@@ -15,6 +15,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    SupportsHMA,
 )
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -66,22 +67,6 @@ logger = lmcache_init_logger(__name__)
 
 
 # Helper functions
-def reformat_block_ids(block_ids: tuple[list[int], ...] | None) -> list[int]:
-    if block_ids is None:
-        return []
-    assert isinstance(block_ids, tuple), (
-        f"Expected block_ids to be a tuple of lists, but got {type(block_ids)}"
-    )
-
-    if len(block_ids) > 1:
-        raise RuntimeError(
-            "LMCacheMPConnector only works without hybrid kv cache manager. "
-            "Please pass --disable-hybrid-kv-cache-manager when starting vllm"
-        )
-
-    return block_ids[0]
-
-
 def extract_world_size_and_kv_rank(
     world_size: int,
     rank: int,
@@ -195,9 +180,25 @@ class LMCacheMPRequestTracker:
     all_token_ids: ConstantList[int]
     block_hashes: ConstantList["BlockHash"]
 
-    # Block ids and hashes will be updated at update_states_after_alloc and
-    # during the generation
-    allocated_block_ids: list[int] = field(default_factory=list)
+    # Per-vLLM-kv-cache-group block IDs allocated to this request.
+    # The dict is keyed by the engine-side ``kv_cache_group_id``, and
+    # each value is the (in-order) list of block IDs allocated for that
+    # group. For non-hybrid models, only key ``0`` is ever populated —
+    # the dict has a single entry that mirrors the prior flat-list
+    # semantics. For DeepSeek-V4 with the hybrid manager active, vLLM
+    # emits 5 disjoint namespaces (one per ``KVCacheGroupSpec``) and
+    # each gid has its own list here.
+    #
+    # Per-gid list lengths are NOT equal: each gid has its own
+    # ``KVCacheSpec.block_size`` and vLLM extends each gid's list by
+    # ``cdiv(scheduled_tokens, gid.block_size)`` per scheduling event.
+    # All gids advance in lockstep at the *coarse* (scheduler) block
+    # boundary — i.e. after vLLM allocates a coarse chunk of
+    # ``scheduler_block_size`` tokens, every gid's list grows by the
+    # number of gid-blocks that span that coarse chunk. Coarse-block
+    # indexing in :class:`LMCacheMPRequestMetadata` relies on this
+    # alignment.
+    allocated_block_ids: dict[int, list[int]] = field(default_factory=dict)
 
     # Number of scheduled tokens in this request. We keep tracking this to
     # avoid saving half-full blocks.
@@ -222,7 +223,7 @@ class LMCacheMPRequestTracker:
         self.cache_salt: str = request.cache_salt or ""
         self.all_token_ids = request.all_token_ids
         self.block_hashes = ConstantList(request.block_hashes)
-        self.allocated_block_ids = []
+        self.allocated_block_ids = {}
         self.num_stored_blocks = 0
         self.num_vllm_hit_blocks = 0
         self.num_lmcache_hit_blocks = 0
@@ -259,14 +260,55 @@ class LMCacheMPRequestTracker:
         """
         self.num_stored_blocks += num_new_blocks
 
-    def append_block_ids(
+    def append_block_ids_per_group(
         self,
-        new_block_ids: list[int],
-    ):
-        """Update the block ids for the current request
-        This function will be called when processing the cached requests.
+        new_block_ids_per_group: tuple[list[int], ...],
+    ) -> None:
+        """Append per-gid block IDs allocated by vLLM since the last call.
+
+        ``new_block_ids_per_group`` is the structure vLLM hands us via
+        :meth:`KVCacheBlocks.get_block_ids` (or the matching
+        ``cached_reqs.new_block_ids[idx]`` slice): one list per
+        ``KVCacheGroupSpec``, in scheduler-fixed order. Each per-gid
+        list is appended to the matching slot in
+        :attr:`allocated_block_ids`, creating new gid entries on
+        first sight.
+
+        For non-hybrid models the tuple has length 1 and only key 0 is
+        ever populated, so this collapses to the prior single-list
+        ``extend`` semantics.
+
+        Args:
+            new_block_ids_per_group: Per-gid lists of newly allocated
+                block IDs. Empty inner lists are allowed (gid had no
+                new blocks this step) and are silently no-oped.
         """
-        self.allocated_block_ids.extend(new_block_ids)
+        for gid, group_block_ids in enumerate(new_block_ids_per_group):
+            if not group_block_ids:
+                continue
+            self.allocated_block_ids.setdefault(gid, []).extend(group_block_ids)
+
+    def num_allocated_blocks_per_group(self) -> dict[int, int]:
+        """Return ``{gid: len(allocated_block_ids[gid])}`` for every
+        gid that has been touched. Used by callers that need to know
+        per-gid block counts (e.g. to compute slice boundaries or
+        avoid double-appending when ``update_state_after_alloc`` is
+        called twice for an async-load request)."""
+        return {gid: len(blocks) for gid, blocks in self.allocated_block_ids.items()}
+
+    def total_allocated_blocks(self) -> int:
+        """Return the total block count across all gids. Useful for
+        legacy log lines that report a single number; do not use as a
+        chunking-grid quantity (each gid has its own scheduler block
+        size).
+
+        For non-hybrid models this equals
+        ``len(allocated_block_ids[0])``; for hybrid models it is the
+        sum of per-gid counts and reflects how many bytes vLLM has
+        materialised in total, *not* the number of token-aligned
+        chunks LMCache should consider.
+        """
+        return sum(len(blocks) for blocks in self.allocated_block_ids.values())
 
     ####
     # For debugging
@@ -276,7 +318,7 @@ class LMCacheMPRequestTracker:
             f"LMCacheMPRequestTracker(request_id={self.request_id}, "
             f"num_tokens={len(self.all_token_ids)}, "
             f"num_block_hashes={len(self.block_hashes)}, "
-            f"num_allocated_blocks={len(self.allocated_block_ids)}, "
+            f"num_allocated_blocks_per_group={self.num_allocated_blocks_per_group()}, "
             f"num_stored_blocks={self.num_stored_blocks}, "
             f"vllm_hit_blocks={self.num_vllm_hit_blocks}, "
             f"lmcache_hit_blocks={self.num_lmcache_hit_blocks}, "
@@ -295,10 +337,73 @@ class LMCacheMPRequestMetadata:
     cache_salt: str = ""
 
     @staticmethod
+    def _per_gid_slice(
+        tracker: "LMCacheMPRequestTracker",
+        gid_to_block_size: dict[int, int],
+        vllm_block_size: int,
+        start: int,
+        end: int,
+    ) -> list[list[int]]:
+        """Slice ``tracker.allocated_block_ids`` per gid for the
+        coarse range ``[start, end)`` (units: ``vllm_block_size``).
+
+        The fundamental relation: gid ``g``'s block ID grid has
+        granularity ``gid_block_size_g``; vLLM's ``cache_config
+        .block_size`` is the GCD of all gid block sizes (= 4 on V4
+        HMA, 256 on non-hybrid). One coarse-block range of
+        ``[start, end)`` covers ``(end - start) * vllm_block_size``
+        tokens, which translates to a per-gid range of
+        ``(end - start) * vllm_block_size / gid_block_size_g``
+        gid-block IDs.
+
+        When ``gid_block_size_g >= vllm_block_size`` (e.g. gid 0 on
+        V4: 256 vs 4) we *divide* by ``gid_block_size_g //
+        vllm_block_size``; the legacy ``multiplier = vllm_block_size
+        // gid_block_size_g`` evaluates to 0 here and silently
+        emits an empty slice — which trips the LMCache server's
+        per-namespace kernel constraint check.
+
+        When ``gid_block_size_g <= vllm_block_size`` (e.g. gid 3 on
+        V4: 4 vs 4) we *multiply*. When the two are equal, both
+        branches produce the same answer.
+
+        Args:
+            tracker: The request tracker holding per-gid block-ID
+                lists.
+            gid_to_block_size: Mapping from gid to that gid's
+                ``KVCacheSpec.block_size``.
+            vllm_block_size: ``cache_config.block_size``, the GCD
+                grain at which ``start`` and ``end`` are expressed.
+            start: First coarse block (inclusive), in
+                ``vllm_block_size`` units.
+            end: Last coarse block (exclusive), same units.
+
+        Returns:
+            One list per gid (in ``sorted(gid_to_block_size.keys())``
+            order) holding that gid's block-ID slice for
+            ``[start, end)``.
+        """
+        block_ids_per_group: list[list[int]] = []
+        for gid in sorted(gid_to_block_size.keys()):
+            gid_bs = gid_to_block_size[gid]
+            if gid_bs >= vllm_block_size:
+                ratio = gid_bs // vllm_block_size
+                gid_start = start // ratio
+                gid_end = end // ratio
+            else:
+                ratio = vllm_block_size // gid_bs
+                gid_start = start * ratio
+                gid_end = end * ratio
+            gid_blocks = tracker.allocated_block_ids.get(gid, [])
+            block_ids_per_group.append(gid_blocks[gid_start:gid_end])
+        return block_ids_per_group
+
+    @staticmethod
     def GetStoreMetadata(
         tracker: LMCacheMPRequestTracker,
         blocks_in_chunk: int,
         vllm_block_size: int,
+        gid_to_block_size: dict[int, int],
     ) -> "LMCacheMPRequestMetadata | None":
         """
         Generate the store metadata for the current request tracker.
@@ -306,7 +411,16 @@ class LMCacheMPRequestMetadata:
         Args:
             tracker: The request tracker to generate the metadata from.
             blocks_in_chunk: the number of blocks in a LMCache data chunk
-            vllm_block_size: the block size used in vLLM
+                (``lmcache_chunk_size // vllm_block_size`` — coarse-block
+                units).
+            vllm_block_size: the scheduler block size used in vLLM (the
+                ``--block-size`` CLI flag), equal to
+                ``lcm(group.block_size for group in kv_cache_groups)``
+                under HMA.
+            gid_to_block_size: ``{gid: KVCacheSpec.block_size}`` for
+                every kv_cache_group exposed to the connector. Used to
+                translate coarse-block ranges into per-gid slice ranges.
+                For non-hybrid models this is ``{0: vllm_block_size}``.
         """
         # Store the blocks that has block hashes
         # NOTE: the invariant here is that `num_stored_blocks` should
@@ -333,9 +447,25 @@ class LMCacheMPRequestMetadata:
         computed_blocks = tracker.num_scheduled_tokens // vllm_block_size + max(
             tracker.num_vllm_hit_blocks, tracker.num_lmcache_hit_blocks
         )
+        # Coarse-block count of the request: smallest gid count after
+        # normalising each per-gid list length back to coarse units. Any
+        # gid whose ``KVCacheSpec.block_size`` divides
+        # ``vllm_block_size`` evenly contributes a coarse count of
+        # ``len(allocated_block_ids[gid]) * gid_block_size //
+        # vllm_block_size``. Take the min as a conservative bound — if
+        # vLLM ever returns lists of inconsistent coarse counts (a bug),
+        # we'd silently store half-aligned data otherwise.
+        per_gid_lengths = tracker.num_allocated_blocks_per_group()
+        if per_gid_lengths:
+            coarse_block_count = min(
+                length * gid_to_block_size[gid] // vllm_block_size
+                for gid, length in per_gid_lengths.items()
+            )
+        else:
+            coarse_block_count = 0
         min_available_blocks = min(
             len(tracker.block_hashes),
-            len(tracker.allocated_block_ids),
+            coarse_block_count,
             computed_blocks,
         )
         num_staging_blocks = min_available_blocks - tracker.num_stored_blocks
@@ -344,13 +474,20 @@ class LMCacheMPRequestMetadata:
         if num_chunks >= 1:
             start = tracker.num_stored_blocks
             end = start + num_chunks * blocks_in_chunk
-            block_ids = tracker.allocated_block_ids[start:end]
+            # Build per-gid block-ID slice. ``_per_gid_slice`` handles
+            # both ``gid_bs >= vllm_block_size`` (V4 hybrid main /
+            # indexer-k / SWA-64 against vllm_bs=4) and
+            # ``gid_bs <= vllm_block_size`` (non-hybrid: vllm_bs=256
+            # equals gid 0's bs=256, multiplier=1).
+            block_ids_per_group = LMCacheMPRequestMetadata._per_gid_slice(
+                tracker, gid_to_block_size, vllm_block_size, start, end
+            )
             start_token_idx = start * vllm_block_size
             end_token_idx = end * vllm_block_size
             token_ids = list(tracker.all_token_ids)
             op = LoadStoreOp(
                 token_ids=token_ids,
-                block_ids=block_ids,
+                block_ids=block_ids_per_group,
                 start=start_token_idx,
                 end=end_token_idx,
             )
@@ -373,6 +510,7 @@ class LMCacheMPRequestMetadata:
         tracker: LMCacheMPRequestTracker,
         blocks_in_chunk: int,
         vllm_block_size: int,
+        gid_to_block_size: dict[int, int],
     ) -> "LMCacheMPRequestMetadata | None":
         """
         Generate the retrieve metadata for the current request tracker.
@@ -380,7 +518,11 @@ class LMCacheMPRequestMetadata:
         Args:
             tracker: The request tracker to generate the metadata from.
             blocks_in_chunk: the number of blocks in a LMCache data chunk
-            vllm_block_size: the block size used in vLLM
+                (coarse-block units).
+            vllm_block_size: the scheduler block size used in vLLM.
+            gid_to_block_size: ``{gid: KVCacheSpec.block_size}`` for
+                every kv_cache_group exposed to the connector. See
+                :meth:`GetStoreMetadata` for usage.
         """
         if not tracker.is_ready_for_retrieving():
             return None
@@ -401,7 +543,9 @@ class LMCacheMPRequestMetadata:
             "number of LMCache hit blocks. "
         )
         if end > start:
-            block_ids = tracker.allocated_block_ids[start:end]
+            block_ids_per_group = LMCacheMPRequestMetadata._per_gid_slice(
+                tracker, gid_to_block_size, vllm_block_size, start, end
+            )
             start_token_idx = start * vllm_block_size
             end_token_idx = end * vllm_block_size
             token_ids = list(tracker.all_token_ids)
@@ -416,7 +560,7 @@ class LMCacheMPRequestMetadata:
 
             op = LoadStoreOp(
                 token_ids=token_ids,
-                block_ids=block_ids,
+                block_ids=block_ids_per_group,
                 start=start_token_idx,
                 end=end_token_idx,
                 skip_first_n_tokens=skip_first_n_tokens,
@@ -460,9 +604,24 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
         return self.__str__()
 
 
-class LMCacheMPConnector(KVConnectorBase_V1):
+class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     """
     The connector for LMCache multi-process mode.
+
+    Inherits :class:`SupportsHMA` so the scheduler will route per-group
+    block-id tuples through :meth:`request_finished_all_groups`. Note that
+    declaring ``SupportsHMA`` does NOT by itself flip vLLM's hybrid-mode
+    default — :func:`vllm.config.vllm.VllmConfig._verify_kv_cache_config`
+    still auto-disables HMA whenever ``kv_transfer_config`` is set unless
+    the user explicitly passes ``--no-disable-hybrid-kv-cache-manager``.
+    What inheriting buys us is: with that flag set, the scheduler stops
+    asserting ``len(kv_cache_groups) == 1`` at the request-finished site
+    and we get the full per-group block-id tuple instead.
+
+    Per-group threading through STORE/RETRIEVE is NOT yet wired up
+    (deferred to a follow-up). With HMA on, store/retrieve will currently
+    crash or produce wrong data; this commit only turns on observability
+    so we can see what arrives at registration.
 
     Extra configs (kv_transfer_config.extra_config):
     - lmcache.mp.host: the host of the LMCache server.
@@ -522,6 +681,30 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
         self.vllm_block_size = vllm_config.cache_config.block_size
 
+        # Per-gid block_size lookup: ``self._kv_cache_config.kv_cache_groups``
+        # exposes one ``KVCacheSpec.block_size`` per group. For non-hybrid
+        # models there is exactly one group with ``block_size ==
+        # vllm_block_size``. For DeepSeek-V4 with the hybrid manager
+        # active there are 5 groups with mixed block sizes (256 / 64 /
+        # 64 / 4 / 8 in our verified probe). The metadata generators
+        # use this to translate coarse-block indices (in
+        # ``vllm_block_size`` units) into per-gid slice ranges.
+        self._gid_to_block_size: dict[int, int] = {}
+        kv_cache_config = getattr(self, "_kv_cache_config", None)
+        if kv_cache_config is not None and getattr(
+            kv_cache_config, "kv_cache_groups", None
+        ):
+            for gid, group in enumerate(kv_cache_config.kv_cache_groups):
+                spec = getattr(group, "kv_cache_spec", None)
+                spec_block_size = getattr(spec, "block_size", None)
+                if spec_block_size is not None:
+                    self._gid_to_block_size[gid] = int(spec_block_size)
+        if not self._gid_to_block_size:
+            # Single-group fallback: pretend gid 0 exists at the
+            # scheduler block size. Keeps non-hybrid models on the
+            # same code path (one gid, multiplier 1).
+            self._gid_to_block_size = {0: self.vllm_block_size}
+
     @property
     def role(self) -> KVConnectorRole:
         return self._role
@@ -552,7 +735,96 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             kv_caches: dictionary of layer names, kv cache
         """
         logger.info("Registering kv caches!")
-        self.worker_adapter.register_kv_caches(kv_caches)
+
+        # Build per-positional-layer logical (scheduler) block size and
+        # block-ID namespace from ``self._kv_cache_config.kv_cache_groups``.
+        # Under hybrid KV cache management, each ``KVCacheGroupSpec``
+        # reports its own ``KVCacheSpec.block_size`` and contributes its
+        # own ``BlockPool`` slice; layers from different groups can
+        # share the same physical tensor shape (via layer-tuple
+        # aliasing) but were allocated against different scheduler
+        # block sizes, and even when both block sizes match they may
+        # still pull block IDs from disjoint pools (e.g. DeepSeek-V4's
+        # vLLM gids 1 and 2 — the even+MTP and odd SWA layers, which
+        # share every spec field but have separate ``req_to_blocks``
+        # dicts).
+        #
+        # LMCache needs both signals to keep one transfer-kernel
+        # dispatch unit per ``(physical_bs, logical_bs, namespace)``
+        # triple. Without ``logical_bs`` it would merge the C4A-main
+        # and per-layer-SWA layers (both physical ``shape[1] = 64``);
+        # without ``namespace`` it would merge gids 1 and 2 even after
+        # the logical_bs split. See
+        # :class:`~lmcache.v1.gpu_connector.utils.LayoutHints`'s
+        # ``per_layer_logical_block_size`` and
+        # ``per_layer_kv_cache_group_id`` fields for the consumer side.
+        #
+        # When the engine produced only one ``KVCacheGroupSpec`` (the
+        # non-hybrid case), every layer ends up with the same block
+        # size and the same namespace, which collapses LMCache's
+        # grouping back to the prior 5-tuple identity behavior.
+        #
+        # If a layer name in any group does not appear in the
+        # registered ``kv_caches`` dict (i.e. that layer's KV cache is
+        # not exposed to the connector), it's silently skipped — its
+        # entry in the per-layer lists stays at the sentinel value
+        # (logical_bs=0, namespace=-1). The LMCache-side consumer
+        # rejects any non-positive logical_bs entry or negative
+        # namespace entry with ``ValueError`` at registration, so a
+        # partial cover surfaces as a loud registration failure rather
+        # than silent miscount. If neither hint is populated we drop
+        # both entirely so single-group engines fall back to the prior
+        # 5-tuple identity behavior.
+        per_layer_logical_block_size: list[int] | None = None
+        per_layer_kv_cache_group_id: list[int] | None = None
+        kv_cache_config = getattr(self, "_kv_cache_config", None)
+        if kv_cache_config is not None and getattr(
+            kv_cache_config, "kv_cache_groups", None
+        ):
+            kv_cache_layer_names = list(kv_caches.keys())
+            name_to_idx = {name: idx for idx, name in enumerate(kv_cache_layer_names)}
+            num_positional = len(kv_cache_layer_names)
+            per_layer_logical_block_size = [0] * num_positional
+            per_layer_kv_cache_group_id = [-1] * num_positional
+            for gid, group in enumerate(kv_cache_config.kv_cache_groups):
+                spec = getattr(group, "kv_cache_spec", None)
+                spec_block_size = getattr(spec, "block_size", None)
+                if spec_block_size is None:
+                    continue
+                for name in group.layer_names:
+                    pos = name_to_idx.get(name)
+                    if pos is not None:
+                        per_layer_logical_block_size[pos] = int(spec_block_size)
+                        per_layer_kv_cache_group_id[pos] = gid
+            # If neither list got populated (no usable specs), drop
+            # both hints so the consumer falls back to the prior
+            # behavior cleanly. Layers that ended up with sentinel
+            # values (some specs missing block_size, some layer names
+            # absent from kv_caches) will trigger a loud ValueError
+            # on the LMCache side.
+            if not any(per_layer_logical_block_size) and all(
+                ns == -1 for ns in per_layer_kv_cache_group_id
+            ):
+                per_layer_logical_block_size = None
+                per_layer_kv_cache_group_id = None
+
+        extra_layout_hints: dict[str, object] | None = None
+        if (
+            per_layer_logical_block_size is not None
+            or per_layer_kv_cache_group_id is not None
+        ):
+            extra_layout_hints = {}
+            if per_layer_logical_block_size is not None:
+                extra_layout_hints["per_layer_logical_block_size"] = (
+                    per_layer_logical_block_size
+                )
+            if per_layer_kv_cache_group_id is not None:
+                extra_layout_hints["per_layer_kv_cache_group_id"] = (
+                    per_layer_kv_cache_group_id
+                )
+        self.worker_adapter.register_kv_caches(
+            kv_caches, extra_layout_hints=extra_layout_hints
+        )
         return
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
@@ -826,13 +1098,21 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         # We must only append the NEW blocks beyond what's already tracked
         # to avoid duplication, which would corrupt the store path's block indexing.
         tracker = self._get_request_tracker(request.request_id)
-        block_ids = reformat_block_ids(blocks.get_block_ids())
+        per_gid_block_ids = blocks.get_block_ids()  # tuple[list[int], ...]
 
-        # Only append blocks beyond what's already tracked
-        existing_count = len(tracker.allocated_block_ids)
-        new_block_ids = block_ids[existing_count:]
-        if new_block_ids:
-            tracker.append_block_ids(new_block_ids)
+        # Only append blocks beyond what's already tracked, per-gid.
+        # ``KVCacheBlocks.get_block_ids()`` returns ALL blocks vLLM has
+        # allocated for the request so far; on the second call (async
+        # load completion) some prefix has already been recorded on
+        # this tracker and must not be re-appended. Per-gid existing
+        # counts let us advance each gid independently.
+        existing_per_gid = tracker.num_allocated_blocks_per_group()
+        new_per_gid: list[list[int]] = []
+        for gid, gid_blocks in enumerate(per_gid_block_ids):
+            existing = existing_per_gid.get(gid, 0)
+            new_per_gid.append(list(gid_blocks[existing:]))
+        if any(new_per_gid):
+            tracker.append_block_ids_per_group(tuple(new_per_gid))
 
         # Update the state of the tracker
         condition = tracker.needs_retrieve()
@@ -956,6 +1236,56 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
         return True, return_params
 
+    def request_finished_all_groups(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """
+        :class:`SupportsHMA` variant of :meth:`request_finished`. Receives
+        per-group block IDs as ``tuple[list[int], ...]``; the scheduler
+        dispatches to this method instead of ``request_finished`` whenever
+        the connector inherits :class:`SupportsHMA`.
+
+        Cleanup is by ``request_id`` only — neither the per-request
+        tracker nor the LMCache session manager needs the block IDs at
+        this point, so this implementation simply forwards to the same
+        cleanup path as the single-group variant. Once per-group STORE/
+        RETRIEVE threading lands, this method will become the natural
+        site to flush any per-group offload state that hasn't been
+        committed yet.
+
+        The transfer-params extraction is identical to
+        ``request_finished``; the per-group ``block_ids`` argument is
+        intentionally unused here (the per-group counts that go into
+        ``num_lmcache_extra_cached_tokens`` come from the tracker, not
+        from the freshly-passed block IDs).
+        """
+        params: dict[str, Any] | None = getattr(request, "kv_transfer_params", None)
+        return_params: dict[str, Any] | None = {} if params is not None else None
+
+        if (
+            params is not None
+            and return_params is not None
+            and "num_lmcache_extra_cached_tokens" in params
+        ):
+            request_tracker = self._get_request_tracker(request.request_id)
+            num_extra_cached_blocks = max(
+                0,
+                request_tracker.num_lmcache_hit_blocks
+                - request_tracker.num_vllm_hit_blocks,
+            )
+            return_params["num_lmcache_extra_cached_tokens"] = (
+                num_extra_cached_blocks * self.vllm_block_size
+            )
+
+        # Clean up request tracker to prevent memory leak
+        self._cleanup_request_tracker(request.request_id)
+        # Notify LMCache to end the session for this request
+        self.scheduler_adapter.end_session(request.request_id)
+
+        return True, return_params
+
     def take_events(self) -> Iterable["KVCacheEvent"]:
         """
         Take the KV cache events from the connector.
@@ -1037,6 +1367,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
                 request_tracker,
                 blocks_per_chunk,
                 vllm_block_size=self.vllm_block_size,
+                gid_to_block_size=self._gid_to_block_size,
             )
             if r_metadata is not None:
                 metadata.add_request_metadata(r_metadata)
@@ -1056,7 +1387,10 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             request_tracker.increase_num_scheduled_tokens(num_new_tokens)
 
             r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(
-                request_tracker, blocks_per_chunk, self.vllm_block_size
+                request_tracker,
+                blocks_per_chunk,
+                self.vllm_block_size,
+                self._gid_to_block_size,
             )
             if r_meta is not None:
                 metadata.add_request_metadata(r_meta)
@@ -1072,10 +1406,15 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         for idx, request_id in enumerate(cached_reqs.req_ids):
             request_tracker = self._get_request_tracker(request_id)
 
-            # Update block ids
-            new_block_ids = reformat_block_ids(cached_reqs.new_block_ids[idx])
+            # Update block ids: cached_reqs.new_block_ids[idx] is
+            # ``tuple[list[int], ...] | None``, one list per
+            # ``KVCacheGroupSpec``. For non-hybrid models the tuple has
+            # length 1; for hybrid it has the per-gid breakdown.
+            new_block_ids_per_group = cached_reqs.new_block_ids[idx]
+            if new_block_ids_per_group is None:
+                new_block_ids_per_group = ()
             if request_id not in cached_reqs.resumed_req_ids:
-                request_tracker.append_block_ids(new_block_ids)
+                request_tracker.append_block_ids_per_group(new_block_ids_per_group)
 
             # Use the incremental num_scheduled_tokens to
             # stay consistent with _process_new_requests.
@@ -1083,7 +1422,10 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             request_tracker.increase_num_scheduled_tokens(num_new_tokens)
 
             r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(
-                request_tracker, blocks_per_chunk, self.vllm_block_size
+                request_tracker,
+                blocks_per_chunk,
+                self.vllm_block_size,
+                self._gid_to_block_size,
             )
 
             if r_meta is not None:
@@ -1097,6 +1439,15 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
         For new requests: all allocated_block_ids and token_ids are new.
         For cached requests: only newly appended block_ids and token_ids.
+
+        L0 telemetry currently consumes a flat list of block IDs at
+        ``vllm_block_size`` granularity, so we report the gid 0
+        ("primary") namespace's blocks here. For non-hybrid models this
+        is the only namespace and equals the prior flat list. For
+        hybrid models (e.g. DeepSeek-V4), gid 0 corresponds to the
+        scheduler-block-size group (block_size == vllm_block_size); the
+        other gids' block IDs live at a finer grid and are not
+        currently exposed via the L0 channel.
         """
         records: list[RequestAllocationRecord] = []
 
@@ -1107,12 +1458,13 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             tracker = self.request_trackers.get(new_request.req_id)
             if tracker is None:
                 continue
-            num_blocks = len(tracker.allocated_block_ids)
+            primary_block_ids = tracker.allocated_block_ids.get(0, [])
+            num_blocks = len(primary_block_ids)
             total_tokens = num_blocks * self.vllm_block_size
             records.append(
                 RequestAllocationRecord(
                     req_id=new_request.req_id,
-                    new_block_ids=list(tracker.allocated_block_ids),
+                    new_block_ids=list(primary_block_ids),
                     new_token_ids=list(tracker.all_token_ids[:total_tokens]),
                 )
             )
@@ -1123,23 +1475,30 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         # can correctly identify block content.
         cached_reqs = scheduler_output.scheduled_cached_reqs
         for idx, request_id in enumerate(cached_reqs.req_ids):
-            new_block_ids = reformat_block_ids(cached_reqs.new_block_ids[idx])
-            if not new_block_ids:
+            new_block_ids_per_group = cached_reqs.new_block_ids[idx]
+            # gid 0 = primary (vllm_block_size) namespace.
+            new_primary_block_ids = (
+                list(new_block_ids_per_group[0])
+                if new_block_ids_per_group
+                else []
+            )
+            if not new_primary_block_ids:
                 continue
             tracker = self.request_trackers.get(request_id)
             if tracker is None:
                 continue
-            # The new blocks sit at the end of the request's block list.
+            # The new blocks sit at the end of the request's gid 0 list.
             # Compute the token range they cover.
-            total_blocks = len(tracker.allocated_block_ids)
-            num_new_blocks = len(new_block_ids)
+            primary_block_ids = tracker.allocated_block_ids.get(0, [])
+            total_blocks = len(primary_block_ids)
+            num_new_blocks = len(new_primary_block_ids)
             start_token = (total_blocks - num_new_blocks) * self.vllm_block_size
             end_token = total_blocks * self.vllm_block_size
             new_token_ids = list(tracker.all_token_ids[start_token:end_token])
             records.append(
                 RequestAllocationRecord(
                     req_id=request_id,
-                    new_block_ids=new_block_ids,
+                    new_block_ids=new_primary_block_ids,
                     new_token_ids=new_token_ids,
                 )
             )
