@@ -415,7 +415,7 @@ class ApertusToolParser(ToolParser):
 
         Returns:
             A list of `DeltaToolCall`
-             items representing string diffs in function arguments
+            items representing string diffs in function arguments
             to stream back to the client.
         """
         try:
