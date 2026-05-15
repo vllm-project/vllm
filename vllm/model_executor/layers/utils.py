@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utility methods for model layers."""
 
-import os
 from collections.abc import Callable
 
 import torch
@@ -12,11 +11,33 @@ from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
+from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
+
+
+@triton.jit
+def _tiny_dot_kernel(x_ptr, w_ptr, out_ptr, K, BLOCK: tl.constexpr):
+    offsets = tl.arange(0, BLOCK)
+    mask = offsets < K
+    x = tl.load(x_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+    w = tl.load(w_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+    acc = tl.sum(x * w, axis=0)
+    tl.store(out_ptr, acc)
+
+
+def _tiny_dot_triton(x_flat: torch.Tensor, w_flat: torch.Tensor) -> torch.Tensor:
+    K = x_flat.numel()
+    BLOCK = triton.next_power_of_2(K)
+    # Cast to fp32 inside kernel; cast back at the call site.  Matches
+    # the eager (x*w).sum(dtype=x.dtype) semantics.
+    out_f32 = torch.empty((), dtype=torch.float32, device=x_flat.device)
+    _tiny_dot_kernel[(1,)](x_flat, w_flat, out_f32, K=K, BLOCK=BLOCK)
+    return out_f32.to(x_flat.dtype)
+
 
 MOE_LAYER_ROUTER_GATE_SUFFIXES = {
     "gate",
@@ -184,14 +205,22 @@ def rocm_unquantized_gemm_impl(
     # output is a single scalar. Replace with a fused elementwise-mul + reduce
     # that emits one (Inductor-friendly) reduction kernel. Triggered for the
     # 1x1xK shape only (40 MoE layers x 1 token = 40 calls/decode step on
-    # Qwen3-Next/Qwen3.5-MoE).
+    # Qwen3-Next/Qwen3.5-MoE).  When bias is None and K <= 4096 we take the
+    # single-block Triton fast path; otherwise fall back to the eager fused
+    # (x*w).sum chain.  Correctness covered by
+    # tests/kernels/test_tiny_dot_triton.py.
     if (
-        os.environ.get("VLLM_DISABLE_TINY_DOT_GEMM", "0") != "1"
-        and envs.VLLM_ROCM_USE_SKINNY_GEMM
+        envs.VLLM_ROCM_USE_SKINNY_GEMM
         and m == 1
         and n == 1
         and x.dtype in [torch.float16, torch.bfloat16]
     ):
+        if bias is None and k <= 4096:
+            with record_function_or_nullcontext(f"DOT {n}x{m}x{k} [tk]"):
+                x_flat = x.reshape(-1).contiguous()
+                w_flat = weight.reshape(-1).contiguous()
+                out = _tiny_dot_triton(x_flat, w_flat)
+                return out.reshape(*x.shape[:-1], 1)
         with record_function_or_nullcontext(f"DOT {n}x{m}x{k}"):
             x_flat = x.reshape(-1)
             w_flat = weight.reshape(-1)
