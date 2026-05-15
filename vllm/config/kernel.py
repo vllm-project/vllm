@@ -20,8 +20,8 @@ logger = init_logger(__name__)
 class IrOpPriorityConfig:
     """
     Configuration for vLLM IR op priority for dispatching/lowering during the
-    forward pass. Each member is a list of strings, which will be passed to
-    vllm.ir.ops.<op_name>.set_priority() for the duration of the forward pass.
+    forward pass. Each member is a list of strings, which will be installed
+    in worker init via vllm.ir.ops.<op_name>.set_default().
     A single comma-separated string is accepted as well,
 
     If specified manually, platform defaults will be appended to the lists.
@@ -67,6 +67,31 @@ class IrOpPriorityConfig:
         assert all(isinstance(v, str) for v in value)
         return value
 
+    def _iter_op_priorities(self):
+        """
+        Yield (IrOp, priority_list) for each field, after importing platform
+        kernels and validating each entry.
+        """
+        from vllm.ir.op import IrOp
+        from vllm.platforms import current_platform
+
+        current_platform.import_ir_kernels()
+
+        for field in fields(self):  # type: ignore[arg-type]
+            op_priority = getattr(self, field.name)
+            assert op_priority is not None, (
+                f"IR op priority for {field.name} must be set"
+            )
+            logger.debug("Setting IR op priority for %s to %s", field.name, op_priority)
+            yield IrOp.registry[field.name], op_priority
+
+    def set_default(self) -> None:
+        """
+        Permanently set the IR op priority for all op members.
+        """
+        for ir_op, op_priority in self._iter_op_priorities():
+            ir_op.set_default(op_priority)
+
     @contextlib.contextmanager
     def set_priority(self):
         """
@@ -74,23 +99,9 @@ class IrOpPriorityConfig:
         It also imports IR kernel implementations for the current platform
         to ensure all implementations are made available.
         """
-        from vllm.ir.op import IrOp
-        from vllm.platforms import current_platform
-
-        current_platform.import_ir_kernels()
-
         with contextlib.ExitStack() as stack:
-            for field in fields(self):  # type: ignore[arg-type]
-                op_priority = getattr(self, field.name)
-                assert op_priority is not None, (
-                    f"IR op priority for {field.name} must be set"
-                )
-                logger.debug(
-                    "Setting IR op priority for %s to %s", field.name, op_priority
-                )
-                ir_op = IrOp.registry[field.name]
+            for ir_op, op_priority in self._iter_op_priorities():
                 stack.enter_context(ir_op.set_priority(op_priority))
-
             yield
 
     @classmethod
