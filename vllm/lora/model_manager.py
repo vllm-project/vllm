@@ -939,10 +939,11 @@ class LoRAModelManager:
         # halves. GPT-OSS interleaves them along the output dim, all other
         # 3D MoE checkpoints we know about concatenate them.
         intermediate_x2 = gate_up_b.shape[1]
-        assert intermediate_x2 % 2 == 0, (
-            "Expected gate_up_proj LoRA-B output dim to be 2 * intermediate, "
-            f"got {intermediate_x2}."
-        )
+        if intermediate_x2 % 2 != 0:
+            raise ValueError(
+                "Expected gate_up_proj LoRA-B output dim to be 2 * intermediate, "
+                f"got {intermediate_x2}."
+            )
         intermediate = intermediate_x2 // 2
         base_arch = self.model.config.architectures[0]
         if base_arch == "GptOssForCausalLM":
