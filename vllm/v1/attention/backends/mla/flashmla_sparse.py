@@ -1081,6 +1081,9 @@ def build_c128a_topk_metadata(
     if num_prefill_tokens > 0:
         prefill_buffer[:num_prefill_tokens].fill_(-1)
 
+    # ``.item()`` is a host sync, but this builder runs in metadata
+    # build (outside the captured forward) so it is harmless w.r.t.
+    # cudagraph capture/replay (see the comment block above).
     max_pos = int(positions.max().item())
     max_num_compressed = min(
         max((max_pos + 1) // compress_ratio, 0),
@@ -1138,10 +1141,12 @@ def _build_c128a_topk_metadata_kernel(
 ):
     # ``effective_topk`` is the BLOCK_SIZE-aligned cap that covers every
     # in-flight token's ``num_compressed`` (computed by the Python
-    # builder). The caller pre-fills the active buffer slice with ``-1``
-    # so entries in ``[effective_topk, max_compressed_tokens)`` remain
-    # ``-1`` (the sentinel the downstream sparse MLA accumulate kernels
-    # use to skip invalid candidates).
+    # caller in ``build_c128a_topk_metadata``). The buffer columns
+    # extend out to the Python-side ``max_compressed_tokens`` width;
+    # entries past ``effective_topk`` are left at ``-1`` by the caller's
+    # ``fill_(-1)`` pre-pass so the downstream sparse MLA accumulate
+    # kernels treat them as invalid via their ``kv_index >= 0`` /
+    # ``slot_id >= 0`` sentinel checks.
     token_idx = tl.program_id(0)
     position = tl.load(positions_ptr + token_idx)
     num_compressed = (position + 1) // compress_ratio
