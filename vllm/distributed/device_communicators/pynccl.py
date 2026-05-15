@@ -382,6 +382,15 @@ class PyNcclCommunicator:
         )
         if stream is None:
             stream = current_stream()
+        if tensor.dtype in [
+            torch.float8_e5m2,
+            torch.float8_e4m3fn,
+            torch.float8_e4m3fnuz,
+            torch.float8_e5m2fnuz,
+        ]:
+            nccl_dtype = ncclDataTypeEnum.from_torch(torch.uint8)
+        else:
+            nccl_dtype = ncclDataTypeEnum.from_torch(tensor.dtype)
         if src == self.rank:
             sendbuff = buffer_type(tensor.data_ptr())
             # NCCL requires the sender also to have a receive buffer
@@ -393,7 +402,7 @@ class PyNcclCommunicator:
             sendbuff,
             recvbuff,
             tensor.numel(),
-            ncclDataTypeEnum.from_torch(tensor.dtype),
+            nccl_dtype,
             src,
             self.comm,
             cudaStream_t(stream.cuda_stream),
