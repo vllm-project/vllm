@@ -785,6 +785,12 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         self, num_cached_blocks: int, num_full_blocks: int, alignment_tokens: int
     ) -> list[bool] | None:
         assert alignment_tokens > self.block_size
+        # Eagle/MTP shifts alignment (post_pop_blocks = i, not i+1) and
+        # requires one extra contiguous block.  The resulting hit pattern
+        # can touch any position in the segment, so the mask must be
+        # disabled — otherwise prefix-cache hit rate drops to 0 %.
+        if getattr(self, 'eagle_extra_cache_blocks', 0):
+            return None
         per_segment = alignment_tokens // self.block_size
         tail = cdiv(self.sliding_window - 1, self.block_size)
         if tail >= per_segment:

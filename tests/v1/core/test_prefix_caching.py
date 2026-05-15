@@ -2602,6 +2602,77 @@ def test_hybrid_cache_blocks_swa_tail_window_only():
             )
 
 
+def test_hybrid_cache_blocks_swa_eagle_disables_mask():
+    """When Eagle/MTP is active, SWA cache block masking must be disabled.
+
+    Eagle changes the SWA hit logic in two ways:
+      1. ``sliding_window_contiguous_blocks += 1`` (needs one more block)
+      2. ``post_pop_blocks = i`` (not ``i + 1``), shifting alignment
+
+    Without the fix the mask skips blocks that eagle's modified lookup
+    needs, resulting in 0 % prefix cache hit rate.  Regression introduced
+    by #42258."""
+    block_size = 8
+    # Full attn bs=32, SWA bs=8, sw=8 -> lcm=32.
+    # Without eagle: mask = [F, F, F, T] per segment (only tail cached).
+    # With eagle: mask disabled -> all blocks cached.
+    kv_cache_config = KVCacheConfig(
+        num_blocks=100,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer1"],
+                FullAttentionSpec(
+                    block_size=4 * block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float16,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["layer2"],
+                SlidingWindowSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=block_size,
+                ),
+            ),
+        ],
+    )
+    manager = KVCacheManager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        use_eagle=True,
+        hash_block_size=block_size,
+    )
+
+    # 8 hash-blocks of 8 tokens (64 tokens, two lcm-aligned segments).
+    token_ids = [i for i in range(8) for _ in range(block_size)]
+    req = make_request("0", token_ids, block_size, sha256)
+    computed_blocks, _ = manager.get_computed_blocks(req)
+    blocks = manager.allocate_slots(
+        req,
+        8 * block_size,
+        len(computed_blocks.blocks[0]) * block_size,
+        computed_blocks,
+    )
+    assert blocks is not None
+    assert len(req.block_hashes) == 8
+
+    pool = manager.block_pool
+    # With eagle active ALL SWA blocks must be cached so the modified
+    # right-to-left lookup can find contiguous runs at shifted positions.
+    for i in range(8):
+        cached = pool.get_cached_block(req.block_hashes[i], kv_cache_group_ids=[1])
+        assert cached is not None, (
+            f"SWA hash {i} should be cached when eagle is active "
+            f"(mask must be disabled)"
+        )
+
+
 def test_hybrid_cache_blocks_clamped_to_lcm():
     """HybridKVCacheCoordinator.cache_blocks() clamps to lcm_block_size.
     Chunks past the last lcm-aligned boundary can never participate in a
