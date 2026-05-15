@@ -120,8 +120,7 @@ class NgramProposer:
         for i in valid_ngram_requests:
             num_drafts = self.valid_ngram_num_drafts[i]
             if num_drafts > 0:
-                draft_token_ids[i] = self.valid_ngram_draft[
-                    i, :num_drafts].tolist()
+                draft_token_ids[i] = self.valid_ngram_draft[i, :num_drafts].tolist()
 
         return draft_token_ids
 
