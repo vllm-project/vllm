@@ -203,6 +203,7 @@ class Attention(nn.Module, AttentionLayerBase):
         kv_sharing_target_layer_name: str | None = None,
         attn_backend: type[AttentionBackend] | None = None,
         head_size_v: int | None = None,
+        use_mm_prefix: bool | None = None,
         **extra_impl_args,
     ) -> None:
         """
@@ -290,7 +291,11 @@ class Attention(nn.Module, AttentionLayerBase):
 
         # NOTE: model_config may be None during certain tests
         model_config = vllm_config.model_config
-        self.use_mm_prefix = model_config is not None and model_config.is_mm_prefix_lm
+        self.use_mm_prefix = (
+            model_config is not None and model_config.is_mm_prefix_lm
+            if use_mm_prefix is None
+            else use_mm_prefix
+        )
 
         # During model initialization, the default dtype is set as the model
         # weight and activation dtype.

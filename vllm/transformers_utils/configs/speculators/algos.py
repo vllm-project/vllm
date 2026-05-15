@@ -85,19 +85,29 @@ def update_dflash(config_dict: dict, pre_trained_config: dict) -> None:
     - target_hidden_size: Hidden size of the target model
     - mask_token_id (required): Token ID used for parallel drafting mask
         placeholders
-    - aux_hidden_state_layer_ids (required): Layer indices from the target
-        model whose intermediate hidden states are used as context for the
-        DFlash drafter. Mapped to both eagle_aux_hidden_state_layer_ids
-        (for gpu_model_runner) and dflash_config.target_layer_ids (for the
-        DFlash model).
+    - aux_hidden_state_layer_ids (required): DFlash target layer indices whose
+        intermediate hidden states are used as context for the DFlash drafter.
+        Mapped to dflash_config.target_layer_ids for the DFlash model. The
+        runner-facing eagle_aux_hidden_state_layer_ids are shifted by one to
+        match vLLM's hidden-state extraction semantics.
     """
     pre_trained_config["architectures"] = ["DFlashDraftModel"]
     pre_trained_config["draft_vocab_size"] = config_dict.get("draft_vocab_size")
     if config_dict.get("target_hidden_size") is not None:
         pre_trained_config["target_hidden_size"] = config_dict["target_hidden_size"]
+    for key in (
+        "layer_types",
+        "use_sliding_window",
+        "sliding_window",
+        "max_window_layers",
+    ):
+        if key in config_dict:
+            pre_trained_config[key] = config_dict[key]
 
     aux_layer_ids = config_dict["aux_hidden_state_layer_ids"]
-    pre_trained_config["eagle_aux_hidden_state_layer_ids"] = aux_layer_ids
+    pre_trained_config["eagle_aux_hidden_state_layer_ids"] = [
+        i + 1 for i in aux_layer_ids
+    ]
 
     pre_trained_config["dflash_config"] = {
         "mask_token_id": config_dict["mask_token_id"],
