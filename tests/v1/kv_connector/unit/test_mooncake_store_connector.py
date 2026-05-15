@@ -10,6 +10,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
     connector,
+    protocol,
+    scheduler,
     worker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  # noqa: E501
@@ -256,3 +258,180 @@ def test_update_connector_output_and_take_events():
     assert conn._kv_cache_events is kv_events
     assert list(conn.take_events()) == [event]
     assert conn._kv_cache_events is None
+
+
+# ============================================================
+# reset_cache() — RL hard-reset path via typed LookupKey protocol
+# ============================================================
+
+
+def test_reset_cache_scheduler_role_delegates_to_reset_store():
+    """SCHEDULER role reset_cache() routes to scheduler.reset_store()."""
+    vllm_config = _make_vllm_config()
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "connector.MooncakeStoreScheduler"
+        ) as mock_scheduler_cls,
+    ):
+        conn = connector.MooncakeStoreConnector(vllm_config, KVConnectorRole.SCHEDULER)
+
+    mock_scheduler_cls.return_value.reset_store.return_value = True
+    assert conn.reset_cache() is True
+    mock_scheduler_cls.return_value.reset_store.assert_called_once_with()
+
+
+def test_reset_cache_scheduler_role_propagates_failure():
+    """SCHEDULER role surfaces False when scheduler.reset_store() fails."""
+    vllm_config = _make_vllm_config()
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "connector.MooncakeStoreScheduler"
+        ) as mock_scheduler_cls,
+    ):
+        conn = connector.MooncakeStoreConnector(vllm_config, KVConnectorRole.SCHEDULER)
+
+    mock_scheduler_cls.return_value.reset_store.return_value = False
+    assert conn.reset_cache() is False
+
+
+def test_reset_cache_worker_role_returns_none():
+    """WORKER role reset_cache() is a no-op; reset is driven via ZMQ admin."""
+    vllm_config = _make_vllm_config()
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "connector.MooncakeStoreWorker"
+        ),
+    ):
+        conn = connector.MooncakeStoreConnector(vllm_config, KVConnectorRole.WORKER)
+
+    assert conn.reset_cache() is None
+
+
+def test_scheduler_reset_store_returns_client_reset_result():
+    """MooncakeStoreScheduler.reset_store() returns LookupKeyClient.reset()."""
+    vllm_config = _make_vllm_config()
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "scheduler.LookupKeyClient"
+        ) as mock_client_cls,
+    ):
+        sched = scheduler.MooncakeStoreScheduler(vllm_config)
+
+    mock_client_cls.return_value.reset.return_value = True
+    assert sched.reset_store() is True
+    mock_client_cls.return_value.reset.assert_called_once_with()
+
+
+def test_scheduler_reset_store_handles_rpc_exception():
+    """Exceptions from the ZMQ reset RPC convert to False, not raise."""
+    vllm_config = _make_vllm_config()
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "scheduler.LookupKeyClient"
+        ) as mock_client_cls,
+    ):
+        sched = scheduler.MooncakeStoreScheduler(vllm_config)
+
+    mock_client_cls.return_value.reset.side_effect = RuntimeError("rpc timed out")
+    assert sched.reset_store() is False
+
+
+def test_lookup_key_client_lookup_prepends_typed_tag():
+    """LookupKeyClient.lookup() puts LOOKUP_MSG tag at frame 0."""
+    vllm_config = _make_vllm_config()
+
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+        "worker.make_zmq_socket"
+    ) as mock_make_socket:
+        client = worker.LookupKeyClient(vllm_config)
+
+    fake_socket = mock_make_socket.return_value
+    fake_socket.recv.return_value = (5).to_bytes(4, "big")
+
+    assert client.lookup(token_len=128, block_hashes=[]) == 5
+
+    sent_frames = fake_socket.send_multipart.call_args[0][0]
+    assert sent_frames[0] == protocol.LOOKUP_MSG
+    assert int.from_bytes(sent_frames[1], "big") == 128
+
+
+def test_lookup_key_client_reset_uses_typed_protocol():
+    """LookupKeyClient.reset() sends RESET_MSG and parses RESP_OK / RESP_ERR."""
+    vllm_config = _make_vllm_config()
+
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+        "worker.make_zmq_socket"
+    ) as mock_make_socket:
+        client = worker.LookupKeyClient(vllm_config)
+
+    fake_socket = mock_make_socket.return_value
+
+    # ACK path: server returns RESP_OK -> client returns True.
+    fake_socket.recv.return_value = protocol.RESP_OK
+    assert client.reset() is True
+    assert fake_socket.send.call_args[0][0] == protocol.RESET_MSG
+
+    # NACK path: server returns RESP_ERR -> client returns False.
+    fake_socket.recv.return_value = protocol.RESP_ERR
+    assert client.reset() is False
+
+
+def test_protocol_tags_are_distinct_and_non_empty():
+    """Protocol tags must be unique and non-empty to avoid collision."""
+    tags = {protocol.LOOKUP_MSG, protocol.RESET_MSG}
+    assert len(tags) == 2
+    for tag in tags:
+        assert isinstance(tag, bytes)
+        assert len(tag) > 0
+    assert protocol.RESP_OK != protocol.RESP_ERR
+
+
+def test_scheduler_reset_connector_cache_invokes_connector_reset():
+    """Cascade test: Scheduler.reset_prefix_cache(reset_connector=True)
+    cascades into MooncakeStoreConnector.reset_cache without dragging in
+    the heavy KVCacheManager fixtures.
+    """
+    vllm_config = _make_vllm_config()
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "connector.MooncakeStoreScheduler"
+        ) as mock_scheduler_cls,
+    ):
+        conn = connector.MooncakeStoreConnector(vllm_config, KVConnectorRole.SCHEDULER)
+
+    mock_scheduler_cls.return_value.reset_store.return_value = True
+
+    class _StubScheduler:
+        def __init__(self, c):
+            self.connector = c
+
+        def reset_connector_cache(self):
+            return self.connector.reset_cache() is not False
+
+    sched = _StubScheduler(conn)
+    assert sched.reset_connector_cache() is True
+    mock_scheduler_cls.return_value.reset_store.assert_called_once_with()
+
+    mock_scheduler_cls.return_value.reset_store.reset_mock()
+    mock_scheduler_cls.return_value.reset_store.return_value = False
+    assert sched.reset_connector_cache() is False
