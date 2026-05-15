@@ -97,13 +97,14 @@ IS_DENSE = False
 
 def enable_norm_fusion(cfg: "VllmConfig") -> bool:
     """Enable if either RMS norm or quant FP8 custom op is active;
-    otherwise Inductor handles fusion."""
+    otherwise Inductor handles fusion. Also disable for batch invariant
+    as the custom fused kernels are not currently batch invariant."""
 
     return (
         cfg.compilation_config.is_custom_op_enabled("rms_norm")
         or cfg.compilation_config.is_custom_op_enabled("quant_fp8")
         or cfg.kernel_config.ir_op_priority.rms_norm[0] != "native"
-    )
+    ) and not envs.VLLM_BATCH_INVARIANT
 
 
 def enable_act_fusion(cfg: "VllmConfig") -> bool:
@@ -120,7 +121,9 @@ def enable_act_fusion(cfg: "VllmConfig") -> bool:
 
 
 def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
-    """Enable if TP > 1 and Hopper/Blackwell and flashinfer installed."""
+    """Enable if TP > 1 and Hopper/Blackwell and flashinfer installed.
+    Disable if batch invariance is enabled.
+    """
     from vllm.platforms import current_platform
     from vllm.utils.flashinfer import has_flashinfer
 
@@ -139,6 +142,7 @@ def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
             current_platform.is_device_capability_family(100)
             or current_platform.is_device_capability(90)
         )
+        and not envs.VLLM_BATCH_INVARIANT
     )
 
 
