@@ -1286,10 +1286,17 @@ def _mcpmv_tgt_sizes_tensor(
 
 
 def _mcpmv_normalize_tgt_sizes(
-    tgt_sizes: torch.Tensor,
+    tgt_sizes: torch.Tensor | list[torch.Tensor],
     slice_counts: list[int],
 ) -> torch.Tensor:
     """Normalize tgt_sizes to shape ``(total_slices, 2)``."""
+
+    if isinstance(tgt_sizes, list):
+        if not tgt_sizes:
+            tgt_sizes = torch.zeros((0, 2), dtype=torch.long)
+        else:
+            tgt_sizes = torch.cat(tgt_sizes, dim=0)
+
     total_slices = sum(slice_counts)
     if tgt_sizes.dim() == 2 and tgt_sizes.shape[0] == total_slices:
         return tgt_sizes
@@ -1545,12 +1552,13 @@ class _MiniCPMVEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
 
         if not indices:
             pixel_h, pixel_w = self._mcpmv_slice_pixel_size()
+            vpm_dtype = next(self.vpm.parameters()).dtype
             subset.update(
                 {
                     pixel_values_key: [],
                     tgt_key: torch.zeros((0, 2), dtype=torch.long, device=device),
                     flat_key: torch.zeros(
-                        (0, 3 * pixel_h * pixel_w), device=device, dtype=torch.float32
+                        (0, 3 * pixel_h * pixel_w), device=device, dtype=vpm_dtype
                     ),
                 }
             )
