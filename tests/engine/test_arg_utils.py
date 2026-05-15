@@ -368,11 +368,7 @@ def test_attention_config():
             "true",
             "--attention-config.flash_attn_max_num_splits_for_cuda_graph",
             "16",
-            "--attention-config.use_trtllm_ragged_deepseek_prefill",
-            "true",
             "--attention-config.use_trtllm_attention",
-            "true",
-            "--attention-config.disable_flashinfer_prefill",
             "true",
             "--attention-config.disable_flashinfer_q_quantization",
             "true",
@@ -385,9 +381,7 @@ def test_attention_config():
     assert engine_args.attention_config.flash_attn_version == 3
     assert engine_args.attention_config.use_prefill_decode_attention is True
     assert engine_args.attention_config.flash_attn_max_num_splits_for_cuda_graph == 16
-    assert engine_args.attention_config.use_trtllm_ragged_deepseek_prefill is True
     assert engine_args.attention_config.use_trtllm_attention is True
-    assert engine_args.attention_config.disable_flashinfer_prefill is True
     assert engine_args.attention_config.disable_flashinfer_q_quantization is True
 
     # set to string form of a dict with all fields
@@ -397,10 +391,7 @@ def test_attention_config():
             '{"backend": "FLASHINFER", "flash_attn_version": 2, '
             '"use_prefill_decode_attention": false, '
             '"flash_attn_max_num_splits_for_cuda_graph": 8, '
-            '"use_cudnn_prefill": false, '
-            '"use_trtllm_ragged_deepseek_prefill": false, '
             '"use_trtllm_attention": false, '
-            '"disable_flashinfer_prefill": false, '
             '"disable_flashinfer_q_quantization": false}',
         ]
     )
@@ -411,10 +402,7 @@ def test_attention_config():
     assert engine_args.attention_config.flash_attn_version == 2
     assert engine_args.attention_config.use_prefill_decode_attention is False
     assert engine_args.attention_config.flash_attn_max_num_splits_for_cuda_graph == 8
-    assert engine_args.attention_config.use_cudnn_prefill is False
-    assert engine_args.attention_config.use_trtllm_ragged_deepseek_prefill is False
     assert engine_args.attention_config.use_trtllm_attention is False
-    assert engine_args.attention_config.disable_flashinfer_prefill is False
     assert engine_args.attention_config.disable_flashinfer_q_quantization is False
 
     # test --attention-backend flows into VllmConfig.attention_config

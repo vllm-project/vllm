@@ -130,17 +130,14 @@ KVConnectorFactory.register_connector(
 @pytest.fixture
 def mc() -> MultiConnector:
     """MultiConnector using two mocked connectors"""
-    vllm_config = create_vllm_config()
-
     mock_connector_config = {
         "kv_connector": "MockConnector",
         "kv_role": "kv_both",
         "kv_connector_module_path": "tests.v1.kv_connector.unit.test_multi_connector",
     }
 
-    vllm_config.kv_transfer_config = KVTransferConfig(
+    vllm_config = create_vllm_config(
         kv_connector="MultiConnector",
-        kv_role="kv_both",
         kv_connector_extra_config={
             "connectors": [mock_connector_config, mock_connector_config],
         },
@@ -405,39 +402,35 @@ def test_multi_connector_handle_preemptions_integration():
 
     try:
         # Configure MultiConnector with two TestExampleConnectors
-        kv_transfer_config = KVTransferConfig(
-            kv_connector="MultiConnector",
-            kv_role="kv_both",
-            kv_connector_extra_config={
-                "connectors": [
-                    {
-                        "kv_connector": "TestExampleConnector",
-                        "kv_role": "kv_both",
-                        "kv_connector_extra_config": {
-                            "shared_storage_path": str(storage_path / "s1"),
-                            "name": "preempt1",
-                        },
-                        "kv_connector_module_path": "tests.v1.kv_connector.unit.utils",
+        connectors_extra_config = {
+            "connectors": [
+                {
+                    "kv_connector": "TestExampleConnector",
+                    "kv_role": "kv_both",
+                    "kv_connector_extra_config": {
+                        "shared_storage_path": str(storage_path / "s1"),
+                        "name": "preempt1",
                     },
-                    {
-                        "kv_connector": "TestExampleConnector",
-                        "kv_role": "kv_both",
-                        "kv_connector_extra_config": {
-                            "shared_storage_path": str(storage_path / "s2"),
-                            "name": "preempt2",
-                        },
-                        "kv_connector_module_path": "tests.v1.kv_connector.unit.utils",
+                    "kv_connector_module_path": "tests.v1.kv_connector.unit.utils",
+                },
+                {
+                    "kv_connector": "TestExampleConnector",
+                    "kv_role": "kv_both",
+                    "kv_connector_extra_config": {
+                        "shared_storage_path": str(storage_path / "s2"),
+                        "name": "preempt2",
                     },
-                ]
-            },
-        )
+                    "kv_connector_module_path": "tests.v1.kv_connector.unit.utils",
+                },
+            ]
+        }
 
         vllm_config = create_vllm_config(
             block_size=16,
             max_num_batched_tokens=100,
-            kv_connector_extra_config=kv_transfer_config.kv_connector_extra_config,
+            kv_connector="MultiConnector",
+            kv_connector_extra_config=connectors_extra_config,
         )
-        vllm_config.kv_transfer_config = kv_transfer_config
 
         # Create scheduler - this initializes the MultiConnector with SCHEDULER role
         scheduler = create_scheduler(vllm_config, num_blocks=10)
@@ -973,7 +966,6 @@ def test_multi_connector_worker_metadata(mc):
 
 def _make_multi_connector(connector_names: list[str]) -> MultiConnector:
     """Build a MultiConnector wrapping the given registered connectors."""
-    vllm_config = create_vllm_config()
     connectors = [
         {
             "kv_connector": name,
@@ -982,9 +974,8 @@ def _make_multi_connector(connector_names: list[str]) -> MultiConnector:
         }
         for name in connector_names
     ]
-    vllm_config.kv_transfer_config = KVTransferConfig(
+    vllm_config = create_vllm_config(
         kv_connector="MultiConnector",
-        kv_role="kv_both",
         kv_connector_extra_config={"connectors": connectors},
     )
     kv_cache_config = KVCacheConfig(
