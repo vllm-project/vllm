@@ -248,6 +248,16 @@ jobs:
           chmod 700 "$HF_HOME"
           echo "HF endpoint: $HF_ENDPOINT"
 
+      - name: Resolve benchmark Python runtime
+        env:
+          VLLM_ASCEND_HUST_REPO: ${{ github.workspace }}/vllm-ascend-hust
+        run: |
+          source "${VLLM_ASCEND_HUST_REPO}/scripts/hust_ascend_manager_helper.sh"
+          PYTHON_BIN="$(hust_resolve_python_bin)"
+          echo "PYTHON_BIN=$PYTHON_BIN" >> "$GITHUB_ENV"
+          dirname "$PYTHON_BIN" >> "$GITHUB_PATH"
+          "$PYTHON_BIN" --version
+
       - name: Prepare Ascend runtime and install repos
         env:
           VLLM_ASCEND_HUST_REPO: ${{ github.workspace }}/vllm-ascend-hust
@@ -255,16 +265,17 @@ jobs:
         run: |
           source "${VLLM_ASCEND_HUST_REPO}/scripts/use_single_ascend_env.sh"
           bash "${VLLM_ASCEND_HUST_REPO}/scripts/install_local_ascend_plugin.sh" "$VLLM_ASCEND_HUST_REPO"
-          python -m pip install -e . --no-build-isolation --no-deps
-          python -m pip install -e "${VLLM_HUST_BENCHMARK_REPO}[publish]" jsonschema
+          "${PYTHON_BIN}" -m pip install -e . --no-build-isolation --no-deps
+          "${PYTHON_BIN}" -m pip install -e "${VLLM_HUST_BENCHMARK_REPO}[publish]" jsonschema
 
       - name: Verify installation
         env:
           VLLM_ASCEND_HUST_REPO: ${{ github.workspace }}/vllm-ascend-hust
         run: |
           source "${VLLM_ASCEND_HUST_REPO}/scripts/use_single_ascend_env.sh"
-          python --version
-          python -c "import vllm; print(f'vLLM version: {vllm.__version__}')"
+          "${PYTHON_BIN}" --version
+          "${PYTHON_BIN}" -c "import vllm; print(f'vLLM version: {vllm.__version__}')"
+          "${PYTHON_BIN}" -c "import importlib; importlib.import_module('vllm.entrypoints.cli.main'); print('vLLM CLI module import: ok')"
 
       - name: Run benchmark CI and optional HF sync
         env:
@@ -280,16 +291,13 @@ jobs:
 
       - name: Cleanup leftover Ascend CI processes
         if: always()
-        env:
-          VLLM_ASCEND_HUST_REPO: ${{ github.workspace }}/vllm-ascend-hust
         run: |
-          source "${VLLM_ASCEND_HUST_REPO}/scripts/use_single_ascend_env.sh"
           bash .github/workflows/scripts/cleanup_ascend_ci_processes.sh
 
       - name: Build benchmark summary artifacts
         if: always()
         run: |
-          python - <<'PY'
+          "${PYTHON_BIN}" - <<'PY'
           import json
           import os
           from pathlib import Path

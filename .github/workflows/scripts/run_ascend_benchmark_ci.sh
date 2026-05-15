@@ -41,6 +41,19 @@ NODE_COUNT=${NODE_COUNT:-1}
 PUBLISH_TO_HF=${PUBLISH_TO_HF:-0}
 HF_REPO_ID=${HF_REPO_ID:-}
 
+PYTHON_BIN=${PYTHON_BIN:-$(command -v python3 || command -v python || true)}
+if [[ -z "$PYTHON_BIN" ]]; then
+  echo "Could not locate a Python interpreter for benchmark CI" >&2
+  exit 127
+fi
+
+VLLM_CLI=("$PYTHON_BIN" -m vllm.entrypoints.cli.main)
+CURL_BIN=${CURL_BIN:-$(command -v curl || true)}
+if [[ -z "$CURL_BIN" ]]; then
+  echo "curl is required for benchmark CI readiness checks" >&2
+  exit 127
+fi
+
 server_pid=""
 server_group_pid=""
 marker_pid_file=""
@@ -71,7 +84,7 @@ cleanup() {
 
 start_server() {
   if command -v setsid >/dev/null 2>&1; then
-    setsid vllm serve "$MODEL_NAME" \
+    setsid "${VLLM_CLI[@]}" serve "$MODEL_NAME" \
       --host "$HOST" \
       --port "$PORT" \
       --dtype "$DTYPE" \
@@ -81,7 +94,7 @@ start_server() {
     server_pid=$!
     server_group_pid=$server_pid
   else
-    vllm serve "$MODEL_NAME" \
+    "${VLLM_CLI[@]}" serve "$MODEL_NAME" \
       --host "$HOST" \
       --port "$PORT" \
       --dtype "$DTYPE" \
@@ -98,7 +111,7 @@ start_server() {
 }
 
 allocate_local_port() {
-  python - <<'PY'
+  "$PYTHON_BIN" - <<'PY'
 import socket
 
 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -199,7 +212,7 @@ fi
 start_server
 
 for attempt in $(seq 1 120); do
-  if curl -fsS "http://$HOST:$PORT/v1/models" >/dev/null; then
+  if "$CURL_BIN" -fsS "http://$HOST:$PORT/v1/models" >/dev/null; then
     break
   fi
 
@@ -218,7 +231,7 @@ for attempt in $(seq 1 120); do
   sleep 2
 done
 
-vllm bench serve \
+"${VLLM_CLI[@]}" bench serve \
   --model "$MODEL_NAME" \
   --host "$HOST" \
   --port "$PORT" \
@@ -227,7 +240,7 @@ vllm bench serve \
   --result-dir "$RESULT_ROOT" \
   --result-filename "$(basename "$RAW_RESULT_FILE")"
 
-CORE_VERSION=$(python - <<'PY'
+CORE_VERSION=$("$PYTHON_BIN" - <<'PY'
 import vllm
 print(vllm.__version__)
 PY
@@ -235,7 +248,7 @@ PY
 
 DISPLAY_VERSION=$(printf '%s' "${GITHUB_SHA:-local}" | cut -c1-8)
 
-python -m vllm_hust_benchmark.cli submit \
+"$PYTHON_BIN" -m vllm_hust_benchmark.cli submit \
   "$BENCH_SCENARIO" \
   --benchmark-result-file "$RAW_RESULT_FILE" \
   --constraints-file "$EFFECTIVE_CONSTRAINTS_FILE" \
@@ -263,7 +276,7 @@ if [[ "$PUBLISH_TO_HF" == "1" ]]; then
     exit 2
   fi
 
-  python -m vllm_hust_benchmark.cli sync-submission-to-hf \
+  "$PYTHON_BIN" -m vllm_hust_benchmark.cli sync-submission-to-hf \
     --submission-dir "$SUBMISSION_DIR" \
     --aggregate-output-dir "$AGGREGATE_OUTPUT_DIR" \
     --repo-id "$HF_REPO_ID" \
@@ -271,7 +284,7 @@ if [[ "$PUBLISH_TO_HF" == "1" ]]; then
     --commit-message "chore: sync vllm-hust benchmark $RUN_ID (${GITHUB_REF_NAME:-detached}@$(printf '%s' "${GITHUB_SHA:-local}" | cut -c1-8))" \
     --execute
 else
-  python -m vllm_hust_benchmark.cli publish-website \
+  "$PYTHON_BIN" -m vllm_hust_benchmark.cli publish-website \
     --source-dir "$SUBMISSIONS_ROOT" \
     --output-dir "$AGGREGATE_OUTPUT_DIR" \
     --execute
