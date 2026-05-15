@@ -29,12 +29,15 @@ def _triton_mrope_forward(
     mrope_section_h: tl.constexpr,
     mrope_section_w: tl.constexpr,
     is_interleaved: tl.constexpr,
+    is_neox_style: tl.constexpr,
 ):
     # Adapted from
     # https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/ops/qwen2vl_mrope.py
     # This version supports flatten input tensors from vllm
     # and supports cos and sin cache with shape (3, num_tokens, head_dim // 2)
     # instead of (3, bsz, seq_len, head_dim), also supports interleaved rotary
+    # and both NeoX-style (pair (i, i+rd/2)) and GPT-J-style (pair (2i, 2i+1))
+    # rotations via the is_neox_style flag.
     pid = tl.program_id(0)
     # locate start address
     q_ptr = q_ptr + pid * (n_qh * hd)
@@ -79,15 +82,24 @@ def _triton_mrope_forward(
     sin_row = t_sin_row + h_sin_row + w_sin_row
 
     # ####################################################################
-    # Load the left and right half of q and k for the current
-    # program instance (i.e. for the current token) separately
+    # Load the two paired halves of q and k for the current token.
+    # NeoX-style pairs (i, i + rd/2) → first half is contiguous low indices.
+    # GPT-J-style pairs (2i, 2i+1) → halves are even / odd elements.
+    # The math below (cos * x1 - sin * x2, ...) is the same either way;
+    # only the offset stride differs, so we branch on is_neox_style.
     # ####################################################################
-    # left half of the head
+    if is_neox_style:
+        first_half_col = tl.arange(0, pad_hd // 2)
+        pair_stride = rd // 2
+    else:
+        first_half_col = tl.arange(0, pad_hd // 2) * 2
+        pair_stride = 1
+
     first_half_q_offsets = (
-        tl.arange(0, pad_n_qh)[:, None] * hd + tl.arange(0, pad_hd // 2)[None, :]
+        tl.arange(0, pad_n_qh)[:, None] * hd + first_half_col[None, :]
     )
     first_half_k_offsets = (
-        tl.arange(0, pad_n_kh)[:, None] * hd + tl.arange(0, pad_hd // 2)[None, :]
+        tl.arange(0, pad_n_kh)[:, None] * hd + first_half_col[None, :]
     )
     first_q_mask = (tl.arange(0, pad_n_qh)[:, None] < n_qh) & (
         tl.arange(0, pad_hd // 2)[None, :] < rd // 2
@@ -103,9 +115,9 @@ def _triton_mrope_forward(
         sin_row.dtype
     )
 
-    # right half of the head
-    second_half_q_offsets = first_half_q_offsets + (rd // 2)
-    second_half_k_offsets = first_half_k_offsets + (rd // 2)
+    # right half (NeoX) / odd elements (GPT-J)
+    second_half_q_offsets = first_half_q_offsets + pair_stride
+    second_half_k_offsets = first_half_k_offsets + pair_stride
     second_q_mask = first_q_mask
     second_k_mask = first_k_mask
 
@@ -139,8 +151,9 @@ def triton_mrope(
     head_size: int,
     rotary_dim: int,
     mrope_interleaved: bool,
+    is_neox_style: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Qwen2VL mrope kernel.
+    """mrope kernel supporting both NeoX-style and GPT-J-style rotation.
 
     Args:
         q: [num_tokens, num_heads * head_size]
@@ -151,6 +164,8 @@ def triton_mrope(
             (T/H/W positions with multimodal inputs)
         mrope_section: [t, h, w]
         head_size: int
+        is_neox_style: True for NeoX (pair (i, i+rd/2)),
+            False for GPT-J / interleaved (pair (2i, 2i+1)).
     """
     n_row, n_q_head_head_dim = q.shape
     n_q_head = n_q_head_head_dim // head_size
@@ -183,6 +198,7 @@ def triton_mrope(
         mrope_section[1],
         mrope_section[2],
         mrope_interleaved,
+        is_neox_style,
     )
     return q, k
 
@@ -349,6 +365,7 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
                 self.head_size,
                 self.rotary_dim,
                 self.mrope_interleaved,
+                self.is_neox_style,
             )
 
             return q.reshape(query_shape), k.reshape(key_shape)
