@@ -19,9 +19,10 @@ QuantizationMethods = Literal[
     "modelopt_mxfp8",
     "modelopt_mixed",
     "gguf",
+    "auto_gptq",
+    "gptq",
     "gptq_marlin",
     "awq_marlin",
-    "gptq",
     "humming",
     "compressed-tensors",
     "bitsandbytes",
@@ -114,6 +115,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
     from vllm.model_executor.models.deepseek_v4 import DeepseekV4FP8Config
 
+    from .auto_gptq import AutoGPTQConfig
     from .awq import AWQConfig
     from .awq_marlin import AWQMarlinConfig
     from .bitsandbytes import BitsAndBytesConfig
@@ -126,8 +128,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .fp8 import Fp8Config
     from .fp_quant import FPQuantConfig
     from .gguf import GGUFConfig
-    from .gptq import GPTQConfig
-    from .gptq_marlin import GPTQMarlinConfig
     from .humming import HummingConfig
     from .inc import INCConfig
     from .modelopt import (
@@ -151,9 +151,10 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "modelopt_mxfp8": ModelOptMxFp8Config,
         "modelopt_mixed": ModelOptMixedPrecisionConfig,
         "gguf": GGUFConfig,
-        "gptq_marlin": GPTQMarlinConfig,
+        "auto_gptq": AutoGPTQConfig,
+        "gptq": AutoGPTQConfig,
+        "gptq_marlin": AutoGPTQConfig,
         "awq_marlin": AWQMarlinConfig,
-        "gptq": GPTQConfig,
         "compressed-tensors": CompressedTensorsConfig,
         "bitsandbytes": BitsAndBytesConfig,
         "experts_int8": ExpertsInt8Config,
