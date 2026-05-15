@@ -171,13 +171,22 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
             ("gate_up_proj", "up_proj", 1),
         ]
         # Skip loading extra parameters for GPTQ/modelopt models.
+        # The NVFP4 variants (.weight_scale_2 / .input_scale_2) hold the
+        # global per-expert scalar used to invert into the activation
+        # quant scale; they're stored as 1-D tensors (shape [num_experts])
+        # and must not flow through the fused-expert transpose path
+        # below, which assumes a ≥2-D weight tensor (see #40885).
         ignore_suffixes = (
             ".bias",
             "_bias",
             ".weight_scale",
             "_weight_scale",
+            ".weight_scale_2",
+            "_weight_scale_2",
             ".input_scale",
             "_input_scale",
+            ".input_scale_2",
+            "_input_scale_2",
         )
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
@@ -240,10 +249,22 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
                     param_name, weight_name, expert_id, shard_id = mapping
                     if weight_name not in name:
                         continue
+                    name_mapped = name.replace(weight_name, param_name)
+                    # NVFP4 / ModelOpt quantization metadata
+                    # (.weight_scale, .weight_scale_2, .input_scale,
+                    # .input_scale_2) is stored as 0-D / 1-D scalar
+                    # tensors. The fused-expert transpose below assumes
+                    # a ≥2-D weight tensor, so an unguarded transpose
+                    # raises `IndexError: Dimension out of range
+                    # (expected to be in range of [-1, 0], but got -2)`
+                    # (#40885). Skip these so they fall through to the
+                    # outer else, where the layer's quant-aware
+                    # weight_loader handles them.
+                    if name_mapped.endswith(ignore_suffixes):
+                        continue
                     # Anyway, this is an expert weight and should not be
                     # attempted to load as other weights later
                     is_expert_weight = True
-                    name_mapped = name.replace(weight_name, param_name)
                     if is_pp_missing_parameter(name_mapped, self):
                         continue
                     if is_fused_expert:
