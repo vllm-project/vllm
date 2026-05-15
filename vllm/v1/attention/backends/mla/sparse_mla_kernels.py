@@ -1134,13 +1134,17 @@ def _accumulate_gathered_attention_chunk_kernel(
         tl.maximum(valid_len - candidate_offset, 0),
     )
 
+    # ``candidate_offset + candidate_idx < valid_len`` is structurally
+    # guaranteed by the ``local_eff`` cap above, so the only remaining
+    # gate is ``slot_id >= 0`` when slot ids are present.
     for candidate_idx in range(0, local_eff):
-        is_valid = (candidate_offset + candidate_idx) < valid_len
         if HAS_SLOT_IDS:
             slot_id = tl.load(
                 slot_ids_ptr + token_idx * stride_slot_t + candidate_idx * stride_slot_c
             )
-            is_valid = is_valid & (slot_id >= 0)
+            is_valid = slot_id >= 0
+        else:
+            is_valid = True
 
         if is_valid:
             kv = tl.load(
@@ -1308,13 +1312,16 @@ def _accumulate_indexed_attention_chunk_kernel(
         tl.maximum(valid_len - candidate_offset, 0),
     )
 
+    # ``candidate_offset + candidate_idx < valid_len`` is structurally
+    # guaranteed by the ``local_eff`` cap above; only the per-cell
+    # sentinel check (``kv_index >= 0``) is still meaningful.
     for candidate_idx in range(0, local_eff):
         kv_index = tl.load(
             indices_ptr
             + token_idx * stride_indices_t
             + candidate_idx * stride_indices_c
         )
-        is_valid = ((candidate_offset + candidate_idx) < valid_len) & (kv_index >= 0)
+        is_valid = kv_index >= 0
 
         if is_valid:
             kv = tl.load(
@@ -1473,11 +1480,14 @@ def _accumulate_fp8ds_global_slots_attention_chunk_kernel(
     rope_mask = (offsets >= fp8_dim) & dim_mask
     rope_offsets = tl.maximum(offsets - fp8_dim, 0)
 
+    # ``candidate_offset + candidate_idx < valid_len`` is structurally
+    # guaranteed by the ``local_eff`` cap above; only the per-cell
+    # sentinel check (``slot_id >= 0``) is still meaningful.
     for candidate_idx in range(0, local_eff):
         slot_id = tl.load(
             slot_ids_ptr + token_idx * stride_slot_t + candidate_idx * stride_slot_c
         )
-        is_valid = ((candidate_offset + candidate_idx) < valid_len) & (slot_id >= 0)
+        is_valid = slot_id >= 0
 
         if is_valid:
             block_idx = slot_id // cache_block_size
@@ -1682,11 +1692,14 @@ def _accumulate_fp8ds_global_slots_attention_chunk_multihead_kernel(
     rope_mask = (dim_offsets >= fp8_dim) & dim_mask
     rope_offsets = tl.maximum(dim_offsets - fp8_dim, 0)
 
+    # ``candidate_offset + candidate_idx < valid_len`` is structurally
+    # guaranteed by the ``local_eff`` cap above; only the per-cell
+    # sentinel check (``slot_id >= 0``) is still meaningful.
     for candidate_idx in range(0, local_eff):
         slot_id = tl.load(
             slot_ids_ptr + token_idx * stride_slot_t + candidate_idx * stride_slot_c
         )
-        is_valid = ((candidate_offset + candidate_idx) < valid_len) & (slot_id >= 0)
+        is_valid = slot_id >= 0
 
         if is_valid:
             block_idx = slot_id // cache_block_size
@@ -1889,51 +1902,50 @@ def _accumulate_fp8ds_paged_attention_chunk_kernel(
         tl.maximum(gather_len - candidate_offset, 0),
     )
 
+    # ``gather_idx < gather_len`` is structurally guaranteed by the
+    # ``local_eff`` cap above; the body is unconditional.
     for candidate_idx in range(0, local_eff):
         gather_idx = candidate_offset + candidate_idx
-        is_valid = gather_idx < gather_len
+        pos = start_pos + gather_idx
+        block_in_seq = pos // cache_block_size
+        pos_in_block = pos % cache_block_size
+        physical_block = tl.load(
+            block_table_ptr + token_idx * stride_block_table_t + block_in_seq
+        )
+        cache_block_ptr = k_cache_ptr + physical_block.to(tl.int64) * block_stride
+        token_data_ptr = cache_block_ptr + pos_in_block * token_data_size
+        token_scale_ptr = (
+            cache_block_ptr
+            + cache_block_size * token_data_size
+            + pos_in_block * scale_dim
+        )
 
-        if is_valid:
-            pos = start_pos + gather_idx
-            block_in_seq = pos // cache_block_size
-            pos_in_block = pos % cache_block_size
-            physical_block = tl.load(
-                block_table_ptr + token_idx * stride_block_table_t + block_in_seq
-            )
-            cache_block_ptr = k_cache_ptr + physical_block.to(tl.int64) * block_stride
-            token_data_ptr = cache_block_ptr + pos_in_block * token_data_size
-            token_scale_ptr = (
-                cache_block_ptr
-                + cache_block_size * token_data_size
-                + pos_in_block * scale_dim
-            )
+        x_uint8 = tl.load(token_data_ptr + offsets, mask=fp8_mask, other=0)
+        x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
+        x_float = x_fp8.to(tl.float32)
+        scale_offsets = offsets // quant_block
+        encoded_scale = tl.load(
+            token_scale_ptr + scale_offsets,
+            mask=fp8_mask,
+            other=127,
+        )
+        dequant_scale = tl.exp2(encoded_scale.to(tl.float32) - 127.0)
+        x_dequant = x_float * dequant_scale
 
-            x_uint8 = tl.load(token_data_ptr + offsets, mask=fp8_mask, other=0)
-            x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
-            x_float = x_fp8.to(tl.float32)
-            scale_offsets = offsets // quant_block
-            encoded_scale = tl.load(
-                token_scale_ptr + scale_offsets,
-                mask=fp8_mask,
-                other=127,
-            )
-            dequant_scale = tl.exp2(encoded_scale.to(tl.float32) - 127.0)
-            x_dequant = x_float * dequant_scale
+        rope_ptr = (token_data_ptr + fp8_dim).to(tl.pointer_type(tl.bfloat16))
+        rope = tl.load(rope_ptr + rope_offsets, mask=rope_mask, other=0.0).to(
+            tl.float32
+        )
+        kv = tl.where(fp8_mask, x_dequant, rope)
+        kv = tl.where(dim_mask, kv, 0.0)
 
-            rope_ptr = (token_data_ptr + fp8_dim).to(tl.pointer_type(tl.bfloat16))
-            rope = tl.load(rope_ptr + rope_offsets, mask=rope_mask, other=0.0).to(
-                tl.float32
-            )
-            kv = tl.where(fp8_mask, x_dequant, rope)
-            kv = tl.where(dim_mask, kv, 0.0)
-
-            score = tl.sum(q * kv, axis=0) * scale
-            next_max = tl.maximum(running_max, score)
-            previous_weight = tl.exp(running_max - next_max)
-            candidate_weight = tl.exp(score - next_max)
-            running_acc = running_acc * previous_weight + kv * candidate_weight
-            running_denom = running_denom * previous_weight + candidate_weight
-            running_max = next_max
+        score = tl.sum(q * kv, axis=0) * scale
+        next_max = tl.maximum(running_max, score)
+        previous_weight = tl.exp(running_max - next_max)
+        candidate_weight = tl.exp(score - next_max)
+        running_acc = running_acc * previous_weight + kv * candidate_weight
+        running_denom = running_denom * previous_weight + candidate_weight
+        running_max = next_max
 
     tl.store(max_score_ptr + state_offset, running_max)
     tl.store(denom_ptr + state_offset, running_denom)
@@ -2101,54 +2113,53 @@ def _accumulate_fp8ds_paged_attention_chunk_multihead_kernel(
         tl.maximum(gather_len - candidate_offset, 0),
     )
 
+    # ``gather_idx < gather_len`` is structurally guaranteed by the
+    # ``local_eff`` cap above; the body is unconditional.
     for candidate_idx in range(0, local_eff):
         gather_idx = candidate_offset + candidate_idx
-        is_valid = gather_idx < gather_len
+        pos = start_pos + gather_idx
+        block_in_seq = pos // cache_block_size
+        pos_in_block = pos % cache_block_size
+        physical_block = tl.load(
+            block_table_ptr + token_idx * stride_block_table_t + block_in_seq
+        )
+        cache_block_ptr = k_cache_ptr + physical_block.to(tl.int64) * block_stride
+        token_data_ptr = cache_block_ptr + pos_in_block * token_data_size
+        token_scale_ptr = (
+            cache_block_ptr
+            + cache_block_size * token_data_size
+            + pos_in_block * scale_dim
+        )
 
-        if is_valid:
-            pos = start_pos + gather_idx
-            block_in_seq = pos // cache_block_size
-            pos_in_block = pos % cache_block_size
-            physical_block = tl.load(
-                block_table_ptr + token_idx * stride_block_table_t + block_in_seq
-            )
-            cache_block_ptr = k_cache_ptr + physical_block.to(tl.int64) * block_stride
-            token_data_ptr = cache_block_ptr + pos_in_block * token_data_size
-            token_scale_ptr = (
-                cache_block_ptr
-                + cache_block_size * token_data_size
-                + pos_in_block * scale_dim
-            )
+        x_uint8 = tl.load(token_data_ptr + dim_offsets, mask=fp8_mask, other=0)
+        x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
+        x_float = x_fp8.to(tl.float32)
+        scale_offsets = dim_offsets // quant_block
+        encoded_scale = tl.load(
+            token_scale_ptr + scale_offsets,
+            mask=fp8_mask,
+            other=127,
+        )
+        dequant_scale = tl.exp2(encoded_scale.to(tl.float32) - 127.0)
+        x_dequant = x_float * dequant_scale
 
-            x_uint8 = tl.load(token_data_ptr + dim_offsets, mask=fp8_mask, other=0)
-            x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
-            x_float = x_fp8.to(tl.float32)
-            scale_offsets = dim_offsets // quant_block
-            encoded_scale = tl.load(
-                token_scale_ptr + scale_offsets,
-                mask=fp8_mask,
-                other=127,
-            )
-            dequant_scale = tl.exp2(encoded_scale.to(tl.float32) - 127.0)
-            x_dequant = x_float * dequant_scale
+        rope_ptr = (token_data_ptr + fp8_dim).to(tl.pointer_type(tl.bfloat16))
+        rope = tl.load(rope_ptr + rope_offsets, mask=rope_mask, other=0.0).to(
+            tl.float32
+        )
+        kv = tl.where(fp8_mask, x_dequant, rope)
+        kv = tl.where(dim_mask, kv, 0.0)
 
-            rope_ptr = (token_data_ptr + fp8_dim).to(tl.pointer_type(tl.bfloat16))
-            rope = tl.load(rope_ptr + rope_offsets, mask=rope_mask, other=0.0).to(
-                tl.float32
-            )
-            kv = tl.where(fp8_mask, x_dequant, rope)
-            kv = tl.where(dim_mask, kv, 0.0)
-
-            score = tl.sum(q * kv[None, :], axis=1) * scale
-            next_max = tl.maximum(running_max, score)
-            previous_weight = tl.exp(running_max - next_max)
-            candidate_weight = tl.exp(score - next_max)
-            running_acc = (
-                running_acc * previous_weight[:, None]
-                + kv[None, :] * candidate_weight[:, None]
-            )
-            running_denom = running_denom * previous_weight + candidate_weight
-            running_max = next_max
+        score = tl.sum(q * kv[None, :], axis=1) * scale
+        next_max = tl.maximum(running_max, score)
+        previous_weight = tl.exp(running_max - next_max)
+        candidate_weight = tl.exp(score - next_max)
+        running_acc = (
+            running_acc * previous_weight[:, None]
+            + kv[None, :] * candidate_weight[:, None]
+        )
+        running_denom = running_denom * previous_weight + candidate_weight
+        running_max = next_max
 
     tl.store(max_score_ptr + state_offsets, running_max, mask=head_mask)
     tl.store(denom_ptr + state_offsets, running_denom, mask=head_mask)
@@ -2303,53 +2314,53 @@ def _fp8ds_paged_attention_with_sink_multihead_kernel(
         tl.maximum(gather_len - candidate_offset, 0),
     )
 
+    # ``gather_idx < gather_len`` is structurally guaranteed by the
+    # ``local_eff`` cap above; the body is unconditional.
     for candidate_idx in range(0, local_eff):
         gather_idx = candidate_offset + candidate_idx
-        is_valid = gather_idx < gather_len
-        if is_valid:
-            pos = start_pos + gather_idx
-            block_in_seq = pos // cache_block_size
-            pos_in_block = pos % cache_block_size
-            physical_block = tl.load(
-                block_table_ptr + token_idx * stride_block_table_t + block_in_seq
-            )
-            cache_block_ptr = k_cache_ptr + physical_block.to(tl.int64) * block_stride
-            token_data_ptr = cache_block_ptr + pos_in_block * token_data_size
-            token_scale_ptr = (
-                cache_block_ptr
-                + cache_block_size * token_data_size
-                + pos_in_block * scale_dim
-            )
+        pos = start_pos + gather_idx
+        block_in_seq = pos // cache_block_size
+        pos_in_block = pos % cache_block_size
+        physical_block = tl.load(
+            block_table_ptr + token_idx * stride_block_table_t + block_in_seq
+        )
+        cache_block_ptr = k_cache_ptr + physical_block.to(tl.int64) * block_stride
+        token_data_ptr = cache_block_ptr + pos_in_block * token_data_size
+        token_scale_ptr = (
+            cache_block_ptr
+            + cache_block_size * token_data_size
+            + pos_in_block * scale_dim
+        )
 
-            x_uint8 = tl.load(token_data_ptr + dim_offsets, mask=fp8_mask, other=0)
-            x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
-            x_float = x_fp8.to(tl.float32)
-            scale_offsets = dim_offsets // quant_block
-            encoded_scale = tl.load(
-                token_scale_ptr + scale_offsets,
-                mask=fp8_mask,
-                other=127,
-            )
-            dequant_scale = tl.exp2(encoded_scale.to(tl.float32) - 127.0)
-            x_dequant = x_float * dequant_scale
+        x_uint8 = tl.load(token_data_ptr + dim_offsets, mask=fp8_mask, other=0)
+        x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
+        x_float = x_fp8.to(tl.float32)
+        scale_offsets = dim_offsets // quant_block
+        encoded_scale = tl.load(
+            token_scale_ptr + scale_offsets,
+            mask=fp8_mask,
+            other=127,
+        )
+        dequant_scale = tl.exp2(encoded_scale.to(tl.float32) - 127.0)
+        x_dequant = x_float * dequant_scale
 
-            rope_ptr = (token_data_ptr + fp8_dim).to(tl.pointer_type(tl.bfloat16))
-            rope = tl.load(rope_ptr + rope_offsets, mask=rope_mask, other=0.0).to(
-                tl.float32
-            )
-            kv = tl.where(fp8_mask, x_dequant, rope)
-            kv = tl.where(dim_mask, kv, 0.0)
+        rope_ptr = (token_data_ptr + fp8_dim).to(tl.pointer_type(tl.bfloat16))
+        rope = tl.load(rope_ptr + rope_offsets, mask=rope_mask, other=0.0).to(
+            tl.float32
+        )
+        kv = tl.where(fp8_mask, x_dequant, rope)
+        kv = tl.where(dim_mask, kv, 0.0)
 
-            score = tl.sum(q * kv[None, :], axis=1) * scale
-            next_max = tl.maximum(running_max, score)
-            previous_weight = tl.exp(running_max - next_max)
-            candidate_weight = tl.exp(score - next_max)
-            running_acc = (
-                running_acc * previous_weight[:, None]
-                + kv[None, :] * candidate_weight[:, None]
-            )
-            running_denom = running_denom * previous_weight + candidate_weight
-            running_max = next_max
+        score = tl.sum(q * kv[None, :], axis=1) * scale
+        next_max = tl.maximum(running_max, score)
+        previous_weight = tl.exp(running_max - next_max)
+        candidate_weight = tl.exp(score - next_max)
+        running_acc = (
+            running_acc * previous_weight[:, None]
+            + kv[None, :] * candidate_weight[:, None]
+        )
+        running_denom = running_denom * previous_weight + candidate_weight
+        running_max = next_max
 
     sink = tl.load(sink_ptr + head_offsets, mask=head_mask, other=-float("inf"))
     has_tokens = running_denom > 0.0
