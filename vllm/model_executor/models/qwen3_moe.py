@@ -518,7 +518,7 @@ class Qwen3MoeModel(nn.Module, EagleModelMixin):
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        return fused_moe_make_expert_params_mapping(
+        per_expert_mapping = fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
@@ -526,6 +526,16 @@ class Qwen3MoeModel(nn.Module, EagleModelMixin):
             num_experts=self.config.num_experts,
             num_redundant_experts=self.num_redundant_experts,
         )
+        # HF fused-MoE layout (transformers ≥ v5, and any v4 checkpoint
+        # re-saved with save_original_format=False) packs experts into two
+        # 3-D tensors per layer: experts.gate_up_proj (E, 2*I, H) and
+        # experts.down_proj (E, H, I).
+        fused_mapping = [
+            ("experts.w13_weight", "experts.gate_up_proj", 0, "w1"),
+            ("experts.w13_weight", "experts.gate_up_proj", 1, "w3"),
+            ("experts.w2_weight", "experts.down_proj", 0, "w2"),
+        ]
+        return per_expert_mapping + fused_mapping
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [

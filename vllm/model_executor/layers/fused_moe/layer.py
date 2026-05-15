@@ -1603,7 +1603,7 @@ class FusedMoE(PluggableLayer):
             else ""
         )
 
-        per_expert_entries = [
+        return [
             # (param_name, weight_name, expert_id, shard_id)
             (
                 f"experts.{base_layer}w13_"
@@ -1620,19 +1620,6 @@ class FusedMoE(PluggableLayer):
                 ("w3", ckpt_up_proj_name),
             ]
         ]
-
-        fused_entries = [
-            (f"experts.{base_layer}w13_weight", "experts.gate_up_proj", 0, "w1"),
-            (f"experts.{base_layer}w13_weight", "experts.gate_up_proj", 1, "w3"),
-            (
-                f"experts.{base_layer}w2_weight",
-                f"experts.{ckpt_down_proj_name}",
-                0,
-                "w2",
-            ),
-        ]
-
-        return per_expert_entries + fused_entries
 
     @property
     def hidden_size(self) -> int:
