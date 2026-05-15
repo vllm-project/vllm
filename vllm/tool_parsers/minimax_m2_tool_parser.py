@@ -160,16 +160,13 @@ class MinimaxM2ToolParser(ToolParser):
         Returns:
             The converted value
         """
-        # Check if the VALUE itself indicates null (not just if null is allowed)
-        if value.lower() in ("null", "none", "nil"):
-            return None
-
         # Normalize types
         normalized_types = [t.lower() for t in param_types]
 
         # Try each type in order of preference (most specific first, string as fallback)
-        # Priority: integer > number > boolean > object > array > string
+        # Priority: null > integer > number > boolean > object > array > string
         type_priority = [
+            "null",
             "integer",
             "int",
             "number",
@@ -187,7 +184,11 @@ class MinimaxM2ToolParser(ToolParser):
             if param_type not in normalized_types:
                 continue
 
-            if param_type in ["string", "str", "text"]:
+            if param_type == "null":
+                if value.lower() == "null":
+                    return None
+                continue
+            elif param_type in ["string", "str", "text"]:
                 return value
             elif param_type in ["integer", "int"]:
                 try:
