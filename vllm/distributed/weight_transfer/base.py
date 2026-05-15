@@ -4,7 +4,7 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
-from dataclasses import KW_ONLY, dataclass, field
+from dataclasses import dataclass, field
 from typing import Any, Generic, TypeVar
 
 import torch
@@ -28,11 +28,7 @@ class WeightTransferInitInfo(ABC):  # noqa: B024
 class WeightTransferUpdateInfo(ABC):  # noqa: B024
     """Base class for backend-specific weight update info."""
 
-    _: KW_ONLY
-    is_checkpoint_format: bool = True
-    """Set to True if weights are in checkpoint/original model format and need
-    layerwise processing. Set to False if weights have already been processed
-    into kernel format (repacking, renaming, etc.)."""
+    pass
 
 
 # API-level request classes (accept dicts for backend-agnostic serialization)

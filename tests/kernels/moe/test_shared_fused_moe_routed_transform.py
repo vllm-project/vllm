@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Tests for SharedFusedMoE with routed_input_transform.
+Tests for FusedMoE with routed_input_transform.
 
-Verifies that applying routed_input_transform inside SharedFusedMoE
+Verifies that applying routed_input_transform inside FusedMoE
 produces the same results as applying the transform manually outside.
 """
 
@@ -13,9 +13,9 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
-from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import is_torch_equal_or_newer
+from vllm.utils.torch_utils import is_torch_equal_or_newer, set_random_seed
 
 
 class SimpleLinear(nn.Module):
@@ -133,19 +133,18 @@ def test_routed_input_transform_inside_vs_outside(
     workspace_init,
     monkeypatch,
 ):
-    """Compare SharedFusedMoE with transform inside vs manually applying outside.
-    Method A (inside): SharedFusedMoE with routed_input_transform
-    Method B (outside): Manually transform, then SharedFusedMoE without transform
+    """Compare FusedMoE with transform inside vs manually applying outside.
+    Method A (inside): FusedMoE with routed_input_transform
+    Method B (outside): Manually transform, then FusedMoE without transform
     """
-    if current_platform.is_rocm() and use_rocm_aiter:
+    if current_platform.is_rocm():
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1" if use_rocm_aiter else "0")
         monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1" if use_rocm_aiter else "0")
         from vllm._aiter_ops import rocm_aiter_ops
 
         rocm_aiter_ops.refresh_env_variables()
 
-    torch.manual_seed(42)
-    torch.cuda.manual_seed(42)
+    set_random_seed(42)
 
     num_experts = 8
     top_k = 2
@@ -158,15 +157,14 @@ def test_routed_input_transform_inside_vs_outside(
     routed_transform = SimpleLinear(hidden_size, latent_size, dtype)
 
     with set_current_vllm_config(vllm_config):
-        # Method A: SharedFusedMoE WITH routed_input_transform
-        moe_with_transform = SharedFusedMoE(
+        # Method A: FusedMoE WITH routed_input_transform
+        moe_with_transform = FusedMoE(
             shared_experts=shared_experts,
             routed_input_transform=routed_transform,
             num_experts=num_experts,
             top_k=top_k,
             hidden_size=latent_size,
             intermediate_size=intermediate_size,
-            reduce_results=False,
             renormalize=True,
             params_dtype=dtype,
             tp_size=1,
@@ -175,16 +173,15 @@ def test_routed_input_transform_inside_vs_outside(
             prefix="moe_with_transform",
         )
 
-        # Method B: SharedFusedMoE WITHOUT routed_input_transform
+        # Method B: FusedMoE WITHOUT routed_input_transform
         # Note: shared_experts=None because when transform is done outside,
-        moe_without_transform = SharedFusedMoE(
+        moe_without_transform = FusedMoE(
             shared_experts=None,
             routed_input_transform=None,
             num_experts=num_experts,
             top_k=top_k,
             hidden_size=latent_size,
             intermediate_size=intermediate_size,
-            reduce_results=False,
             renormalize=True,
             params_dtype=dtype,
             tp_size=1,
@@ -213,34 +210,20 @@ def test_routed_input_transform_inside_vs_outside(
         hidden_states = torch.randn(num_tokens, hidden_size, device="cuda", dtype=dtype)
         router_logits = torch.randn(num_tokens, num_experts, device="cuda", dtype=dtype)
 
-        # Clone inputs so any in-place modification by Method A
-        # cannot affect Method B's computation.
-        hidden_states_A = hidden_states.clone()
-        router_logits_A = router_logits.clone()
-
         with set_forward_context(None, vllm_config, num_tokens=num_tokens):
-            shared_out_A, routed_out_A = moe_with_transform(
-                hidden_states_A, router_logits_A
-            )
+            # Method A: combined output (shared + routed)
+            combined_A = moe_with_transform(hidden_states, router_logits)
 
+            # Method B: manually transform, get routed output, add shared
             transformed_hidden = routed_transform(hidden_states)
-            shared_out_B, routed_out_B = moe_without_transform(
-                transformed_hidden, router_logits
-            )
+            routed_out_B = moe_without_transform(transformed_hidden, router_logits)
+            shared_out_B = shared_experts(hidden_states)
+            combined_B = shared_out_B + routed_out_B
 
-        expected_shared_out = shared_experts(hidden_states)
-
-        _assert_close(
-            routed_out_A,
-            routed_out_B,
+        torch.testing.assert_close(
+            combined_A,
+            combined_B,
             atol=1e-3,
             rtol=1e-3,
-            label="Routed output: transform inside vs outside",
-        )
-        _assert_close(
-            shared_out_A,
-            expected_shared_out,
-            atol=1e-3,
-            rtol=1e-3,
-            label="Shared expert output",
+            msg="Combined output should match: transform inside vs outside",
         )

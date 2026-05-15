@@ -55,6 +55,7 @@ class MockModelConfig:
     skip_tokenizer_init = False
     is_encoder_decoder: bool = False
     is_multimodal_model: bool = False
+    renderer_num_workers: int = 1
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}
@@ -86,7 +87,6 @@ def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
     serving_render = OpenAIServingRender(
         model_config=engine.model_config,
         renderer=engine.renderer,
-        io_processor=engine.io_processor,
         model_registry=models.registry,
         request_logger=None,
         chat_template=None,
@@ -122,7 +122,6 @@ async def test_chat_error_non_stream():
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
-    mock_engine.io_processor = MagicMock()
     mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     serving_chat = _build_serving_chat(mock_engine)
@@ -166,13 +165,64 @@ async def test_chat_error_non_stream():
 
 
 @pytest.mark.asyncio
+async def test_openai_chat_keeps_mm_cache_for_engine_execution():
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    serving_chat = _build_serving_chat(mock_engine)
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "Test prompt"}],
+    )
+
+    result = await serving_chat.render_chat_request(request)
+
+    assert isinstance(result, tuple)
+    assert (
+        serving_chat.openai_serving_render.preprocess_chat.call_args.kwargs[
+            "skip_mm_cache"
+        ]
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_renderer_only_chat_request_skips_mm_cache():
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    serving_chat = _build_serving_chat(mock_engine)
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "Test prompt"}],
+    )
+
+    result = await serving_chat.openai_serving_render.render_chat_request(request)
+
+    assert result.token_ids == [1, 2, 3]
+    assert (
+        serving_chat.openai_serving_render.preprocess_chat.call_args.kwargs[
+            "skip_mm_cache"
+        ]
+        is True
+    )
+
+
+@pytest.mark.asyncio
 async def test_chat_error_stream():
     """test finish_reason='error' returns 500 InternalServerError (streaming)"""
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
-    mock_engine.io_processor = MagicMock()
     mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     serving_chat = _build_serving_chat(mock_engine)

@@ -12,6 +12,7 @@ import pytest
 import torch
 
 from tests.quantization.utils import is_quant_method_supported
+from vllm.config.model import ModelConfig
 
 
 @pytest.fixture(scope="function", autouse=True)
@@ -46,7 +47,7 @@ def _snapshot_download_or_skip(model_id: str) -> str:
     not is_quant_method_supported("modelopt"),
     reason="ModelOpt FP8 is not supported on this GPU type.",
 )
-def test_modelopt_fp8_checkpoint_setup(vllm_runner):
+def test_modelopt_fp8_checkpoint_setup(default_vllm_config, vllm_runner):
     """Test ModelOpt FP8 checkpoint loading and structure validation."""
     # TODO: provide a small publicly available test checkpoint
     model_path = (
@@ -61,6 +62,8 @@ def test_modelopt_fp8_checkpoint_setup(vllm_runner):
             "This test requires a local ModelOpt FP8 checkpoint."
         )
 
+    # Set model config as model_config.dtype is required in ModelOptFp8LinearMethod.
+    default_vllm_config.model_config = ModelConfig()
     with vllm_runner(model_path, quantization="modelopt", enforce_eager=True) as llm:
 
         def check_model(model):
@@ -120,11 +123,13 @@ def test_modelopt_fp8_checkpoint_setup(vllm_runner):
     not is_quant_method_supported("modelopt"),
     reason="ModelOpt FP8 is not supported on this GPU type.",
 )
-def test_modelopt_fp8_pc_pt_checkpoint_setup(vllm_runner):
+def test_modelopt_fp8_pc_pt_checkpoint_setup(default_vllm_config, vllm_runner):
     """Test ModelOpt FP8_PER_CHANNEL_PER_TOKEN checkpoint setup."""
     model_id = "CedricHwang/qwen2.5-0.5b-modelopt-fp8-pc-pt"
     model_path = _snapshot_download_or_skip(model_id)
 
+    # Set model config as model_config.dtype is required in ModelOptFp8LinearMethod.
+    default_vllm_config.model_config = ModelConfig()
     with vllm_runner(model_path, quantization="modelopt", enforce_eager=True) as llm:
 
         def check_model(model):
@@ -181,11 +186,13 @@ def test_modelopt_fp8_pc_pt_checkpoint_setup(vllm_runner):
     not is_quant_method_supported("modelopt"),
     reason="ModelOpt FP8 is not supported on this GPU type.",
 )
-def test_modelopt_fp8_pb_wo_checkpoint_setup(vllm_runner):
+def test_modelopt_fp8_pb_wo_checkpoint_setup(default_vllm_config, vllm_runner):
     """Test ModelOpt FP8_PB_WO checkpoint setup."""
     model_id = "CedricHwang/qwen2.5-0.5b-modelopt-fp8-pb-wo"
     model_path = _snapshot_download_or_skip(model_id)
 
+    # Set model config as model_config.dtype is required in ModelOptFp8LinearMethod.
+    default_vllm_config.model_config = ModelConfig()
     with vllm_runner(model_path, quantization="modelopt", enforce_eager=True) as llm:
 
         def check_model(model):
@@ -232,3 +239,49 @@ def test_modelopt_fp8_pb_wo_checkpoint_setup(vllm_runner):
         output = llm.generate_greedy(["Hello my name is"], max_tokens=4)
         assert output
         print(f"ModelOpt FP8_PB_WO output: {output}")
+
+
+def test_modelopt_nvfp4_config_dispatches_w4a4_method():
+    """``quant_method="NVFP4"`` (W4A4 default) routes to the existing
+    ``ModelOptNvFp4LinearMethod``."""
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptNvFp4Config,
+        ModelOptNvFp4LinearMethod,
+    )
+
+    config = ModelOptNvFp4Config(
+        quant_method="NVFP4",
+        is_checkpoint_nvfp4_serialized=True,
+        kv_cache_quant_algo=None,
+        exclude_modules=[],
+    )
+    assert config.LinearMethodCls is ModelOptNvFp4LinearMethod
+    assert config.quant_method == "NVFP4"
+
+
+def test_modelopt_nvfp4_config_dispatches_w4a16_method():
+    """``quant_method="W4A16_NVFP4"`` routes to the new
+    ``ModelOptNvFp4W4A16LinearMethod`` instead of the W4A4 sibling.
+
+    Mirrors the FP8 dispatch precedent (``ModelOptFp8Config`` selects
+    one of three FP8 LinearMethods on ``quant_method``); a regression
+    here would mean a W4A16 NVFP4 checkpoint silently loaded under the
+    W4A4 method, which would try to register an ``input_scale`` runtime
+    parameter and (more importantly) call the cutlass W4A4 NVFP4 GEMM
+    instead of FP4 Marlin.
+    """
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptNvFp4Config,
+        ModelOptNvFp4LinearMethod,
+        ModelOptNvFp4W4A16LinearMethod,
+    )
+
+    config = ModelOptNvFp4Config(
+        quant_method="W4A16_NVFP4",
+        is_checkpoint_nvfp4_serialized=True,
+        kv_cache_quant_algo=None,
+        exclude_modules=[],
+    )
+    assert config.LinearMethodCls is ModelOptNvFp4W4A16LinearMethod
+    assert config.LinearMethodCls is not ModelOptNvFp4LinearMethod
+    assert config.quant_method == "W4A16_NVFP4"
