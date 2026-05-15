@@ -257,6 +257,7 @@ class Proxy:
             kv_prepare_request = request.copy()
             kv_prepare_request["max_tokens"] = 1
             kv_prepare_request.pop("min_tokens", None)
+            kv_prepare_request.pop("min_completion_tokens", None)
             if self.nixl:
                 # Tell the prefill node that disaggregation is enabled and
                 # decode will happen remotely. Ask for a non-streaming response
@@ -323,6 +324,7 @@ class Proxy:
             kv_prepare_request = request.copy()
             kv_prepare_request["max_tokens"] = 1
             kv_prepare_request.pop("min_tokens", None)
+            kv_prepare_request.pop("min_completion_tokens", None)
             if "max_completion_tokens" in kv_prepare_request:
                 kv_prepare_request["max_completion_tokens"] = 1
             if self.nixl:
