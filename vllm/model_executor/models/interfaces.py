@@ -207,7 +207,8 @@ class SupportsMultiModal(Protocol):
 
         raise NotImplementedError(
             f"No language model found in {type(self).__name__}! "
-            "You should initialize it via `_mark_language_model`."
+            "You should initialize it via `_mark_language_model`, "
+            "and make sure `embed_input_ids` is implemented."
         )
 
     @contextmanager

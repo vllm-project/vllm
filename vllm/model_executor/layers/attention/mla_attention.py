@@ -779,14 +779,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                         attn_out,
                         lse,
                         get_dcp_group(),
-                        is_lse_base_on_e=not getattr(self, "_use_fi_prefill", False),
+                        is_lse_base_on_e=True,
                     )
                 else:
                     attn_out = cp_lse_ag_out_rs(
                         attn_out,
                         lse,
                         get_dcp_group(),
-                        is_lse_base_on_e=not getattr(self, "_use_fi_prefill", False),
+                        is_lse_base_on_e=True,
                     )
 
             # v_up projection
@@ -1362,6 +1362,7 @@ def backend_supports_prefill_query_quantization() -> bool:
     return backend_cls.get_name() in (
         "FLASHINFER",
         "TRTLLM_RAGGED",
+        "TOKENSPEED_MLA",
     )
 
 
