@@ -34,8 +34,8 @@ class CompressedTensorsW8A8Mxfp8(CompressedTensorsScheme):
     - Activations dynamically quantized to MXFP8 during inference
     """
 
-    def __init__(self):
-        self.kernel = init_mxfp8_linear_kernel()
+    def __init__(self, use_a16: bool = False):
+        self.kernel = init_mxfp8_linear_kernel(use_marlin=use_a16)
 
     @classmethod
     def get_min_capability(cls) -> int:

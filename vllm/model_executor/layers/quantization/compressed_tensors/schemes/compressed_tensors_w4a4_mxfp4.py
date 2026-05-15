@@ -33,9 +33,9 @@ class CompressedTensorsW4A4Mxfp4(CompressedTensorsScheme):
     Otherwise: W4A16 weight-only via Marlin.
     """
 
-    def __init__(self):
+    def __init__(self, use_a16: bool = False):
         self.group_size = 32
-        self.kernel = init_mxfp4_linear_kernel()
+        self.kernel = init_mxfp4_linear_kernel(use_marlin=use_a16)
 
     @classmethod
     def get_min_capability(cls) -> int:

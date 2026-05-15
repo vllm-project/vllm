@@ -558,10 +558,24 @@ def choose_mp_linear_kernel(
     )
 
 
-def init_mxfp8_linear_kernel() -> Mxfp8LinearKernel:
+def init_mxfp8_linear_kernel(use_marlin: bool = False) -> Mxfp8LinearKernel:
     """Select and instantiate the best MXFP8 linear kernel for the
     current platform."""
     config = Mxfp8LinearLayerConfig()
+
+    force_kernel: type[Mxfp8LinearKernel] | None = None
+    if use_marlin:
+        force_kernel = MarlinMxfp8LinearKernel
+
+    if force_kernel is not None:
+        is_supported, reason = force_kernel.is_supported()
+        if not is_supported:
+            raise ValueError(
+                f"Forced MXFP8 kernel {force_kernel.__name__} is not "
+                f"supported: {reason}"
+            )
+        logger.info_once("Using %s for MXFP8 GEMM", force_kernel.__name__)
+        return force_kernel(config)
 
     platform = current_platform._enum
     possible = _POSSIBLE_MXFP8_KERNELS.get(platform, [])
@@ -593,11 +607,11 @@ def init_mxfp8_linear_kernel() -> Mxfp8LinearKernel:
     )
 
 
-def init_mxfp4_linear_kernel() -> MxFp4LinearKernel:
+def init_mxfp4_linear_kernel(use_marlin: bool = False) -> MxFp4LinearKernel:
     """Select and instantiate the best MXFP4 linear kernel for the
     current platform."""
     force_kernel: type[MxFp4LinearKernel] | None = None
-    if envs.VLLM_MXFP4_USE_MARLIN:
+    if envs.VLLM_MXFP4_USE_MARLIN or use_marlin:
         force_kernel = MarlinMxFp4LinearKernel
 
     if force_kernel is not None:
