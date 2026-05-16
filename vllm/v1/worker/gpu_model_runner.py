@@ -1489,11 +1489,25 @@ class GPUModelRunner(
         num_reqs = output_token_ids.size(0)
         self.num_accepted_tokens.gpu[:num_reqs] = (output_token_ids != -1).sum(dim=1)
 
+        # Fast path for non-align mode: if no draft tokens were proposed this
+        # step, no request can have num_accepted_tokens > 1, so we can skip the
+        # blocking GPU->CPU sync and use the original async non-blocking copy.
+        if (
+            self.cache_config.mamba_cache_mode != "align"
+            and not scheduler_output.scheduled_spec_decode_tokens
+        ):
+            self.input_batch.num_accepted_tokens_cpu_tensor[:num_reqs].copy_(
+                self.num_accepted_tokens.gpu[:num_reqs], non_blocking=True
+            )
+            assert self.num_accepted_tokens_event is not None
+            self.num_accepted_tokens_event.record()
+            return
+
+        accepted_np = self.num_accepted_tokens.gpu[:num_reqs].cpu().numpy()
+        for i in range(num_reqs):
+            self.input_batch.num_accepted_tokens_cpu[i] = int(accepted_np[i])
+
         if self.cache_config.mamba_cache_mode == "align":
-            for i, num_tokens in enumerate(
-                self.num_accepted_tokens.gpu[:num_reqs].cpu().numpy()
-            ):
-                self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
             mamba_utils.postprocess_mamba(
                 scheduler_output,
                 self.kv_cache_config,
@@ -1505,9 +1519,31 @@ class GPUModelRunner(
                 self._get_mamba_copy_bufs(),
             )
         else:
-            self.input_batch.num_accepted_tokens_cpu_tensor[:num_reqs].copy_(
-                self.num_accepted_tokens.gpu[:num_reqs], non_blocking=True
-            )
+            # Clear stale mamba_state_idx entries for finished/preempted/resumed
+            # requests to prevent unbounded growth in the non-align path
+            # (preprocess_mamba, which normally handles this, is skipped here).
+            preempted = scheduler_output.preempted_req_ids or set()
+            resumed = scheduler_output.scheduled_cached_reqs.resumed_req_ids
+            for rid in itertools.chain(
+                scheduler_output.finished_req_ids, preempted, resumed
+            ):
+                self.mamba_state_idx.pop(rid, None)
+            if any(accepted_np > 1):
+                for req_id in self.input_batch.req_ids[:num_reqs]:
+                    self.mamba_state_idx.setdefault(req_id, 0)
+                mamba_utils.postprocess_mamba(
+                    scheduler_output,
+                    self.kv_cache_config,
+                    self.input_batch,
+                    self.requests,
+                    self.mamba_state_idx,
+                    self.compilation_config.static_forward_context,
+                    self.model.get_mamba_state_copy_func(),
+                    self._get_mamba_copy_bufs(),
+                )
+            # else: num_accepted_tokens_cpu was already populated above and
+            # shares storage with num_accepted_tokens_cpu_tensor, so the GPU
+            # tensor is already reflected on CPU - no extra copy needed.
             assert self.num_accepted_tokens_event is not None
             self.num_accepted_tokens_event.record()
 

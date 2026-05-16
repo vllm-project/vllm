@@ -270,4 +270,18 @@ def postprocess_mamba(
             )
             if src_block_idx == dest_block_idx:
                 num_accepted_tokens_cpu[i] = 1
+        elif num_accepted_tokens > 1:
+            src_block_idx = mamba_state_idx[req_id]
+            collect_mamba_copy_meta(
+                copy_bufs,
+                kv_cache_config,
+                mamba_state_copy_funcs,
+                mamba_group_ids,
+                src_block_idx,
+                src_block_idx,
+                num_accepted_tokens - 1,
+                req_state,
+                forward_context,
+            )
+            num_accepted_tokens_cpu[i] = 1
     do_mamba_copy_block(copy_bufs)
