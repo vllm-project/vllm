@@ -9,7 +9,10 @@ import vllm.envs as envs
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader.reload import finalize_layerwise_processing
+from vllm.model_executor.model_loader.reload import (
+    finalize_layerwise_processing,
+    make_load_weights_safe_for_reload,
+)
 from vllm.model_executor.model_loader.utils import (
     initialize_model,
     process_weights_after_loading,
@@ -78,6 +81,17 @@ class BaseModelLoader(ABC):
                 finalize_layerwise_processing(model, model_config)
 
             process_weights_after_loading(model, model_config, target_device)
+
+            # Make subsequent direct invocations of `model.load_weights`
+            # (e.g. from external RL frameworks performing in-place weight
+            # updates over `collective_rpc`) idempotent on a live model.
+            # Without this, MoE backends that rewrite the parameter layout
+            # in `process_weights_after_loading` (FlashInfer CUTLASS /
+            # TRT-LLM) silently corrupt subsequent forward output because
+            # the persisted per-expert `weight_loader` writes raw
+            # checkpoint-format bytes into the kernel-layout buffer. See
+            # https://github.com/vllm-project/vllm/issues/42821.
+            make_load_weights_safe_for_reload(model, model_config)
 
         return model.eval()
 
