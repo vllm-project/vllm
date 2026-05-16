@@ -110,6 +110,7 @@ class KimiK25ProcessingInfo(BaseProcessingInfo):
         tokenizer = self.get_tokenizer()
         image_processor = cached_get_image_processor(
             self.ctx.model_config.model,
+            revision=self.ctx.model_config.revision,
             trust_remote_code=self.ctx.model_config.trust_remote_code,
         )
 
