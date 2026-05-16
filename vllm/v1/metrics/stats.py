@@ -159,6 +159,20 @@ class MultiModalCacheStats(BaseCacheStats):
 
 
 @dataclass
+class StructuredOutputCacheStats(BaseCacheStats):
+    """Stores structured-output compiled grammar cache hit statistics.
+
+    `queries` counts structured-output grammar lookup attempts at the backend.
+    `hits` counts lookups that reused an already compiled grammar.
+    """
+
+    def record(self, num_queries: int, num_hits: int) -> None:
+        self.requests += num_queries
+        self.queries += num_queries
+        self.hits += num_hits
+
+
+@dataclass
 class KVCacheEvictionEvent:
     """Single KV cache block eviction sample."""
 
@@ -184,6 +198,7 @@ class SchedulerStats:
 
     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)
     connector_prefix_cache_stats: PrefixCacheStats | None = None
+    structured_output_cache_stats: StructuredOutputCacheStats | None = None
 
     kv_cache_eviction_events: list[KVCacheEvictionEvent] = field(default_factory=list)
 

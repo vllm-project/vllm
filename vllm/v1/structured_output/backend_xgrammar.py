@@ -10,11 +10,13 @@ import torch
 import vllm.envs
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
+from vllm.utils.cache import CacheInfo, LRUCache
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
     StructuredOutputGrammar,
+    StructuredOutputKey,
     StructuredOutputOptions,
 )
 from vllm.v1.structured_output.utils import (
@@ -29,6 +31,8 @@ else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
 logger = init_logger(__name__)
+
+_XGRAMMAR_COMPILED_GRAMMAR_CACHE_SIZE = 128
 
 
 @dataclass
@@ -67,6 +71,9 @@ class XgrammarBackend(StructuredOutputBackend):
             cache_enabled=True,
             cache_limit_bytes=vllm.envs.VLLM_XGRAMMAR_CACHE_MB * 1024 * 1024,
         )
+        self._compiled_grammars: LRUCache[StructuredOutputKey, Any] = LRUCache(
+            _XGRAMMAR_COMPILED_GRAMMAR_CACHE_SIZE
+        )
 
         self.num_speculative_tokens = 0
         if self.vllm_config.speculative_config is not None:
@@ -74,22 +81,23 @@ class XgrammarBackend(StructuredOutputBackend):
                 self.vllm_config.speculative_config.num_speculative_tokens
             )
 
-    def compile_grammar(
+    def _compile_context(
         self, request_type: StructuredOutputOptions, grammar_spec: str
-    ) -> StructuredOutputGrammar:
+    ) -> Any:
         if request_type == StructuredOutputOptions.JSON:
-            ctx = self.compiler.compile_json_schema(
+            return self.compiler.compile_json_schema(
                 grammar_spec, any_whitespace=not self.disable_any_whitespace
             )
-        elif request_type == StructuredOutputOptions.JSON_OBJECT:
-            ctx = self.compiler.compile_json_schema(
-                '{"type": "object"}', any_whitespace=not self.disable_any_whitespace
+        if request_type == StructuredOutputOptions.JSON_OBJECT:
+            return self.compiler.compile_json_schema(
+                '{"type": "object"}',
+                any_whitespace=not self.disable_any_whitespace,
             )
-        elif request_type == StructuredOutputOptions.GRAMMAR:
-            ctx = self.compiler.compile_grammar(grammar_spec)
-        elif request_type == StructuredOutputOptions.REGEX:
-            ctx = self.compiler.compile_regex(grammar_spec)
-        elif request_type == StructuredOutputOptions.STRUCTURAL_TAG:
+        if request_type == StructuredOutputOptions.GRAMMAR:
+            return self.compiler.compile_grammar(grammar_spec)
+        if request_type == StructuredOutputOptions.REGEX:
+            return self.compiler.compile_regex(grammar_spec)
+        if request_type == StructuredOutputOptions.STRUCTURAL_TAG:
             s_tag = json.loads(grammar_spec)
             if "structures" in s_tag:
                 # Falling back to deprecated method of compiling structural tag
@@ -101,16 +109,24 @@ class XgrammarBackend(StructuredOutputBackend):
                     )
                     for s in s_tag["structures"]
                 ]
-                ctx = self.compiler.compile_structural_tag(tags, s_tag["triggers"])
-            else:
-                ctx = self.compiler.compile_structural_tag(grammar_spec)
-        else:
-            logger.error(
-                "Validation should have already occurred. Please file an issue."
-            )
-            raise ValueError(
-                f"grammar is not of valid supported types. ({request_type!s})"
-            )
+                return self.compiler.compile_structural_tag(tags, s_tag["triggers"])
+            return self.compiler.compile_structural_tag(grammar_spec)
+
+        logger.error(
+            "Validation should have already occurred. Please file an issue."
+        )
+        raise ValueError(
+            f"grammar is not of valid supported types. ({request_type!s})"
+        )
+
+    def compile_grammar(
+        self, request_type: StructuredOutputOptions, grammar_spec: str
+    ) -> StructuredOutputGrammar:
+        key = (request_type, grammar_spec)
+        ctx = self._compiled_grammars.get(key)
+        if ctx is None:
+            ctx = self._compile_context(request_type, grammar_spec)
+            self._compiled_grammars.put(key, ctx)
 
         return XgrammarGrammar(
             matcher=xgr.GrammarMatcher(
@@ -124,7 +140,14 @@ class XgrammarBackend(StructuredOutputBackend):
     def allocate_token_bitmask(self, max_num_seqs: int):
         return xgr.allocate_token_bitmask(max_num_seqs, self.vocab_size)
 
+    def compiled_grammar_cache_stats(self, *, delta: bool = False) -> CacheInfo:
+        return self._compiled_grammars.stat(delta=delta)
+
+    def clear_compiled_grammar_cache(self) -> None:
+        self._compiled_grammars.clear()
+
     def destroy(self):
+        self.clear_compiled_grammar_cache()
         del self.compiler
 
 

@@ -26,6 +26,7 @@ from vllm.v1.metrics.stats import (
     MultiModalCacheStats,
     PromptTokenStats,
     SchedulerStats,
+    StructuredOutputCacheStats,
 )
 from vllm.v1.metrics.utils import create_metric_per_engine
 from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingProm
@@ -109,6 +110,7 @@ class LoggingStatLogger(StatLoggerBase):
         self.prefix_caching_metrics = CachingMetrics()
         self.connector_prefix_caching_metrics = CachingMetrics()
         self.mm_caching_metrics = CachingMetrics()
+        self.structured_output_caching_metrics = CachingMetrics()
 
         self.spec_decoding_logging = SpecDecodingLogging()
         kv_transfer_config = self.vllm_config.kv_transfer_config
@@ -175,6 +177,11 @@ class LoggingStatLogger(StatLoggerBase):
             if scheduler_stats.connector_prefix_cache_stats is not None:
                 self.connector_prefix_caching_metrics.observe(
                     scheduler_stats.connector_prefix_cache_stats
+                )
+
+            if scheduler_stats.structured_output_cache_stats is not None:
+                self.structured_output_caching_metrics.observe(
+                    scheduler_stats.structured_output_cache_stats
                 )
 
             if scheduler_stats.spec_decoding_stats is not None:
@@ -267,6 +274,9 @@ class LoggingStatLogger(StatLoggerBase):
         if not self.mm_caching_metrics.empty:
             log_parts.append("MM cache hit rate: %.1f%%")
             log_args.append(self.mm_caching_metrics.hit_rate * 100)
+        if not self.structured_output_caching_metrics.empty:
+            log_parts.append("Structured output cache hit rate: %.1f%%")
+            log_args.append(self.structured_output_caching_metrics.hit_rate * 100)
 
         log_fn(
             self.log_prefix + ", ".join(log_parts),
@@ -611,6 +621,30 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
         self.counter_mm_cache_hits = create_metric_per_engine(
             counter_mm_cache_hits, per_engine_labelvalues
+        )
+
+        counter_structured_output_cache_queries = self._counter_cls(
+            name="vllm:structured_output_cache_queries",
+            documentation=(
+                "Structured output compiled grammar cache queries, in terms of "
+                "number of grammar lookups."
+            ),
+            labelnames=labelnames,
+        )
+        self.counter_structured_output_cache_queries = create_metric_per_engine(
+            counter_structured_output_cache_queries, per_engine_labelvalues
+        )
+
+        counter_structured_output_cache_hits = self._counter_cls(
+            name="vllm:structured_output_cache_hits",
+            documentation=(
+                "Structured output compiled grammar cache hits, in terms of "
+                "number of reused compiled grammars."
+            ),
+            labelnames=labelnames,
+        )
+        self.counter_structured_output_cache_hits = create_metric_per_engine(
+            counter_structured_output_cache_hits, per_engine_labelvalues
         )
 
         #
@@ -1093,6 +1127,14 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 )
                 self.counter_connector_prefix_cache_hits[engine_idx].inc(
                     scheduler_stats.connector_prefix_cache_stats.hits
+                )
+
+            if scheduler_stats.structured_output_cache_stats is not None:
+                self.counter_structured_output_cache_queries[engine_idx].inc(
+                    scheduler_stats.structured_output_cache_stats.queries
+                )
+                self.counter_structured_output_cache_hits[engine_idx].inc(
+                    scheduler_stats.structured_output_cache_stats.hits
                 )
 
             if scheduler_stats.spec_decoding_stats is not None:
