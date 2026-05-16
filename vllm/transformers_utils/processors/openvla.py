@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
 import torch
 from PIL import Image
-from transformers import BatchFeature
+from transformers.processing_utils import ProcessorMixin
 
 IMAGENET_MEAN = np.array([0.484375, 0.455078125, 0.40625], dtype=np.float32)
 IMAGENET_STD = np.array([0.228515625, 0.2236328125, 0.224609375], dtype=np.float32)
@@ -65,26 +65,21 @@ def preprocess_openvla_image(image: Any, image_size: int) -> torch.Tensor:
     return torch.from_numpy(pixel_values)
 
 
-class OpenVLAProcessor:
-    def __init__(self, *, tokenizer: Any, image_size: int) -> None:
-        self.tokenizer = tokenizer
+class OpenVLAImageProcessor:
+    def __init__(self, *, image_size: int) -> None:
         self.image_size = image_size
 
     def __call__(
         self,
-        text: str,
         images: Any | None = None,
-        tok_kwargs: Mapping[str, object] | None = None,
-    ) -> BatchFeature:
-        tok_kwargs = tok_kwargs or {}
-        prompt_ids = self.tokenizer.encode(text, **tok_kwargs)
-
+        **kwargs: object,
+    ) -> dict[str, object]:
         if images is None:
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+            return {}
         if not isinstance(images, Sequence) or isinstance(images, (str, bytes)):
             images = [images]
         if len(images) == 0:
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+            return {}
 
         pixel_values = torch.stack(
             [
@@ -93,7 +88,15 @@ class OpenVLAProcessor:
             ],
             dim=0,
         )
-        return BatchFeature(
-            dict(input_ids=[prompt_ids], pixel_values=pixel_values),
-            tensor_type="pt",
-        )
+        return {"pixel_values": pixel_values}
+
+
+class OpenVLAProcessor(ProcessorMixin):
+    def __init__(
+        self,
+        *,
+        image_processor: OpenVLAImageProcessor,
+        tokenizer: Any,
+    ) -> None:
+        self.image_processor = image_processor
+        self.tokenizer = tokenizer

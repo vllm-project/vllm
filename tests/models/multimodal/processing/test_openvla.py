@@ -20,6 +20,7 @@ from vllm.transformers_utils.processors.openvla import (
     IMAGENET_STD,
     SIGLIP_MEAN,
     SIGLIP_STD,
+    OpenVLAImageProcessor,
     OpenVLAProcessor,
     preprocess_openvla_image,
     to_rgb_image,
@@ -30,6 +31,7 @@ pytestmark = pytest.mark.cpu_test
 
 class _FakeTokenizer:
     bos_token_id = 1
+    init_kwargs: dict[str, object] = {}
 
     def encode(self, prompt: str, **kwargs: object) -> list[int]:
         assert prompt == "In: test\nOut:"
@@ -37,6 +39,9 @@ class _FakeTokenizer:
             return [self.bos_token_id, 10, 11]
         assert kwargs == {"add_special_tokens": False}
         return [10, 11]
+
+    def __call__(self, text: str, **kwargs: object) -> dict[str, list[list[int]]]:
+        return {"input_ids": [self.encode(text, **kwargs)]}
 
 
 class _FakeProcessingInfo:
@@ -136,18 +141,31 @@ def test_openvla_preprocess_image_matches_expected_normalization() -> None:
 
 
 def test_openvla_processor_outputs_pixel_values() -> None:
-    processor = OpenVLAProcessor(tokenizer=_FakeTokenizer(), image_size=224)
+    processor = OpenVLAProcessor(
+        image_processor=OpenVLAImageProcessor(image_size=224),
+        tokenizer=_FakeTokenizer(),
+    )
     image = Image.new("RGB", (8, 8), color=(255, 0, 0))
 
     batch = processor(
-        "In: test\nOut:",
+        text="In: test\nOut:",
         images=image,
-        tok_kwargs={"add_special_tokens": True},
+        text_kwargs={"add_special_tokens": True},
     )
 
-    assert batch["input_ids"].tolist() == [[1, 10, 11]]
+    assert batch["input_ids"] == [[1, 10, 11]]
     assert batch["pixel_values"].shape == (1, 6, 224, 224)
     assert batch["pixel_values"].dtype == torch.float32
+
+
+def test_openvla_image_processor_outputs_pixel_values() -> None:
+    processor = OpenVLAImageProcessor(image_size=224)
+    image = Image.new("RGB", (8, 8), color=(255, 0, 0))
+
+    output = processor(images=image)
+
+    assert output["pixel_values"].shape == (1, 6, 224, 224)
+    assert output["pixel_values"].dtype == torch.float32
 
 
 def test_openvla_processing_info_token_counts() -> None:
