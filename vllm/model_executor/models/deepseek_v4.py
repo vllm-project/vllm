@@ -1529,6 +1529,7 @@ class DeepseekV4Model(nn.Module):
                         and loaded_weight.dtype == torch.float8_e8m0fnu
                     ):
                         loaded_weight = loaded_weight.view(torch.uint8)
+                    success = False
                     for mapping in expert_mapping:
                         param_name, weight_name, expert_id, shard_id = mapping
                         if weight_name not in name:
@@ -1554,6 +1555,14 @@ class DeepseekV4Model(nn.Module):
                         if success:
                             name = name_mapped
                             break
+                    if not success:
+                        # No expert_mapping entry matched, the tensor wasn't
+                        # owned by this rank (is_pp_missing_parameter), or
+                        # the weight loader returned False. Skip rather than
+                        # adding the (possibly stale) ``name_mapped`` to
+                        # ``loaded_params`` or raising UnboundLocalError on
+                        # the loop-never-matched case.
+                        continue
                     loaded_params.add(name_mapped)
                     continue
                 elif "attn_sink" in name:
