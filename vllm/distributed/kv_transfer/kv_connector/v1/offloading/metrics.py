@@ -12,13 +12,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 )
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
-from vllm.v1.kv_offload.metrics import OffloadingCounterMetadata
+from vllm.v1.kv_offload.metrics import OffloadingMetricMetadata
 from vllm.v1.kv_offload.worker.worker import TransferType
 
 logger = init_logger(__name__)
 
 TRANSFER_PREFIX = "xfer:"
 COUNTER_PREFIX = "counter:"
+GAUGE_PREFIX = "gauge:"
+HISTOGRAM_PREFIX = "histogram:"
 
 
 @dataclass
@@ -28,6 +30,8 @@ class OffloadingConnectorStats(KVConnectorStats):
 
     * ``xfer:<transfer_type>`` maps to a list of serialized operation metrics.
     * ``counter:<counter_name>`` maps to an int or float increment.
+    * ``gauge:<gauge_name>`` maps to the latest int or float value.
+    * ``histogram:<histogram_name>`` maps to observed int or float samples.
     """
 
     def __post_init__(self):
@@ -51,6 +55,16 @@ class OffloadingConnectorStats(KVConnectorStats):
                 elif key.startswith(COUNTER_PREFIX):
                     assert isinstance(value, int | float)
                     self.data[key] = self.data.get(key, 0) + value
+                elif key.startswith(GAUGE_PREFIX):
+                    assert isinstance(value, int | float)
+                    self.data[key] = value
+                elif key.startswith(HISTOGRAM_PREFIX):
+                    assert isinstance(value, list)
+                    if key not in self.data:
+                        self.data[key] = value
+                    else:
+                        assert isinstance(self.data[key], list)
+                        self.data[key].extend(value)
                 else:
                     raise AssertionError(f"Unknown offloading stats key: {key}")
         return self
@@ -78,6 +92,14 @@ class OffloadingConnectorStats(KVConnectorStats):
             elif key.startswith(COUNTER_PREFIX):
                 assert isinstance(value, int | float)
                 return_dict[key.removeprefix(COUNTER_PREFIX)] = value
+            elif key.startswith(GAUGE_PREFIX):
+                assert isinstance(value, int | float)
+                return_dict[key.removeprefix(GAUGE_PREFIX)] = value
+            elif key.startswith(HISTOGRAM_PREFIX):
+                histogram_name = key.removeprefix(HISTOGRAM_PREFIX)
+                assert isinstance(value, list)
+                return_dict[f"{histogram_name}_count"] = len(value)
+                return_dict[f"{histogram_name}_sum"] = sum(value)
             else:
                 raise AssertionError(f"Unknown offloading stats key: {key}")
         return return_dict
@@ -95,6 +117,18 @@ class OffloadingConnectorStats(KVConnectorStats):
         """Set a counter increment on the stats payload."""
         self.data[COUNTER_PREFIX + counter_name] = counter_value
 
+    def set_gauge(self, gauge_name: str, gauge_value: int | float) -> None:
+        """Set a gauge snapshot on the stats payload."""
+        self.data[GAUGE_PREFIX + gauge_name] = gauge_value
+
+    def observe_histogram(
+        self, histogram_name: str, histogram_value: int | float
+    ) -> None:
+        """Record a histogram observation on the stats payload."""
+        self.data.setdefault(HISTOGRAM_PREFIX + histogram_name, []).append(
+            histogram_value
+        )
+
 
 class OffloadPromMetrics(KVConnectorPromMetrics):
     def __init__(
@@ -109,11 +143,11 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
         self.histogram_transfer_size: dict[tuple[int, str], PromMetricT] = {}
         self.counter_kv_bytes: dict[tuple[int, str], PromMetricT] = {}
         self.counter_kv_transfer_time: dict[tuple[int, str], PromMetricT] = {}
-        self._offloading_manager_counter_metadata: dict[
-            str, OffloadingCounterMetadata
-        ] = OffloadingSpecFactory.get_counter_definitions(vllm_config)
-        self._offloading_manager_counter_defs: dict[str, PromMetricT] = {}
-        self.offloading_manager_counters: dict[tuple[int, str], PromMetricT] = {}
+        self._offloading_manager_metric_metadata: dict[
+            str, OffloadingMetricMetadata
+        ] = OffloadingSpecFactory.get_metric_definitions(vllm_config)
+        self._offloading_manager_metric_defs: dict[str, PromMetricT] = {}
+        self.offloading_manager_metrics: dict[tuple[int, str], PromMetricT] = {}
         buckets = [  # In bytes
             1e6,
             5e6,
@@ -146,23 +180,31 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
             labelnames=labelnames + ["transfer_type"],
         )
 
-    def _ensure_offloading_manager_counter(
-        self, counter_name: str, engine_idx: int
+    def _ensure_offloading_manager_metric(
+        self, metric_name: str, engine_idx: int
     ) -> PromMetricT:
-        assert counter_name in self._offloading_manager_counter_metadata
-        if counter_name not in self._offloading_manager_counter_defs:
-            metadata = self._offloading_manager_counter_metadata[counter_name]
-            self._offloading_manager_counter_defs[counter_name] = self._counter_cls(
-                name=metadata.name,
-                documentation=metadata.documentation,
-                labelnames=self._labelnames,
+        assert metric_name in self._offloading_manager_metric_metadata
+        if metric_name not in self._offloading_manager_metric_defs:
+            metadata = self._offloading_manager_metric_metadata[metric_name]
+            metric_cls = {
+                "counter": self._counter_cls,
+                "gauge": self._gauge_cls,
+                "histogram": self._histogram_cls,
+            }[metadata.metric_type]
+            kwargs: dict[str, Any] = {
+                "name": metadata.name,
+                "documentation": metadata.documentation,
+                "labelnames": self._labelnames,
+            }
+            if metadata.metric_type == "histogram" and metadata.buckets is not None:
+                kwargs["buckets"] = metadata.buckets
+            self._offloading_manager_metric_defs[metric_name] = metric_cls(**kwargs)
+        if (engine_idx, metric_name) not in self.offloading_manager_metrics:
+            metric = self._offloading_manager_metric_defs[metric_name]
+            self.offloading_manager_metrics[(engine_idx, metric_name)] = metric.labels(
+                *self.per_engine_labelvalues[engine_idx]
             )
-        if (engine_idx, counter_name) not in self.offloading_manager_counters:
-            counter = self._offloading_manager_counter_defs[counter_name]
-            self.offloading_manager_counters[(engine_idx, counter_name)] = (
-                counter.labels(*self.per_engine_labelvalues[engine_idx])
-            )
-        return self.offloading_manager_counters[(engine_idx, counter_name)]
+        return self.offloading_manager_metrics[(engine_idx, metric_name)]
 
     def _ensure_transfer_metrics(
         self, transfer_type: str, engine_idx: int
@@ -193,12 +235,38 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
         """Observe transfer statistics."""
         for key, value in transfer_stats_data.items():
             if key.startswith(COUNTER_PREFIX):
-                counter_name = key.removeprefix(COUNTER_PREFIX)
+                metric_name = key.removeprefix(COUNTER_PREFIX)
                 assert isinstance(value, int | float)
-                counter = self._ensure_offloading_manager_counter(
-                    counter_name, engine_idx
+                assert (
+                    self._offloading_manager_metric_metadata[metric_name].metric_type
+                    == "counter"
                 )
+                counter = self._ensure_offloading_manager_metric(metric_name, engine_idx)
                 counter.inc(value)
+                continue
+            if key.startswith(GAUGE_PREFIX):
+                metric_name = key.removeprefix(GAUGE_PREFIX)
+                assert isinstance(value, int | float)
+                assert (
+                    self._offloading_manager_metric_metadata[metric_name].metric_type
+                    == "gauge"
+                )
+                gauge = self._ensure_offloading_manager_metric(metric_name, engine_idx)
+                gauge.set(value)
+                continue
+            if key.startswith(HISTOGRAM_PREFIX):
+                metric_name = key.removeprefix(HISTOGRAM_PREFIX)
+                assert isinstance(value, list)
+                assert (
+                    self._offloading_manager_metric_metadata[metric_name].metric_type
+                    == "histogram"
+                )
+                histogram = self._ensure_offloading_manager_metric(
+                    metric_name, engine_idx
+                )
+                for observation in value:
+                    assert isinstance(observation, int | float)
+                    histogram.observe(observation)
                 continue
 
             if not key.startswith(TRANSFER_PREFIX):

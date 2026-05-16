@@ -20,7 +20,7 @@ from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
 from vllm.v1.kv_offload.cpu.policies.base import BlockStatus, CachePolicy
 from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
-from vllm.v1.kv_offload.metrics import OffloadingCounterMetadata
+from vllm.v1.kv_offload.metrics import OffloadingMetricMetadata
 
 _CACHE_POLICIES: dict[str, type[CachePolicy]] = {
     "lru": LRUCachePolicy,
@@ -39,14 +39,15 @@ class CPUOffloadingManager(OffloadingManager):
     """
 
     @classmethod
-    def get_counter_definitions(cls) -> dict[str, OffloadingCounterMetadata]:
+    def get_metric_definitions(cls) -> dict[str, OffloadingMetricMetadata]:
         return {
-            "stores_skipped": OffloadingCounterMetadata(
+            "stores_skipped": OffloadingMetricMetadata(
                 name="vllm:kv_offload_stores_skipped",
                 documentation=(
                     "Number of KV offload stores skipped because the reuse "
                     "threshold was not reached."
                 ),
+                metric_type="counter",
             )
         }
 

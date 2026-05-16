@@ -6,6 +6,8 @@ from prometheus_client import Counter, Gauge, Histogram
 
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     COUNTER_PREFIX,
+    GAUGE_PREFIX,
+    HISTOGRAM_PREFIX,
     TRANSFER_PREFIX,
     OffloadingConnectorStats,
     OffloadPromMetrics,
@@ -13,6 +15,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
 )
+from vllm.v1.kv_offload.metrics import OffloadingMetricMetadata
 
 
 class _FakeMetric:
@@ -21,6 +24,7 @@ class _FakeMetric:
         self.children: list[_FakeMetric] = []
         self.observed: list[int | float] = []
         self.increments: list[int | float] = []
+        self.set_values: list[int | float] = []
 
     def labels(self, *labelvalues):
         child = _FakeMetric(**self.kwargs)
@@ -33,6 +37,9 @@ class _FakeMetric:
 
     def inc(self, value):
         self.increments.append(value)
+
+    def set(self, value):
+        self.set_values.append(value)
 
 
 class _FakeVllmConfig:
@@ -105,6 +112,8 @@ def test_aggregate_same_connector():
                 {"op_size": 2, "op_time": 0.2},
             ],
             COUNTER_PREFIX + "stores_skipped": 1,
+            GAUGE_PREFIX + "pending_stores": 3,
+            HISTOGRAM_PREFIX + "lookup_latency": [0.1],
         }
     )
 
@@ -116,6 +125,8 @@ def test_aggregate_same_connector():
             ],
             TRANSFER_PREFIX + "GPU_to_CPU": [{"op_size": 16, "op_time": 2}],
             COUNTER_PREFIX + "stores_skipped": 3,
+            GAUGE_PREFIX + "pending_stores": 1,
+            HISTOGRAM_PREFIX + "lookup_latency": [0.2, 0.3],
         }
     )
 
@@ -135,6 +146,12 @@ def test_aggregate_same_connector():
         {"op_size": 16, "op_time": 2},
     ]
     assert offload_connector_stats.data[COUNTER_PREFIX + "stores_skipped"] == 4
+    assert offload_connector_stats.data[GAUGE_PREFIX + "pending_stores"] == 1
+    assert offload_connector_stats.data[HISTOGRAM_PREFIX + "lookup_latency"] == [
+        0.1,
+        0.2,
+        0.3,
+    ]
 
 
 def test_reduce():
@@ -153,6 +170,8 @@ def test_reduce():
                 {"op_size": 16, "op_time": 2},
             ],
             COUNTER_PREFIX + "stores_skipped": 11,
+            GAUGE_PREFIX + "pending_stores": 2,
+            HISTOGRAM_PREFIX + "lookup_latency": [0.1, 0.2, 0.3],
         }
     )
 
@@ -169,6 +188,9 @@ def test_reduce():
     assert reduced["GPU_to_CPU_total_time"] == 2.3
     assert reduced["GPU_to_CPU_total_bytes"] == 19
     assert reduced["stores_skipped"] == 11
+    assert reduced["pending_stores"] == 2
+    assert reduced["lookup_latency_count"] == 3
+    assert reduced["lookup_latency_sum"] == sum([0.1, 0.2, 0.3])
 
 
 def test_reset():
@@ -181,6 +203,8 @@ def test_reset():
             ],
             TRANSFER_PREFIX + "GPU_to_CPU": [{"op_size": 16, "op_time": 2}],
             COUNTER_PREFIX + "stores_skipped": 4,
+            GAUGE_PREFIX + "pending_stores": 2,
+            HISTOGRAM_PREFIX + "lookup_latency": [0.1],
         }
     )
 
@@ -207,14 +231,54 @@ def test_prom_metrics_observes_manager_counter():
 
     prom_metrics.observe({COUNTER_PREFIX + "stores_skipped": 7})
 
-    counter = prom_metrics.offloading_manager_counters[(0, "stores_skipped")]
+    counter = prom_metrics.offloading_manager_metrics[(0, "stores_skipped")]
     assert counter.increments == [7]
-    counter_def = prom_metrics._offloading_manager_counter_defs["stores_skipped"]
+    counter_def = prom_metrics._offloading_manager_metric_defs["stores_skipped"]
     assert counter_def.kwargs["name"] == "vllm:kv_offload_stores_skipped"
     assert counter.labelvalues == ("model", "0")
 
 
-def test_prom_metrics_uses_configured_manager_counters():
+def test_prom_metrics_observes_manager_gauge_and_histogram():
+    prom_metrics = OffloadPromMetrics(
+        vllm_config=_FakeVllmConfig(store_threshold=0),  # type: ignore[arg-type]
+        metric_types={
+            Gauge: _FakeMetric,
+            Counter: _FakeMetric,
+            Histogram: _FakeMetric,
+        },
+        labelnames=["model_name", "engine"],
+        per_engine_labelvalues={0: ["model", "0"]},
+    )
+    prom_metrics._offloading_manager_metric_metadata = {
+        "pending_stores": OffloadingMetricMetadata(
+            name="vllm:kv_offload_pending_stores",
+            documentation="Number of currently pending KV offload stores.",
+            metric_type="gauge",
+        ),
+        "lookup_latency": OffloadingMetricMetadata(
+            name="vllm:kv_offload_lookup_latency_seconds",
+            documentation="KV offload lookup latency.",
+            metric_type="histogram",
+            buckets=(0.1, 1.0),
+        ),
+    }
+
+    prom_metrics.observe(
+        {
+            GAUGE_PREFIX + "pending_stores": 5,
+            HISTOGRAM_PREFIX + "lookup_latency": [0.2, 0.4],
+        }
+    )
+
+    gauge = prom_metrics.offloading_manager_metrics[(0, "pending_stores")]
+    histogram = prom_metrics.offloading_manager_metrics[(0, "lookup_latency")]
+    assert gauge.set_values == [5]
+    assert histogram.observed == [0.2, 0.4]
+    histogram_def = prom_metrics._offloading_manager_metric_defs["lookup_latency"]
+    assert histogram_def.kwargs["buckets"] == (0.1, 1.0)
+
+
+def test_prom_metrics_uses_configured_manager_metrics():
     prom_metrics = OffloadPromMetrics(
         vllm_config=_FakeVllmConfig(store_threshold=0),  # type: ignore[arg-type]
         metric_types={
@@ -226,4 +290,4 @@ def test_prom_metrics_uses_configured_manager_counters():
         per_engine_labelvalues={0: ["model", "0"]},
     )
 
-    assert prom_metrics._offloading_manager_counter_metadata == {}
+    assert prom_metrics._offloading_manager_metric_metadata == {}

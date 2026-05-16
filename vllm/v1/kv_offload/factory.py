@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import OffloadingSpec
-from vllm.v1.kv_offload.metrics import OffloadingCounterMetadata
+from vllm.v1.kv_offload.metrics import OffloadingMetricMetadata
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -48,14 +48,14 @@ class OffloadingSpecFactory:
         return spec_cls
 
     @classmethod
-    def get_counter_definitions(
+    def get_metric_definitions(
         cls, config: "VllmConfig"
-    ) -> dict[str, OffloadingCounterMetadata]:
+    ) -> dict[str, OffloadingMetricMetadata]:
         kv_transfer_config = config.kv_transfer_config
         assert kv_transfer_config is not None
         extra_config = kv_transfer_config.kv_connector_extra_config
         spec_cls = cls.get_spec_cls(config)
-        return spec_cls.get_counter_definitions(extra_config)
+        return spec_cls.get_metric_definitions(extra_config)
 
     @classmethod
     def create_spec(

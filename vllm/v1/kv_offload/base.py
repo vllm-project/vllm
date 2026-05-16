@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
     from vllm.v1.kv_cache_interface import KVCacheConfig
-    from vllm.v1.kv_offload.metrics import OffloadingCounterMetadata
+    from vllm.v1.kv_offload.metrics import OffloadingMetricMetadata
     from vllm.v1.kv_offload.worker.worker import OffloadingHandler
 
 # `OffloadKey` identifies an offloaded block. It combines a block hash with
@@ -127,8 +127,8 @@ The class provides the following primitives:
 
 class OffloadingManager(ABC):
     @classmethod
-    def get_counter_definitions(cls) -> dict[str, OffloadingCounterMetadata]:
-        """Return Prometheus counter definitions emitted by this manager."""
+    def get_metric_definitions(cls) -> dict[str, OffloadingMetricMetadata]:
+        """Return Prometheus metric definitions emitted by this manager."""
         return {}
 
     @abstractmethod
@@ -453,10 +453,10 @@ class OffloadingSpec(ABC):
             self.block_size_factor = offloaded_block_size_int // gpu_block_size
 
     @classmethod
-    def get_counter_definitions(
+    def get_metric_definitions(
         cls, extra_config: dict[str, Any]
-    ) -> dict[str, OffloadingCounterMetadata]:
-        """Return Prometheus counter definitions emitted by this spec."""
+    ) -> dict[str, OffloadingMetricMetadata]:
+        """Return Prometheus metric definitions emitted by this spec."""
         return {}
 
     @abstractmethod
