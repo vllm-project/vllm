@@ -15,6 +15,9 @@ def merge_attn_states(
     output_lse: torch.Tensor | None = None,
     prefill_tokens_with_context: int | None = None,
     output_scale: torch.Tensor | None = None,
+    output_block_scale: torch.Tensor | None = None,
+    quant_group_size: int | None = None,
+    quant_scale_ue8m0: bool = False,
 ) -> None:
     """Merge partial attention outputs from prefix (KV cache) and suffix
     (new tokens) into a single output tensor using the log-sum-exp (LSE)
@@ -44,16 +47,34 @@ def merge_attn_states(
             are treated as having context.
         output_scale: Optional scalar tensor for FP8 static quantization.
             When provided, output must be FP8 dtype.
+        output_block_scale: Optional FP32 tensor of shape
+            [NUM_TOKENS, NUM_GROUPS] for per-token-per-group FP8 quantization.
+            When provided, output must be FP8 dtype, ``output_scale`` must be
+            unset, and ``quant_group_size`` must be specified. Strides are
+            honored so any of the row-major / column-major / TMA-aligned
+            layouts produced by ``per_token_group_quant_fp8`` work directly.
+        quant_group_size: Group size for per-token-per-group FP8 quantization.
+            Must divide HEAD_SIZE. Required when ``output_block_scale`` is set.
+        quant_scale_ue8m0: If True, the per-group FP8 scale is rounded to a
+            power-of-two (UE8M0). Only used when ``output_block_scale`` is set.
     """
 
     # NOTE(DefTruth): Currently, custom merge_attn_states CUDA kernel
     # does not support FP8 dtype for inputs, fallback to use Triton kernel.
-    # However, when output_scale is provided, the inputs are still BF16/FP16
-    # and the output is FP8 — both CUDA and Triton support this.
-    # FP8 output requires output_scale to be set.
+    # However, when output_scale or output_block_scale is provided, the inputs
+    # are still BF16/FP16 and the output is FP8 — both CUDA and Triton support
+    # this. FP8 output requires output_scale or output_block_scale to be set.
     if output.dtype not in (torch.float32, torch.half, torch.bfloat16):
-        assert output_scale is not None, (
-            f"output_scale is required when output is {output.dtype}"
+        assert output_scale is not None or output_block_scale is not None, (
+            f"output_scale/output_block_scale is required when output is {output.dtype}"
+        )
+
+    if output_block_scale is not None:
+        assert quant_group_size is not None, (
+            "quant_group_size is required for per-token-per-group FP8 merge"
+        )
+        assert output_scale is None, (
+            "output_scale must be None for per-token-per-group FP8 merge"
         )
 
     def supported_dtypes(prefix: torch.Tensor) -> bool:
@@ -85,6 +106,9 @@ def merge_attn_states(
             output_lse,
             prefill_tokens_with_context,
             output_scale,
+            output_block_scale,
+            quant_group_size,
+            quant_scale_ue8m0,
         )
     else:
         from vllm.v1.attention.ops.triton_merge_attn_states import (
@@ -100,4 +124,7 @@ def merge_attn_states(
             output_lse,
             prefill_tokens_with_context,
             output_scale,
+            output_block_scale,
+            quant_group_size,
+            quant_scale_ue8m0,
         )

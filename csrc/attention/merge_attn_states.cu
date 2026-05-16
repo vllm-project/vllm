@@ -3,6 +3,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <algorithm>
+#include <cstdint>
 #include <limits>
 
 #include "attention_dtypes.h"
@@ -191,6 +192,161 @@ __global__ void merge_attn_states_kernel(
   }
 }
 
+// Per-token-per-group FP8 merge kernel.
+//
+// Each thread handles `pack_size` elements (= 16 / sizeof(scalar_t), e.g. 8 for
+// bf16) and `THREADS_PER_GROUP = GROUP_SIZE / pack_size` threads cooperate to
+// quantize one group. Threads within a group share an absmax via warp shuffle,
+// the lowest-id thread in the group writes the FP8 scale into
+// output_block_scale (using caller-provided strides so any of row-major /
+// col-major / TMA-aligned layouts work), and every thread writes its own
+// quantized FP8 pack.
+template <typename scalar_t, typename fp8_t, const uint NUM_THREADS,
+          const int GROUP_SIZE, bool USE_UE8M0>
+__global__ void merge_attn_states_group_fp8_kernel(
+    fp8_t* output, float* output_lse, const scalar_t* prefix_output,
+    const float* prefix_lse, const scalar_t* suffix_output,
+    const float* suffix_lse, const uint num_tokens, const uint num_heads,
+    const uint head_size, const uint prefix_head_stride,
+    const uint output_head_stride, const uint prefix_num_tokens,
+    float* output_block_scale, const int64_t sf_token_stride,
+    const int64_t sf_group_stride) {
+  using input_pack_t = uint4;  // 128-bit load (matches existing kernel)
+  using output_pack_t = std::conditional_t<sizeof(scalar_t) == 4, uint, uint2>;
+
+  constexpr uint pack_size = 16 / sizeof(scalar_t);
+  constexpr uint threads_per_group = GROUP_SIZE / pack_size;
+  static_assert(threads_per_group > 0 && threads_per_group <= 32 &&
+                    (threads_per_group & (threads_per_group - 1)) == 0,
+                "GROUP_SIZE/pack_size must be a power-of-2 in [1, 32]");
+  // Full warp mask: butterfly shuffles with offset < threads_per_group stay
+  // within each threads_per_group-aligned chunk of lanes.
+  constexpr uint shfl_mask = 0xffffffffu;
+  const uint threads_per_head = head_size / pack_size;
+  const uint groups_per_head = head_size / GROUP_SIZE;
+
+  const uint global_idx = blockIdx.x * NUM_THREADS + threadIdx.x;
+  const uint token_head_threads = num_tokens * num_heads * threads_per_head;
+  if (global_idx >= token_head_threads) return;
+
+  const uint token_head_idx = global_idx / threads_per_head;
+  const uint pack_idx = global_idx % threads_per_head;
+  const uint token_idx = token_head_idx / num_heads;
+  const uint head_idx = token_head_idx % num_heads;
+
+  const uint pack_offset = pack_idx * pack_size;
+  const uint group_idx_in_head = pack_offset / GROUP_SIZE;
+  const uint global_group_idx = head_idx * groups_per_head + group_idx_in_head;
+  const uint thread_in_group = threadIdx.x % threads_per_group;
+
+  const uint src_head_offset = token_idx * num_heads * prefix_head_stride +
+                               head_idx * prefix_head_stride;
+  const uint dst_head_offset = token_idx * num_heads * output_head_stride +
+                               head_idx * output_head_stride;
+  const scalar_t* prefix_head_ptr = prefix_output + src_head_offset;
+  const scalar_t* suffix_head_ptr = suffix_output + src_head_offset;
+  fp8_t* output_head_ptr = output + dst_head_offset;
+
+  // Stage 1: compute fp32 merged values for this thread's pack.
+  float merged_f[pack_size];
+
+  if (token_idx >= prefix_num_tokens) {
+    input_pack_t s_pack = reinterpret_cast<const input_pack_t*>(
+        suffix_head_ptr)[pack_offset / pack_size];
+#pragma unroll
+    for (uint i = 0; i < pack_size; ++i) {
+      merged_f[i] =
+          vllm::to_float(reinterpret_cast<const scalar_t*>(&s_pack)[i]);
+    }
+    if (output_lse != nullptr && pack_idx == 0) {
+      output_lse[head_idx * num_tokens + token_idx] =
+          suffix_lse[head_idx * num_tokens + token_idx];
+    }
+  } else {
+    float p_lse = prefix_lse[head_idx * num_tokens + token_idx];
+    float s_lse = suffix_lse[head_idx * num_tokens + token_idx];
+    p_lse = std::isinf(p_lse) ? -std::numeric_limits<float>::infinity() : p_lse;
+    s_lse = std::isinf(s_lse) ? -std::numeric_limits<float>::infinity() : s_lse;
+    const float max_lse = fmaxf(p_lse, s_lse);
+
+    if (std::isinf(max_lse)) {
+      input_pack_t p_pack = reinterpret_cast<const input_pack_t*>(
+          prefix_head_ptr)[pack_offset / pack_size];
+#pragma unroll
+      for (uint i = 0; i < pack_size; ++i) {
+        merged_f[i] =
+            vllm::to_float(reinterpret_cast<const scalar_t*>(&p_pack)[i]);
+      }
+      if (output_lse != nullptr && pack_idx == 0) {
+        output_lse[head_idx * num_tokens + token_idx] = max_lse;
+      }
+    } else {
+      const float p_lse_n = p_lse - max_lse;
+      const float s_lse_n = s_lse - max_lse;
+      const float p_se = expf(p_lse_n);
+      const float s_se = expf(s_lse_n);
+      const float out_se = p_se + s_se;
+      const float p_scale = p_se / out_se;
+      const float s_scale = s_se / out_se;
+
+      input_pack_t p_pack = reinterpret_cast<const input_pack_t*>(
+          prefix_head_ptr)[pack_offset / pack_size];
+      input_pack_t s_pack = reinterpret_cast<const input_pack_t*>(
+          suffix_head_ptr)[pack_offset / pack_size];
+#pragma unroll
+      for (uint i = 0; i < pack_size; ++i) {
+        const float pf =
+            vllm::to_float(reinterpret_cast<const scalar_t*>(&p_pack)[i]);
+        const float sf =
+            vllm::to_float(reinterpret_cast<const scalar_t*>(&s_pack)[i]);
+        merged_f[i] = pf * p_scale + sf * s_scale;
+      }
+      if (output_lse != nullptr && pack_idx == 0) {
+        output_lse[head_idx * num_tokens + token_idx] = logf(out_se) + max_lse;
+      }
+    }
+  }
+
+  // Stage 2: per-thread absmax + intra-group reduction.
+  float local_max = 0.0f;
+#pragma unroll
+  for (uint i = 0; i < pack_size; ++i) {
+    local_max = fmaxf(local_max, fabsf(merged_f[i]));
+  }
+#pragma unroll
+  for (uint offset = threads_per_group / 2; offset > 0; offset /= 2) {
+    local_max = fmaxf(local_max, __shfl_xor_sync(shfl_mask, local_max, offset));
+  }
+
+  // Stage 3: derive scale (optionally UE8M0) and write SF.
+  constexpr float eps = 1e-10f;
+  const float fp8_max = quant_type_max_v<fp8_t>;
+  float scale_raw = fmaxf(local_max, eps) / fp8_max;
+  float scale;
+  if constexpr (USE_UE8M0) {
+    scale = exp2f(ceilf(log2f(scale_raw)));
+  } else {
+    scale = scale_raw;
+  }
+  if (thread_in_group == 0) {
+    output_block_scale[static_cast<int64_t>(token_idx) * sf_token_stride +
+                       static_cast<int64_t>(global_group_idx) *
+                           sf_group_stride] = scale;
+  }
+
+  // Stage 4: quantize + store.
+  const float inv_scale = 1.0f / scale;
+  output_pack_t out_pack;
+  fp8_t* out_ptr = reinterpret_cast<fp8_t*>(&out_pack);
+#pragma unroll
+  for (uint i = 0; i < pack_size; ++i) {
+    out_ptr[i] =
+        vllm::scaled_fp8_conversion<true, fp8_t>(merged_f[i], inv_scale);
+  }
+  reinterpret_cast<output_pack_t*>(output_head_ptr)[pack_offset / pack_size] =
+      out_pack;
+}
+
 }  // namespace vllm
 
 // The following macro is used to dispatch the conversion function based on
@@ -224,6 +380,22 @@ __global__ void merge_attn_states_kernel(
             prefix_num_tokens, output_scale_ptr);                           \
   }
 
+#define LAUNCH_MERGE_ATTN_STATES_GROUP_FP8(scalar_t, fp8_t, NUM_THREADS,   \
+                                           GROUP_SIZE, USE_UE8M0)          \
+  {                                                                        \
+    vllm::merge_attn_states_group_fp8_kernel<scalar_t, fp8_t, NUM_THREADS, \
+                                             GROUP_SIZE, USE_UE8M0>        \
+        <<<grid, block, 0, stream>>>(                                      \
+            reinterpret_cast<fp8_t*>(output.data_ptr()), output_lse_ptr,   \
+            reinterpret_cast<scalar_t*>(prefix_output.data_ptr()),         \
+            reinterpret_cast<float*>(prefix_lse.data_ptr()),               \
+            reinterpret_cast<scalar_t*>(suffix_output.data_ptr()),         \
+            reinterpret_cast<float*>(suffix_lse.data_ptr()), num_tokens,   \
+            num_heads, head_size, prefix_head_stride, output_head_stride,  \
+            prefix_num_tokens, output_block_scale_ptr, sf_token_stride,    \
+            sf_group_stride);                                              \
+  }
+
 /*@brief Merges the attention states from prefix and suffix
  * into the output tensor. NUM_TOKENS: n, NUM_HEADS: h, HEAD_SIZE: d
  *
@@ -249,7 +421,10 @@ void merge_attn_states_launcher(
     const torch::Tensor& prefix_output, const torch::Tensor& prefix_lse,
     const torch::Tensor& suffix_output, const torch::Tensor& suffix_lse,
     const std::optional<int64_t> prefill_tokens_with_context,
-    const std::optional<torch::Tensor>& output_scale) {
+    const std::optional<torch::Tensor>& output_scale,
+    const std::optional<torch::Tensor>& output_block_scale,
+    const std::optional<int64_t> quant_group_size,
+    const bool quant_scale_ue8m0) {
   constexpr uint NUM_THREADS = 128;
   const uint num_tokens = output.size(0);
   const uint num_heads = output.size(1);
@@ -287,7 +462,59 @@ void merge_attn_states_launcher(
   const c10::cuda::OptionalCUDAGuard device_guard(prefix_output.device());
   auto stream = at::cuda::getCurrentCUDAStream();
 
-  if (output_scale.has_value()) {
+  if (output_block_scale.has_value()) {
+    TORCH_CHECK(!output_scale.has_value(),
+                "output_scale must be None when output_block_scale is set");
+    TORCH_CHECK(quant_group_size.has_value(),
+                "quant_group_size is required for per-group FP8 output");
+    const int group_size = static_cast<int>(quant_group_size.value());
+    TORCH_CHECK(head_size % group_size == 0, "head_size (", head_size,
+                ") must be a multiple of quant_group_size (", group_size, ")");
+    TORCH_CHECK(group_size % pack_size == 0, "quant_group_size (", group_size,
+                ") must be a multiple of pack_size (", pack_size, ")");
+    // Intra-group warp shuffle uses a full-warp mask, so every lane in a
+    // warp must take the same early-return decision. We need the total
+    // launched thread count to be a multiple of warpSize. (num_tokens can
+    // compensate for an odd per-token count.)
+    TORCH_CHECK(
+        (total_threads % 32) == 0,
+        "total_threads (num_tokens * num_heads * head_size / pack_size) must "
+        "be a multiple of warpSize (32) for group FP8 merge; got ",
+        total_threads);
+    const torch::Tensor& sf = output_block_scale.value();
+    TORCH_CHECK(sf.scalar_type() == at::ScalarType::Float,
+                "output_block_scale must be FP32, got: ", sf.scalar_type());
+    TORCH_CHECK(sf.dim() == 2,
+                "output_block_scale must be 2D [num_tokens, num_groups]");
+    const int64_t sf_token_stride = sf.stride(0);
+    const int64_t sf_group_stride = sf.stride(1);
+    float* output_block_scale_ptr = sf.data_ptr<float>();
+
+#define LAUNCH_MERGE_GROUP_FP8(GROUP_SIZE)                                 \
+  if (quant_scale_ue8m0) {                                                 \
+    VLLM_DISPATCH_FP8_TYPES(                                               \
+        output.scalar_type(), "merge_attn_states_group_fp8", [&] {         \
+          LAUNCH_MERGE_ATTN_STATES_GROUP_FP8(scalar_t, fp8_t, NUM_THREADS, \
+                                             GROUP_SIZE, true);            \
+        });                                                                \
+  } else {                                                                 \
+    VLLM_DISPATCH_FP8_TYPES(                                               \
+        output.scalar_type(), "merge_attn_states_group_fp8", [&] {         \
+          LAUNCH_MERGE_ATTN_STATES_GROUP_FP8(scalar_t, fp8_t, NUM_THREADS, \
+                                             GROUP_SIZE, false);           \
+        });                                                                \
+  }
+
+    if (group_size == 128) {
+      LAUNCH_MERGE_GROUP_FP8(128);
+    } else if (group_size == 64) {
+      LAUNCH_MERGE_GROUP_FP8(64);
+    } else {
+      TORCH_CHECK(false, "Unsupported quant_group_size for group FP8 merge: ",
+                  group_size, ". Supported: 64, 128");
+    }
+#undef LAUNCH_MERGE_GROUP_FP8
+  } else if (output_scale.has_value()) {
     // FP8 output path - dispatch on output FP8 type
     VLLM_DISPATCH_FP8_TYPES(output.scalar_type(), "merge_attn_states_fp8", [&] {
       LAUNCH_MERGE_ATTN_STATES(scalar_t, fp8_t, NUM_THREADS, true);
@@ -302,7 +529,8 @@ void merge_attn_states_launcher(
   {                                                                   \
     merge_attn_states_launcher<scalar_t>(                             \
         output, output_lse, prefix_output, prefix_lse, suffix_output, \
-        suffix_lse, prefill_tokens_with_context, output_scale);       \
+        suffix_lse, prefill_tokens_with_context, output_scale,        \
+        output_block_scale, quant_group_size, quant_scale_ue8m0);     \
   }
 
 void merge_attn_states(torch::Tensor& output,
@@ -312,17 +540,21 @@ void merge_attn_states(torch::Tensor& output,
                        const torch::Tensor& suffix_output,
                        const torch::Tensor& suffix_lse,
                        std::optional<int64_t> prefill_tokens_with_context,
-                       const std::optional<torch::Tensor>& output_scale) {
-  if (output_scale.has_value()) {
+                       const std::optional<torch::Tensor>& output_scale,
+                       const std::optional<torch::Tensor>& output_block_scale,
+                       const std::optional<int64_t> quant_group_size,
+                       const bool quant_scale_ue8m0) {
+  if (output_scale.has_value() || output_block_scale.has_value()) {
     TORCH_CHECK(output.scalar_type() == at::ScalarType::Float8_e4m3fn ||
                     output.scalar_type() == at::ScalarType::Float8_e4m3fnuz,
-                "output must be FP8 when output_scale is provided, got: ",
+                "output must be FP8 when output_scale or output_block_scale "
+                "is provided, got: ",
                 output.scalar_type());
   } else {
     TORCH_CHECK(output.scalar_type() == prefix_output.scalar_type(),
                 "output dtype (", output.scalar_type(),
                 ") must match prefix_output dtype (",
-                prefix_output.scalar_type(), ") when output_scale is not set");
+                prefix_output.scalar_type(), ") when no quant scale is set");
   }
   // Always dispatch on prefix_output (input) dtype
   DISPATCH_BY_SCALAR_DTYPE(prefix_output.dtype(),

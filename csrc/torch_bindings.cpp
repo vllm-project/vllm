@@ -74,7 +74,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    Tensor suffix_output,"
       "    Tensor suffix_lse,"
       "    int!? prefill_tokens_with_context,"
-      "    Tensor? output_scale=None) -> ()");
+      "    Tensor? output_scale=None,"
+      "    Tensor!? output_block_scale=None,"
+      "    int? quant_group_size=None,"
+      "    bool quant_scale_ue8m0=False) -> ()");
   ops.impl("merge_attn_states", torch::kCUDA, &merge_attn_states);
 #ifndef USE_ROCM
   ops.def(

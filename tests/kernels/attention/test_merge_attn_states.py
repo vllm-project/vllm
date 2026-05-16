@@ -10,6 +10,9 @@ from vllm._custom_ops import (
 from vllm._custom_ops import (
     scaled_fp8_quant,
 )
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    per_token_group_quant_fp8,
+)
 from vllm.platforms import current_platform
 from vllm.v1.attention.ops.triton_merge_attn_states import (
     merge_attn_states as merge_attn_states_triton,
@@ -390,3 +393,156 @@ def test_merge_attn_states(
         len(NUM_BATCH_TOKENS) * len(HEAD_SIZES) * len(NUM_QUERY_HEADS) * len(DTYPES)
     ):
         generate_markdown_table()
+
+
+# Per-token-per-group FP8 merge tests. Reference: bf16 merge →
+# per_token_group_quant_fp8. Compares CUDA + Triton fused merge kernels in
+# dequantized space.
+GROUP_FP8_TOKENS = [16, 128, 257, 512]
+GROUP_FP8_HEADS = [16, 64, 128]
+GROUP_FP8_HEAD_SIZES = [128]
+GROUP_FP8_GROUP_SIZES = [64, 128]
+GROUP_FP8_INPUT_DTYPES = [torch.bfloat16, torch.float16]
+
+
+def _scale_layout_kwargs(layout: str) -> dict:
+    if layout == "row_major":
+        return {"column_major_scales": False, "tma_aligned_scales": False}
+    if layout == "col_major":
+        return {"column_major_scales": True, "tma_aligned_scales": False}
+    if layout == "col_major_tma":
+        return {"column_major_scales": True, "tma_aligned_scales": True}
+    raise ValueError(layout)
+
+
+def _bf16_merge_reference(
+    prefix_output, prefix_lse, suffix_output, suffix_lse, prefill_with_context
+):
+    output = torch.empty_like(prefix_output)
+    lse = torch.empty(
+        (prefix_output.shape[1], prefix_output.shape[0]),
+        device=prefix_output.device,
+        dtype=torch.float32,
+    )
+    output, lse = merge_attn_states_torch(
+        output,
+        prefix_output.clone(),
+        prefix_lse.clone(),
+        suffix_output.clone(),
+        suffix_lse.clone(),
+        lse,
+        prefill_with_context,
+        None,
+    )
+    return output, lse
+
+
+def _broadcast_scales(
+    sf: torch.Tensor, num_heads: int, head_size: int, group_size: int
+) -> torch.Tensor:
+    num_tokens = sf.shape[0]
+    num_groups = num_heads * head_size // group_size
+    sf_rm = sf.contiguous().float().reshape(num_tokens, num_groups)
+    sf_full = sf_rm.repeat_interleave(group_size, dim=-1)
+    return sf_full.view(num_tokens, num_heads, head_size)
+
+
+@pytest.mark.parametrize("kernel", ["cuda", "triton"], ids=["cuda", "triton"])
+@pytest.mark.parametrize("scale_layout", ["row_major", "col_major", "col_major_tma"])
+@pytest.mark.parametrize("use_ue8m0", [False, True])
+@pytest.mark.parametrize("group_size", GROUP_FP8_GROUP_SIZES)
+@pytest.mark.parametrize("head_size", GROUP_FP8_HEAD_SIZES)
+@pytest.mark.parametrize("num_heads", GROUP_FP8_HEADS)
+@pytest.mark.parametrize("num_tokens", GROUP_FP8_TOKENS)
+@pytest.mark.parametrize("input_dtype", GROUP_FP8_INPUT_DTYPES)
+@torch.inference_mode()
+def test_merge_attn_states_group_fp8(
+    kernel: str,
+    scale_layout: str,
+    use_ue8m0: bool,
+    group_size: int,
+    head_size: int,
+    num_heads: int,
+    num_tokens: int,
+    input_dtype: torch.dtype,
+):
+    if not current_platform.is_cuda():
+        pytest.skip("group-FP8 merge fusion is CUDA-only")
+
+    fp8_dtype = current_platform.fp8_dtype()
+    prefill_with_context = num_tokens // 2
+
+    prefix_output = torch.randn(
+        num_tokens, num_heads, head_size, dtype=input_dtype, device="cuda"
+    )
+    suffix_output = torch.randn(
+        num_tokens, num_heads, head_size, dtype=input_dtype, device="cuda"
+    )
+    prefix_lse = torch.randn(num_heads, num_tokens, dtype=torch.float32, device="cuda")
+    suffix_lse = torch.randn(num_heads, num_tokens, dtype=torch.float32, device="cuda")
+
+    bf16_ref, _ = _bf16_merge_reference(
+        prefix_output, prefix_lse, suffix_output, suffix_lse, prefill_with_context
+    )
+    flat_ref = bf16_ref.reshape(num_tokens, num_heads * head_size)
+    ref_q, ref_s = per_token_group_quant_fp8(
+        flat_ref,
+        group_size,
+        dtype=fp8_dtype,
+        use_ue8m0=use_ue8m0,
+        **_scale_layout_kwargs(scale_layout),
+    )
+    ref_q = ref_q.view(num_tokens, num_heads, head_size)
+
+    test_q = torch.empty(
+        (num_tokens, num_heads, head_size), dtype=fp8_dtype, device="cuda"
+    )
+    test_s = torch.empty_strided(
+        ref_s.shape, ref_s.stride(), dtype=ref_s.dtype, device=ref_s.device
+    )
+    test_s.zero_()
+
+    output_lse = torch.empty(
+        (num_heads, num_tokens), dtype=torch.float32, device="cuda"
+    )
+
+    if kernel == "cuda":
+        merge_attn_states_cuda(
+            test_q,
+            prefix_output,
+            prefix_lse,
+            suffix_output,
+            suffix_lse,
+            output_lse,
+            prefill_with_context,
+            None,  # output_scale
+            test_s,
+            group_size,
+            use_ue8m0,
+        )
+    else:
+        merge_attn_states_triton(
+            test_q,
+            prefix_output,
+            prefix_lse,
+            suffix_output,
+            suffix_lse,
+            output_lse,
+            prefill_with_context,
+            None,
+            test_s,
+            group_size,
+            use_ue8m0,
+        )
+
+    test_deq = test_q.float() * _broadcast_scales(
+        test_s, num_heads, head_size, group_size
+    )
+    ref_deq = ref_q.float() * _broadcast_scales(ref_s, num_heads, head_size, group_size)
+
+    # Both sides FP8-quantize the same merged values; the only source of
+    # divergence is ref's extra bf16 round-trip subtly shifting the absmax
+    # (and thus the scale) on a small fraction of groups, which can flip a
+    # value into an adjacent FP8 bucket. Empirically ~99.98% of FP8 bytes
+    # are bit-identical; tolerances cover the boundary cases.
+    torch.testing.assert_close(test_deq, ref_deq, atol=2e-1, rtol=2e-1)
