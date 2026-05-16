@@ -83,6 +83,19 @@ if GDN_AITER_TRITON_AVAILABLE:
 logger = init_logger(__name__)
 
 
+def _should_use_aiter_gdn_decode_fast_path(
+    gqa_interleaved_layout: bool,
+    attn_metadata: GDNAttentionMetadata,
+) -> bool:
+    """Return whether the AITER fused GDN decode kernels match this layout."""
+    return (
+        gqa_interleaved_layout
+        and attn_metadata.spec_sequence_masks is None
+        and attn_metadata.num_prefills == 0
+        and attn_metadata.num_decodes > 0
+    )
+
+
 def fi_chunk_gated_delta_rule(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -994,9 +1007,9 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         """ROCm AITER fast path: conv1d + recurrent attention from packed
         qkvz/ba layout.
 
-        For decode-only (no spec, no prefill), dispatches directly to
-        ``_forward_core_decode_fast``.  Otherwise unpacks the packed
-        layout and falls through to ``_forward_core``.
+        For decode-only (no spec, no prefill) interleaved-GQA layouts,
+        dispatches directly to ``_forward_core_decode_fast``. Otherwise unpacks
+        the packed layout and falls through to ``_forward_core``.
 
         Args:
             qkvz: packed [q, k, v, z] projection (num_tokens, qkvz_dim)
@@ -1017,10 +1030,12 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         attn_metadata = attn_metadata_raw[self.prefix]  # type: ignore[index]
         assert isinstance(attn_metadata, GDNAttentionMetadata)
 
-        if (
-            attn_metadata.spec_sequence_masks is None
-            and attn_metadata.num_prefills == 0
-            and attn_metadata.num_decodes > 0
+        # The AITER fused reshape/conv kernel expects Qwen3-Next's interleaved
+        # GQA layout. Qwen3.5 uses a non-interleaved q/k/v/z layout and must use
+        # the generic path below to split/rearrange inputs correctly.
+        if _should_use_aiter_gdn_decode_fast_path(
+            self.gqa_interleaved_layout,
+            attn_metadata,
         ):
             return self._forward_core_decode_fast(
                 qkvz=qkvz,
