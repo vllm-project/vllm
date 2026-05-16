@@ -626,11 +626,13 @@ class Scheduler(SchedulerInterface):
                             step_skipped_waiting.prepend_request(request)
                             continue
 
-                        num_external_computed_tokens = ext_tokens
-
-                        connector_prefix_cache_queries = (
+                        remaining_tokens = (
                             request.num_tokens - num_new_local_computed_tokens
                         )
+                        assert 0 <= ext_tokens <= remaining_tokens
+                        num_external_computed_tokens = ext_tokens
+
+                        connector_prefix_cache_queries = remaining_tokens
                         connector_prefix_cache_hits = num_external_computed_tokens
 
                     # Total computed tokens (local + external).
