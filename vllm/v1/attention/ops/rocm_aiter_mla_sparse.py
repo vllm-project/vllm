@@ -778,7 +778,7 @@ def rocm_aiter_sparse_attn_indexer(
             # if padded, we need to unpack
             # the topk indices removing padded tokens
             topk_indices = unpack_seq_triton(
-                topk_indices.reshape(batch_size, -1, topk_indices.shape[-1]),
+                topk_indices.reshape(batch_size, next_n, topk_indices.shape[-1]),
                 decode_lens,
             )
             topk_indices_buffer[:num_decode_tokens, : topk_indices.shape[-1]] = (
