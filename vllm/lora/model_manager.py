@@ -361,6 +361,8 @@ class LoRAModelManager:
             #  - given an input 'x' return ''
             return module_name.rpartition(".")[0]
 
+        wrapped_by_id: dict[int, BaseLayerWithLoRA] = {}
+
         for module_name, module in self.model.named_modules(remove_duplicate=False):
             if isinstance(module, PPMissingLayer):
                 continue
@@ -391,6 +393,23 @@ class LoRAModelManager:
                 )
                 continue
 
+            existing_wrapper = wrapped_by_id.get(id(module))
+            if existing_wrapper is not None and "lm_head" not in module_name:
+                # Same underlying module was already wrapped under another
+                # path (e.g. a MoE gate held both directly on the block and
+                # inside the MoE runner). The adapter targets the canonical
+                # path (`mlp.gate`); rewire the alias attribute
+                # (`runner.gate`) to the SAME wrapper so the forward path
+                # through the alias still applies LoRA, but do NOT add a
+                # second entry to self.modules — otherwise `activate_adapter`
+                # would call `reset_lora` on the alias and wipe the weights
+                # just set under the canonical name,  because the alias can't
+                # load LoRA weights due to name mismatch.
+                parent = self.model.get_submodule(_parent_module(module_name))
+                # reference
+                setattr(parent, module_name.rpartition(".")[-1], existing_wrapper)
+                continue
+
             parts = module_name.split(".")[-1]
             packed_moduled_lst = self.packed_modules_mapping.get(parts, [])
             if isinstance(module, FusedMoE):
@@ -411,6 +430,8 @@ class LoRAModelManager:
                     self.model.config,
                 ),
             )
+            if isinstance(new_module, BaseLayerWithLoRA):
+                wrapped_by_id[id(module)] = new_module
 
             # (yard1): TODO make this more robust
             if "lm_head" in module_name:
