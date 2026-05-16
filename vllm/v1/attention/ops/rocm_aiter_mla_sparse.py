@@ -760,7 +760,7 @@ def rocm_aiter_sparse_attn_indexer(
             max_model_len=max_model_len,
         )
 
-        topk_indices = topk_indices_buffer[:num_decode_tokens, :topk_tokens]
+        topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
         num_rows = logits.shape[0]
 
         torch.ops._C.top_k_per_row_decode(
