@@ -176,7 +176,7 @@ class TurboQuantConfig:
     @staticmethod
     def get_boundary_skip_layers(
         model_config: ModelConfig,
-        n: int = 0,
+        n: int = 2,
     ) -> list[str]:
         """Layer indices to skip TQ compression (boundary protection).
 
@@ -187,9 +187,10 @@ class TurboQuantConfig:
         protection. Native boundary layers have a high aggregate KV-cache cost
         in these layouts and sharply reduce effective KV token capacity.
 
-        By default, dense models use TQ on all layers so the preset compression
-        ratios reflect the actual KV layout. Callers may pass ``n > 0`` to skip
-        the first N and last N attention layers as an explicit quality guard.
+        By default, dense models protect the first and last 2 attention layers
+        from TQ compression as a quality guard. Callers may pass ``n = 0`` to
+        use TQ on all dense layers when they explicitly prefer capacity over
+        this boundary protection.
         """
         num_layers = model_config.hf_text_config.num_hidden_layers
         attn_indices = _get_full_attention_layer_indices(model_config)
