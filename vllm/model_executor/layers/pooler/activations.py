@@ -123,7 +123,7 @@ class PoolerClassify(PoolerActivation):
         if num_labels == 0:
             logger.warning(
                 "num_labels should be > 0 for classification "
-                "models, falling back to softmax. "
+                "models, falling back to sigmoid. "
                 "Please check if the configuration is correct."
             )
 
