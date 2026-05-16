@@ -8,8 +8,8 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import (
-    mooncake_store_worker,
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
+    worker as mooncake_store_worker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
     MooncakeStoreCoordinator,
@@ -69,6 +69,8 @@ def _minimal_vllm_config(cache_block_size=16):
     cfg.parallel_config.pipeline_parallel_size = 1
     cfg.parallel_config.world_size = 1
     cfg.parallel_config.rank = 0
+    cfg.parallel_config.data_parallel_rank_local = 0
+    cfg.parallel_config.data_parallel_size_local = 1
     cfg.kv_transfer_config.kv_role = "kv_both"
     cfg.kv_transfer_config.kv_connector_extra_config = {}
     cfg.kv_events_config = None
@@ -101,25 +103,25 @@ def _build_worker_with_dict_store(vllm_config, kv_cache_config, store):
         with (
             patch(
                 "vllm.distributed.kv_transfer.kv_connector.v1.mooncake"
-                ".mooncake_store_worker.get_tensor_model_parallel_rank",
+                ".store.worker.get_tensor_model_parallel_rank",
                 return_value=0,
             ),
             patch(
                 "vllm.distributed.kv_transfer.kv_connector.v1.mooncake"
-                ".mooncake_store_worker.get_tensor_model_parallel_world_size",
+                ".store.worker.get_tensor_model_parallel_world_size",
                 return_value=1,
             ),
             patch(
                 "vllm.distributed.kv_transfer.kv_connector.v1.mooncake"
-                ".mooncake_store_worker.get_pcp_group"
+                ".store.worker.get_pcp_group"
             ) as mock_pcp,
             patch(
                 "vllm.distributed.kv_transfer.kv_connector.v1.mooncake"
-                ".mooncake_store_worker.get_dcp_group"
+                ".store.worker.get_dcp_group"
             ) as mock_dcp,
             patch(
                 "vllm.distributed.kv_transfer.kv_connector.v1.mooncake"
-                ".mooncake_store_worker.get_ip",
+                ".store.worker.get_ip",
                 return_value="127.0.0.1",
             ),
         ):
@@ -209,7 +211,6 @@ def test_e2e_swa_plus_full_save_then_lookup_hits():
         kv_role=worker.kv_role,
         ready_event=ready,
         enable_kv_event=False,
-        record_operation=None,
     )
 
     hs = [BlockHash(bytes([i + 1]) * 4) for i in range(4)]

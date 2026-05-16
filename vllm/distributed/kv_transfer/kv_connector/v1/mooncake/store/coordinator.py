@@ -3,7 +3,9 @@
 """External-store cache-hit coordinator for MooncakeStoreConnector."""
 
 from math import lcm
+from typing import cast
 
+from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashList,
@@ -20,6 +22,9 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     UniformTypeKVCacheSpecs,
 )
+
+# Dummy placeholder hash for store_mask's template computation.
+_DUMMY_BLOCK_HASH = BlockHash(b"\x00" * 32)
 
 
 class ExternalCachedBlockPool:
@@ -156,8 +161,7 @@ class MooncakeStoreCoordinator:
             return tuple([True] * n for n in num_chunks_per_group)
 
         n_segments = aligned_token_len // self.lcm_block_size
-        # Dummy list of the correct length is sufficient
-        dummy_hashes: list[BlockHash] = [BlockHash(b"\x00" * 4)] * (
+        dummy_hashes: list[BlockHash] = [_DUMMY_BLOCK_HASH] * (
             self.lcm_block_size // self.hash_block_size
         )
         template_masks, _ = self.find_longest_cache_hit(
@@ -195,7 +199,7 @@ class MooncakeStoreCoordinator:
                 block_hashes=hashes,
                 max_length=max_length,
                 kv_cache_group_ids=group_ids,
-                block_pool=cached_block_pool,
+                block_pool=cast(BlockPool, cached_block_pool),
                 kv_cache_spec=spec,
                 use_eagle=(0 in self.eagle_attn_group_indices),
                 alignment_tokens=spec.block_size,
@@ -237,7 +241,7 @@ class MooncakeStoreCoordinator:
                     block_hashes=hashes,
                     max_length=_max_length,
                     kv_cache_group_ids=group_ids,
-                    block_pool=cached_block_pool,
+                    block_pool=cast(BlockPool, cached_block_pool),
                     kv_cache_spec=spec,
                     use_eagle=use_eagle,
                     alignment_tokens=self.lcm_block_size,
@@ -263,9 +267,9 @@ class MooncakeStoreCoordinator:
         if isinstance(spec0, FullAttentionSpec):
             num_blocks = hit_length // spec0.block_size
             for gid in group_ids0:
-                blks = hit_blocks_by_group[gid]
-                if blks is not None:
-                    del blks[num_blocks:]
+                full_blks = hit_blocks_by_group[gid]
+                assert full_blks is not None
+                del full_blks[num_blocks:]
 
         return (
             tuple(blks if blks is not None else [] for blks in hit_blocks_by_group),
