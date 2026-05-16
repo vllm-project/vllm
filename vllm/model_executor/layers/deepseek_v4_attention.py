@@ -1130,8 +1130,8 @@ class DeepseekV4Indexer(nn.Module):
         assert cache_config is not None, "Deepseek V4 indexer requires cache_config"
         # NOTE(yifan): FP8 indxer cache use the same layout as V3.2:
         # head_dim bytes = 128 fp8 + 4 fp32 scale = 132.
-        # For FP4 indexer cache, we still allocate the same amount of memory as FP8,
-        # but only use the first half of the memory.
+        # For FP4 indexer cache, keep the same allocation width as CUDA and
+        # only use the MXFP4 value/scale prefix.
         k_cache_head_dim = self.head_dim + self.head_dim // self.quant_block_size * 4
         self.k_cache = DeepseekV4IndexerCache(
             head_dim=k_cache_head_dim,

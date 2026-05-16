@@ -244,6 +244,8 @@ def _lazy_init() -> None:
 
 
 def get_num_sms() -> int:
+    if current_platform.is_rocm():
+        return int(current_platform.num_compute_units())
     _lazy_init()
     dg = _import_deep_gemm()
     if dg is None:
@@ -370,6 +372,20 @@ def fp8_fp4_mqa_logits(
     Returns:
         Logits tensor of shape [M, N], dtype `torch.float32`.
     """
+    if current_platform.is_rocm() and q[1] is not None:
+        from vllm.v1.attention.ops.rocm_fp8_fp4_paged_mqa_logits import (
+            rocm_fp4_mqa_logits,
+        )
+
+        return rocm_fp4_mqa_logits(
+            q,
+            kv,
+            weights,
+            cu_seqlen_ks,
+            cu_seqlen_ke,
+            clean_logits=clean_logits,
+        )
+
     _lazy_init()
     if _fp8_fp4_mqa_logits_impl is None:
         return _missing()
@@ -384,24 +400,45 @@ def fp8_fp4_mqa_logits(
 
 
 def get_paged_mqa_logits_metadata(
-    context_lens: torch.Tensor, block_size: int, num_sms: int
+    context_lens: torch.Tensor,
+    block_size: int,
+    num_sms: int,
+    indices: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Build scheduling metadata for paged MQA logits.
 
     Args:
-        context_lens: Tensor of shape [B], dtype int32; effective context length
-            per batch element.
+        context_lens: Tensor of shape [B] or [B, next_n], dtype int32;
+            effective context length per batch element or per decoded token.
         block_size: KV-cache block size in tokens (e.g., 64).
-        num_sms: Number of SMs available. 132 for Hopper
+        num_sms: Number of SMs/CUs available.
+        indices: Optional varlen token-to-sequence indices for DeepGEMM SM100
+            style scheduling. ROCm accepts this for API compatibility.
 
     Returns:
         Backend-specific tensor consumed by `fp8_fp4_paged_mqa_logits` to
         schedule work across SMs.
     """
+    if current_platform.is_rocm():
+        from vllm.v1.attention.ops.rocm_fp8_fp4_paged_mqa_logits import (
+            rocm_get_paged_mqa_logits_metadata,
+        )
+
+        return rocm_get_paged_mqa_logits_metadata(
+            context_lens,
+            block_size,
+            num_sms,
+            indices=indices,
+        )
+
     _lazy_init()
     if _get_paged_mqa_logits_metadata_impl is None:
         return _missing()
-    return _get_paged_mqa_logits_metadata_impl(context_lens, block_size, num_sms)
+    if indices is None:
+        return _get_paged_mqa_logits_metadata_impl(context_lens, block_size, num_sms)
+    return _get_paged_mqa_logits_metadata_impl(
+        context_lens, block_size, num_sms, indices=indices
+    )
 
 
 def fp8_fp4_paged_mqa_logits(
@@ -413,6 +450,8 @@ def fp8_fp4_paged_mqa_logits(
     schedule_metadata: torch.Tensor,
     max_model_len: int,
     clean_logits: bool,
+    logits_dtype: torch.dtype = torch.float32,
+    indices: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Compute MQA logits using a paged KV-cache.
 
@@ -426,25 +465,51 @@ def fp8_fp4_paged_mqa_logits(
             q_values is packed uint8 and q_scale is the companion
             block-scale tensor.
         kv_cache: Paged KV-cache. FP8 layout is [num_blocks, block_size, 1,
-            D+4], dtype `torch.uint8`, with the last 4 bytes per (block, pos)
-            storing the float dequant scale.
+            D+4], dtype `torch.uint8`, with one float32 scale per token.
+            FP4 layout is [num_blocks, block_size, 1, D/2+4], with packed
+            MXFP4 values and one packed int32 UE8M0 scale word per token.
         weights: Tensor of shape [B * next_n, H], dtype `torch.float32`.
-        context_lens: Tensor of shape [B], dtype int32; effective context length
-            for each batch element.
+        context_lens: Tensor of shape [B] or [B, next_n], dtype int32;
+            effective context length for each batch element/token.
         block_tables: Tensor of shape [B, max_blocks], dtype int32; maps logical
             block indices to physical blocks in the paged cache.
         schedule_metadata: Returned by `get_paged_mqa_logits_metadata`;
             used to distribute work across SMs.
         max_model_len: Maximum sequence length used to size the logits output.
         clean_logits: Whether to clean the unfilled logits into `-inf`.
+        logits_dtype: Output dtype, matching DeepGEMM's float32/bfloat16 API.
+        indices: Optional varlen token-to-sequence indices.
 
     Returns:
         Logits tensor of shape [B * next_n, max_model_len], dtype
-        `torch.float32`.
+        `logits_dtype`.
     """
+    if current_platform.is_rocm():
+        from vllm.v1.attention.ops.rocm_fp8_fp4_paged_mqa_logits import (
+            rocm_fp8_fp4_paged_mqa_logits,
+        )
+
+        return rocm_fp8_fp4_paged_mqa_logits(
+            q,
+            kv_cache,
+            weights,
+            context_lens,
+            block_tables,
+            schedule_metadata,
+            max_model_len,
+            clean_logits=clean_logits,
+            logits_dtype=logits_dtype,
+            indices=indices,
+        )
+
     _lazy_init()
     if _fp8_fp4_paged_mqa_logits_impl is None:
         return _missing()
+    kwargs: dict[str, Any] = {"clean_logits": clean_logits}
+    if logits_dtype is not torch.float32:
+        kwargs["logits_dtype"] = logits_dtype
+    if indices is not None:
+        kwargs["indices"] = indices
     return _fp8_fp4_paged_mqa_logits_impl(
         q,
         kv_cache,
@@ -453,7 +518,7 @@ def fp8_fp4_paged_mqa_logits(
         block_tables,
         schedule_metadata,
         max_model_len,
-        clean_logits=clean_logits,
+        **kwargs,
     )
 
 

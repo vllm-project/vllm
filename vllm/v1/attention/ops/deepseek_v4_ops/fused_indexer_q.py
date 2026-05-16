@@ -3,6 +3,7 @@
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_cutedsl
 
@@ -25,23 +26,54 @@ def _get_cos_sin(
     return cos, sin
 
 
-@triton.jit
-def _fp32x2_to_fp4x2(x_lo, x_hi):
-    # NOTE: $1 is high nibble, $2 is low nibble
-    return tl.inline_asm_elementwise(
-        """
-        {
-            .reg .b8 tmp;
-            cvt.rn.satfinite.e2m1x2.f32 tmp, $1, $2;
-            cvt.u32.u8 $0, tmp;
-        }
-        """,
-        constraints="=r,f,f",
-        args=[x_hi, x_lo],
-        dtype=tl.uint32,
-        is_pure=True,
-        pack=1,
-    ).to(tl.uint8)
+if current_platform.is_rocm():
+
+    @triton.jit
+    def _fp32x2_to_fp4x2(x_lo, x_hi):
+        lo_abs = tl.abs(x_lo)
+        hi_abs = tl.abs(x_hi)
+
+        lo = tl.full(x_lo.shape, 0, tl.uint32)
+        lo = tl.where(lo_abs > 0.25, 1, lo)
+        lo = tl.where(lo_abs >= 0.75, 2, lo)
+        lo = tl.where(lo_abs > 1.25, 3, lo)
+        lo = tl.where(lo_abs >= 1.75, 4, lo)
+        lo = tl.where(lo_abs > 2.5, 5, lo)
+        lo = tl.where(lo_abs >= 3.5, 6, lo)
+        lo = tl.where(lo_abs > 5.0, 7, lo)
+        lo = lo | ((x_lo < 0.0).to(tl.uint32) << 3)
+
+        hi = tl.full(x_hi.shape, 0, tl.uint32)
+        hi = tl.where(hi_abs > 0.25, 1, hi)
+        hi = tl.where(hi_abs >= 0.75, 2, hi)
+        hi = tl.where(hi_abs > 1.25, 3, hi)
+        hi = tl.where(hi_abs >= 1.75, 4, hi)
+        hi = tl.where(hi_abs > 2.5, 5, hi)
+        hi = tl.where(hi_abs >= 3.5, 6, hi)
+        hi = tl.where(hi_abs > 5.0, 7, hi)
+        hi = hi | ((x_hi < 0.0).to(tl.uint32) << 3)
+
+        return (lo | (hi << 4)).to(tl.uint8)
+
+else:
+
+    @triton.jit
+    def _fp32x2_to_fp4x2(x_lo, x_hi):
+        # NOTE: $1 is high nibble, $2 is low nibble
+        return tl.inline_asm_elementwise(
+            """
+            {
+                .reg .b8 tmp;
+                cvt.rn.satfinite.e2m1x2.f32 tmp, $1, $2;
+                cvt.u32.u8 $0, tmp;
+            }
+            """,
+            constraints="=r,f,f",
+            args=[x_hi, x_lo],
+            dtype=tl.uint32,
+            is_pure=True,
+            pack=1,
+        ).to(tl.uint8)
 
 
 @triton.jit

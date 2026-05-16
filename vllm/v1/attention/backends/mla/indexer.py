@@ -256,25 +256,32 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             self.vllm_config.attention_config.use_fp4_indexer_cache
         )
 
-        assert (
-            current_platform.is_device_capability_family(100)
-            or not self.use_fp4_indexer_cache
-        ), (
+        supports_fp4_indexer_cache = current_platform.is_device_capability_family(
+            100
+        ) or (current_platform.is_rocm() and current_platform.supports_mx())
+        assert supports_fp4_indexer_cache or not self.use_fp4_indexer_cache, (
             "use_fp4_indexer_cache requires Blackwell datacenter GPUs "
-            "(sm_10x, e.g. B200/GB200); sm_120 (consumer Blackwell) and "
-            "earlier architectures are not supported."
+            "(sm_10x, e.g. B200/GB200) or ROCm GPUs with MX support "
+            "(gfx95x, e.g. MI355X); sm_120, earlier CUDA architectures, "
+            "and non-MX ROCm architectures are not supported."
         )
 
         next_n = self.num_speculative_tokens + 1
         self.reorder_batch_threshold += self.num_speculative_tokens
+        native_paged_mqa_logits = current_platform.is_device_capability_family(
+            100
+        ) or (
+            current_platform.is_rocm()
+            and current_platform.supports_mx()
+            and self.use_fp4_indexer_cache
+        )
         # NOTE(zyongye) fp4 indexer cache only natively supports next_n in
         # natively_supported_next_n_fp4; for other next_n values we fall back
-        # to the flattening path. Outside the SM100 datacenter family the FP8
+        # to the flattening path. Outside native FP4 indexer platforms the FP8
         # paged MQA logits kernel has the same [1, 2] constraint (deepgemm
         # smxx_fp8_fp4_paged_mqa_logits.hpp:233), so flatten there too.
         self.use_flattening = (
-            self.use_fp4_indexer_cache
-            or not current_platform.is_device_capability_family(100)
+            self.use_fp4_indexer_cache or not native_paged_mqa_logits
         ) and next_n not in self.natively_supported_next_n_fp4
 
         sm_count = num_compute_units(self.device.index)
