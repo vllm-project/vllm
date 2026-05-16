@@ -47,6 +47,7 @@ def _add_unfinished_request(
     *,
     token_ids: list[int],
     block_hashes: list[bytes],
+    prefill_end_tokens: int,
 ) -> None:
     request = SimpleNamespace(
         all_token_ids=token_ids,
@@ -60,16 +61,20 @@ def _add_unfinished_request(
         allocated_block_ids=([0, 1],),
         num_saved_tokens=32,
         token_ids=token_ids[:44],
-        prefill_end_tokens=44,
+        prefill_end_tokens=prefill_end_tokens,
     )
 
 
 def test_cached_request_with_spec_decode_does_not_save_scheduled_drafts():
+    # Drafts in scheduled_spec_decode_tokens are not appended to all_token_ids
+    # yet, so the tracker's token_len does not advance and num_tokens_to_save
+    # stays below chunk_boundary — the save is naturally skipped.
     scheduler = _make_bare_scheduler()
     _add_unfinished_request(
         scheduler,
         token_ids=list(range(44)),
         block_hashes=[b"h0", b"h1"],
+        prefill_end_tokens=48,
     )
 
     meta = scheduler.build_connector_meta(
@@ -89,6 +94,7 @@ def test_cached_request_without_spec_decode_keeps_current_step_save_overlap():
         scheduler,
         token_ids=list(range(48)),
         block_hashes=[b"h0", b"h1", b"h2"],
+        prefill_end_tokens=48,
     )
 
     meta = scheduler.build_connector_meta(

@@ -18,6 +18,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
     worker,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
     worker as mooncake_store_worker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
@@ -489,9 +491,9 @@ def test_recv_thread_uses_single_batch_when_no_disk_offload_budget(monkeypatch):
     assert store.batch_get_into_multi_buffers.call_count == 1
     keys, addrs, sizes = store.batch_get_into_multi_buffers.call_args.args
     assert keys == [
-        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@6130",
-        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@6131",
-        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@6132",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6130",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6131",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6132",
     ]
     assert sizes == [[256], [256], [256]]
     store.batch_get_replica_desc.assert_not_called()
@@ -511,9 +513,9 @@ def test_recv_thread_logs_tier_summary_when_enabled(monkeypatch, caplog_vllm):
         token_len=48,
     )
     expected_keys = [
-        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@6130",
-        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@6131",
-        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@6132",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6130",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6131",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6132",
     ]
     store.batch_get_replica_desc.return_value = {
         expected_keys[0]: [_ReplicaDesc("memory")],
@@ -565,10 +567,10 @@ def test_recv_thread_uses_ratio_scaled_budget_for_first_pass_split():
     first_keys = store.batch_get_into_multi_buffers.call_args_list[0].args[0]
     second_keys = store.batch_get_into_multi_buffers.call_args_list[1].args[0]
     assert first_keys == [
-        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@6130",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6130",
     ]
     assert second_keys == [
-        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@6131",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6131",
     ]
 
 
@@ -600,14 +602,14 @@ def test_recv_thread_splits_disk_offload_loads_by_budget():
     first_sizes = store.batch_get_into_multi_buffers.call_args_list[0].args[2]
     second_sizes = store.batch_get_into_multi_buffers.call_args_list[1].args[2]
     assert first_keys == [
-        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@6130",
-        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@6131",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6130",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6131",
     ]
     assert second_keys == [
-        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@6132",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6132",
     ]
-    base_addr = thread.token_database.kv_caches_base_addr[0]
-    block_len = thread.token_database.block_len[0]
+    base_addr = thread.token_databases[0].kv_caches_base_addr[0]
+    block_len = thread.token_databases[0].block_len[0]
     assert first_addrs == [[base_addr], [base_addr + block_len]]
     assert second_addrs == [[base_addr + 2 * block_len]]
     expected_size = block_len
@@ -654,9 +656,9 @@ def test_recv_thread_skips_split_when_budget_holds_all_keys():
 
     assert store.batch_get_into_multi_buffers.call_count == 1
     assert store.batch_get_into_multi_buffers.call_args_list[0].args[0] == [
-        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@6130",
-        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@6131",
-        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@6132",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6130",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6131",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6132",
     ]
 
 
@@ -1013,6 +1015,7 @@ def _make_bare_worker(
         FullAttentionSpec,
         KVCacheGroupSpec,
     )
+
     worker.disk_offload_buffer_budget_bytes = None
     worker.store_replicate_config = SimpleNamespace()
 

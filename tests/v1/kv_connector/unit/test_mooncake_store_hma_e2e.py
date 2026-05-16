@@ -40,7 +40,7 @@ class _DictStore:
     def __init__(self):
         self._data: dict[str, bytes] = {}
 
-    def setup(self, _config):
+    def setup(self, *_args, **_kwargs):
         return 0
 
     def register_buffer(self, addr, length):
@@ -49,12 +49,12 @@ class _DictStore:
     def batch_is_exist(self, keys):
         return [1 if k in self._data else 0 for k in keys]
 
-    def batch_put_from_multi_buffers(self, keys, addrs, sizes):
+    def batch_put_from_multi_buffers(self, keys, addrs, sizes, *_args, **_kwargs):
         for k in keys:
             self._data[k] = b"x"
         return [0] * len(keys)
 
-    def batch_get_into_multi_buffers(self, keys, addrs, sizes):
+    def batch_get_into_multi_buffers(self, keys, addrs, sizes, *_args, **_kwargs):
         return [0 if k in self._data else -1 for k in keys]
 
 
