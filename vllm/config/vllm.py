@@ -857,16 +857,34 @@ class VllmConfig:
         if self.lora_config is not None:
             self.lora_config.verify_with_model_config(self.model_config)
 
+        _SR_SUPPORTED_SSM_DTYPES = ("float16", "int8", "int16", "fp8_e4m3fn")
         if (
             self.mamba_config.enable_stochastic_rounding
-            and self.cache_config.mamba_ssm_cache_dtype != "float16"
+            and self.cache_config.mamba_ssm_cache_dtype not in _SR_SUPPORTED_SSM_DTYPES
         ):
             raise ValueError(
-                "Stochastic rounding for Mamba cache requires "
-                "the SSM cache to be float16. Please set it explicitly, "
-                "by specifying `--mamba-ssm-cache-dtype float16`, or disable "
-                "stochastic rounding by not specifying "
+                "Stochastic rounding for Mamba cache requires the SSM cache "
+                f"dtype to be one of {_SR_SUPPORTED_SSM_DTYPES}. "
+                "Please set it explicitly via `--mamba-ssm-cache-dtype`, or "
+                "disable stochastic rounding by not specifying "
                 "`--enable-mamba-cache-stochastic-rounding`."
+            )
+
+        # Spec decoding does not yet update quantized SSM decode scales.
+        # Without this guard, rejected-token state writes would corrupt cache.
+        _QUANTIZED_SSM_DTYPES = ("int8", "int16", "fp8_e4m3fn")
+        if (
+            self.cache_config.mamba_ssm_cache_dtype in _QUANTIZED_SSM_DTYPES
+            and self.num_speculative_tokens > 0
+        ):
+            raise ValueError(
+                "Quantized Mamba SSM cache "
+                f"(--mamba-ssm-cache-dtype={self.cache_config.mamba_ssm_cache_dtype}) "
+                "is not yet supported with speculative decoding. The spec-"
+                "decoding store path does not update the per-channel scale "
+                "tensor and would silently corrupt state across steps. "
+                "Either disable speculative decoding or use "
+                "`--mamba-ssm-cache-dtype {auto,float16,float32}`."
             )
 
         if self.quant_config is None and self.model_config is not None:

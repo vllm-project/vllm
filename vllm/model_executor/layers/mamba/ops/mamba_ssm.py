@@ -8,6 +8,7 @@ import torch
 from packaging import version
 
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.mamba.mamba_utils import QUANTIZED_SSM_STATE_DTYPES
 from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
@@ -43,6 +44,21 @@ cvt.rs.f16x2.f32 $0, $2, $1, $3;
     return y
 
 
+@triton.jit
+def convert_rs_fp8x4_e4m3(x: tl.tensor, rand: tl.tensor) -> tl.tensor:
+    # PTX fp32 -> fp8 E4M3 stochastic rounding.  The source regs are reversed
+    # to match Triton's packed lane order (same issue as convert_rs_fp16x2).
+    y = tl.inline_asm_elementwise(
+        asm="cvt.rs.satfinite.e4m3x4.f32 $0, {$4, $3, $2, $1}, $5;",
+        constraints="=r,r,r,r,r,r,r,r,r",
+        args=(x, rand),
+        dtype=tl.float8e4nv,
+        is_pure=True,
+        pack=4,
+    )
+    return y
+
+
 @triton.heuristics({"HAS_DT_BIAS": lambda args: args["dt_bias_ptr"] is not None})
 @triton.heuristics({"HAS_D": lambda args: args["D_ptr"] is not None})
 @triton.heuristics({"HAS_Z": lambda args: args["z_ptr"] is not None})
@@ -63,6 +79,7 @@ cvt.rs.f16x2.f32 $0, $2, $1, $3;
 def _selective_scan_update_kernel(
     # Pointers to matrices
     state_ptr,
+    state_scales_ptr,
     rand_seed_ptr,
     x_ptr,
     dt_ptr,
@@ -89,6 +106,9 @@ def _selective_scan_update_kernel(
     stride_state_head,
     stride_state_dim,
     stride_state_dstate,
+    stride_state_scales_batch,
+    stride_state_scales_head,
+    stride_state_scales_dim,
     stride_x_batch,
     stride_x_head,
     stride_x_dim,
@@ -131,6 +151,7 @@ def _selective_scan_update_kernel(
     BLOCK_SIZE_DSTATE: tl.constexpr,
     USE_RS_ROUNDING: tl.constexpr,
     PHILOX_ROUNDS: tl.constexpr,
+    QUANT_MAX: tl.constexpr,
 ):
     pid_m = tl.program_id(axis=0)
     pid_b = tl.program_id(axis=1)
@@ -168,17 +189,31 @@ def _selective_scan_update_kernel(
             dst_state_ptr = state_ptr + (
                 dst_state_batch_idx * stride_state_batch + pid_h * stride_state_head
             )
+            dst_state_scales_ptr = state_scales_ptr + (
+                dst_state_batch_idx * stride_state_scales_batch
+                + pid_h * stride_state_scales_head
+            )
 
         state_batch_indices_ptr += (
             pid_b * stride_state_indices_batch + init_token_idx * stride_state_indices_T
         )
         state_batch_idx = tl.load(state_batch_indices_ptr).to(tl.int64)
         state_ptr += state_batch_idx * stride_state_batch + pid_h * stride_state_head
+        state_scales_ptr += (
+            state_batch_idx * stride_state_scales_batch
+            + pid_h * stride_state_scales_head
+        )
     else:
         dst_state_ptr = (
             state_ptr + pid_b * stride_state_batch + pid_h * stride_state_head
         )
+        dst_state_scales_ptr = state_scales_ptr + (
+            pid_b * stride_state_scales_batch + pid_h * stride_state_scales_head
+        )
         state_ptr += pid_b * stride_state_batch + pid_h * stride_state_head
+        state_scales_ptr += (
+            pid_b * stride_state_scales_batch + pid_h * stride_state_scales_head
+        )
 
     x_ptr += bos * stride_x_batch + pid_h * stride_x_head
     dt_ptr += bos * stride_dt_batch + pid_h * stride_dt_head
@@ -196,15 +231,30 @@ def _selective_scan_update_kernel(
     state_ptrs = state_ptr + (
         offs_m[:, None] * stride_state_dim + offs_n[None, :] * stride_state_dstate
     )
+    # Scale pointers: shape (BLOCK_SIZE_M, 1) — one scale per dim channel.
+    state_scales_ptrs = state_scales_ptr + offs_m[:, None] * stride_state_scales_dim
     if not IS_SPEC_DECODING:
         dst_state_ptrs = dst_state_ptr + (
             offs_m[:, None] * stride_state_dim + offs_n[None, :] * stride_state_dstate
+        )
+        dst_state_scales_ptrs = (
+            dst_state_scales_ptr + offs_m[:, None] * stride_state_scales_dim
         )
 
     mask = (offs_m[:, None] < dim) & (offs_n[None, :] < dstate)
     if HAS_STATE_BATCH_INDICES:
         mask &= state_batch_idx != null_block_id
     state = tl.load(state_ptrs, mask=mask, other=0.0).to(tl.float32)
+
+    # Dequantize block-scaled state (int8 / int16 / fp8).
+    if QUANT_MAX > 0.0:
+        scales_mask = offs_m[:, None] < dim
+        if HAS_STATE_BATCH_INDICES:
+            scales_mask = scales_mask & (state_batch_idx != null_block_id)
+        decode_scale = tl.load(state_scales_ptrs, mask=scales_mask, other=1.0).to(
+            tl.float32
+        )
+        state = state * decode_scale
 
     if HAS_DT_BIAS:
         dt_bias_ptrs = dt_bias_ptr + offs_m * stride_dt_bias_dim
@@ -304,7 +354,45 @@ def _selective_scan_update_kernel(
                 rand = tl.randint(rand_seed, rand_offsets, PHILOX_ROUNDS)
             else:
                 rand = tl.randint(rand_seed, rand_offsets)
-            # Convert state to fp16 with RS rounding
+
+        if QUANT_MAX > 0.0:
+            # Block-scale quantize: compute per-dim amax over dstate, encode
+            # and store the decode scale, then round/clamp/cast.
+            amax = tl.max(tl.abs(state), axis=1, keep_dims=True)
+            encode_scale = tl.where(amax == 0.0, 1.0, QUANT_MAX / amax)
+            new_decode_scale = 1.0 / encode_scale
+            # Guard: padded CUDA-graph slots have out-of-bounds scale ptrs.
+            dst_scales_mask = offs_m[:, None] < dim
+            if HAS_STATE_BATCH_INDICES:
+                dst_scales_mask = dst_scales_mask & (state_batch_idx != null_block_id)
+            tl.store(dst_state_scales_ptrs, new_decode_scale, mask=dst_scales_mask)
+            state = state * encode_scale
+            if USE_RS_ROUNDING and (dst_state_ptrs.dtype.element_ty == tl.float8e4nv):
+                # Hardware PTX SR on the true fp8 E4M3 grid (SM_100a+).  One
+                # instruction does unbiased stochastic rounding + saturating
+                # cast, so no explicit clamp/cast is needed here.
+                state = convert_rs_fp8x4_e4m3(state, rand)
+            else:
+                if USE_RS_ROUNDING:
+                    # Unbiased integer-domain SR: floor(x + U[0, 1)).  Top 24
+                    # bits of the random u32 give a uniform fp32 in [0, 1).
+                    # Correct for int8/int16 (uniform integer grid); used as a
+                    # fallback if someone enables SR on a non-fp8 quant dtype.
+                    rand01 = (rand & 0x00FFFFFF).to(tl.float32) * (1.0 / float(1 << 24))
+                    state = tl.extra.cuda.libdevice.floor(state + rand01)
+                elif dst_state_ptrs.dtype.element_ty != tl.float8e4nv:
+                    # int8 / int16 round-to-nearest: snap explicitly to the
+                    # uniform integer grid before the int cast.
+                    state = tl.extra.cuda.libdevice.round(state)
+                # fp8_e4m3fn round-to-nearest: skip the explicit `round()` and
+                # let `.to(float8e4nv)` perform native RN on the true E4M3
+                # grid.  Rounding to integer first would destroy fp8's
+                # sub-integer precision for |x| < 16 where the E4M3 grid is
+                # finer than 1 (e.g. ulp = 0.015625 near 0.125).
+                state = tl.minimum(tl.maximum(state, -QUANT_MAX), QUANT_MAX)
+                state = state.to(dst_state_ptrs.dtype.element_ty)
+        elif USE_RS_ROUNDING:
+            # PTX-accelerated fp32 -> fp16 stochastic rounding.
             state = convert_rs_fp16x2(state, rand)
             tl.static_assert(state.dtype == tl.float16, "state must be fp16")
             tl.static_assert(
@@ -314,6 +402,13 @@ def _selective_scan_update_kernel(
         else:
             state = state.to(dst_state_ptrs.dtype.element_ty)
         tl.store(dst_state_ptrs, state, mask=mask)
+
+
+def _quant_max(dtype: torch.dtype) -> float:
+    """Return the max representable value for quantized dtypes."""
+    if dtype not in QUANTIZED_SSM_STATE_DTYPES:
+        return 0.0
+    return torch.finfo(dtype).max if dtype.is_floating_point else torch.iinfo(dtype).max
 
 
 def selective_state_update(
@@ -336,6 +431,7 @@ def selective_state_update(
     is_blackwell=False,
     enable_stochastic_rounding=False,
     cache_philox_rounds=0,
+    state_scale=None,
 ):
     """
     Argument:
@@ -465,6 +561,15 @@ def selective_state_update(
         and dt.stride(-1) == 0
         and dt_bias.stride(-1) == 0
     )
+    quant_max = _quant_max(state.dtype)
+    if quant_max > 0.0 and state_scale is None:
+        raise ValueError(
+            f"state_scale is required for quantized state dtype {state.dtype}"
+        )
+    # Provide a unit-stride dummy tensor when no scale is used so the kernel
+    # receives valid (but never accessed) stride values.
+    _dummy_scales = state_scale if state_scale is not None else state[:1, :1, :1, :1]
+
     rand_seed = (
         torch.randint(0, 2**32, (1,), device=state.device)
         if enable_stochastic_rounding
@@ -474,6 +579,7 @@ def selective_state_update(
     with torch.accelerator.device_index(x.device.index):
         _selective_scan_update_kernel[grid](
             state,
+            _dummy_scales,
             rand_seed,
             x,
             dt,
@@ -498,6 +604,9 @@ def selective_state_update(
             state.stride(1),
             state.stride(2),
             state.stride(3),
+            _dummy_scales.stride(0),
+            _dummy_scales.stride(1),
+            _dummy_scales.stride(2),
             x.stride(0),
             x.stride(1),
             x.stride(2),
@@ -533,6 +642,7 @@ def selective_state_update(
             num_warps=num_warps,
             USE_RS_ROUNDING=enable_stochastic_rounding,
             PHILOX_ROUNDS=cache_philox_rounds,
+            QUANT_MAX=quant_max,
         )
 
 
