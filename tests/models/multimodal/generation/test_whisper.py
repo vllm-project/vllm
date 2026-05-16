@@ -215,6 +215,64 @@ def test_beam_search_encoder_decoder(
             )
 
 
+@pytest.mark.core_model
+@pytest.mark.skip_global_cleanup
+def test_whisper_beam_search_reuses_encoder_cache(vllm_runner, monkeypatch) -> None:
+    """Regression test: child beams should not re-run the Whisper encoder."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    model = "openai/whisper-large-v3-turbo"
+    check_model_available(model)
+    if current_platform.is_out_of_tree():
+        pytest.skip(
+            "Whisper beam-search integration is not portable to out-of-tree "
+            "ACLGraph paths; narrow V1 encoder-cache regressions cover this platform."
+        )
+
+    prompt = {
+        "prompt": "<|startoftranscript|>",
+        "multi_modal_data": {
+            "audio": AudioAsset("mary_had_lamb").audio_and_sample_rate,
+        },
+    }
+
+    with vllm_runner(
+        model,
+        dtype="half",
+        max_model_len=448,
+        tensor_parallel_size=1,
+        max_num_seqs=4,
+        limit_mm_per_prompt={"audio": 2},
+        enforce_eager=False,
+    ) as vllm_model:
+        engine_core = vllm_model.llm.llm_engine.engine_core.engine_core
+        model_runner = engine_core.model_executor.driver_worker.worker.model_runner
+
+        call_count = 0
+        orig_execute_mm_encoder = model_runner._execute_mm_encoder
+
+        def counted_execute_mm_encoder(scheduler_output):
+            nonlocal call_count
+            call_count += 1
+            return orig_execute_mm_encoder(scheduler_output)
+
+        model_runner._execute_mm_encoder = counted_execute_mm_encoder
+        try:
+            outputs = vllm_model.generate_beam_search(
+                [prompt],
+                beam_width=2,
+                max_tokens=16,
+            )
+        finally:
+            model_runner._execute_mm_encoder = orig_execute_mm_encoder
+
+        assert len(outputs) == 1
+        assert len(outputs[0][0]) == 2
+        assert call_count == 1, (
+            "Expected beam search to reuse cached encoder outputs across child "
+            f"beams, but encoder ran {call_count} times."
+        )
+
+
 def test_parse_language_detection_output():
     """Unit test for WhisperForConditionalGeneration.parse_language_detection_output.
 

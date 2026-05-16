@@ -2952,6 +2952,33 @@ class GPUModelRunner(
 
         return encoder_outputs
 
+    def _get_encoder_decoder_outputs(self) -> list[torch.Tensor]:
+        """Collect encoder outputs for encoder-decoder requests in batch order.
+
+        Encoder-decoder requests only need explicit encoder outputs before the
+        first decoder token is computed. On cache hits, the scheduler may no
+        longer carry scheduled encoder inputs, so we recover the outputs from
+        the per-worker encoder cache here.
+        """
+        encoder_outputs: list[torch.Tensor] = []
+
+        for req_id in self.input_batch.req_ids:
+            req_state = self.requests[req_id]
+            if req_state.num_computed_tokens > 0 or not req_state.mm_features:
+                continue
+
+            assert len(req_state.mm_features) == 1, (
+                "Encoder-decoder models are expected to have exactly one "
+                "encoder input per request."
+            )
+
+            mm_hash = req_state.mm_features[0].identifier
+            encoder_output = self.encoder_cache.get(mm_hash)
+            assert encoder_output is not None, f"Encoder cache miss for {mm_hash}."
+            encoder_outputs.append(encoder_output)
+
+        return encoder_outputs
+
     def _gather_mm_embeddings(
         self,
         scheduler_output: "SchedulerOutput",
@@ -3346,14 +3373,18 @@ class GPUModelRunner(
                 num_input_tokens, intermediate_tensors, True
             )
 
-        if is_encoder_decoder and scheduler_output.scheduled_encoder_inputs:
-            # Run the encoder, just like we do with other multimodal inputs.
-            # For an encoder-decoder model, our processing here is a bit
-            # simpler, because the outputs are just passed to the decoder.
-            # We are not doing any prompt replacement. We also will only
-            # ever have a single encoder input.
-            encoder_outputs = self._execute_mm_encoder(scheduler_output)
-            model_kwargs.update({"encoder_outputs": encoder_outputs})
+        if is_encoder_decoder:
+            if scheduler_output.scheduled_encoder_inputs:
+                # Run the encoder, just like we do with other multimodal inputs.
+                # For an encoder-decoder model, our processing here is a bit
+                # simpler, because the outputs are just passed to the decoder.
+                # We are not doing any prompt replacement. We also will only
+                # ever have a single encoder input.
+                self._execute_mm_encoder(scheduler_output)
+
+            encoder_outputs = self._get_encoder_decoder_outputs()
+            if encoder_outputs:
+                model_kwargs.update({"encoder_outputs": encoder_outputs})
 
         return (
             input_ids,
