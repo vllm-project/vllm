@@ -30,7 +30,6 @@ from einops import rearrange
 from torch import nn
 from transformers.activations import ACT2FN
 
-from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CacheConfig,
@@ -1071,7 +1070,6 @@ class OlmoHybridForCausalLM(
         return loader.load_weights(weights)
 
 
-@eager_break_during_capture
 def olmo_hybrid_gdn_full_forward(
     hidden_states: torch.Tensor,
     output: torch.Tensor,

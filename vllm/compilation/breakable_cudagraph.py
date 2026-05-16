@@ -285,7 +285,7 @@ class BreakableCUDAGraphWrapper:
         self.entries: dict[BatchDescriptor, _BreakableEntry] = {}
         BreakableCUDAGraphWrapper._all_instances.add(self)
 
-        logger.info_once("[Experimental] Breakable CUDA graph enabled")
+        logger.info_once("Breakable CUDA graph enabled")
 
     # --- vllm-style attribute forwarding ---------------------------------
 

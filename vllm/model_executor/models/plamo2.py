@@ -10,7 +10,6 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
@@ -484,7 +483,6 @@ class Plamo2MambaMixer(MambaBase, PluggableLayer):
         return MambaAttentionBackendEnum.MAMBA2
 
 
-@eager_break_during_capture
 def plamo2_mamba_mixer(
     hidden_states: torch.Tensor,
     output: torch.Tensor,

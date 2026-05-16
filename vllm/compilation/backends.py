@@ -653,16 +653,6 @@ def wrap_with_cudagraph_if_needed(
     ):
         return piecewise_backend
 
-    # Breakable cudagraph takes over capture at a single outer point
-    # (installed in gpu_model_runner) and forces splitting_ops=[], so
-    # there is no per-segment FX wrap to do here.
-    from vllm.compilation.breakable_cudagraph import (
-        is_breakable_cudagraph_enabled,
-    )
-
-    if is_breakable_cudagraph_enabled():
-        return piecewise_backend
-
     # We're using Dynamo-based piecewise splitting, so we wrap
     # the whole subgraph with a static graph wrapper.
     from .cuda_graph import CUDAGraphOptions

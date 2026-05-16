@@ -1275,6 +1275,18 @@ class DeepseekV2Model(nn.Module):
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
+        # # Probe: dynamo/inductor must NOT touch this forward when
+        # # VLLM_USE_BREAKABLE_CUDAGRAPH is set. is_compiling() is True only
+        # # inside a dynamo trace; if dynamo enters, it traces this branch,
+        # # the condition evaluates to True at trace time, and the raise
+        # # makes the trace fail loudly.
+        # if torch.compiler.is_compiling():
+        #     raise RuntimeError(
+        #         "DYNAMO_TRACE_DETECTED in DeepseekV2Model.forward"
+        #     )
+        # import inspect
+
+        # inspect.currentframe().f_back  # untraceable; dynamo graph-breaks here
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
