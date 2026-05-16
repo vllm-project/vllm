@@ -671,19 +671,41 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         activation_clamp: float | None,
         fast_math: bool,
     ) -> None:
-        import vllm.third_party.deep_gemm as deep_gemm
+        # Experimental: external deep_gemm for mega_moe_pre_dispatch.
+        # TODO: collapse to vendored import once upstream supports this API.
+        if envs.VLLM_DEEPGEMM_MEGA_MOE_USE_FP4_ACTS:
+            import deep_gemm
+        else:
+            import vllm.third_party.deep_gemm as deep_gemm
 
         symm_buffer = self.get_symm_buffer()
         num_tokens = hidden_states.shape[0]
-        _stage_deepseek_v4_mega_moe_inputs(
-            hidden_states,
-            topk_weights,
-            topk_ids,
-            symm_buffer.x[:num_tokens],
-            symm_buffer.x_sf[:num_tokens],
-            symm_buffer.topk_idx[:num_tokens],
-            symm_buffer.topk_weights[:num_tokens],
-        )
+
+        use_fp4_acts = envs.VLLM_DEEPGEMM_MEGA_MOE_USE_FP4_ACTS
+        if use_fp4_acts:
+            topk_ids_i32 = topk_ids.to(torch.int32)
+            deep_gemm.mega_moe_pre_dispatch(
+                hidden_states,
+                topk_ids_i32,
+                topk_weights,
+                symm_buffer.x,
+                symm_buffer.x_sf,
+                symm_buffer.topk_idx,
+                symm_buffer.topk_weights,
+                num_tokens=num_tokens,
+                group_size=32,
+                use_fp4_acts=True,
+            )
+        else:
+            _stage_deepseek_v4_mega_moe_inputs(
+                hidden_states,
+                topk_weights,
+                topk_ids,
+                symm_buffer.x[:num_tokens],
+                symm_buffer.x_sf[:num_tokens],
+                symm_buffer.topk_idx[:num_tokens],
+                symm_buffer.topk_weights[:num_tokens],
+            )
 
         # This method must have been already called during the weight loading phase.
         # We call it again here to cover the dummy weight loading case.
