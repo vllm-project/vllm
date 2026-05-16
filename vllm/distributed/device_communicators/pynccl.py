@@ -225,8 +225,11 @@ class PyNcclCommunicator:
 
         torch.accelerator.synchronize()
         if self.rank in excluded:
+            old_comm = self.comm
             self.available = False
             self.disabled = True
+            if destroy_old:
+                self.nccl.ncclCommDestroy(old_comm)
             return False
 
         old_comm = self.comm
