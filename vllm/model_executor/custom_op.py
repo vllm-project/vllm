@@ -247,6 +247,13 @@ class CustomOp(nn.Module):
 
             @functools.wraps(fn)
             def wrapper(*args, **kwargs):
+                # If this wrapper is reached while tracing an enclosing
+                # torch.compile graph, calling mark_dynamic is forbidden.
+                # In that case, run the eager-native function directly and
+                # let the outer trace capture it.
+                if torch.compiler.is_compiling():
+                    return fn(*args, **kwargs)
+
                 bound = sig.bind(*args, **kwargs)
                 bound.apply_defaults()
                 for name, dims in dynamic_arg_dims.items():

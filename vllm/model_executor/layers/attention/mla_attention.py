@@ -518,6 +518,75 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             compile_native=True,
         )
 
+        # Trace-time gate that controls whether the decode q-prep
+        # (q-absorb BMM + cat + FP8 quant) is lifted out of ``forward_impl``
+        # into ``forward()`` so it appears as discrete FX graph nodes.
+        #
+        # We only lift on the FP8 decode path that today goes through
+        # ``_DecodeConcatQuantFP8``. All conditions below are layer-init
+        # constants, so this is safe to bake in at trace time. The lifted
+        # path stays off unless
+        # ``cc.pass_config.lift_mla_decode_q_prep=True`` (see
+        # ``_compute_lift_q_decode_quant``).
+        decode_context_parallel_size = (
+            vllm_config.parallel_config.decode_context_parallel_size
+            if vllm_config is not None
+            else 1
+        )
+        compilation_config = (
+            vllm_config.compilation_config if vllm_config is not None else None
+        )
+        pass_config = (
+            compilation_config.pass_config if compilation_config is not None else None
+        )
+        self._lift_q_decode_quant = self._compute_lift_q_decode_quant(
+            kv_cache_dtype=self.kv_cache_dtype,
+            impl=self.impl,
+            q_pad_num_heads=self.q_pad_num_heads,
+            decode_context_parallel_size=decode_context_parallel_size,
+            use_inductor_graph_partition=(
+                compilation_config.use_inductor_graph_partition
+                if compilation_config is not None
+                else False
+            ),
+            lift_decode_q_prep=(
+                bool(getattr(pass_config, "lift_mla_decode_q_prep", False))
+                if pass_config is not None
+                else False
+            ),
+        )
+
+    @staticmethod
+    def _compute_lift_q_decode_quant(
+        kv_cache_dtype: str,
+        impl: "MLAAttentionImpl",
+        q_pad_num_heads: int | None,
+        decode_context_parallel_size: int,
+        use_inductor_graph_partition: bool,
+        lift_decode_q_prep: bool,
+    ) -> bool:
+        """Pure predicate for the decode q-prep lift gate.
+
+        Extracted from ``__init__`` so the truth table is unit-testable
+        without standing up a full ``MLAAttention`` instance.
+
+        The lifted path is gated by
+        ``cc.pass_config.lift_mla_decode_q_prep`` and additionally
+        requires ``cc.use_inductor_graph_partition``: without graph
+        partitioning, piecewise/full cudagraph capture can freeze the
+        decode SymInt at capture time and replay it incorrectly.
+        """
+        return (
+            is_quantized_kv_cache(kv_cache_dtype)
+            and kv_cache_dtype != "fp8_ds_mla"
+            and getattr(impl, "supports_quant_query_input", False)
+            and not isinstance(impl, SparseMLAAttentionImpl)
+            and q_pad_num_heads is None
+            and decode_context_parallel_size <= 1
+            and use_inductor_graph_partition
+            and lift_decode_q_prep
+        )
+
     @property
     def chunked_prefill_workspace_size(self) -> int:
         if self._chunked_prefill_workspace_size is None:
@@ -535,14 +604,39 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         k_pe: torch.Tensor,
         output_shape: torch.Size | None = None,
     ) -> torch.Tensor:
-        if self.calculate_kv_scales:
-            torch.ops.vllm.maybe_calc_kv_scales(
-                q,
-                kv_c_normed,
-                k_pe,
-                _encode_layer_name(self.layer_name),
-            )
+        encoded = _encode_layer_name(self.layer_name)
 
+        if self.calculate_kv_scales:
+            torch.ops.vllm.maybe_calc_kv_scales(q, kv_c_normed, k_pe, encoded)
+
+        # ProExpertProg-style outer/inner-forward split (see PR #39346
+        # discussion): one place picks between the lifted (FX-visible
+        # decode q-prep) path and the opaque single-op path. Everything
+        # else stays identical between the two so reviewers can read
+        # the policy at one site.
+        if self._lift_q_decode_quant:
+            return self._lifted_inner_forward(
+                q, kv_c_normed, k_pe, output_shape, encoded
+            )
+        return self._opaque_forward(q, kv_c_normed, k_pe, output_shape, encoded)
+
+    def _opaque_forward(
+        self,
+        q: torch.Tensor,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        output_shape: torch.Size | None,
+        encoded: LayerNameType,
+    ) -> torch.Tensor:
+        """Default path: MLA attention is one opaque custom op.
+
+        This is the historical path; ``torch.compile`` sees a single
+        ``vllm::unified_mla_attention_with_output`` node and never
+        traces into the q-absorb BMM / cat / FP8 quant / attention
+        kernels. No FX-visible q-prep, so Phase 2 has nothing to bind
+        to; that's fine — Phase 2 only fires when the lifted path is
+        active.
+        """
         if self.use_direct_call:
             forward_context: ForwardContext = get_forward_context()
             attn_metadata_raw = forward_context.attn_metadata
@@ -579,25 +673,267 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 output=output,
             )
             return output
-        else:
-            encoded = _encode_layer_name(self.layer_name)
-            kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
+
+        kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
+            kv_c_normed,
+            k_pe,
+            encoded,
+            self.kv_cache_dtype,
+            self._k_scale,
+        )
+        output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
+        torch.ops.vllm.unified_mla_attention_with_output(
+            q,
+            kv_c_normed,
+            k_pe,
+            output,
+            encoded,
+            kv_cache_dummy_dep=kv_cache_dummy_dep,
+        )
+        return output
+
+    def _lifted_inner_forward(
+        self,
+        q: torch.Tensor,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        output_shape: torch.Size | None,
+        encoded: LayerNameType,
+    ) -> torch.Tensor:
+        """Lifted (decomposed) path: decode q-prep happens here as
+        plain torch ops so torch.compile / FX see them.
+
+        Layout mirrors PR #39346's ``inner_forward`` sketch from
+        ProExpertProg's review:
+
+        * The ``vllm::mla_split_batch`` SymInt op + ``aten.narrow`` +
+          BMM + cat + static FP8 quant are emitted as discrete FX
+          nodes here, ready for a Phase 2
+          ``VllmFusionPatternMatcherPass`` to rewrite.
+        * The actual attention kernel call stays opaque (still one
+          ``vllm::unified_mla_attention_with_output`` op), so the
+          backend remains responsible for its own correctness and
+          perf — we are only exposing the *prep* chain, not the
+          attention itself.
+
+        Strict by design: when the gate is on we never silently
+        recompute prep in ``forward_impl``. If the row count of
+        ``prepared_mqa_q`` does not match ``num_decode_tokens`` at
+        kernel-launch time, ``forward_impl`` asserts and the run
+        stops, so any capture/replay shape drift is loud.
+        """
+        prepared_mqa_q = self._maybe_prepare_decode_mqa_q(q, encoded)
+        assert prepared_mqa_q is not None, (
+            "_lift_q_decode_quant=True but _maybe_prepare_decode_mqa_q "
+            "returned None; the gate predicate is out of sync with "
+            "the prep helper."
+        )
+
+        if self.use_direct_call:
+            forward_context: ForwardContext = get_forward_context()
+            attn_metadata_raw = forward_context.attn_metadata
+            attn_metadata: MLACommonMetadata
+            if isinstance(attn_metadata_raw, dict):
+                attn_metadata = attn_metadata_raw[self.layer_name]  # type: ignore[assignment]
+            elif isinstance(attn_metadata_raw, list):
+                attn_metadata = attn_metadata_raw[0][self.layer_name]  # type: ignore[assignment]
+            else:
+                attn_metadata = attn_metadata_raw
+            self_kv_cache = self.kv_cache
+            slot_mapping = forward_context.slot_mapping
+
+            assert isinstance(slot_mapping, dict), (
+                f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
+            )
+            self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
                 kv_c_normed,
                 k_pe,
-                encoded,
+                self_kv_cache,
+                slot_mapping.get(self.layer_name),
                 self.kv_cache_dtype,
                 self._k_scale,
             )
             output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
-            torch.ops.vllm.unified_mla_attention_with_output(
+            self.forward_impl(
                 q,
                 kv_c_normed,
                 k_pe,
-                output,
-                encoded,
-                kv_cache_dummy_dep=kv_cache_dummy_dep,
+                self_kv_cache,
+                attn_metadata,
+                output=output,
+                prepared_mqa_q=prepared_mqa_q,
             )
             return output
+
+        kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
+            kv_c_normed,
+            k_pe,
+            encoded,
+            self.kv_cache_dtype,
+            self._k_scale,
+        )
+        output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
+        torch.ops.vllm.unified_mla_attention_with_output(
+            q,
+            kv_c_normed,
+            k_pe,
+            output,
+            encoded,
+            kv_cache_dummy_dep=kv_cache_dummy_dep,
+            prepared_mqa_q=prepared_mqa_q,
+        )
+        return output
+
+    def _run_decode_q_prep_kernels(
+        self,
+        mqa_q_nope: torch.Tensor,
+        mqa_q_pe: torch.Tensor,
+        fp8_attention: bool,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Q-absorb BMM + (optional) head-dim concat + per-tensor FP8 quant.
+
+        Shared between ``_maybe_prepare_decode_mqa_q`` (the lifted path
+        in ``forward()`` that exposes the chain to torch.compile as
+        discrete FX nodes) and the legacy in-place branch in
+        ``forward_impl`` (eager). Same code, same kernels, same math —
+        bit-exact between the two callers, which keeps the parity test
+        ``tests/kernels/core/test_mla_q_quant_separation.py`` honest.
+
+        Excludes the ``q_pad_num_heads is not None`` branch: that path
+        intermixes head-padding with kernel-specific allocation and is
+        kept inline in ``forward_impl``. The lift gate disables the
+        lifted path whenever padding is active, so this branch is never
+        reached from ``_maybe_prepare_decode_mqa_q``.
+
+        Args:
+            mqa_q_nope: ``(B, N, qk_nope_head_dim)`` no-PE part.
+            mqa_q_pe:   ``(B, N, qk_rope_head_dim)`` PE part.
+            fp8_attention: ``is_quantized_kv_cache(kv_cache_dtype)`` —
+                when true and the impl supports FP8 query input, the
+                helper returns the FP8 ``mqa_q`` tensor; otherwise
+                returns the ``(ql_nope, mqa_q_pe)`` tuple that the DCP
+                / non-FP8 paths consume.
+
+        We force ``y_scale=None`` on the AITER FP4/FP8 BMM kernels so
+        the BMM output stays in BF16 and the subsequent cat + per-tensor
+        quant remain visible as separate ops. Phase 2's pattern matcher
+        binds to those ops, so collapsing them into the kernel's fused
+        ``y_scale`` path would defeat the lift. The legacy in-place path
+        previously used the fused path; the resulting extra per-tensor
+        quant kernel launch is bounded (one launch per layer per decode
+        forward) and is recovered entirely once Phase 2 replaces the
+        whole chain with the AITER fused kernel.
+        """
+        # (B, N, P) -> (N, B, P) for the BMM kernels.
+        q_nope_nb = mqa_q_nope.transpose(0, 1)
+
+        if self.is_aiter_triton_fp4_bmm_enabled:
+            from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
+
+            ql_nope = batched_gemm_a16wfp4(
+                q_nope_nb,
+                self.W_K,
+                self.W_K_scale,
+                transpose_bm=True,
+                prequant=True,
+                # Force BF16 output here so cat + FP8-quant stay visible
+                # as discrete graph nodes downstream (see docstring).
+                y_scale=None,
+            )
+        elif self.is_aiter_triton_fp8_bmm_enabled:
+            ql_nope = rocm_aiter_ops.triton_fp8_bmm(
+                q_nope_nb,
+                self.W_K,
+                self.W_K_scale,
+                group_size=128,
+                transpose_bm=True,
+            )
+        else:
+            # Plain BMM path. We deliberately *do not* preallocate
+            # ``out=`` here: when ``q_nope_nb`` carries an unbacked
+            # SymInt batch dim from ``vllm::mla_split_batch`` (the
+            # lifted decode path), constructing a ``new_empty`` with
+            # that SymInt and feeding it as ``out=`` introduces a
+            # data-dependent shape-equality guard that Dynamo cannot
+            # discharge (``GuardOnDataDependentSymNode: u0``). Letting
+            # ``torch.bmm`` infer the output shape avoids the guard
+            # and is bit-equivalent.
+            ql_nope_nb = torch.bmm(q_nope_nb, self.W_UK_T)
+            ql_nope = ql_nope_nb.transpose(0, 1)
+
+        if fp8_attention and self.impl.supports_quant_query_input:
+            return self._decode_concat_quant_fp8_op(
+                ql_nope, mqa_q_pe, self._q_scale
+            )
+        return (ql_nope, mqa_q_pe)
+
+    def _maybe_prepare_decode_mqa_q(
+        self,
+        q: torch.Tensor,
+        layer_name_encoded: LayerNameType,
+    ) -> torch.Tensor | None:
+        """Run the lifted decode q-prep (slice + q-absorb + cat + FP8 quant).
+
+        Returns the FP8-quantized ``mqa_q`` (shape ``(num_decode_tokens,
+        num_heads, kv_lora_rank + qk_rope_head_dim)``) when the
+        trace-time gate is enabled, otherwise ``None`` and
+        ``forward_impl`` runs the legacy in-place path.
+
+        Design note (mirrors PR #39346 / @morrison-turnansky's
+        ``mla_split_batch`` pattern):
+
+        - ``vllm::mla_split_batch`` is a SymInt-returning custom op;
+          its impl reads ``attn_metadata.num_decode_tokens`` at runtime
+          and its fake returns ``ctx.new_dynamic_size()``. Wrapping
+          this metadata read in a custom op is what keeps it invisible
+          to ``torch.compile``, so the surrounding ops stay traceable
+          without graph-breaking on the metadata access.
+        - The slice (``q.narrow(0, 0, num_decode)``), q-absorb BMM,
+          cat, and FP8 quant are deliberately **not** wrapped in
+          custom ops — they are plain aten / kernel calls that
+          torch.compile sees as discrete FX nodes, ready for Phase 2's
+          pattern matcher to bind to.
+
+        Known caveat: under vLLM's *piecewise* CUDA-graph capture, the
+        decode SymInt resolves at capture time and is baked into the
+        captured graph's tensor sizes / kernel grids. At replay with a
+        runtime ``num_decode_tokens`` different from the capture-time
+        value, the captured chain still operates at the captured size,
+        producing incorrect output. PR #39346 sidesteps this by using
+        ``cudagraph_mode=FULL_AND_PIECEWISE`` plus
+        ``use_inductor_graph_partition=true`` (commit ``0aa9492``:
+        "stable cuda graph piece replay addresses").
+
+        The lift gate (``cc.pass_config.lift_mla_decode_q_prep``) is
+        therefore additionally **and**-ed with
+        ``cc.use_inductor_graph_partition`` in
+        ``_compute_lift_q_decode_quant``, and ``forward_impl``
+        asserts on row mismatch instead of silently recomputing —
+        any residual capture/replay drift is loud, not silent.
+        """
+        if not self._lift_q_decode_quant:
+            return None
+
+        # Discrete FX node #1: SymInt split point.
+        #
+        # We intentionally avoid torch._check/_check_is_size hints here.
+        # On our current stack, those hints lower through a path that
+        # reaches ``torch._dynamo.mark_dynamic`` during fullgraph capture,
+        # which Dynamo rejects with:
+        #   AssertionError: Attempt to trace forbidden callable mark_dynamic
+        # The bound is still enforced by ``aten.narrow`` at runtime.
+        num_decode = torch.ops.vllm.mla_split_batch(q, layer_name_encoded)
+
+        # Discrete FX node #2: slice q to decode rows.
+        q_decode = q.narrow(0, 0, num_decode)
+        mqa_q_nope, mqa_q_pe = q_decode.split(
+            [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
+        )
+        # The shared helper emits FX nodes #3 (BMM), #4 (cat), and
+        # #5 (FP8 quant). The lift gate guarantees ``fp8_attention``
+        # is true and ``supports_quant_query_input`` is true, so the
+        # helper takes the FP8-mqa_q-tensor return path.
+        return self._run_decode_q_prep_kernels(mqa_q_nope, mqa_q_pe, fp8_attention=True)
 
     def forward_impl(
         self,
@@ -613,6 +949,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         quant_scale_ue8m0: bool | None = None,
         quant_col_major: bool | None = None,
         quant_tma_aligned: bool | None = None,
+        prepared_mqa_q: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
 
@@ -667,6 +1004,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         q = q[:num_actual_toks, ...]
         k_c_normed = k_c_normed[:num_actual_toks, ...]
         k_pe = k_pe[:num_actual_toks, ...]
+        # ``prepared_mqa_q`` arrives sized to ``num_decode_tokens``
+        # (sliced by ``q.narrow(0, 0, vllm::mla_split_batch(...))``
+        # inside ``_maybe_prepare_decode_mqa_q``), which is
+        # ``<= num_actual_toks``, so no cudagraph-padding trim is
+        # needed here. The decode-row slice below also becomes a no-op.
 
         if fp8_attention and self.kv_cache_dtype != "fp8_ds_mla":
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
@@ -698,68 +1040,107 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
 
         if num_mqa_tokens > 0:
-            mqa_q = q[:num_mqa_tokens]
             mqa_output_slice = output[:num_mqa_tokens]
 
-            mqa_q_nope, mqa_q_pe = mqa_q.split(
-                [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
-            )
-
-            # Convert from (B, N, P) to (N, B, P)
-            mqa_q_nope = mqa_q_nope.transpose(0, 1)
-
-            if self.q_pad_num_heads is not None:
-                B, N, L = mqa_q_pe.shape
-                mqa_pe_padded = mqa_q_pe.new_empty((B, self.q_pad_num_heads, L))
-                mqa_pe_padded.resize_((B, N, L))
-                mqa_pe_padded.copy_(mqa_q_pe)
-                mqa_q_pe = mqa_pe_padded
-
-            if self.is_aiter_triton_fp4_bmm_enabled:
-                from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
-
-                mqa_ql_nope = batched_gemm_a16wfp4(
-                    mqa_q_nope,
-                    self.W_K,
-                    self.W_K_scale,
-                    transpose_bm=True,
-                    prequant=True,
-                    y_scale=self._q_scale if fp8_attention else None,
+            if prepared_mqa_q is not None:
+                # Lifted decode q-prep path: ``_lifted_inner_forward``
+                # already sliced to decode rows and ran the q-absorb
+                # BMM + cat + FP8 quant via
+                # ``_maybe_prepare_decode_mqa_q``. The SymInt split
+                # point in that helper makes the slice visible to
+                # torch.compile, so ``prepared_mqa_q`` must be sized to
+                # ``num_decode_tokens == num_mqa_tokens`` at kernel
+                # launch.
+                #
+                # Strict by design: a row mismatch here means the
+                # cudagraph capture/replay froze the SymInt at a
+                # different decode size, which silently corrupts
+                # outputs. Fail loudly instead of recomputing — the
+                # gate (``cc.pass_config.lift_mla_decode_q_prep``)
+                # ships default-off precisely because Phase 1 alone
+                # cannot guarantee this won't happen on every stack;
+                # the freeze is dodged either by PR #39346's
+                # "stable cuda graph piece replay" work or by Phase 2
+                # collapsing the chain into one fused op (#41839).
+                assert prepared_mqa_q.shape[0] == num_mqa_tokens, (
+                    f"prepared_mqa_q row mismatch ({prepared_mqa_q.shape[0]} "
+                    f"vs {num_mqa_tokens} decode rows). The lifted "
+                    "decode q-prep produced a tensor with the wrong "
+                    "leading dim; this is a cudagraph capture/replay "
+                    "SymInt freeze on the lifted chain. Phase 1 of the "
+                    "decode q-prep lift cannot make this safe by "
+                    "itself. For now, set "
+                    "cc.pass_config.lift_mla_decode_q_prep=False "
+                    "(default) to fall back to the in-impl prep."
                 )
-            elif self.is_aiter_triton_fp8_bmm_enabled:
-                # Multiply+Transpose (N, B, P)x(N, P, L)->(N, B, L)->(B, N, L)
-                mqa_ql_nope = rocm_aiter_ops.triton_fp8_bmm(
-                    mqa_q_nope,
-                    self.W_K,
-                    self.W_K_scale,
-                    group_size=128,
-                    transpose_bm=True,
-                )
+                mqa_q = prepared_mqa_q
             else:
-                # Pads the head_dim if necessary (for the underlying kernel)
-                N, B, P = mqa_q_nope.shape
-                _, _, L = self.W_UK_T.shape
+                mqa_q = q[:num_mqa_tokens]
+                mqa_q_nope, mqa_q_pe = mqa_q.split(
+                    [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
+                )
 
                 if self.q_pad_num_heads is not None:
-                    mqa_ql_nope = mqa_q_nope.new_empty((self.q_pad_num_heads, B, L))
-                    mqa_ql_nope.resize_((N, B, L))
+                    # Padded path: kept inline because the head padding
+                    # is intermixed with kernel-specific allocation.
+                    # ``_run_decode_q_prep_kernels`` deliberately doesn't
+                    # cover this branch (the lift gate disables the lift
+                    # whenever padding is active, so the lifted path
+                    # never reaches it).
+                    mqa_q_nope = mqa_q_nope.transpose(0, 1)
+
+                    B, N, L = mqa_q_pe.shape
+                    mqa_pe_padded = mqa_q_pe.new_empty((B, self.q_pad_num_heads, L))
+                    mqa_pe_padded.resize_((B, N, L))
+                    mqa_pe_padded.copy_(mqa_q_pe)
+                    mqa_q_pe = mqa_pe_padded
+
+                    if self.is_aiter_triton_fp4_bmm_enabled:
+                        from aiter.ops.triton.batched_gemm_a16wfp4 import (
+                            batched_gemm_a16wfp4,
+                        )
+
+                        mqa_ql_nope = batched_gemm_a16wfp4(
+                            mqa_q_nope,
+                            self.W_K,
+                            self.W_K_scale,
+                            transpose_bm=True,
+                            prequant=True,
+                            y_scale=self._q_scale if fp8_attention else None,
+                        )
+                    elif self.is_aiter_triton_fp8_bmm_enabled:
+                        mqa_ql_nope = rocm_aiter_ops.triton_fp8_bmm(
+                            mqa_q_nope,
+                            self.W_K,
+                            self.W_K_scale,
+                            group_size=128,
+                            transpose_bm=True,
+                        )
+                    else:
+                        N, B, P = mqa_q_nope.shape
+                        _, _, L = self.W_UK_T.shape
+                        mqa_ql_nope = mqa_q_nope.new_empty(
+                            (self.q_pad_num_heads, B, L)
+                        )
+                        mqa_ql_nope.resize_((N, B, L))
+                        torch.bmm(mqa_q_nope, self.W_UK_T, out=mqa_ql_nope)
+                        mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
+
+                    if fp8_attention and self.impl.supports_quant_query_input:
+                        assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
+                        assert mqa_ql_nope.shape[1] == mqa_q_pe.shape[1]
+                        mqa_q = self._decode_concat_quant_fp8_op(
+                            mqa_ql_nope, mqa_q_pe, self._q_scale
+                        )
+                    else:
+                        mqa_q = (mqa_ql_nope, mqa_q_pe)
                 else:
-                    mqa_ql_nope = mqa_q_nope.new_empty((N, B, L))
-
-                # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
-                torch.bmm(mqa_q_nope, self.W_UK_T, out=mqa_ql_nope)
-
-                # Convert from (N, B, L) to (B, N, L)
-                mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
-
-            if fp8_attention and self.impl.supports_quant_query_input:
-                assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
-                assert mqa_ql_nope.shape[1] == mqa_q_pe.shape[1]
-                mqa_q = self._decode_concat_quant_fp8_op(
-                    mqa_ql_nope, mqa_q_pe, self._q_scale
-                )
-            else:
-                mqa_q = (mqa_ql_nope, mqa_q_pe)
+                    # No padding: same kernels as the lifted path,
+                    # via the shared helper. Bit-exact between the two
+                    # callers (verified by the parity test).
+                    mqa_q = self._run_decode_q_prep_kernels(
+                        mqa_q_nope, mqa_q_pe, fp8_attention=fp8_attention
+                    )
             if self.impl.dcp_world_size > 1:
                 assert not fp8_attention, "DCP not support fp8 kvcache now."
                 # concatenate mqa_ql_nope and mqa_q_pe -> (B, N, L + P)
@@ -1036,6 +1417,68 @@ direct_register_custom_op(
 )
 
 
+torch.library.define(
+    "vllm::mla_split_batch",
+    "(Tensor q, str layer_name) -> SymInt",
+    tags=torch.Tag.pt2_compliant_tag,
+)
+
+
+@torch.library.impl("vllm::mla_split_batch", "CompositeExplicitAutograd")
+def mla_split_batch_impl(q: torch.Tensor, layer_name: str) -> int:
+    """Read ``num_decode_tokens`` from forward context as a runtime int.
+
+    Wrapping this metadata read in a custom op (with a SymInt-returning
+    fake) is what keeps it invisible to ``torch.compile``: the
+    surrounding lifted ops (``q.narrow``, the q-absorb BMM, cat, FP8
+    quant) stay fully traceable, with the SymInt as their leading dim,
+    instead of graph-breaking on the ``attn_metadata`` access.
+
+    Same role as ``vllm::mla_split_batch`` in PR #39346
+    ([Refactor][MLA]: Expose mla to torch.compile), under the same
+    name to match the upstream convention.
+
+    Returns 0 when ``attn_metadata`` is unavailable (profile runs) or
+    when ``num_decode_tokens`` isn't populated. Downstream callers
+    handle the 0-row case via ``forward_impl``'s
+    ``num_mqa_tokens > 0`` guard.
+
+    We deliberately reach into ``forward_context.attn_metadata``
+    directly rather than going through ``get_attention_context``: we
+    only need the metadata field, not ``attn_layer`` / ``kv_cache`` /
+    slot mapping, and avoiding that lookup keeps the op cheap.
+    """
+    layer_name = _resolve_layer_name(layer_name)
+    forward_context = get_forward_context()
+    attn_metadata_raw = forward_context.attn_metadata
+    if attn_metadata_raw is None:
+        return 0
+    # Mirror the dispatch get_attention_context() does: per-layer dict,
+    # list-of-dicts (speculative decoding), or a single attn_metadata.
+    if isinstance(attn_metadata_raw, dict):
+        attn_metadata = attn_metadata_raw.get(layer_name)
+    elif isinstance(attn_metadata_raw, list):
+        attn_metadata = attn_metadata_raw[0].get(layer_name)
+    else:
+        attn_metadata = attn_metadata_raw
+    if attn_metadata is None:
+        return 0
+    num_decode = getattr(attn_metadata, "num_decode_tokens", None)
+    return int(num_decode) if num_decode else 0
+
+
+@torch.library.register_fake("vllm::mla_split_batch")
+def mla_split_batch_fake(q: torch.Tensor, layer_name: str) -> int:
+    # Return a fresh unbacked SymInt at trace time. Inductor then tracks
+    # ``num_decode_tokens`` as its own dynamic dimension, independent of
+    # the input batch size ``q.shape[0]``. Downstream ops
+    # (``q.narrow(0, 0, num_decode)``, the inline BMM, cat, FP8 quant)
+    # carry this unbacked SymInt as their leading dim, so symbolic
+    # shapes match runtime shapes exactly — no fake-impl shape lie.
+    ctx = torch.library.get_ctx()
+    return ctx.new_dynamic_size()
+
+
 @maybe_transfer_kv_layer
 def unified_mla_attention_with_output(
     q: torch.Tensor,
@@ -1050,6 +1493,7 @@ def unified_mla_attention_with_output(
     quant_scale_ue8m0: bool | None = None,
     quant_col_major: bool | None = None,
     quant_tma_aligned: bool | None = None,
+    prepared_mqa_q: torch.Tensor | None = None,
 ) -> None:
     # kv_cache_dummy_dep is not used but accepting it creates a data dependency
     # that ensures torch.compile preserves ordering between KV cache update and
@@ -1070,6 +1514,7 @@ def unified_mla_attention_with_output(
         quant_scale_ue8m0=quant_scale_ue8m0,
         quant_col_major=quant_col_major,
         quant_tma_aligned=quant_tma_aligned,
+        prepared_mqa_q=prepared_mqa_q,
     )
 
 
@@ -1086,6 +1531,7 @@ def unified_mla_attention_with_output_fake(
     quant_scale_ue8m0: bool | None = None,
     quant_col_major: bool | None = None,
     quant_tma_aligned: bool | None = None,
+    prepared_mqa_q: torch.Tensor | None = None,
 ) -> None:
     return
 
