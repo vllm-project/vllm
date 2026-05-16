@@ -85,10 +85,6 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         needs_video_metadata=True,
         marks=[pytest.mark.core_model],
     ),
-    "step3_vl": VitCudagraphTestConfig(
-        model="stepfun-ai/Step3-VL-10B",
-        image_prompt=step3_vl_chat_template("What is in this image?"),
-        video_prompt=None,
     "qwen2_vl": VitCudagraphTestConfig(
         model="Qwen/Qwen2-VL-2B-Instruct",
         image_prompt=qwen_vl_chat_template(
@@ -100,6 +96,11 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         ),
         needs_video_metadata=False,
         marks=[pytest.mark.core_model],
+    ),
+    "step3_vl": VitCudagraphTestConfig(
+        model="stepfun-ai/Step3-VL-10B",
+        image_prompt=step3_vl_chat_template("What is in this image?"),
+        video_prompt=None,
     ),
 }
 
