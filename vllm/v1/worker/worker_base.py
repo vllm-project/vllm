@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
 
 import torch
 import torch.nn as nn
 
+import vllm.ir
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -28,6 +29,11 @@ else:
 logger = init_logger(__name__)
 
 _R = TypeVar("_R")
+
+
+class CompilationTimes(NamedTuple):
+    language_model: float
+    encoder: float
 
 
 class WorkerBase:
@@ -82,15 +88,22 @@ class WorkerBase:
         self.device: torch.device | None = None
         self.model_runner: nn.Module | None = None
 
+        # IR op priority and torch-wrap state are constant for the worker's
+        # lifetime.
+        vllm_config.kernel_config.ir_op_priority.set_default()
+        vllm.ir.set_default_torch_wrap(
+            vllm_config.compilation_config.ir_enable_torch_wrap
+        )
+
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """Get specifications for KV cache implementation."""
         raise NotImplementedError
 
-    def compile_or_warm_up_model(self) -> float:
+    def compile_or_warm_up_model(self) -> CompilationTimes:
         """Prepare model for execution through compilation/warmup.
 
         Returns:
-            The accumulated compilation time in seconds.
+            Compilation times (language_model, encoder) in seconds.
         """
         raise NotImplementedError
 
@@ -195,8 +208,8 @@ class WorkerWrapperBase:
         All workers have rpc_rank=0, but they have different ranks in the TP
         group.
         """
-        self.rpc_rank = rpc_rank
-        self.global_rank = self.rpc_rank if global_rank is None else global_rank
+        self.rpc_rank: int = rpc_rank
+        self.global_rank: int = self.rpc_rank if global_rank is None else global_rank
 
         # Initialized after init_worker is called
         self.worker: WorkerBase

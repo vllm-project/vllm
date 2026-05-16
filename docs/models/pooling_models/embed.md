@@ -45,6 +45,7 @@ You can compute pairwise similarity scores to build a similarity matrix using th
 | `GritLM` | GritLM | `parasail-ai/GritLM-7B-vllm`. | ✅︎ | ✅︎ |
 | `GteModel` | Arctic-Embed-2.0-M | `Snowflake/snowflake-arctic-embed-m-v2.0`. | | |
 | `GteNewModel` | mGTE-TRM (see note) | `Alibaba-NLP/gte-multilingual-base`, etc. | | |
+| `JinaEmbeddingsV5Model`<sup>C</sup> | Qwen3-based with task-specific LoRA adapters | `jinaai/jina-embeddings-v5-text-small` (see note) | ✅︎ | ✅︎ |
 | `LlamaBidirectionalModel`<sup>C</sup> | Llama-based with bidirectional attention | `nvidia/llama-nemotron-embed-1b-v2`, etc. | ✅︎ | ✅︎ |
 | `LlamaModel`<sup>C</sup>, `LlamaForCausalLM`<sup>C</sup>, `MistralModel`<sup>C</sup>, etc. | Llama-based | `intfloat/e5-mistral-7b-instruct`, etc. | ✅︎ | ✅︎ |
 | `ModernBertModel` | ModernBERT-based | `Alibaba-NLP/gte-modernbert-base`, etc. | | |
@@ -72,6 +73,12 @@ You can compute pairwise similarity scores to build a similarity matrix using th
 
 !!! note
     `jinaai/jina-embeddings-v3` supports multiple tasks through LoRA, while vllm temporarily only supports text-matching tasks by merging LoRA weights.
+
+!!! note
+    `jinaai/jina-embeddings-v5-text-small` ships with four task-specific LoRA adapters
+    (`retrieval`, `text-matching`, `classification`, `clustering`). vLLM merges the
+    selected adapter into the base weights at load time. Choose the task with
+    `--hf-overrides '{"jina_task": "<task>"}'`; the default is `retrieval`.
 
 ### Multimodal Models
 
@@ -113,7 +120,7 @@ The following [pooling parameters][vllm.PoolingParams] are supported.
 
 ### `LLM.embed`
 
-The [embed][vllm.LLM.embed] method outputs an embedding vector for each prompt.
+The [embed][vllm.entrypoints.pooling.offline.PoolingOfflineMixin.embed] method outputs an embedding vector for each prompt.
 
 ```python
 from vllm import LLM
@@ -129,7 +136,7 @@ A code example can be found here: [examples/basic/offline_inference/embed.py](..
 
 ### `LLM.encode`
 
-The [encode][vllm.LLM.encode] method is available to all pooling models in vLLM.
+The [encode][vllm.entrypoints.pooling.offline.PoolingOfflineMixin.encode] method is available to all pooling models in vLLM.
 
 Set `pooling_task="embed"` when using `LLM.encode` for embedding Models:
 
@@ -145,7 +152,7 @@ print(f"Data: {data!r}")
 
 ### `LLM.score`
 
-The [score][vllm.LLM.score] method outputs similarity scores between sentence pairs.
+The [score][vllm.entrypoints.pooling.offline.PoolingOfflineMixin.score] method outputs similarity scores between sentence pairs.
 
 All models that support embedding task also support using the score API to compute similarity scores by calculating the cosine similarity of two input prompt's embeddings.
 

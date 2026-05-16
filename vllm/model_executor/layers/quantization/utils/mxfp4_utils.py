@@ -162,3 +162,7 @@ try:
     quant_dequant_mxfp4 = torch.ops.vllm.quant_dequant_mxfp4
 except AttributeError as error:
     raise error
+
+
+def xpu_mxfp4_quantize(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.ops.vllm.xpu_mxfp4_quantize(x)
