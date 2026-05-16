@@ -168,6 +168,8 @@ if TYPE_CHECKING:
     VLLM_MOE_USE_DEEP_GEMM: bool = True
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
     VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES: bool = True
+    VLLM_DEEPGEMM_MEGA_MOE_USE_FP4_ACTS: bool = False
+    VLLM_DEEPGEMM_MEGA_MOE_USE_MXF4_KIND: bool = False
     VLLM_DEEP_GEMM_WARMUP: Literal[
         "skip",
         "full",
@@ -1289,6 +1291,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to create TMA-aligned scale tensor when DeepGEMM is used.
     "VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES": lambda: bool(
         int(os.getenv("VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES", "1"))
+    ),
+    "VLLM_DEEPGEMM_MEGA_MOE_USE_FP4_ACTS": lambda: bool(
+        int(os.getenv("VLLM_DEEPGEMM_MEGA_MOE_USE_FP4_ACTS", "0"))
+    ),
+    "VLLM_DEEPGEMM_MEGA_MOE_USE_MXF4_KIND": lambda: bool(
+        int(os.getenv("VLLM_DEEPGEMM_MEGA_MOE_USE_MXF4_KIND", "0"))
     ),
     # DeepGemm JITs the kernels on-demand. The warmup attempts to make DeepGemm
     # JIT all the required kernels before model execution so there is no
