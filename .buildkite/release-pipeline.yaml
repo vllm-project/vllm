@@ -7,6 +7,9 @@ env:
   CUDA_ARCH_AARCH64: "8.0 8.7 8.9 9.0 10.0 11.0 12.0+PTX"
   CUDA_ARCH_X86_CU129: "7.5 8.0 8.6 8.9 9.0 10.0 12.0"
   CUDA_ARCH_AARCH64_CU129: "8.0 8.7 8.9 9.0 10.0 12.0"
+  MOONCAKE_WHEEL_AARCH64_2_35: "https://vllm-wheels.s3.amazonaws.com/mooncake/mooncake_transfer_engine-0.3.10.post2-0da9dfea3-cp312-cp312-manylinux_2_35_aarch64.whl"
+  MOONCAKE_WHEEL_AARCH64_2_39: "https://vllm-wheels.s3.amazonaws.com/mooncake/mooncake_transfer_engine-0.3.10.post2-0da9dfea3-cp312-cp312-manylinux_2_39_aarch64.whl"
+  MOONCAKE_WHEEL_X86_64: "https://vllm-wheels.s3.amazonaws.com/mooncake/mooncake_transfer_engine-0.3.10.post2-0da9dfea3-cp312-cp312-manylinux_2_35_x86_64.whl"
 
 steps:
   - input: "Provide Release version here"
@@ -136,6 +139,8 @@ steps:
               --build-arg CUDA_VERSION=13.0.2 \
               --build-arg torch_cuda_arch_list="${CUDA_ARCH_X86}" \
               --build-arg INSTALL_KV_CONNECTORS=true \
+              --build-arg MOONCAKE_WHEEL_AARCH64="${MOONCAKE_WHEEL_AARCH64_2_35}" \
+              --build-arg MOONCAKE_WHEEL_X86_64="${MOONCAKE_WHEEL_X86_64}" \
               --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.2-devel-ubuntu22.04 \
               --target vllm-openai \
               --progress plain \
@@ -162,6 +167,8 @@ steps:
               --build-arg CUDA_VERSION=13.0.2 \
               --build-arg torch_cuda_arch_list="${CUDA_ARCH_AARCH64}" \
               --build-arg INSTALL_KV_CONNECTORS=true \
+              --build-arg MOONCAKE_WHEEL_AARCH64="${MOONCAKE_WHEEL_AARCH64_2_35}" \
+              --build-arg MOONCAKE_WHEEL_X86_64="${MOONCAKE_WHEEL_X86_64}" \
               --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.2-devel-ubuntu22.04 \
               --target vllm-openai \
               --progress plain \
@@ -185,6 +192,8 @@ steps:
               --build-arg CUDA_VERSION=12.9.1 \
               --build-arg torch_cuda_arch_list="${CUDA_ARCH_X86_CU129}" \
               --build-arg INSTALL_KV_CONNECTORS=true \
+              --build-arg MOONCAKE_WHEEL_AARCH64="${MOONCAKE_WHEEL_AARCH64_2_35}" \
+              --build-arg MOONCAKE_WHEEL_X86_64="${MOONCAKE_WHEEL_X86_64}" \
               --target vllm-openai \
               --progress plain \
               -f docker/Dockerfile .
@@ -210,6 +219,8 @@ steps:
               --build-arg CUDA_VERSION=12.9.1 \
               --build-arg torch_cuda_arch_list="${CUDA_ARCH_AARCH64_CU129}" \
               --build-arg INSTALL_KV_CONNECTORS=true \
+              --build-arg MOONCAKE_WHEEL_AARCH64="${MOONCAKE_WHEEL_AARCH64_2_35}" \
+              --build-arg MOONCAKE_WHEEL_X86_64="${MOONCAKE_WHEEL_X86_64}" \
               --target vllm-openai \
               --progress plain \
               -f docker/Dockerfile .
@@ -234,6 +245,8 @@ steps:
               --build-arg GDRCOPY_OS_VERSION=Ubuntu24_04 \
               --build-arg torch_cuda_arch_list="${CUDA_ARCH_X86}" \
               --build-arg INSTALL_KV_CONNECTORS=true \
+              --build-arg MOONCAKE_WHEEL_AARCH64="${MOONCAKE_WHEEL_AARCH64_2_39}" \
+              --build-arg MOONCAKE_WHEEL_X86_64="${MOONCAKE_WHEEL_X86_64}" \
               --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.2-devel-ubuntu24.04 \
               --target vllm-openai \
               --progress plain \
@@ -261,6 +274,8 @@ steps:
               --build-arg GDRCOPY_OS_VERSION=Ubuntu24_04 \
               --build-arg torch_cuda_arch_list="${CUDA_ARCH_AARCH64}" \
               --build-arg INSTALL_KV_CONNECTORS=true \
+              --build-arg MOONCAKE_WHEEL_AARCH64="${MOONCAKE_WHEEL_AARCH64_2_39}" \
+              --build-arg MOONCAKE_WHEEL_X86_64="${MOONCAKE_WHEEL_X86_64}" \
               --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.2-devel-ubuntu24.04 \
               --target vllm-openai \
               --progress plain \
@@ -286,6 +301,8 @@ steps:
               --build-arg GDRCOPY_OS_VERSION=Ubuntu24_04 \
               --build-arg torch_cuda_arch_list="${CUDA_ARCH_X86_CU129}" \
               --build-arg INSTALL_KV_CONNECTORS=true \
+              --build-arg MOONCAKE_WHEEL_AARCH64="${MOONCAKE_WHEEL_AARCH64_2_39}" \
+              --build-arg MOONCAKE_WHEEL_X86_64="${MOONCAKE_WHEEL_X86_64}" \
               --target vllm-openai \
               --progress plain \
               -f docker/Dockerfile .
@@ -312,6 +329,8 @@ steps:
               --build-arg GDRCOPY_OS_VERSION=Ubuntu24_04 \
               --build-arg torch_cuda_arch_list="${CUDA_ARCH_AARCH64_CU129}" \
               --build-arg INSTALL_KV_CONNECTORS=true \
+              --build-arg MOONCAKE_WHEEL_AARCH64="${MOONCAKE_WHEEL_AARCH64_2_39}" \
+              --build-arg MOONCAKE_WHEEL_X86_64="${MOONCAKE_WHEEL_X86_64}" \
               --target vllm-openai \
               --progress plain \
               -f docker/Dockerfile .
