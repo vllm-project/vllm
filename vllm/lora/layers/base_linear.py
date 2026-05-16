@@ -93,20 +93,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         self.layer_name = self.base_layer.prefix + ".lora_linear_async"
         compilation_config = vllm_config.compilation_config
         if self.layer_name in compilation_config.static_forward_context:
-            # TEMP(unblock-end-to-end): Upstream FusedMoE.runner exposes the
-            # gate via an aliased path (mlp.gate AND mlp.experts.runner.gate
-            # refer to the same nn.Module), so LoRA module replacement wraps
-            # the same gate twice. Both wrappers compute self.layer_name
-            # from base_layer.prefix and thus collide here. The two
-            # wrappers share a base_layer, so disabling dual-stream on the
-            # duplicate (it falls through to _apply_sync) is safe and
-            # preserves correctness; only the first-registered wrapper
-            # keeps the overlap. TODO(remove once upstream LoRA walker
-            # de-duplicates by base-layer identity).
-            self._enable_aux_cuda_stream = False
-            self._lora_stream = None
-            self._events = []
-            return
+            raise ValueError("Duplicate layer name: {}".format(self.layer_name))
         compilation_config.static_forward_context[self.layer_name] = self
 
     def create_lora_weights(

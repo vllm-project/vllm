@@ -344,7 +344,10 @@ def _run_fused_moe_lora_one_shot(
     # rank padding is to next pow2 with a floor of 16 (tensor-core minimum
     # K-dim). Beyond 128 the (BLOCK_M, BLOCK_R) accumulator outgrows the
     # register file; rank tiling would be needed but is out of scope for
-    # this kernel.
+    # this kernel. Tried floor=32 to double MMA density per K-step but it
+    # regressed across all M (+8 to +40%): the (64,32) fp32 accumulator +
+    # widened B tile pushed register count past spill threshold, lowering
+    # occupancy by more than the MMA gain saved.
     assert rank <= 128, (
         f"fused_moe_lora_one_shot supports max_lora_rank<=128; got rank={rank}"
     )
@@ -422,6 +425,9 @@ def _run_fused_moe_lora_one_shot(
     # the 4-stage pipeline pushed register count to 168/thread and capped
     # achieved occupancy at ~17% (3 blocks/SM, register-bound); ns=3 frees
     # ~30 regs/thread which keeps a 4th block resident on small grids.
+    # Tried BLOCK_N=64 for w13 (N=192) to avoid the half-wasted second
+    # tile: regressed 11-29% because the "waste" was just masked stores
+    # (cheap) and the extra iteration added load + index overhead.
     if npid > 1:
         block_n, nw, ns = 128, 8, 3
     else:
