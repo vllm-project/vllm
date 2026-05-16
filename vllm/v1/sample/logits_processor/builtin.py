@@ -114,6 +114,43 @@ class MinPLogitsProcessor(LogitsProcessor):
         logits.masked_fill_(invalid_token_mask, -float("inf"))
         return logits
 
+    def apply_with_spec_decode(
+        self,
+        logits: torch.Tensor,
+        num_draft_tokens: list[int],
+    ) -> torch.Tensor:
+        """Spec-decode version of apply(): apply min_p row-wise to target
+        logits laid out per-draft-token across all requests.
+
+        ``num_draft_tokens[i]`` is the number of drafted tokens for request
+        ``i``; the logits tensor has shape ``[sum(num_draft_tokens), V]``
+        with one row per drafted position. We expand the per-request
+        ``self.min_p`` tensor to per-row via ``repeat_interleave`` and then
+        run the same softmax / max-prob / threshold / mask logic as
+        ``apply()``.
+        """
+        if not self.min_p_count:
+            return logits
+
+        num_draft_arr = torch.tensor(num_draft_tokens, device="cpu")
+        original_indices = torch.arange(len(num_draft_tokens), device="cpu")
+        repeat_indices_cpu = original_indices.repeat_interleave(num_draft_arr)
+        repeat_indices = repeat_indices_cpu.to(
+            device=logits.device, non_blocking=True
+        )
+
+        # self.min_p has shape [batch_size, 1] (unsqueezed in update_state);
+        # indexing with a 1-D LongTensor of length sum(num_draft_tokens)
+        # broadcasts to shape [sum(num_draft_tokens), 1].
+        min_p_per_row = self.min_p[repeat_indices]
+
+        probability_values = torch.nn.functional.softmax(logits, dim=-1)
+        max_probabilities = torch.amax(probability_values, dim=-1, keepdim=True)
+        adjusted_min_p = max_probabilities.mul_(min_p_per_row)
+        invalid_token_mask = probability_values < adjusted_min_p
+        logits.masked_fill_(invalid_token_mask, -float("inf"))
+        return logits
+
 
 class LogitBiasLogitsProcessor(LogitsProcessor):
     def __init__(self, _, device: torch.device, is_pin_memory: bool):
