@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Literal
 
 import msgspec
 
@@ -20,6 +21,11 @@ class LoRARequest(
         with the same lora_int_id already exists in the cache. This replaces
         the existing adapter in-place. If False (default), only loads if the
         adapter is not already loaded.
+
+    source: Selects how the adapter is loaded.
+        - "path": load from lora_path.
+        - "memory": load from peft_config and lora_tensors.
+          In this mode, lora_path is ignored.
     """
 
     lora_name: str
@@ -28,13 +34,23 @@ class LoRARequest(
     base_model_name: str | None = msgspec.field(default=None)
     tensorizer_config_dict: dict | None = None
     load_inplace: bool = False
+    source: Literal["path", "memory"] = "path"
+    peft_config: dict | None = None
+    lora_tensors: dict | None = None
 
     def __post_init__(self):
         if self.lora_int_id < 1:
             raise ValueError(f"id must be > 0, got {self.lora_int_id}")
 
-        # Ensure lora_path is not empty
-        assert self.lora_path, "lora_path cannot be empty"
+        if self.source == "path":
+            if not self.lora_path:
+                raise ValueError("LoRA source 'path' requires a non-empty lora_path.")
+            return
+
+        if self.peft_config is None or self.lora_tensors is None:
+            raise ValueError(
+                "LoRA source 'memory' requires peft_config and lora_tensors."
+            )
 
     @property
     def adapter_id(self):
