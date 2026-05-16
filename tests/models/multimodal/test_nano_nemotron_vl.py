@@ -53,6 +53,19 @@ class _VisionModel:
         self.loaded_weights = list(weights)
 
 
+class _FakeTensor:
+    """Sentinel stand-in for torch.Tensor in load_weights tests. Supports the
+    .detach().clone() chain used by load_weights for buffered mm weights;
+    both methods return self so identity (and the existing equality
+    assertions) are preserved through cloning."""
+
+    def detach(self):
+        return self
+
+    def clone(self):
+        return self
+
+
 def test_nano_nemotron_vl_skips_multimodal_weights_in_text_only_mode():
     model = object.__new__(NemotronH_Nano_VL_V2)
     language_model = _LanguageModel()
@@ -86,7 +99,7 @@ def test_nano_nemotron_vl_loads_vision_weights_without_sound_encoder():
     object.__setattr__(model, "sound_encoder", None)
 
     language_weight = object()
-    vision_weight = object()
+    vision_weight = _FakeTensor()
     model.load_weights(
         [
             ("language_model.layers.0.weight", language_weight),

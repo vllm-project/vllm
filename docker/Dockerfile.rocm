@@ -2,10 +2,18 @@
 ARG REMOTE_VLLM="0"
 ARG COMMON_WORKDIR=/app
 ARG BASE_IMAGE=rocm/vllm-dev:base
-# AMD NIC backend
-ARG NIC_BACKEND=none
+# NIC backend for MoRI RDMA support.
+# By default (all), drivers and userspace libraries for all supported NIC types
+# (ainic and bnxt) are installed; MoRI selects the appropriate one at runtime.
+# To install drivers for a single NIC type only, set NIC_BACKEND explicitly:
+#   --build-arg NIC_BACKEND=ainic   # AMD AINIC (Pensando) only
+#   --build-arg NIC_BACKEND=bnxt    # Broadcom Thor-2 only
+#   --build-arg NIC_BACKEND=none    # Install nothing.
+ARG NIC_BACKEND=all
 # AMD AINIC apt repo settings
-ARG AINIC_VERSION=1.117.5
+# Users can specify a custom version compatible with their host drivers.
+# The default version has been tested with ioinic-dkms=25.11.1.001
+ARG AINIC_VERSION=1.117.3-hydra
 ARG UBUNTU_CODENAME=jammy
 
 # Sccache configuration (only used in release pipeline)
@@ -231,39 +239,52 @@ ARG NIC_BACKEND
 ARG AINIC_VERSION
 ARG UBUNTU_CODENAME
 RUN /bin/bash -lc 'set -euo pipefail; \
+ \
+ install_ainic() { \
+   apt-get update && apt-get install -y --no-install-recommends ca-certificates curl gnupg apt-transport-https; \
+   rm -rf /var/lib/apt/lists/*; \
+   mkdir -p /etc/apt/keyrings; \
+   curl -fsSL https://repo.radeon.com/rocm/rocm.gpg.key | gpg --dearmor > /etc/apt/keyrings/amdainic.gpg; \
+   echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/amdainic.gpg] https://repo.radeon.com/amdainic/pensando/ubuntu/${AINIC_VERSION} ${UBUNTU_CODENAME} main" \
+     > /etc/apt/sources.list.d/amdainic.list; \
+   apt-get update && apt-get install -y --no-install-recommends \
+     libionic-dev \
+     ionic-common \
+   ; \
+   rm -rf /var/lib/apt/lists/*; \
+ }; \
+ \
+ # NOTE: requires FW 235.2.86.0 and kernel drivers on the host: \
+ #   bnxt-en-dkms=1.10.3.235.2.86.0 bnxt-re-dkms=235.2.86.0 (from packages.broadcom.com PPA) \
+ install_bnxt() { \
+   install -m 0755 -d /etc/apt/keyrings; \
+   curl -fsSL https://packages.broadcom.com/artifactory/api/security/keypair/PackagesKey/public \
+     -o /etc/apt/keyrings/broadcom-nic.asc; \
+   chmod a+r /etc/apt/keyrings/broadcom-nic.asc; \
+   echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/broadcom-nic.asc] https://packages.broadcom.com/artifactory/ethernet-nic-debian-public jammy main" \
+     > /etc/apt/sources.list.d/broadcom-nic.list; \
+   apt-get update && apt-get install -y --no-install-recommends \
+     bnxt-rocelib=235.2.86.0 \
+   ; \
+   cp -a /usr/local/lib/x86_64-linux-gnu/libbnxt_re* /usr/local/lib/; \
+   ldconfig; \
+   rm -rf /var/lib/apt/lists/*; \
+ }; \
+ \
  echo "[MORI] Install MoRI proxy deps"; \
  pip install --quiet --ignore-installed blinker && \
  pip install --quiet quart msgpack aiohttp pyzmq; \
  echo "[MORI] NIC_BACKEND=${NIC_BACKEND}"; \
-  \
-  # NIC backend deps — mori auto-detects NIC at runtime (MORI_DEVICE_NIC env var override).
-  # Only vendor packages are installed here for dlopen (e.g. libionic.so); no compile-time flags needed.
-  case "${NIC_BACKEND}" in \
-    # default: mlx5
-    none) \
-      ;; \
-    # AMD NIC
-    ainic) \
-      apt-get update && apt-get install -y --no-install-recommends ca-certificates curl gnupg apt-transport-https && \
-      rm -rf /var/lib/apt/lists/* && mkdir -p /etc/apt/keyrings; \
-      curl -fsSL https://repo.radeon.com/rocm/rocm.gpg.key | gpg --dearmor > /etc/apt/keyrings/amdainic.gpg; \
-      echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/amdainic.gpg] https://repo.radeon.com/amdainic/pensando/ubuntu/${AINIC_VERSION} ${UBUNTU_CODENAME} main" \
-        > /etc/apt/sources.list.d/amdainic.list; \
-      apt-get update && apt-get install -y --no-install-recommends \
-          libionic-dev \
-          ionic-common \
-      ; \
-      rm -rf /var/lib/apt/lists/*; \
-      ;; \
-    # TODO: Add Broadcom bnxt packages/repos here later.
-    # bnxt) \
-    #   echo "[MORI] Add Broadcom bnxt packages/repos here later."; \
-    #   ;; \
-    *) \
-      echo "ERROR: unknown NIC_BACKEND=${NIC_BACKEND}. Use one of: none, ainic"; \
-      exit 2; \
-      ;; \
-  esac;'
+ \
+ # NIC backend deps — mori auto-detects NIC at runtime (MORI_DEVICE_NIC env var override). \
+ # Only vendor packages are installed here for dlopen; no compile-time flags needed. \
+ case "${NIC_BACKEND}" in \
+   none)  ;; \
+   all)   install_ainic; install_bnxt ;; \
+   ainic) install_ainic ;; \
+   bnxt)  install_bnxt ;; \
+   *)     echo "ERROR: unknown NIC_BACKEND=${NIC_BACKEND}. Use one of: none, ainic, bnxt, all"; exit 2 ;; \
+ esac'
 
 # -----------------------
 # vLLM wheel release build stage (for building distributable wheels)

@@ -13,7 +13,7 @@ The test ensures that disaggregated encoding produces **identical** outputs to t
 
 Note that currently PD disaggregation set up may give slightly different results from a single instance. Therefore, we need the result from 1P+1D as the baseline for 1E+1P+1D
 
-Please refer to [Disaggregated Encoder Feature](../../../docs/features/disagg_encoder.md) for the detailed explanation for the EPD features.
+Please refer to [Disaggregated Encoder Feature](../../../../docs/features/disagg_encoder.md) for the detailed explanation for the EPD features.
 
 ## Files
 
