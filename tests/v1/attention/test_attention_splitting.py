@@ -9,6 +9,7 @@ from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm.v1.attention.backends.utils import (
     make_kv_sharing_fast_prefill_common_attn_metadata,
     split_decodes_and_prefills,
+    split_decodes_prefills_and_extends,
 )
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlice,
@@ -182,6 +183,23 @@ def apply_split_decodes_and_prefills(
     )
 
 
+def apply_split_decodes_prefills_and_extends(
+    query_lens: list[int],
+    seq_lens: list[int],
+    decode_threshold: int,
+):
+    device = torch.device("cpu")
+    common_metadata = create_common_attn_metadata(
+        BatchSpec(seq_lens=seq_lens, query_lens=query_lens),
+        block_size=16,
+        device=device,
+    )
+    return split_decodes_prefills_and_extends(
+        common_metadata,
+        decode_threshold=decode_threshold,
+    )
+
+
 def test_split_decodes_and_prefills_nonuniform_all_ones():
     query_lens = [1, 1, 1]
     num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
@@ -320,6 +338,25 @@ def test_make_kv_sharing_fast_prefill_common_attn_metadata():
     assert new_metadata.num_actual_tokens == 4
     assert new_metadata.max_query_len == 2
     assert torch.equal(new_metadata.seq_lens, common_metadata.seq_lens)
+
+
+def test_split_decodes_prefills_and_extends_mixed_batch():
+    query_lens = [1, 2, 4, 5, 6]
+    seq_lens = [10, 11, 20, 5, 6]
+    (
+        num_decodes,
+        num_extends,
+        num_prefills,
+        num_decode_tokens,
+        num_extend_tokens,
+        num_prefill_tokens,
+    ) = apply_split_decodes_prefills_and_extends(query_lens, seq_lens, 3)
+    assert num_decodes == 2
+    assert num_extends == 1
+    assert num_prefills == 2
+    assert num_decode_tokens == 3
+    assert num_extend_tokens == 4
+    assert num_prefill_tokens == 11
 
 
 @pytest.mark.parametrize(

@@ -14,6 +14,11 @@ import sysconfig
 from pathlib import Path
 from shutil import which
 
+# setup.py only needs torch metadata such as version and extension helpers.
+# Disable backend autoload so importing torch here does not pull in optional
+# runtime backends like torch_npu during metadata generation.
+os.environ["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
+
 import torch
 from packaging.version import Version, parse
 from setuptools import Extension, setup
