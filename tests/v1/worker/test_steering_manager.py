@@ -1530,3 +1530,180 @@ class TestDevicePlacement:
         expected = per_req_vec.to(cuda_device)
         assert torch.allclose(table[row], expected)
 
+
+# ---------------------------------------------------------------------------
+# TestFusedScatter
+# ---------------------------------------------------------------------------
+
+
+class TestFusedScatter:
+    """Validate the per-(hook, dtype) fused-backing scatter optimisation.
+
+    With N steerable layers in a single hook + dtype group, the scatter
+    used to issue N separate ``index_copy_`` calls (~80 us launch each
+    on a 3090). The fused-backing path coalesces them into ONE
+    ``backing.index_copy_(1, indices, casted)`` per group. These tests
+    verify both the correctness invariants (per-layer content matches
+    the unfused expected values) and the launch-count reduction (via
+    ``torch.profiler`` aten op counts).
+    """
+
+    def test_per_layer_content_matches_unfused(self):
+        """Fused scatter must produce the same per-layer table content
+        as the unfused per-layer ``index_copy_`` would produce."""
+        mgr = _make_manager()
+        # Multi-layer setup so the fused path is meaningfully exercised
+        # (single-layer would degenerate to the same launch count).
+        layer_indices = list(range(8))
+        # Distinct base vectors per layer so a layer mix-up would be
+        # detected immediately.
+        for idx in layer_indices:
+            base = torch.full((HIDDEN_SIZE,), float(idx + 1))
+            mgr.update_global_vectors(
+                hook_point=_HP, layer_idx=idx, vector=base, phase="base"
+            )
+        # Per-request config with vectors on a subset of layers — this
+        # exercises the layer-without-per-request branch in the fused
+        # row assembly.
+        per_req_vec = torch.full((HIDDEN_SIZE,), 100.0)
+        vectors = {_HP: {idx: per_req_vec.tolist() for idx in layer_indices[:4]}}
+        row = mgr.register_config(config_hash=42, vectors=vectors, phase="prefill")
+
+        layers = _make_layers(mgr, layer_indices=layer_indices)
+        mgr.populate_steering_tables(layers)
+
+        for idx in layer_indices:
+            table = getattr(layers[idx], _TABLE_ATTR)
+            expected_base = torch.full((HIDDEN_SIZE,), float(idx + 1))
+            # Row 1: base + (no prefill global) = base
+            assert torch.allclose(table[1], expected_base), (
+                f"Layer {idx} row 1 mismatch"
+            )
+            # Row 2: base + (no decode global) = base
+            assert torch.allclose(table[2], expected_base), (
+                f"Layer {idx} row 2 mismatch"
+            )
+            # Row N (per-request prefill row):
+            #   layers 0..3: base + per_req
+            #   layers 4..7: base only (no per-request entry for them)
+            if idx < 4:
+                expected_row = expected_base + per_req_vec
+            else:
+                expected_row = expected_base
+            assert torch.allclose(table[row], expected_row), (
+                f"Layer {idx} per-request row {row} mismatch: "
+                f"got {table[row]}, expected {expected_row}"
+            )
+            # Row 0 must always be zero.
+            assert torch.allclose(table[0], torch.zeros(HIDDEN_SIZE)), (
+                f"Layer {idx} row 0 must be zero"
+            )
+
+    def test_layer_buffers_alias_one_backing_per_group(self):
+        """After populate, every per-layer buffer in a (hook, dtype)
+        group must be a view into the same contiguous backing tensor.
+
+        This is the structural invariant the launch-count reduction
+        relies on — without aliasing, the fused ``index_copy_(1, ...)``
+        path would not be reachable.
+        """
+        mgr = _make_manager()
+        layer_indices = list(range(6))
+        # Need at least one mutator so populate runs through the
+        # backing path (not the no-state short-circuit which lives in
+        # the model runner mixin, not the manager).
+        per_req_vec = torch.ones(HIDDEN_SIZE) * 3.0
+        vectors = {_HP: {0: per_req_vec.tolist()}}
+        mgr.register_config(config_hash=1, vectors=vectors, phase="prefill")
+
+        layers = _make_layers(mgr, layer_indices=layer_indices)
+        mgr.populate_steering_tables(layers)
+
+        # Collect underlying storage pointers — all per-layer buffers
+        # in the group should share one storage.
+        storage_ids = {
+            getattr(layers[idx], _TABLE_ATTR).untyped_storage().data_ptr()
+            for idx in layer_indices
+        }
+        assert len(storage_ids) == 1, (
+            f"Expected all per-layer buffers to alias one backing storage; "
+            f"got {len(storage_ids)} distinct storages."
+        )
+
+    def test_fused_scatter_emits_one_index_copy_per_group(self):
+        """Profiler-counted aten::index_copy_ launches must drop from
+        ``L`` (one per layer) to 1 (one per (hook, dtype) group)."""
+        mgr = _make_manager()
+        layer_indices = list(range(8))
+        per_req_vec = torch.ones(HIDDEN_SIZE) * 2.0
+        vectors = {_HP: {idx: per_req_vec.tolist() for idx in layer_indices}}
+        mgr.register_config(config_hash=7, vectors=vectors, phase="prefill")
+
+        layers = _make_layers(mgr, layer_indices=layer_indices)
+        # First call: builds the backing (which itself does L per-layer
+        # ``copy_`` calls to seed). Run it once outside the profiler
+        # window so we measure the steady-state scatter cost.
+        mgr.populate_steering_tables(layers)
+
+        # Force a re-populate so the profiled call definitely scatters.
+        mgr._tables_dirty = True
+
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU],
+            record_shapes=False,
+        ) as prof:
+            mgr.populate_steering_tables(layers)
+
+        index_copy_calls = sum(
+            1
+            for ev in prof.events()
+            if ev.name == "aten::index_copy_"
+        )
+        # One hook, one dtype, so exactly one fused scatter per populate.
+        # Anything > 1 means we regressed back to per-layer launches.
+        assert index_copy_calls == 1, (
+            f"Expected 1 fused index_copy_ per populate, got "
+            f"{index_copy_calls}. Layers={len(layer_indices)} would have "
+            f"emitted {len(layer_indices)} on the unfused path."
+        )
+
+    def test_aliasing_survives_repopulate_after_register_release(self):
+        """Register/release of configs must not break the buffer aliasing.
+
+        ``register_config`` / ``release_config`` flip the indices-dirty
+        flag but should not reset the fused backing — the per-layer
+        buffer rebind is set up the first time and persists.
+        """
+        mgr = _make_manager()
+        layer_indices = list(range(4))
+        layers = _make_layers(mgr, layer_indices=layer_indices)
+
+        # First populate with one config — sets up backings.
+        v1 = {_HP: {idx: [1.0] * HIDDEN_SIZE for idx in layer_indices}}
+        mgr.register_config(config_hash=11, vectors=v1, phase="prefill")
+        mgr.populate_steering_tables(layers)
+        first_backing_id = (
+            getattr(layers[0], _TABLE_ATTR).untyped_storage().data_ptr()
+        )
+
+        # Register another, then release the first.
+        v2 = {_HP: {idx: [2.0] * HIDDEN_SIZE for idx in layer_indices}}
+        mgr.register_config(config_hash=22, vectors=v2, phase="decode")
+        mgr.release_config(config_hash=11, phase="prefill")
+        mgr.populate_steering_tables(layers)
+        second_backing_id = (
+            getattr(layers[0], _TABLE_ATTR).untyped_storage().data_ptr()
+        )
+
+        # Same backing should still be in use — the layer set didn't
+        # change shape.
+        assert first_backing_id == second_backing_id, (
+            "Backing storage should be stable across config "
+            "register/release; got rebuild instead."
+        )
+        # And aliasing should still hold across all layers.
+        storage_ids = {
+            getattr(layers[idx], _TABLE_ATTR).untyped_storage().data_ptr()
+            for idx in layer_indices
+        }
+        assert len(storage_ids) == 1

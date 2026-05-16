@@ -52,6 +52,17 @@ from vllm.model_executor.layers.steering import (
     SteeringHookPoint,
 )
 
+# Sentinel for the per-(hook_point, dtype) fused-backing cache key. The
+# cache maps ``(hp_str, dtype) -> (backing_tensor[L, R, H], layer_idxs)``.
+# When all per-layer ``steering_table_<hp>`` buffers in a group are views
+# into the same backing tensor, ``populate_steering_tables`` issues ONE
+# ``backing.index_copy_(1, indices, casted_stack)`` per group instead of
+# one ``index_copy_`` per layer. With 34 layers and 1 hook this collapses
+# 34 sequential ~80 us launches into 1 — directly addressing the launch-
+# bound ``populate.scatter.index_copy_loop`` cost (~13–29 ms / mode on
+# Gemma-3-4B / 3090; see PR description for trace evidence).
+FusedBackingKey = tuple[str, torch.dtype]
+
 logger = init_logger(__name__)
 
 
@@ -124,6 +135,22 @@ class SteeringManager:
         self._cached_zero_row: torch.Tensor | None = None
         self._cached_ordered_configs: list[tuple[tuple[int, str], int]] | None = None
         self._indices_dirty: bool = True
+
+        # Per-(hook_point, dtype) fused backing tensors of shape
+        # ``[L, max_steering_configs + 3, hidden_size]``. Lazily allocated
+        # on the first ``populate_steering_tables`` call. Each per-layer
+        # ``steering_table_<hp>`` buffer is rebound (via
+        # :py:meth:`torch.Tensor.set_`) to alias ``backing[i]`` so the
+        # apply-steering kernel and any cached ``getattr`` references
+        # keep working unchanged (the view is row-contiguous ``[R, H]``).
+        #
+        # The cache value is ``(backing_tensor, list[layer_idx])``: the
+        # layer-idx list mirrors the discovery order used when the backing
+        # was built so subsequent populates can detect a layer-set drift
+        # and rebuild the backing instead of writing to a stale view.
+        self._fused_backings: dict[
+            FusedBackingKey, tuple[torch.Tensor, list[int]]
+        ] = {}
 
     def register_config(
         self,
@@ -374,6 +401,115 @@ class SteeringManager:
             return cpu_t.to(self.device, non_blocking=True)
         return cpu_t.to(self.device)
 
+    def _ensure_fused_backing(
+        self,
+        *,
+        hp_str: str,
+        dtype: torch.dtype,
+        active_positions: list[int],
+        active_tables: list[tuple[torch.Tensor, str, int, "torch.nn.Module"]],
+        table_rows: int,
+        hidden_size: int,
+        device: torch.device,
+    ) -> torch.Tensor | None:
+        """Return the contiguous ``[L, R, H]`` backing for a hook/dtype group.
+
+        Lazily allocates the backing on first call and rebinds each
+        layer's ``steering_table_<hp>`` buffer to ``backing[i]`` so that
+        existing ``getattr(mod, table_attr)`` callers (the apply-steering
+        kernel, tests, status reporters) keep working unchanged.
+
+        ``table_rows`` is the per-layer buffer's full row capacity
+        (``max_steering_configs + 3``), NOT the count of currently-active
+        rows — the backing has to match the registered buffer's shape so
+        downstream consumers indexing into rows beyond the active count
+        keep reading the zero sentinel.
+
+        Returns ``None`` when the group cannot be fused — currently only
+        when discovered tables disagree on shape or device, which would
+        indicate an upstream construction inconsistency. Callers fall
+        back to the per-layer ``index_copy_`` loop in that case.
+
+        Invariants on the returned backing:
+
+        - ``backing.shape == (len(active_positions), table_rows, hidden_size)``
+        - ``backing.dtype == dtype``
+        - ``backing.device == device``
+        - For every ``i, ap`` in ``enumerate(active_positions)``:
+          ``active_tables[ap][0].data_ptr() == backing[i].data_ptr()``
+          (the per-layer buffer aliases the backing slice).
+        """
+        key: FusedBackingKey = (hp_str, dtype)
+        cached = self._fused_backings.get(key)
+
+        # Build the candidate layer-idx order for this group, mirroring
+        # ``active_positions``. The backing's dim 0 maps 1:1 to this
+        # order by construction.
+        layer_idxs: list[int] = [
+            active_tables[ap][2] for ap in active_positions
+        ]
+
+        # All tables in a group must agree on shape — registration in
+        # ``register_steering_buffers`` always uses ``(max_configs+3,
+        # hidden)`` so this is a safety check, not an expected branch.
+        for ap in active_positions:
+            t = active_tables[ap][0]
+            if t.shape[0] != table_rows or t.shape[1] != hidden_size:
+                return None
+            if t.device != device:
+                return None
+
+        if cached is not None:
+            backing, cached_layer_idxs = cached
+            if (
+                cached_layer_idxs == layer_idxs
+                and backing.shape == (len(layer_idxs), table_rows, hidden_size)
+                and backing.dtype == dtype
+                and backing.device == device
+            ):
+                # Already built with this exact layer order. Verify the
+                # per-layer buffers still alias the backing — if a caller
+                # rebound the buffer behind our back (e.g. test fakes
+                # constructing a fresh ``register_buffer`` each step),
+                # rebuild instead of writing to an orphaned tensor.
+                aliased = True
+                for i, ap in enumerate(active_positions):
+                    if active_tables[ap][0].data_ptr() != backing[i].data_ptr():
+                        aliased = False
+                        break
+                if aliased:
+                    return backing
+            # Shape / order / aliasing changed — drop and rebuild.
+
+        # Build a fresh backing of shape ``[L, R, H]`` matching the
+        # group's dtype and device, seeded from the current per-layer
+        # buffer contents so the rebind is content-preserving (rows that
+        # this populate call will not overwrite stay at their pre-fuse
+        # values — typically zeros from ``register_steering_buffers``).
+        L = len(layer_idxs)
+        backing = torch.empty(
+            (L, table_rows, hidden_size), dtype=dtype, device=device
+        )
+        for i, ap in enumerate(active_positions):
+            table = active_tables[ap][0]
+            backing[i].copy_(table)
+            # Rebind in place via ``Tensor.set_``: this swaps the
+            # storage pointer of the existing per-layer buffer object to
+            # alias the backing slice WITHOUT creating a new Python
+            # tensor. Any references previously captured by callers
+            # (e.g. ``table = getattr(mod, attr)`` followed by a later
+            # read) keep working — they observe the live backing data.
+            # Using ``setattr(mod, attr, view)`` would have replaced the
+            # ``_buffers`` entry but orphaned outside references, which
+            # breaks tests / consumers that cache the buffer ref.
+            table.set_(backing[i])
+            # ``active_tables`` already holds ``table``; after ``set_``
+            # the storage is swapped in place so the entry stays valid
+            # without having to rebuild it.
+
+        self._fused_backings[key] = (backing, layer_idxs)
+        return backing
+
     def populate_steering_tables(
         self, steerable_layers: dict[int, "torch.nn.Module"]
     ) -> None:
@@ -398,6 +534,13 @@ class SteeringManager:
             to each table via ``index_copy_``. This consolidates ~84
             independent ``stacked.to(dtype=...)`` casts on Gemma-3-4B
             (3 hooks * 28 layers) into one.
+        3.  Per-layer table buffers within a ``(hook_point, dtype)``
+            group are backed by one contiguous ``[L, R, H]`` tensor
+            (lazily allocated on the first call). The scatter then
+            issues ONE ``backing.index_copy_(1, indices, casted)`` per
+            group instead of L sequential per-layer ``index_copy_``
+            calls — collapsing ~34 launches per hook (≈80 us each on a
+            3090) into 1.
         """
         # Build a flat list of (table_buffer, hp_str, layer_idx, mod) for
         # every (hook, layer) pair that actually has a table buffer
@@ -466,7 +609,8 @@ class SteeringManager:
         # Build all rows for all active tables in fp32. ``all_rows`` ends
         # up shape ``(num_active_tables, num_rows, hidden)``. We do ONE
         # ``.to(dtype=table.dtype)`` cast on the whole stack instead of
-        # per-(hook, layer), then index_copy_ each layer's slice.
+        # per-(hook, layer), then scatter each ``(hook, dtype)`` group
+        # into its fused backing tensor with a single ``index_copy_``.
         num_rows = 3 + len(ordered_configs)
         per_table_rows: list[list[torch.Tensor]] = []
         for _table, hp_str, layer_idx, _mod in active_tables:
@@ -536,9 +680,11 @@ class SteeringManager:
             per_table_any_active.append(any_active)
 
         # Stack all rows into one fp32 tensor of shape
-        # ``(num_active_tables, num_rows, hidden)`` and split by dtype.
-        # The vast majority of deployments use a single dtype across all
-        # tables, so the dtype loop is one iteration in the common case.
+        # ``(num_active_tables, num_rows, hidden)`` and split by
+        # ``(hook_point, dtype)``. The vast majority of deployments use
+        # a single dtype across all tables and a small fixed number of
+        # hook points, so this is a handful of iterations in the common
+        # case (Gemma-3-4B with one active hook -> one group).
         flat_rows: list[torch.Tensor] = [
             r for table_rows in per_table_rows for r in table_rows
         ]
@@ -546,17 +692,57 @@ class SteeringManager:
             len(active_tables), num_rows, hidden_size
         )
 
-        # Group by dtype so we can do one cast per dtype.
-        dtype_to_indices: dict[torch.dtype, list[int]] = defaultdict(list)
-        for i, (table, _hp, _layer, _mod) in enumerate(active_tables):
-            dtype_to_indices[table.dtype].append(i)
+        # Group by ``(hp_str, dtype)`` so the per-group scatter can
+        # target one contiguous ``[L_group, R, H]`` backing tensor with
+        # a single ``index_copy_(1, indices, casted)`` call.
+        group_to_indices: dict[FusedBackingKey, list[int]] = defaultdict(list)
+        for i, (table, hp_str, _layer, _mod) in enumerate(active_tables):
+            group_to_indices[(hp_str, table.dtype)].append(i)
 
-        for dtype, table_indices_in_active in dtype_to_indices.items():
-            # One batched cast covering every table that uses this dtype.
-            casted = stacked_fp32[table_indices_in_active].to(dtype=dtype)
-            for casted_pos, active_pos in enumerate(table_indices_in_active):
-                table = active_tables[active_pos][0]
-                table.index_copy_(0, indices, casted[casted_pos])
+        for (hp_str, dtype), active_positions in group_to_indices.items():
+            # One batched cast covering every table in this group.
+            casted = stacked_fp32[active_positions].to(dtype=dtype)
+
+            # Look up (and lazily build) the fused backing tensor for
+            # this ``(hook_point, dtype)`` group. If every table in the
+            # group already aliases the backing along dim 0, the scatter
+            # below is a single ``index_copy_(1, ...)`` kernel launch.
+            #
+            # The backing must match the per-layer buffer's full row
+            # capacity (``max_steering_configs + 3``), not the number of
+            # currently-active rows: ``index_copy_`` only writes the rows
+            # named in ``indices``, leaving the others (zero-init from
+            # ``register_steering_buffers``) untouched, and existing
+            # callers like the apply-steering kernel index into the full
+            # row range.
+            table_rows = active_tables[active_positions[0]][0].shape[0]
+            backing = self._ensure_fused_backing(
+                hp_str=hp_str,
+                dtype=dtype,
+                active_positions=active_positions,
+                active_tables=active_tables,
+                table_rows=table_rows,
+                hidden_size=hidden_size,
+                device=device,
+            )
+
+            if backing is not None:
+                # Fused fast path: ONE scatter for the whole group. The
+                # backing's dim 0 maps 1:1 to ``active_positions`` order
+                # by construction, and ``casted`` was assembled in the
+                # same order (it's ``stacked_fp32[active_positions]``).
+                # ``index_copy_(1, indices, casted)`` writes the same
+                # ``indices`` rows into every layer slice in one launch.
+                backing.index_copy_(1, indices, casted)
+            else:
+                # Fallback (heterogeneous: tables in this group are NOT
+                # views into a shared backing — e.g. unit-test fakes
+                # that registered each buffer independently). Loop per
+                # layer; this is the original launch-bound path but is
+                # only hit in tests / pathological setups.
+                for casted_pos, active_pos in enumerate(active_positions):
+                    table = active_tables[active_pos][0]
+                    table.index_copy_(0, indices, casted[casted_pos])
 
         # Write the per-(hook, layer) any-active flags into each layer's
         # bool buffer so the apply_steering kernel can short-circuit when
