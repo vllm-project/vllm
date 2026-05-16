@@ -3,10 +3,12 @@
 
 import sys
 import types
+from typing import Any
 
 import torch
 
 from vllm.config.load import LoadConfig
+from vllm.model_executor.model_loader import bitsandbytes_loader
 from vllm.model_executor.model_loader.bitsandbytes_loader import (
     BitsAndBytesModelLoader,
 )
@@ -27,12 +29,14 @@ def _install_fake_bitsandbytes(monkeypatch, dequantized_weight: torch.Tensor):
     def dequantize_4bit(weight, quant_state):
         return dequantized_weight.clone()
 
-    functional.QuantState = FakeQuantState
-    functional.dequantize_4bit = dequantize_4bit
+    functional_any: Any = functional
+    functional_any.QuantState = FakeQuantState
+    functional_any.dequantize_4bit = dequantize_4bit
 
     bitsandbytes = types.ModuleType("bitsandbytes")
-    bitsandbytes.__version__ = "99.0.0"
-    bitsandbytes.functional = functional
+    bitsandbytes_any: Any = bitsandbytes
+    bitsandbytes_any.__version__ = "99.0.0"
+    bitsandbytes_any.functional = functional
 
     monkeypatch.setitem(sys.modules, "bitsandbytes", bitsandbytes)
     monkeypatch.setitem(sys.modules, "bitsandbytes.functional", functional)
@@ -59,17 +63,28 @@ def _loader_for_entries(entries, param_dict):
     return loader
 
 
+def _capture_debug_logs(monkeypatch):
+    debug_logs = []
+
+    def debug(msg, *args, **kwargs):
+        debug_logs.append(msg % args)
+
+    monkeypatch.setattr(bitsandbytes_loader.logger, "debug", debug)
+    return debug_logs
+
+
 def test_prequant_4bit_plain_param_is_dequantized(monkeypatch):
     packed_weight = torch.arange(3, dtype=torch.uint8).reshape(3, 1)
     dequantized_weight = torch.arange(6, dtype=torch.float32).reshape(2, 3)
     target_param = torch.nn.Parameter(torch.empty(2, 3, dtype=torch.float16))
     _install_fake_bitsandbytes(monkeypatch, dequantized_weight)
+    debug_logs = _capture_debug_logs(monkeypatch)
 
     loader = _loader_for_entries(
         _bnb_4bit_entries("plain.weight", packed_weight),
         {"plain.weight": target_param},
     )
-    quant_state_dict = {}
+    quant_state_dict: dict[str, Any] = {}
 
     loaded = list(loader._quantized_4bit_generator([], True, quant_state_dict))
 
@@ -81,6 +96,9 @@ def test_prequant_4bit_plain_param_is_dequantized(monkeypatch):
         loaded[0][1], dequantized_weight.to(dtype=target_param.dtype)
     )
     assert quant_state_dict == {}
+    logs = "\n".join(debug_logs)
+    assert "Dequantizing pre-quantized BNB 4bit weight plain.weight" in logs
+    assert "target parameter plain.weight" in logs
 
 
 def test_prequant_4bit_bnb_param_keeps_packed_weight(monkeypatch):
@@ -97,7 +115,7 @@ def test_prequant_4bit_bnb_param_keeps_packed_weight(monkeypatch):
         _bnb_4bit_entries("bnb.weight", packed_weight),
         {"bnb.weight": target_param},
     )
-    quant_state_dict = {}
+    quant_state_dict: dict[str, Any] = {}
 
     loaded = list(loader._quantized_4bit_generator([], True, quant_state_dict))
 
@@ -115,16 +133,20 @@ def test_prequant_4bit_packed_bnb_param_keeps_packed_weight(monkeypatch):
     target_param.use_bitsandbytes_4bit = True
     target_param.pack_factor = 2
     _install_fake_bitsandbytes(monkeypatch, dequantized_weight)
+    debug_logs = _capture_debug_logs(monkeypatch)
 
     loader = _loader_for_entries(
         _bnb_4bit_entries("layer.q_proj.weight", packed_weight),
         {"layer.qkv_proj.weight": target_param},
     )
     loader.modules_mapping = ParamMapping({"qkv_proj": ["q_proj", "k_proj", "v_proj"]})
-    quant_state_dict = {}
+    quant_state_dict: dict[str, Any] = {}
 
     loaded = list(loader._quantized_4bit_generator([], True, quant_state_dict))
 
     assert len(loaded) == 1
     assert loaded[0] == ("layer.q_proj.weight", packed_weight)
     assert "layer.q_proj.weight" in quant_state_dict
+    logs = "\n".join(debug_logs)
+    assert "Keeping pre-quantized BNB 4bit weight layer.q_proj.weight packed" in logs
+    assert "target_parameter=layer.qkv_proj.weight" in logs
