@@ -9,6 +9,9 @@ PATH=${cuda_home}/bin:$PATH
 LD_LIBRARY_PATH=${cuda_home}/lib64:$LD_LIBRARY_PATH
 
 # Install requirements
+if [ "$(echo $2 | cut -d. -f1)" = "12" ]; then
+    sed -i 's/^nvidia-cutlass-dsl\[cu13\]>=/nvidia-cutlass-dsl>=/' requirements/cuda.txt
+fi
 $python_executable -m pip install -r requirements/build/cuda.txt -r requirements/cuda.txt
 
 # Limit the number of parallel jobs to avoid OOM
