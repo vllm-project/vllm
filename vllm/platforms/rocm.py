@@ -374,6 +374,13 @@ def flash_attn_triton_available() -> bool:
         return False
 
 
+def _model_uses_sliding_window() -> bool:
+    from vllm.config import get_current_vllm_config
+
+    vllm_config = get_current_vllm_config()
+    return vllm_config.model_config.get_sliding_window() is not None
+
+
 def _get_backend_priorities(
     use_mla: bool,
     use_sparse: bool,
@@ -396,13 +403,14 @@ def _get_backend_priorities(
                 AttentionBackendEnum.TRITON_MLA,
             ]
 
-    backends = []
-    # ROCM_ATTN uses (2, num_blocks, ...) KV cache layout which is
-    # incompatible with KV connectors that require blocks-first layout.
-    if not use_kv_connector:
-        backends.append(AttentionBackendEnum.ROCM_ATTN)
+    backends: list[AttentionBackendEnum] = []
     if rocm_aiter_ops.is_mha_enabled():
         backends.append(AttentionBackendEnum.ROCM_AITER_FA)
+    # ROCM_ATTN right now has extremely slow performance on sliding window attention
+    # ROCM_ATTN uses (2, num_blocks, ...) KV cache layout which is
+    # incompatible with KV connectors that require blocks-first layout.
+    if not _model_uses_sliding_window() and not use_kv_connector:
+        backends.append(AttentionBackendEnum.ROCM_ATTN)
     if is_aiter_found_and_supported():
         backends.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
     backends.append(AttentionBackendEnum.TRITON_ATTN)
