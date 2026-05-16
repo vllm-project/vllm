@@ -316,9 +316,25 @@ class MoERunner(MoERunnerInterface):
 
     # TODO(bnell): temporary hack, do not call this method.
     def _replace_quant_method(self, quant_method: FusedMoEMethodBase):
+        old_quant_method = self._quant_method
+        old_forward_mode = self.forward_mode
+        old_shared_quant_method: FusedMoEMethodBase | None = (
+            self._shared_experts._quant_method
+            if self._shared_experts is not None
+            else None
+        )
         if self._shared_experts is not None:
             self._shared_experts._quant_method = quant_method
         self._quant_method = quant_method
+        try:
+            self.forward_mode = self._determine_forward_mode()
+        except Exception:
+            if self._shared_experts is not None:
+                assert old_shared_quant_method is not None
+                self._shared_experts._quant_method = old_shared_quant_method
+            self._quant_method = old_quant_method
+            self.forward_mode = old_forward_mode
+            raise
 
     def _maybe_fuse_gate_weights(self):
         """Fuse router and shared expert gate weights on first call.

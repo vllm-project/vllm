@@ -140,6 +140,13 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         activation_out_dim = self.adjust_N_for_activation(N, activation)
+        if envs.VLLM_FUSED_MOE_WRAP_MODE == "unwrapped":
+            return (
+                (M * topk, activation_out_dim),
+                (M, topk, N),
+                (M, K),
+            )
+
         workspace1 = (M, topk, max(activation_out_dim, K))
         workspace2 = (M, topk, max(N, K))
         output = (M, K)
@@ -205,13 +212,22 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
 
         compute_type = _moe_compute_type(hidden_states.dtype)
 
-        # The modular kernel owns allocation; Triton experts only carve the
-        # backend-specific cache views from the provided workspaces.
-        intermediate_cache1 = _resize_cache(workspace2, (num_tokens, top_k_num, N))
-        intermediate_cache2 = _resize_cache(
-            workspace13, (num_tokens * top_k_num, cache2_dim)
-        )
-        intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
+        if use_unwrapped:
+            intermediate_cache1 = workspace2
+            intermediate_cache2 = workspace13
+            intermediate_cache3 = torch.empty(
+                (num_tokens, top_k_num, K),
+                dtype=workspace2.dtype,
+                device=workspace2.device,
+            )
+        else:
+            # The modular kernel owns allocation; Triton experts only carve the
+            # backend-specific cache views from the provided workspaces.
+            intermediate_cache1 = _resize_cache(workspace2, (num_tokens, top_k_num, N))
+            intermediate_cache2 = _resize_cache(
+                workspace13, (num_tokens * top_k_num, cache2_dim)
+            )
+            intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
 
         if use_unwrapped:
             torch.ops.vllm.moe_expert_projection(
@@ -395,7 +411,10 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> torch.Tensor | None:
         if envs.VLLM_FUSED_MOE_WRAP_MODE == "unwrapped":
-            ops.moe_sum(input, output)
+            reduced = torch.sum(input, dim=1)
+            if torch.compiler.is_compiling():
+                return reduced
+            output.copy_(reduced)
             return output
 
         ops.moe_sum(input, output)
