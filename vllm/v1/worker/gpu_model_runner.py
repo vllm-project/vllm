@@ -21,6 +21,10 @@ import torch.nn as nn
 from tqdm import tqdm
 
 import vllm.envs as envs
+from vllm.compilation.breakable_cudagraph import (
+    BreakableCUDAGraphWrapper,
+    is_breakable_cudagraph_enabled,
+)
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
@@ -3127,7 +3131,9 @@ class GPUModelRunner(
     def get_model(self) -> nn.Module:
         if not hasattr(self, "model"):
             raise ValueError("Cannot get model before model has been initialized")
-        if isinstance(self.model, (CUDAGraphWrapper, UBatchWrapper)):
+        if isinstance(
+            self.model, (CUDAGraphWrapper, UBatchWrapper, BreakableCUDAGraphWrapper)
+        ):
             # get raw model out of the cudagraph wrapper.
             return self.model.unwrap()
         return self.model
@@ -5130,6 +5136,12 @@ class GPUModelRunner(
         cudagraph_mode = self.compilation_config.cudagraph_mode
         assert cudagraph_mode is not None
         if (
+            is_breakable_cudagraph_enabled()
+            and cudagraph_mode != CUDAGraphMode.NONE
+            and not self.parallel_config.use_ubatching
+        ):
+            self.model = BreakableCUDAGraphWrapper(self.model, self.vllm_config)
+        elif (
             cudagraph_mode.has_full_cudagraphs()
             and not self.parallel_config.use_ubatching
         ):
@@ -6206,7 +6218,10 @@ class GPUModelRunner(
         # Use a temporary pool for profiling to avoid fragmentation in the main pool.
         profiling_pool = current_platform.graph_pool_handle()
         original_pools: dict[int, Any] = {}
-        for instance in list(CUDAGraphWrapper._all_instances):
+        all_wrappers = list(CUDAGraphWrapper._all_instances) + list(
+            BreakableCUDAGraphWrapper._all_instances
+        )
+        for instance in all_wrappers:
             original_pools[id(instance)] = instance.graph_pool
             instance.graph_pool = profiling_pool
 
@@ -6257,7 +6272,11 @@ class GPUModelRunner(
 
         set_cudagraph_capturing_enabled(False)
         CUDAGraphWrapper.clear_all_graphs()
-        for instance in list(CUDAGraphWrapper._all_instances):
+        BreakableCUDAGraphWrapper.clear_all_graphs()
+        all_wrappers = list(CUDAGraphWrapper._all_instances) + list(
+            BreakableCUDAGraphWrapper._all_instances
+        )
+        for instance in all_wrappers:
             if id(instance) in original_pools:
                 instance.graph_pool = original_pools[id(instance)]
         for key_set in self.cudagraph_dispatcher.cudagraph_keys.values():

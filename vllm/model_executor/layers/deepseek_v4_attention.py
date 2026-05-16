@@ -14,6 +14,7 @@ import torch.nn.functional as F
 from transformers import DeepseekV2Config, DeepseekV3Config
 
 import vllm.envs as envs
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
 )
@@ -553,6 +554,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         )
 
 
+@eager_break_during_capture
 def deepseek_v4_attention(
     hidden_states: torch.Tensor,
     positions: torch.Tensor,
