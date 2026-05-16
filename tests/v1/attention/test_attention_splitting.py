@@ -6,7 +6,9 @@ import torch
 
 from tests.v1.attention.test_attention_backends import BATCH_SPECS
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
+from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.utils import (
+    make_kv_sharing_fast_prefill_common_attn_metadata,
     split_decodes_and_prefills,
     split_decodes_prefills_and_extends,
 )
@@ -502,3 +504,122 @@ def test_split_decodes_prefills_and_extends_token_counts_sum():
         assert nd + ne + np_ == len(query_lens), (
             f"Request count mismatch: {nd}+{ne}+{np_} != {len(query_lens)}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Tests for make_kv_sharing_fast_prefill_common_attn_metadata
+# ---------------------------------------------------------------------------
+
+
+def _make_fast_prefill_input(
+    query_lens: list[int],
+    seq_lens: list[int],
+    logits_indices: list[int],
+) -> CommonAttentionMetadata:
+    """Build a minimal CommonAttentionMetadata for fast-prefill metadata tests.
+
+    All tensors are kept on CPU so no GPU is required.
+    """
+    n = len(query_lens)
+    qsl = [0] + list(__import__("itertools").accumulate(query_lens))
+    query_start_loc = torch.tensor(qsl, dtype=torch.int32)
+    seq_lens_t = torch.tensor(seq_lens, dtype=torch.int32)
+    li = torch.tensor(logits_indices, dtype=torch.int32)
+    dummy = torch.zeros(0, dtype=torch.int32)
+    return CommonAttentionMetadata(
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc.clone(),
+        seq_lens=seq_lens_t,
+        num_reqs=n,
+        num_actual_tokens=sum(query_lens),
+        max_query_len=max(query_lens),
+        max_seq_len=max(seq_lens),
+        block_table_tensor=dummy,
+        slot_mapping=dummy,
+        seq_lens_cpu_upper_bound=seq_lens_t.clone(),
+        logits_indices_padded=li,
+        num_logits_indices=len(logits_indices),
+    )
+
+
+def test_make_kv_sharing_fast_prefill_pure_decode_shortcircuit():
+    """max_query_len == 1 → function returns the input unchanged."""
+    meta = _make_fast_prefill_input(
+        query_lens=[1, 1, 1],
+        seq_lens=[10, 20, 30],
+        logits_indices=[0, 1, 2],
+    )
+    result = make_kv_sharing_fast_prefill_common_attn_metadata(meta)
+    assert result is meta
+
+
+@pytest.mark.parametrize(
+    "query_lens,seq_lens,logits_indices,exp_total,exp_max",
+    [
+        # 3 requests: 3/2/1 decode tokens each
+        # query_start_loc = [0, 5, 10, 15]; valid range for each req:
+        #   req0=[0,4], req1=[5,9], req2=[10,14]
+        (
+            [5, 5, 5],
+            [41, 31, 40],
+            [0, 1, 2, 5, 8, 12],
+            6,
+            3,
+        ),
+        # 2 requests: 1 decode token each (equal distribution)
+        # query_start_loc = [0, 3, 6]; req0=[0,2], req1=[3,5]
+        (
+            [3, 3],
+            [20, 30],
+            [0, 3],
+            2,
+            1,
+        ),
+        # 1 request: all tokens are decode
+        # query_start_loc = [0, 4]; req0=[0,3]
+        (
+            [4],
+            [10],
+            [0, 1, 2, 3],
+            4,
+            4,
+        ),
+    ],
+)
+def test_make_kv_sharing_fast_prefill_scalar_values(
+    query_lens, seq_lens, logits_indices, exp_total, exp_max
+):
+    """num_actual_tokens and max_query_len are correct Python ints."""
+    meta = _make_fast_prefill_input(query_lens, seq_lens, logits_indices)
+    result = make_kv_sharing_fast_prefill_common_attn_metadata(meta)
+
+    assert isinstance(result.num_actual_tokens, int), (
+        f"num_actual_tokens should be int, got {type(result.num_actual_tokens)}"
+    )
+    assert isinstance(result.max_query_len, int), (
+        f"max_query_len should be int, got {type(result.max_query_len)}"
+    )
+    assert result.num_actual_tokens == exp_total, (
+        f"Expected num_actual_tokens={exp_total}, got {result.num_actual_tokens}"
+    )
+    assert result.max_query_len == exp_max, (
+        f"Expected max_query_len={exp_max}, got {result.max_query_len}"
+    )
+
+
+def test_make_kv_sharing_fast_prefill_query_start_loc_consistent():
+    """query_start_loc_cpu last element equals num_actual_tokens."""
+    # query_start_loc=[0,5,10,15]; valid idx: req0=[0,4], req1=[5,9], req2=[10,14]
+    meta = _make_fast_prefill_input(
+        query_lens=[5, 5, 5],
+        seq_lens=[41, 31, 40],
+        logits_indices=[0, 1, 2, 5, 8, 12],
+    )
+    result = make_kv_sharing_fast_prefill_common_attn_metadata(meta)
+
+    cpu = result.query_start_loc_cpu
+    assert cpu.device.type == "cpu"
+    assert int(cpu[-1]) == result.num_actual_tokens
+    # Adjacent differences must be non-negative
+    diffs = cpu[1:] - cpu[:-1]
+    assert (diffs >= 0).all()

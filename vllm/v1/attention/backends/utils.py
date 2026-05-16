@@ -412,16 +412,20 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
 
     decode_query_start_loc[:1].fill_(0)  # Avoid sync from scalar assignment.
     decode_query_start_loc[1:] = torch.cumsum(num_decode_tokens, dim=0)
-    decode_max_query_len = int(num_decode_tokens.max().item())
-    # TODO(perf): .max() and .sum() here force GPU→CPU syncs because
-    # num_decode_tokens is a GPU tensor.  Both values can be derived from
-    # decode_query_start_loc_cpu once it is available (last element = total,
-    # max per-request count from adjacent differences), avoiding these syncs.
-    total_num_decode_tokens = int(num_decode_tokens.sum().item())
+    # Transfer the cumsum tensor to CPU once; derive both scalar values on CPU,
+    # eliminating two separate GPU reduction syncs (.max() and .sum() on the
+    # GPU tensor num_decode_tokens).  The last element of the cumulative sum is
+    # the total token count; adjacent differences reconstruct per-request counts
+    # whose maximum is the max query length.
+    decode_query_start_loc_cpu = decode_query_start_loc.cpu()
+    total_num_decode_tokens = int(decode_query_start_loc_cpu[-1])
+    decode_max_query_len = int(
+        (decode_query_start_loc_cpu[1:] - decode_query_start_loc_cpu[:-1]).max()
+    )
 
     common_attn_metadata = CommonAttentionMetadata(
         query_start_loc=decode_query_start_loc,
-        query_start_loc_cpu=decode_query_start_loc.to("cpu", non_blocking=True),
+        query_start_loc_cpu=decode_query_start_loc_cpu,
         seq_lens=common_attn_metadata.seq_lens,
         num_reqs=num_reqs,
         num_actual_tokens=total_num_decode_tokens,
