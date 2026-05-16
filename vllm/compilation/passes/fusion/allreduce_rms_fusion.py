@@ -26,6 +26,9 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    QuantKey,
+    ScaleDesc,
     kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
@@ -1002,6 +1005,169 @@ class AiterAllreduceFusedAddRMSNormPattern(BasePattern, VllmPatternReplacement):
         return _replacement
 
 
+class AiterAllreduceFusedRMSNormGroupQuantFP8Pattern(
+    BasePattern, VllmPatternReplacement
+):
+    """Fuse AllReduce + RMSNorm + per-group FP8 quant into a single AITER
+    custom op.
+
+    Matches the AR-side analogue of ``AiterRMSFp8GroupQuantPattern`` in
+    ``rocm_aiter_fusion.py``: ``all_reduce -> rms_norm -> group_fp8_quant``
+    fans out into ``rocm_aiter_fused_allreduce_rmsnorm_quant_per_group``.
+
+    Without this pattern, ``RocmAiterAllReduceFusionPass`` would fuse the
+    ``all_reduce + rms_norm`` half (PR #41825 wires that), but the trailing
+    ``rocm_aiter_group_fp8_quant`` would still launch as a separate kernel.
+    That standalone quant accounts for ~535us / decode step on DSv3.2 MI355X
+    TP4 -- this pattern eliminates it by absorbing the quant into the AR
+    epilogue. Group size 128 matches the FP8 block-scaled MM kernel used by
+    DSv3.2's linear weights.
+    """
+
+    def __init__(
+        self,
+        epsilon: float,
+        dtype: torch.dtype,
+        device: str | None,
+        group_size: int = 128,
+    ) -> None:
+        super().__init__(dtype, device)
+        self.epsilon = epsilon
+        self.dtype = dtype
+        self.group_size = group_size
+        self.FUSED_AR_RMS_QUANT_OP = (
+            rocm_aiter_ops.get_fused_allreduce_rmsnorm_quant_per_group_op()
+        )
+        self.quant_dtype = current_platform.fp8_dtype()
+        self.quant_matcher = MatcherQuantFP8(
+            QuantKey(
+                dtype=self.quant_dtype,
+                scale=ScaleDesc(
+                    torch.float32, False, GroupShape(1, group_size)
+                ),
+                symmetric=True,
+            ),
+            match_rocm_aiter=True,
+        )
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        # input, weight; hidden dim must be a group_size multiple so the
+        # group quant matcher's example trace is well-defined.
+        return [self.empty(5, self.group_size), self.empty(self.group_size)]
+
+    @property
+    def pattern(self):
+        def _pattern(
+            input: torch.Tensor, weight: torch.Tensor
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            allreduce_output = tensor_model_parallel_all_reduce(input)
+            rms = vllm.ir.ops.rms_norm(allreduce_output, weight, self.epsilon)
+            quant, scale = self.quant_matcher(rms)
+            return quant, scale
+
+        return _pattern
+
+    @property
+    def replacement(self):
+        def _replacement(
+            input: torch.Tensor, weight: torch.Tensor
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            residual = torch.zeros_like(input)
+            result = self.FUSED_AR_RMS_QUANT_OP(
+                input_=input,
+                residual=residual,
+                weight=weight,
+                epsilon=self.epsilon,
+                group_size=self.group_size,
+            )
+            # quant_out, scale_out (residual is unused on the no-add path,
+            # mirroring how AiterAllreduceFusedRMSNormPattern drops the
+            # residual output)
+            return result[0], result[2]
+
+        return _replacement
+
+
+class AiterAllreduceFusedAddRMSNormGroupQuantFP8Pattern(
+    BasePattern, VllmPatternReplacement
+):
+    """``fused_add`` variant of ``AiterAllreduceFusedRMSNormGroupQuantFP8Pattern``.
+
+    Targets the dominant DSv3.2-style post-attention / post-MLP path:
+    ``all_reduce -> fused_add_rms_norm -> group_fp8_quant``. Returns the
+    FP8 quant output, the residual carry-over, and the per-group scale.
+    """
+
+    def __init__(
+        self,
+        epsilon: float,
+        dtype: torch.dtype,
+        device: str | None,
+        group_size: int = 128,
+    ) -> None:
+        super().__init__(dtype, device)
+        self.epsilon = epsilon
+        self.dtype = dtype
+        self.group_size = group_size
+        self.FUSED_AR_RMS_QUANT_OP = (
+            rocm_aiter_ops.get_fused_allreduce_rmsnorm_quant_per_group_op()
+        )
+        self.quant_dtype = current_platform.fp8_dtype()
+        self.quant_matcher = MatcherQuantFP8(
+            QuantKey(
+                dtype=self.quant_dtype,
+                scale=ScaleDesc(
+                    torch.float32, False, GroupShape(1, group_size)
+                ),
+                symmetric=True,
+            ),
+            match_rocm_aiter=True,
+        )
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        # residual, input, weight
+        return [
+            self.empty(5, self.group_size),
+            self.empty(5, self.group_size),
+            self.empty(self.group_size),
+        ]
+
+    @property
+    def pattern(self):
+        def _pattern(
+            residual: torch.Tensor,
+            input: torch.Tensor,
+            weight: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            allreduce_output = tensor_model_parallel_all_reduce(input)
+            rms, residual_out = vllm.ir.ops.fused_add_rms_norm(
+                allreduce_output, residual, weight, self.epsilon
+            )
+            quant, scale = self.quant_matcher(rms)
+            return quant, scale, residual_out
+
+        return _pattern
+
+    @property
+    def replacement(self):
+        def _replacement(
+            residual: torch.Tensor,
+            input: torch.Tensor,
+            weight: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            result = self.FUSED_AR_RMS_QUANT_OP(
+                input_=input,
+                residual=residual,
+                weight=weight,
+                epsilon=self.epsilon,
+                group_size=self.group_size,
+            )
+            # quant_out, scale_out, residual_out
+            return result[0], result[2], result[1]
+
+        return _replacement
+
+
 class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
     def __init__(self, config: VllmConfig) -> None:
         super().__init__(config, "rocm_aiter_allreduce_fusion_pass")
@@ -1071,7 +1237,43 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
             config.scheduler_config.max_num_batched_tokens,
         )
 
+        # Only register the AR+RMS+per-group-FP8-quant patterns when the
+        # running aiter exposes the kernel. Older aiter builds (pre PR #2823)
+        # fall back to the AR+RMS-only fusion paired with PR #41825's
+        # standalone RMS+quant fusion -- still correct, just leaves the
+        # post-AR quant as a standalone kernel.
+        supports_per_group_quant = (
+            rocm_aiter_ops.has_fused_allreduce_rmsnorm_quant_per_group()
+        )
+        if not supports_per_group_quant:
+            logger.warning_once(
+                "AITER AR+RMS+per-group-FP8-quant fusion disabled: aiter "
+                "build is missing 'fused_ar_rms_per_group_quant'. Upgrade "
+                "aiter past PR #2823 to enable the trailing per-group "
+                "FP8 quant fusion."
+            )
+
         for epsilon in [1e-5, 1e-6]:
+            # Quant-fused variants must register first so the pattern matcher
+            # tries them before the AR+RMS-only variants. Otherwise the
+            # AR+RMS-only fusion runs first and consumes the all_reduce node,
+            # leaving the trailing quant op stranded as an unfused kernel.
+            if supports_per_group_quant:
+                self.register(
+                    AiterAllreduceFusedRMSNormGroupQuantFP8Pattern(
+                        epsilon,
+                        self.model_dtype,
+                        self.device,
+                    )
+                )
+                self.register(
+                    AiterAllreduceFusedAddRMSNormGroupQuantFP8Pattern(
+                        epsilon,
+                        self.model_dtype,
+                        self.device,
+                    )
+                )
+
             self.register(
                 AiterAllreduceFusedRMSNormPattern(
                     epsilon,
