@@ -626,15 +626,35 @@ class TritonAttentionImpl(AttentionImpl):
         # We fold q_scale into softmax_scale unconditionally.  Additionally,
         # for the per-tensor FP8 path, _cast_kv_tile keeps K/V in FP8 for
         # FP8 MMA and skips k_scale/v_scale — we fold k_scale into
-        # softmax_scale and apply v_scale post-kernel (FlashInfer strategy).
+        # softmax_scale and v_scale into output_scale (FlashInfer strategy).
+        #
+        # NOTE: softmax_scale is a host-side scalar baked into the kernel
+        # launch. With CUDA Graphs + dynamic quantization, the captured
+        # graph will use the scale from capture time.  This matches
+        # FlashInfer's existing approach and is acceptable because scales
+        # stabilize during warmup before graph capture.
+        is_quantized_per_tensor = (
+            is_quantized_kv_cache(self.kv_cache_dtype)
+            and not self._is_per_token_head_quant
+        )
         softmax_scale = self.scale
         v_scale_float = 1.0
         if query.dtype == self.fp8_dtype:
+            # Always fold q_scale when Q is FP8: kernel has no q_descale.
             softmax_scale *= layer._q_scale_float
-            if not self._is_per_token_head_quant:
+            if is_quantized_per_tensor:
                 # Per-tensor path: kernel skips k/v descale for FP8 Q.
                 softmax_scale *= layer._k_scale_float
                 v_scale_float = layer._v_scale_float
+
+        # Fold v_scale into output_scale when output is FP8 (avoids crash
+        # from in-place mul_ on FP8 tensors and saves a memory pass).
+        # When output is bf16 (output_scale is None), apply post-kernel.
+        effective_output_scale = output_scale
+        if v_scale_float != 1.0 and output_scale is not None:
+            # Kernel does: acc * (1/output_scale).  We want:
+            # acc * v_scale * (1/output_scale) = acc * (1/(output_scale/v_scale))
+            effective_output_scale = output_scale / v_scale_float
 
         unified_attention(
             q=query[:num_actual_tokens],
@@ -661,7 +681,7 @@ class TritonAttentionImpl(AttentionImpl):
             softmax_segm_max=softmax_segm_max,
             softmax_segm_expsum=softmax_segm_expsum,
             sinks=self.sinks,
-            output_scale=output_scale,
+            output_scale=effective_output_scale,
             mm_prefix_range=mm_prefix_range_tensor,
             kv_quant_mode=self._kv_quant_mode,
             k_scale_cache=k_scale_cache,
@@ -670,8 +690,9 @@ class TritonAttentionImpl(AttentionImpl):
             use_td=self.use_td,
         )
 
-        # Apply v_scale post-kernel for FP8 per-tensor path (see comment above).
-        if v_scale_float != 1.0:
+        # Apply v_scale post-kernel when output is bf16 (output_scale=None).
+        # When output is FP8, v_scale was already folded into output_scale.
+        if v_scale_float != 1.0 and output_scale is None:
             output[:num_actual_tokens].mul_(v_scale_float)
 
         return output
