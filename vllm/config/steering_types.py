@@ -18,6 +18,7 @@ Where ``scale(entry)`` means: if entry is a bare list, scale=1.0; if entry is
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from collections import OrderedDict
 from collections.abc import Callable
@@ -25,8 +26,12 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from vllm.logger import init_logger
+
 if TYPE_CHECKING:
     from vllm.sampling_params import SamplingParams
+
+logger = init_logger(__name__)
 
 # Per-layer entry: bare list (scale=1.0) or {"vector": [...], "scale": float}.
 # This is the public, user-facing shape — the type alias is exposed as a
@@ -582,6 +587,17 @@ class SteeringAutoPromoteLRU:
         self._items.move_to_end(key)
         return existing
 
+    def forget(self, key: tuple[int, int]) -> None:
+        """Drop *key* from the LRU if present.
+
+        Used by the async broadcast path to roll back a registered entry
+        when ``register_steering_modules`` fails — the next request with
+        the same hash will then observe ``"first"`` status and fall back
+        to the inline-pack path instead of shipping a ``module_ref`` to
+        a name the worker never received.  No-op when *key* is absent.
+        """
+        self._items.pop(key, None)
+
     def __contains__(self, key: tuple[int, int]) -> bool:
         return key in self._items
 
@@ -829,29 +845,111 @@ async def maybe_auto_promote_steering_modules_async(
     sp: SamplingParams,
     rpc_fn: Callable[..., Any],
     registry_lru: SteeringAutoPromoteLRU,
-) -> None:
+) -> "asyncio.Task[None] | None":
     """Async variant for ``AsyncLLM.add_request``.
 
-    Identical contract to :func:`maybe_auto_promote_steering_modules`
-    except that *rpc_fn* is awaited (matches the
-    ``AsyncLLM.collective_rpc`` coroutine signature).
+    Identical eligibility / LRU semantics to
+    :func:`maybe_auto_promote_steering_modules`, but the
+    ``register_steering_modules`` (and paired
+    ``unregister_steering_modules``) collective RPCs are dispatched as a
+    background ``asyncio.Task`` rather than awaited inline.  The trace
+    evidence (3090, gemma-3-4b-it, NUM_PROMPTS=8 CONCURRENCY=4) shows
+    these broadcasts cost 32–44 ms each and map ~1:1 to a GPU idle gap
+    on the engine thread, so blocking the request that triggered the
+    promotion is the single biggest avoidable stall in inline-mode
+    traces.
+
+    Ordering invariant: the broadcast and the per-request submit both
+    flow over the same ZMQ ``input_socket`` FIFO from
+    ``add_request_async``.  ``asyncio.ensure_future`` enqueues the
+    broadcast coroutine first; CPython's asyncio scheduler then runs it
+    on the next event-loop tick — before the caller's subsequent
+    ``await self.engine_core.add_request_async(...)`` sends the request.
+    Engine-core processes both messages in arrival order, so the
+    triggering request reaches the worker after the registry update.
+
+    Failure handling: if the broadcast errors, the LRU entry is
+    rolled back so the *next* request observing the same hash falls
+    back to the inline-pack path (its ``observe`` returns ``"first"``).
+    The triggering request is not retried — it has already been
+    submitted with ``module_ref`` set and will surface the failure if
+    the worker rejects the unregistered name.  This is acceptable per
+    the perf design: graceful degradation for subsequent requests, not
+    transparent retry for the trigger.
+
+    Returns the dispatched broadcast ``asyncio.Task`` (or ``None`` when
+    no RPC is needed).  Production callers ignore the return value;
+    tests can ``await`` it to observe the broadcast's effect on the
+    spy ``rpc_fn``.
     """
     prep = _auto_promote_prep(sp, registry_lru)
     if prep is None:
-        return
+        return None
     name, payload, evicted = prep
-    if payload is not None:
+
+    # Apply the SP mutation synchronously so the engine sees the
+    # promoted form on the very next ``add_request_async`` send.  The
+    # broadcast then goes out as a background task that races the
+    # request through the same FIFO socket.
+    if name is not None:
+        _auto_promote_apply(sp, name)
+
+    has_register = payload is not None
+    has_unregister = evicted is not None and evicted[1] is not None
+    if not has_register and not has_unregister:
+        return None
+
+    # Recover the LRU key for rollback from the name itself when we
+    # registered.  Auto-promoted names embed (prefill_hash, decode_hash)
+    # in their suffix, so the helper round-trips the LRU key without
+    # threading it through ``_auto_promote_prep``'s return tuple.
+    rollback_key: tuple[int, int] | None = None
+    if has_register:
         assert name is not None
-        await rpc_fn(
-            "register_steering_modules",
-            kwargs={"modules": {name: payload}, "replace": False},
-        )
-    if evicted is not None:
-        _, evicted_name = evicted
-        if evicted_name is not None:
+        rollback_key = auto_promote_hashes_from_module_ref((name, 1.0))
+
+    evicted_name = evicted[1] if evicted is not None else None
+
+    async def _broadcast() -> None:
+        if has_register:
+            assert name is not None and payload is not None
+            try:
+                await rpc_fn(
+                    "register_steering_modules",
+                    kwargs={"modules": {name: payload}, "replace": False},
+                )
+            except Exception:
+                # Roll back so subsequent requests fall back to inline-pack
+                # rather than shipping ``module_ref`` to a name the worker
+                # never received.  The ``forget`` is best-effort: if the
+                # entry has already been evicted by a concurrent observer
+                # the no-op pop is fine.
+                if rollback_key is not None:
+                    registry_lru.forget(rollback_key)
+                raise
+        if has_unregister:
+            assert evicted_name is not None
             await rpc_fn(
                 "unregister_steering_modules",
                 kwargs={"names": [evicted_name]},
             )
-    if name is not None:
-        _auto_promote_apply(sp, name)
+
+    task: asyncio.Task[None] = asyncio.ensure_future(_broadcast())
+
+    def _swallow(t: "asyncio.Task[None]") -> None:
+        # Reading the exception marks it as retrieved so asyncio's
+        # default "exception was never retrieved" warning stays quiet.
+        # The LRU rollback inside ``_broadcast`` is the actual recovery.
+        if t.cancelled():
+            return
+        exc = t.exception()
+        if exc is not None:
+            logger.warning(
+                "Auto-promote broadcast failed; subsequent requests "
+                "with the same steering hash will fall back to inline. "
+                "Underlying error: %s",
+                exc,
+            )
+
+    task.add_done_callback(_swallow)
+    return task

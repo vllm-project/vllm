@@ -381,13 +381,29 @@ class TestSyncAutoPromote:
 # ---------------------------------------------------------------------------
 
 
+async def _drive(*calls):
+    """Await each ``maybe_auto_promote_steering_modules_async`` call, then
+    drain any background broadcast tasks each one returned.
+
+    The async helper dispatches the broadcast as a fire-and-forget
+    ``asyncio.Task`` so the caller can return immediately; tests want
+    deterministic visibility of the spy's recorded calls, so they
+    drive the helper through this wrapper which awaits the returned
+    task before moving on.
+    """
+    for sp, rpc, lru in calls:
+        task = await maybe_auto_promote_steering_modules_async(sp, rpc, lru)
+        if task is not None:
+            await task
+
+
 class TestAsyncAutoPromote:
     def test_async_first_sight_does_not_register(self):
         async def go():
             rpc = _AsyncRpcSpy()
             lru = SteeringAutoPromoteLRU(capacity=4)
             sp = _fresh_sp()
-            await maybe_auto_promote_steering_modules_async(sp, rpc, lru)
+            await _drive((sp, rpc, lru))
             return sp, rpc
 
         sp, rpc = asyncio.run(go())
@@ -401,9 +417,11 @@ class TestAsyncAutoPromote:
             sp_a = _fresh_sp()
             sp_b = _fresh_sp()
             sp_c = _fresh_sp()
-            await maybe_auto_promote_steering_modules_async(sp_a, rpc, lru)  # first
-            await maybe_auto_promote_steering_modules_async(sp_b, rpc, lru)  # second
-            await maybe_auto_promote_steering_modules_async(sp_c, rpc, lru)  # cached
+            await _drive(
+                (sp_a, rpc, lru),  # first
+                (sp_b, rpc, lru),  # second
+                (sp_c, rpc, lru),  # cached
+            )
             return sp_a, sp_b, sp_c, rpc
 
         sp_a, sp_b, sp_c, rpc = asyncio.run(go())
@@ -420,10 +438,12 @@ class TestAsyncAutoPromote:
             sp_a1 = _fresh_sp(spec_vec={0: [1.0, 2.0]})
             sp_a2 = _fresh_sp(spec_vec={0: [1.0, 2.0]})
             sp_b = _fresh_sp(spec_vec={0: [3.0, 4.0]})
-            await maybe_auto_promote_steering_modules_async(sp_a1, rpc, lru)
-            await maybe_auto_promote_steering_modules_async(sp_a2, rpc, lru)
-            # B's first sighting evicts A (registered).
-            await maybe_auto_promote_steering_modules_async(sp_b, rpc, lru)
+            await _drive(
+                (sp_a1, rpc, lru),
+                (sp_a2, rpc, lru),
+                # B's first sighting evicts A (registered).
+                (sp_b, rpc, lru),
+            )
             return rpc
 
         rpc = asyncio.run(go())
@@ -432,6 +452,179 @@ class TestAsyncAutoPromote:
             "register_steering_modules",
             "unregister_steering_modules",
         ]
+
+
+# ---------------------------------------------------------------------------
+# Async broadcast is fire-and-forget
+# ---------------------------------------------------------------------------
+
+
+class TestAsyncBroadcastIsFireAndForget:
+    """The async broadcast must dispatch as a background task rather than
+    block the request that triggered the promotion.  Trace evidence on
+    gemma-3-4b-it (3090, NUM_PROMPTS=8 CONCURRENCY=4) shows the inline
+    ``register_steering_modules`` collective_rpc costs 32–44 ms per
+    call and maps ~1:1 to a GPU idle gap on the engine thread.  The
+    fix returns the broadcast task to the caller for fire-and-forget
+    dispatch, applies the SP mutation + LRU update synchronously, and
+    rolls back the LRU on broadcast failure so subsequent requests
+    fall back to inline-pack (graceful degradation)."""
+
+    def test_helper_returns_task_without_awaiting_rpc(self):
+        # Use a spy whose ``__call__`` never resolves until the test
+        # explicitly releases it.  If the helper awaits the broadcast
+        # inline, the helper itself would hang; if it dispatches as a
+        # task, the helper returns immediately and the LRU + SP
+        # mutations are observable while the task is still pending.
+        async def go():
+            release = asyncio.Event()
+            calls: list[tuple[str, dict]] = []
+
+            async def slow_rpc(method, *, kwargs=None, **_):
+                calls.append((method, kwargs or {}))
+                await release.wait()
+
+            lru = SteeringAutoPromoteLRU(capacity=4)
+            sp_seed = _fresh_sp()
+            sp_target = _fresh_sp()
+
+            # Warm to "second sight" so the next observation fires the
+            # register broadcast.  Seed observation is "first" so it
+            # never spawns a task — no need to drain anything.
+            seed_task = await maybe_auto_promote_steering_modules_async(
+                sp_seed, slow_rpc, lru
+            )
+            assert seed_task is None
+            assert sp_seed.steering_module_ref is None
+
+            # The second-sight call must return promptly even though the
+            # rpc hasn't resolved.  ``asyncio.wait_for`` guards against
+            # the regression where the helper awaits the broadcast
+            # inline.
+            task = await asyncio.wait_for(
+                maybe_auto_promote_steering_modules_async(
+                    sp_target, slow_rpc, lru
+                ),
+                timeout=1.0,
+            )
+            # SP was promoted synchronously...
+            assert sp_target.steering_module_ref is not None
+            promoted_name = sp_target.steering_module_ref[0]
+            assert promoted_name.startswith("_auto_")
+            # ...and the broadcast task is still pending (awaiting release).
+            assert task is not None
+            # Yield once so the task starts and reaches the slow_rpc await.
+            await asyncio.sleep(0)
+            assert len(calls) == 1
+            assert calls[0][0] == "register_steering_modules"
+            assert promoted_name in calls[0][1]["modules"]
+            assert not task.done()
+            release.set()
+            await task
+
+        asyncio.run(go())
+
+    def test_lru_state_visible_before_broadcast_resolves(self):
+        # The LRU must be updated synchronously: a "next request"
+        # observing the same hash before the broadcast resolves must
+        # see ``"registered"`` and ship a ``module_ref`` instead of
+        # going through inline-pack.
+        async def go():
+            release = asyncio.Event()
+            calls: list[tuple[str, dict]] = []
+
+            async def slow_rpc(method, *, kwargs=None, **_):
+                calls.append((method, kwargs or {}))
+                await release.wait()
+
+            lru = SteeringAutoPromoteLRU(capacity=4)
+            sp_first = _fresh_sp()
+            sp_second = _fresh_sp()
+            sp_third = _fresh_sp()
+
+            # First sighting: no broadcast.
+            t = await maybe_auto_promote_steering_modules_async(
+                sp_first, slow_rpc, lru
+            )
+            assert t is None
+            assert sp_first.steering_module_ref is None
+
+            # Second sighting: broadcast dispatched, SP promoted, LRU
+            # registered — all synchronously.
+            register_task = await maybe_auto_promote_steering_modules_async(
+                sp_second, slow_rpc, lru
+            )
+            assert register_task is not None
+            assert not register_task.done()  # broadcast still pending
+            assert sp_second.steering_module_ref is not None
+            promoted_name = sp_second.steering_module_ref[0]
+
+            # Third request — observed BEFORE the broadcast resolves —
+            # must be promoted to the same module ref.  This is the
+            # invariant: LRU is updated sync, so subsequent requests
+            # see the registration immediately.
+            third_task = await maybe_auto_promote_steering_modules_async(
+                sp_third, slow_rpc, lru
+            )
+            # Cache hit: no broadcast spawned.
+            assert third_task is None
+            assert sp_third.steering_module_ref == (promoted_name, 1.0)
+
+            release.set()
+            await register_task
+
+        asyncio.run(go())
+
+    def test_failed_broadcast_rolls_back_lru_for_inline_fallback(self):
+        # If the broadcast errors, the next request observing the same
+        # hash MUST fall back to inline-pack rather than ship a
+        # ``module_ref`` to a name the worker never received.  The
+        # helper signals this by removing the LRU entry before the
+        # task surfaces the exception.
+        async def go():
+            calls: list[str] = []
+
+            async def failing_rpc(method, *, kwargs=None, **_):
+                calls.append(method)
+                if method == "register_steering_modules":
+                    raise RuntimeError("simulated broadcast failure")
+
+            lru = SteeringAutoPromoteLRU(capacity=4)
+            sp_seed = _fresh_sp()
+            sp_trigger = _fresh_sp()
+            sp_recover = _fresh_sp()
+
+            # Warm to "second sight".
+            await _drive((sp_seed, failing_rpc, lru))
+
+            # Trigger the failing broadcast.  The helper still applies
+            # the SP mutation synchronously (the trigger request is
+            # already in flight); the rollback only protects future
+            # observations.
+            task = await maybe_auto_promote_steering_modules_async(
+                sp_trigger, failing_rpc, lru
+            )
+            assert task is not None
+            assert sp_trigger.steering_module_ref is not None
+
+            # Drive the broadcast to completion; it should raise
+            # internally and remove the LRU entry.  We swallow the
+            # exception here because in production the done-callback
+            # logs it and consumers don't await the task.
+            with pytest.raises(RuntimeError):
+                await task
+
+            # The "next request" observing the same hash must now hit
+            # "first" again (LRU was rolled back) and fall through to
+            # inline-pack.
+            recover_task = await maybe_auto_promote_steering_modules_async(
+                sp_recover, failing_rpc, lru
+            )
+            assert recover_task is None
+            assert sp_recover.steering_module_ref is None
+            assert sp_recover.steering_vectors is not None
+
+        asyncio.run(go())
 
 
 class TestHashStabilityAcrossPromotion:
