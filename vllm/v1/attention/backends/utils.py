@@ -45,6 +45,21 @@ PAD_SLOT_ID = -1
 NULL_BLOCK_ID = 0
 
 
+def _find_first_true_boundary(sorted_mask: torch.Tensor) -> int:
+    """Return the index of the first True in a monotonic False->True mask."""
+    if sorted_mask.numel() == 0:
+        return 0
+    return int(torch.searchsorted(sorted_mask.to(dtype=torch.int32), 1).item())
+
+
+def _find_first_true_index(mask: torch.Tensor) -> int:
+    """Return the index of the first True in an arbitrary boolean mask."""
+    first_true_indices = torch.nonzero(mask, as_tuple=False)
+    if first_true_indices.numel() == 0:
+        return mask.numel()
+    return int(first_true_indices[0].item())
+
+
 def is_valid_kv_cache_layout(value: str) -> bool:
     return value in get_args(KVCacheLayoutType)
 
@@ -459,16 +474,16 @@ def split_decodes_prefills_and_extends(
     query_lens = query_start_loc[1:] - query_start_loc[:-1]
     is_prefill_or_extend = query_lens > decode_threshold
     is_prefill = (seq_lens == query_lens) & is_prefill_or_extend
-    first_extend = is_prefill_or_extend.int().argmax(dim=-1).item()
-    first_prefill = is_prefill.int().argmax(dim=-1).item()
+    first_extend = _find_first_true_boundary(is_prefill_or_extend)
+    first_prefill = _find_first_true_boundary(is_prefill)
     num_decodes = first_extend
     num_decode_tokens = query_start_loc[first_extend].item()
-    if not torch.any(is_prefill_or_extend):
+    if first_extend == num_reqs:
         return (num_decodes, 0, 0, num_decode_tokens, 0, 0)
 
     num_prefills_or_extends = num_reqs - num_decodes
     num_prefill_or_extend_tokens = num_tokens - num_decode_tokens
-    if not torch.any(is_prefill):
+    if first_prefill == num_reqs:
         return (
             num_decodes,
             num_prefills_or_extends,
@@ -536,7 +551,7 @@ def split_decodes_and_prefills(
         return num_reqs, 0, num_tokens, 0
 
     query_lens = query_start_loc[1:] - query_start_loc[:-1]
-    if query_lens[0].item() > decode_threshold:
+    if int(query_lens[0]) > decode_threshold:
         # first request is not decode, so no decode requests
         return 0, num_reqs, 0, num_tokens
 
@@ -554,10 +569,14 @@ def split_decodes_and_prefills(
         assert common_attn_metadata.is_prefilling is not None
         is_prefill |= common_attn_metadata.is_prefilling
 
-    if not torch.any(is_prefill):
+    first_prefill = (
+        _find_first_true_boundary(is_prefill)
+        if not require_uniform and treat_short_extends_as_decodes
+        else _find_first_true_index(is_prefill)
+    )
+    if first_prefill == num_reqs:
         return num_reqs, 0, num_tokens, 0
 
-    first_prefill = is_prefill.int().argmax(dim=-1).item()
     num_decodes = first_prefill
     num_prefills = num_reqs - num_decodes
     num_decode_tokens = query_start_loc[first_prefill].item()
@@ -579,16 +598,27 @@ def split_prefill_chunks(
     Returns:
         A list of tuples of (reqs_start, reqs_end) representing chunk boundaries.
     """
+    n = len(seq_lens_cpu)
+    if n == 0:
+        return []
+
     chunk_bounds = []
-    i, n = 0, len(seq_lens_cpu)
     assert torch.all(seq_lens_cpu <= workspace_size).item()
 
-    while i < n:
-        start, chunk_total = i, 0
-        while i < n and (chunk_total + (s := seq_lens_cpu[i].item())) <= workspace_size:
-            chunk_total += s
-            i += 1
-        chunk_bounds.append((start + request_offset, i + request_offset))
+    cumulative_seq_lens = torch.cumsum(seq_lens_cpu, dim=0)
+    start = 0
+    current_chunk_limit = workspace_size
+
+    while start < n:
+        end = int(
+            torch.searchsorted(
+                cumulative_seq_lens, current_chunk_limit, right=True
+            ).item()
+        )
+        end = max(end, start + 1)
+        chunk_bounds.append((start + request_offset, end + request_offset))
+        current_chunk_limit = int(cumulative_seq_lens[end - 1].item()) + workspace_size
+        start = end
     return chunk_bounds
 
 

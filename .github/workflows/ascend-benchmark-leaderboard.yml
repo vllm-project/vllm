@@ -289,6 +289,9 @@ jobs:
           dirname "$PYTHON_BIN" >> "$GITHUB_PATH"
           "$PYTHON_BIN" --version
 
+      - name: Acquire Ascend hardware lock
+        run: bash .github/workflows/scripts/acquire_ascend_hardware_lock.sh
+
       - name: Prepare Ascend runtime and install repos
         env:
           VLLM_ASCEND_HUST_REPO: ${{ github.workspace }}/vllm-ascend-hust
@@ -324,6 +327,10 @@ jobs:
         if: always()
         run: |
           bash .github/workflows/scripts/cleanup_ascend_ci_processes.sh
+
+      - name: Release Ascend hardware lock
+        if: always()
+        run: bash .github/workflows/scripts/release_ascend_hardware_lock.sh
 
       - name: Build benchmark summary artifacts
         if: always()

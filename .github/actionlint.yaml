@@ -2,3 +2,5 @@ self-hosted-runner:
   labels:
     - linux-aarch64-a2b3-0
     - docker
+    - ascend-benchmark
+    - ascend-regression
