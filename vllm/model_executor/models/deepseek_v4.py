@@ -403,6 +403,26 @@ def make_deepseek_v4_expert_params_mapping(
     ]
 
 
+_MEGA_MOE_DG_ENV_APPLIED = False
+
+
+def _apply_mega_moe_dg_env() -> None:
+    """Forward VLLM_DEEPGEMM_MEGA_MOE_* env vars to DeepGEMM internals.
+
+    Experimental: uses external deep_gemm (sgl-deep-gemm) for FP4 acts.
+    TODO(upstream): remove once vendored deep_gemm includes
+    mega_moe_pre_dispatch and FP4-aware buffer sizing.
+    """
+    global _MEGA_MOE_DG_ENV_APPLIED
+    if _MEGA_MOE_DG_ENV_APPLIED:
+        return
+    if envs.VLLM_DEEPGEMM_MEGA_MOE_USE_FP4_ACTS:
+        os.environ.setdefault("DG_USE_FP4_ACTS", "1")
+    if envs.VLLM_DEEPGEMM_MEGA_MOE_USE_MXF4_KIND:
+        os.environ.setdefault("DG_USE_MXF4_KIND", "1")
+    _MEGA_MOE_DG_ENV_APPLIED = True
+
+
 class DeepseekV4MegaMoEExperts(nn.Module):
     _symm_buffer_cache: dict[tuple[int, int, int, int, int, int, int], object] = {}
 
@@ -584,7 +604,13 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         self.w2_weight_scale = None
 
     def get_symm_buffer(self):
-        import vllm.third_party.deep_gemm as deep_gemm
+        _apply_mega_moe_dg_env()
+        # Experimental: external deep_gemm for FP4-aware buffer sizing.
+        # TODO: collapse to vendored import once upstream supports FP4 layout.
+        if envs.VLLM_DEEPGEMM_MEGA_MOE_USE_FP4_ACTS:
+            import deep_gemm
+        else:
+            import vllm.third_party.deep_gemm as deep_gemm
 
         group = get_ep_group().device_group
         device = torch.accelerator.current_device_index()
