@@ -162,7 +162,7 @@ def _tq_decode_stage1(
                 other=0,
             )
             if FP8_E4B15:
-                k_float = k_raw.to(tl.float8e4b15, bitcast=True).to(tl.float32)
+                k_float = k_raw.to(tl.float8e4b8, bitcast=True).to(tl.float32)
             else:
                 k_float = k_raw.to(tl.float8e4nv, bitcast=True).to(tl.float32)
             scores = (
@@ -371,7 +371,7 @@ def _tq_full_dequant_kv(
     if KEY_FP8:
         k_raw = tl.load(KV_cache_ptr + slot_base + d_offs, mask=d_mask, other=0)
         if FP8_E4B15:
-            k_recon = k_raw.to(tl.float8e4b15, bitcast=True).to(tl.float32)
+            k_recon = k_raw.to(tl.float8e4b8, bitcast=True).to(tl.float32)
         else:
             k_recon = k_raw.to(tl.float8e4nv, bitcast=True).to(tl.float32)
         tl.store(K_out_ptr + ko_base + d_offs, k_recon.to(tl.float16), mask=d_mask)
