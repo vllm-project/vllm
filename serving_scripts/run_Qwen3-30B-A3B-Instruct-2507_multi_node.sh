@@ -188,9 +188,11 @@ module load CUDA/12.9.0
 # === Trace output directory ===
 TRACE_BASE="/data/engs-glass/catz0932/inference-traces/vllm/results"
 TRACE_RUN_DIR="${TRACE_BASE}/${SLURM_JOB_ID}"
+RAY_TMP_ROOT="${TRACE_RUN_DIR}/ray_tmp"
 
 mkdir -p "${TRACE_RUN_DIR}/nsight"
 mkdir -p "${TRACE_RUN_DIR}/nccl_logs"
+mkdir -p "${RAY_TMP_ROOT}"
 
 # === Nsight Systems ===
 export NSYS_ENABLE="${NSYS_ENABLE:-1}"
@@ -344,14 +346,16 @@ if [ \"${NSYS_ENABLE}\" = \"1\" ] && [ \"${NSYS_PROFILE_RAY}\" = \"1\" ]; then
       --node-ip-address=${HEAD_NODE_IP} \\
       --port=${RAY_PORT} \\
       --num-gpus=${GPUS_PER_NODE} \\
-      --num-cpus=${CPUS_PER_TASK}
+      --num-cpus=${CPUS_PER_TASK} \\
+      --temp-dir=${RAY_TMP_ROOT}/${HEAD_NODE}
 else
   \"${RAY_BIN}\" start --block \\
     --head \\
     --node-ip-address=${HEAD_NODE_IP} \\
     --port=${RAY_PORT} \\
     --num-gpus=${GPUS_PER_NODE} \\
-    --num-cpus=${CPUS_PER_TASK}
+    --num-cpus=${CPUS_PER_TASK} \\
+    --temp-dir=${RAY_TMP_ROOT}/${HEAD_NODE}
 fi"
 srun \
   --nodelist "${HEAD_NODE}" \
@@ -399,13 +403,15 @@ if [ \"${NSYS_ENABLE}\" = \"1\" ] && [ \"${NSYS_PROFILE_RAY}\" = \"1\" ]; then
       --address=${HEAD_NODE_IP}:${RAY_PORT} \\
       --node-ip-address=${WORKER_IP} \\
       --num-gpus=${GPUS_PER_NODE} \\
-      --num-cpus=${CPUS_PER_TASK}
+      --num-cpus=${CPUS_PER_TASK} \\
+      --temp-dir=${RAY_TMP_ROOT}/${WORKER} 
 else
   \"${RAY_BIN}\" start --block \\
     --address=${HEAD_NODE_IP}:${RAY_PORT} \\
     --node-ip-address=${WORKER_IP} \\
     --num-gpus=${GPUS_PER_NODE} \\
-    --num-cpus=${CPUS_PER_TASK}
+    --num-cpus=${CPUS_PER_TASK} \\
+    --temp-dir=${RAY_TMP_ROOT}/${WORKER} 
 fi"
     srun \
       --nodelist "${WORKER}" \
@@ -454,7 +460,7 @@ fi
 
 if [ "${NSYS_ENABLE}" = "1" ] && [ "${NSYS_PROFILE_VLLM}" = "1" ]; then
   echo "Starting vLLM server with Ray worker Nsight profiling enabled"
-  echo "Ray worker Nsight reports should appear under /tmp/ray/session_latest/logs/nsight on each node"
+  echo "Ray worker Nsight reports should appear under ${RAY_TMP_ROOT}/<node>/session_*/logs/nsight"
   python -m vllm.entrypoints.openai.api_server \
     --model "${MODEL_ID}" \
     --host "${HOST}" \
@@ -510,50 +516,27 @@ if [ -n "${SERVER_STEP_PID}" ] && kill -0 "${SERVER_STEP_PID}" 2>/dev/null; then
   wait "${SERVER_STEP_PID}" 2>/dev/null || true
   SERVER_STEP_PID=""
 fi
-
-echo "Waiting briefly for Ray worker Nsight files to flush..."
+echo "Waiting briefly for Ray/Nsight files to flush..."
 sleep 30
 
-echo "Copying Ray worker Nsight reports before stopping Ray..."
+echo "Collecting Ray worker Nsight reports from shared Ray temp dir..."
 mkdir -p "${TRACE_RUN_DIR}/ray_worker_nsight"
 
-copy_ray_nsight_from_node() {
-  local NODE="$1"
-  echo "Copying Ray worker Nsight reports from ${NODE}"
+echo "Looking for Nsight reports under ${RAY_TMP_ROOT}:"
+find "${RAY_TMP_ROOT}" \
+  -type f -name "*.nsys-rep" \
+  -printf "%p %s bytes\n" 2>/dev/null || true
 
-  srun \
-    --overlap \
-    --nodelist "${NODE}" \
-    --nodes=1 \
-    --ntasks=1 \
-    --ntasks-per-node=1 \
-    --cpus-per-task=1 \
-    --mem=1G \
-    bash -lc "
-      mkdir -p '${TRACE_RUN_DIR}/ray_worker_nsight/${NODE}'
+find "${RAY_TMP_ROOT}" \
+  -type f -name "*.nsys-rep" -print0 2>/dev/null \
+  | while IFS= read -r -d '' report; do
+      rel="${report#${RAY_TMP_ROOT}/}"
+      node="${rel%%/*}"
+      mkdir -p "${TRACE_RUN_DIR}/ray_worker_nsight/${node}"
+      cp -v "${report}" "${TRACE_RUN_DIR}/ray_worker_nsight/${node}/" || true
+    done
 
-      echo 'Looking for Nsight reports on ${NODE}:'
-      find /tmp/ray/session_latest/logs/nsight \
-        -type f -name '*.nsys-rep' \
-        -printf '%p %s bytes\n' 2>/dev/null || true
-
-      if [ -d /tmp/ray/session_latest/logs/nsight ]; then
-        find /tmp/ray/session_latest/logs/nsight \
-          -type f -name '*.nsys-rep' \
-          -exec cp -v {} '${TRACE_RUN_DIR}/ray_worker_nsight/${NODE}/' \; 2>/dev/null || true
-      else
-        echo 'No /tmp/ray/session_latest/logs/nsight on ${NODE}'
-      fi
-    " || true
-}
-
-copy_ray_nsight_from_node "${HEAD_NODE}"
-
-for WORKER in ${WORKER_NODES}; do
-  copy_ray_nsight_from_node "${WORKER}"
-done
-
-echo "Stopping Ray background srun steps after copying Nsight reports..."
+echo "Stopping Ray background srun steps after collecting Nsight reports..."
 
 if [ -n "${HEAD_RAY_PID}" ] && kill -0 "${HEAD_RAY_PID}" 2>/dev/null; then
   kill -TERM "${HEAD_RAY_PID}" 2>/dev/null || true
