@@ -25,6 +25,7 @@ from vllm.config import (
     PassConfig,
     VllmConfig,
 )
+from vllm.config.utils import Range
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
@@ -39,6 +40,20 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 INDEX_SELECT_OP = torch.ops.aten.index.Tensor
 VLLM_UNIFIED_KV_CACHE_UPDATE_OP = torch.ops.vllm.unified_kv_cache_update
 FP8_DTYPE = current_platform.fp8_dtype()
+
+
+def test_rope_kvcache_fusion_default_keeps_large_ranges_unfused():
+    vllm_config = VllmConfig(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            pass_config=PassConfig(fuse_rope_kvcache=True),
+        ),
+    )
+    fusion_pass = RopeKVCacheFusionPass(vllm_config)
+
+    assert fusion_pass.is_applicable_for_range(Range(1, 256))
+    assert not fusion_pass.is_applicable_for_range(Range(257, 11650))
+    assert not fusion_pass.is_applicable_for_range(Range(11651, 16384))
 
 
 class QKRoPEKVCacheTestModel(torch.nn.Module):
