@@ -8,6 +8,7 @@ from importlib.util import find_spec
 import torch
 import torch.nn.functional as F
 
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.forward_context import get_forward_context
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -836,6 +837,7 @@ def rocm_aiter_sparse_attn_indexer_native(
     return topk_indices_buffer
 
 
+@eager_break_during_capture
 def rocm_aiter_sparse_attn_indexer(
     hidden_states: torch.Tensor,
     k_cache_prefix: LayerNameType,
