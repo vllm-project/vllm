@@ -34,7 +34,7 @@ class BeamSearchSequence:
     finish_reason: str | None = None
     stop_reason: int | str | None = None
 
-    def get_prompt(self):
+    def get_prompt(self) -> DecoderOnlyEngineInput | EncoderDecoderInput:
         prompt = self.orig_prompt
 
         if prompt["type"] == "enc_dec":

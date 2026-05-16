@@ -46,7 +46,7 @@ class DeviceConfig:
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.device == "auto":
             # Automated device type detection
             from vllm.platforms import current_platform

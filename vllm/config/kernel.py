@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from dataclasses import asdict, fields
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -93,7 +93,7 @@ class IrOpPriorityConfig:
             ir_op.set_default(op_priority)
 
     @contextlib.contextmanager
-    def set_priority(self):
+    def set_priority(self) -> Generator[None, None, None]:
         """
         Context manager to set the IR op priority for all op members.
         It also imports IR kernel implementations for the current platform

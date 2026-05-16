@@ -222,7 +222,7 @@ class HTTPConnection:
 
         return self._async_client
 
-    def _validate_http_url(self, url: str):
+    def _validate_http_url(self, url: str) -> None:
         parsed_url = parse_url(url)
 
         if parsed_url.scheme not in ("http", "https"):
