@@ -1,0 +1,123 @@
+%%
+%% This is file `fontenc.sty',
+%% generated with the docstrip utility.
+%%
+%% The original source files were:
+%%
+%% ltoutenc.dtx  (with options: `package')
+%% 
+%% This is a generated file.
+%% 
+%% The source is maintained by the LaTeX Project team and bug
+%% reports for it can be opened at https://latex-project.org/bugs.html
+%% (but please observe conditions on bug reports sent to that address!)
+%% 
+%% 
+%% Copyright (C) 1993-2021
+%% The LaTeX Project and any individual authors listed elsewhere
+%% in this file.
+%% 
+%% This file was generated from file(s) of the LaTeX base system.
+%% --------------------------------------------------------------
+%% 
+%% It may be distributed and/or modified under the
+%% conditions of the LaTeX Project Public License, either version 1.3c
+%% of this license or (at your option) any later version.
+%% The latest version of this license is in
+%%    https://www.latex-project.org/lppl.txt
+%% and version 1.3c or later is part of all distributions of LaTeX
+%% version 2008 or later.
+%% 
+%% This file has the LPPL maintenance status "maintained".
+%% 
+%% This file may only be distributed together with a copy of the LaTeX
+%% base system. You may however distribute the LaTeX base system without
+%% such generated files.
+%% 
+%% The list of all files belonging to the LaTeX base distribution is
+%% given in the file `manifest.txt'. See also `legal.txt' for additional
+%% information.
+%% 
+%% The list of derived (unpacked) files belonging to the distribution
+%% and covered by LPPL is defined by the unpacking scripts (with
+%% extension .ins) which are part of the distribution.
+%%% From File: ltoutenc.dtx
+\ProvidesPackage{fontenc}
+ [2021/04/29 v2.0v
+                        Standard LaTeX package]
+\def\update@uclc@with@cyrillic{%
+ \expandafter\def\expandafter\@uclclist\expandafter
+  {\@uclclist
+  \cyra\CYRA\cyrabhch\CYRABHCH\cyrabhchdsc\CYRABHCHDSC\cyrabhdze
+  \CYRABHDZE\cyrabhha\CYRABHHA\cyrae\CYRAE\cyrb\CYRB\cyrbyus
+  \CYRBYUS\cyrc\CYRC\cyrch\CYRCH\cyrchldsc\CYRCHLDSC\cyrchrdsc
+  \CYRCHRDSC\cyrchvcrs\CYRCHVCRS\cyrd\CYRD\cyrdelta\CYRDELTA
+  \cyrdje\CYRDJE\cyrdze\CYRDZE\cyrdzhe\CYRDZHE\cyre\CYRE\cyreps
+  \CYREPS\cyrerev\CYREREV\cyrery\CYRERY\cyrf\CYRF\cyrfita
+  \CYRFITA\cyrg\CYRG\cyrgdsc\CYRGDSC\cyrgdschcrs\CYRGDSCHCRS
+  \cyrghcrs\CYRGHCRS\cyrghk\CYRGHK\cyrgup\CYRGUP\cyrh\CYRH
+  \cyrhdsc\CYRHDSC\cyrhhcrs\CYRHHCRS\cyrhhk\CYRHHK\cyrhrdsn
+  \CYRHRDSN\cyri\CYRI\cyrie\CYRIE\cyrii\CYRII\cyrishrt\CYRISHRT
+  \cyrishrtdsc\CYRISHRTDSC\cyrizh\CYRIZH\cyrje\CYRJE\cyrk\CYRK
+  \cyrkbeak\CYRKBEAK\cyrkdsc\CYRKDSC\cyrkhcrs\CYRKHCRS\cyrkhk
+  \CYRKHK\cyrkvcrs\CYRKVCRS\cyrl\CYRL\cyrldsc\CYRLDSC\cyrlhk
+  \CYRLHK\cyrlje\CYRLJE\cyrm\CYRM\cyrmdsc\CYRMDSC\cyrmhk\CYRMHK
+  \cyrn\CYRN\cyrndsc\CYRNDSC\cyrng\CYRNG\cyrnhk\CYRNHK\cyrnje
+  \CYRNJE\cyrnlhk\CYRNLHK\cyro\CYRO\cyrotld\CYROTLD\cyrp\CYRP
+  \cyrphk\CYRPHK\cyrq\CYRQ\cyrr\CYRR\cyrrdsc\CYRRDSC\cyrrhk
+  \CYRRHK\cyrrtick\CYRRTICK\cyrs\CYRS\cyrsacrs\CYRSACRS
+  \cyrschwa\CYRSCHWA\cyrsdsc\CYRSDSC\cyrsemisftsn\CYRSEMISFTSN
+  \cyrsftsn\CYRSFTSN\cyrsh\CYRSH\cyrshch\CYRSHCH\cyrshha\CYRSHHA
+  \cyrt\CYRT\cyrtdsc\CYRTDSC\cyrtetse\CYRTETSE\cyrtshe\CYRTSHE
+  \cyru\CYRU\cyrushrt\CYRUSHRT\cyrv\CYRV\cyrw\CYRW\cyry\CYRY
+  \cyrya\CYRYA\cyryat\CYRYAT\cyryhcrs\CYRYHCRS\cyryi\CYRYI\cyryo
+  \CYRYO\cyryu\CYRYU\cyrz\CYRZ\cyrzdsc\CYRZDSC\cyrzh\CYRZH
+  \cyrzhdsc\CYRZHDSC}%
+ \let\update@uclc@with@cyrillic\relax
+}
+\DeclareOption*{%
+   \let\encodingdefault\CurrentOption
+   \@tempswafalse
+   \@ifl@t@r\fmtversion{2020/02/02}%
+       {\expandafter\ifx\csname T@\CurrentOption\endcsname\relax
+         \@tempswatrue\fi}%
+       {\@tempswatrue}%
+   \if@tempswa
+     \edef\reserved@f{%
+       \lowercase{\def\noexpand\reserved@f{\CurrentOption enc.def}}}%
+     \reserved@f
+     \InputIfFileExists\reserved@f
+          {}{\PackageError{fontenc}%
+           {Encoding file `\reserved@f' not found.%
+            \MessageBreak
+             You might have misspelt the name of the encoding}%
+           {Necessary code for this encoding was not
+            loaded.\MessageBreak
+            Thus calling the encoding later on will
+            produce further error messages.}}%
+    \let\reserved@f\relax
+    \expandafter\in@\expandafter{\CurrentOption}%
+                                {T2A,T2B,T2C,X2,LCY,OT2}%
+    \ifin@
+       \expandafter\in@\expandafter\cyra\expandafter
+                                {\@uclclist}%
+       \ifin@
+       \else
+         \update@uclc@with@cyrillic
+       \fi
+    \fi
+  \fi
+}
+\ProcessOptions*
+\usefont\encodingdefault\familydefault\seriesdefault\shapedefault
+\let\update@uclc@with@cyrillic\relax
+\let\@elt\relax
+\xdef\@fontenc@load@list{\@fontenc@load@list
+  \@elt{\csname opt@fontenc.sty\endcsname}}
+\global\expandafter\let\csname ver@fontenc.sty\endcsname\relax
+\global\expandafter\let\csname opt@fontenc.sty\endcsname\relax
+\global\let\@ifl@ter@@\@ifl@ter
+\def\@ifl@ter#1#2#3#4#5{\global\let\@ifl@ter\@ifl@ter@@}
+\endinput
+%%
+%% End of file `fontenc.sty'.

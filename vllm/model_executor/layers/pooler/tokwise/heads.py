@@ -92,14 +92,16 @@ class TokenClassifierPoolerHead(TokenPoolerHead):
     def __init__(
         self,
         classifier: ClassifierFn | None = None,
-        logit_bias: float | None = None,
+        logit_mean: float | None = None,
+        logit_sigma: float | None = None,
         head_dtype: torch.dtype | str | None = None,
         activation: ActivationFn | None = None,
     ) -> None:
         super().__init__()
 
         self.classifier = classifier
-        self.logit_bias = logit_bias
+        self.logit_mean = logit_mean
+        self.logit_sigma = logit_sigma
         self.head_dtype = head_dtype
         self.activation = activation
 
@@ -125,8 +127,11 @@ class TokenClassifierPoolerHead(TokenPoolerHead):
             logits = pooled_data
         # logits shape: [n_token, num_labels]
 
-        if self.logit_bias is not None:
-            logits -= self.logit_bias
+        # Affine score calibration: activation((logit - mean) / sigma)
+        if self.logit_mean is not None:
+            logits = logits - self.logit_mean
+        if self.logit_sigma is not None:
+            logits = logits / self.logit_sigma
 
         if self.activation is not None and pooling_param.use_activation:
             logits = self.activation(logits)

@@ -1,25 +1,30 @@
 name: Linux Ascend Inference Regression
 
 on:
-  pull_request:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 jobs:
   linux-ascend-inference-regression:
+    if: >-
+      github.event_name != 'pull_request' ||
+      (
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        (
+          contains(github.event.pull_request.labels.*.name, 'ready') ||
+          contains(github.event.pull_request.labels.*.name, 'verified')
+        )
+      )
     runs-on:
       - self-hosted
       - linux-aarch64-a2b3-0
       - docker
-      - ascend-regression
     timeout-minutes: 45
     env:
       HF_HUB_DISABLE_TELEMETRY: "1"
@@ -30,59 +35,10 @@ jobs:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       TARGET_REPO_URL: git@github.com:${{ github.repository }}.git
       TARGET_REPO_SHA: ${{ github.sha }}
-      VLLM_ASCEND_HUST_REPO_URL: git@github.com:vLLM-HUST/vllm-ascend-hust.git
-      VLLM_ASCEND_HUST_REPO_REF: eb157681731da8ce28982cf7039ea4460eb8e64f
       VLLM_ASCEND_HUST_REPO: ${{ github.workspace }}/vllm-ascend-hust
+      HUST_ASCEND_MANAGER_REPO: ${{ github.workspace }}/ascend-runtime-manager
 
     steps:
-      - name: Configure GitHub SSH checkout
-        env:
-          VLLM_HUST_BENCHMARK_SSH_KEY: ${{ secrets.VLLM_ASCEND_HUST_BENCHMARK_SSH_KEY }}
-        run: |
-          set -euo pipefail
-
-          if [[ -z "${VLLM_HUST_BENCHMARK_SSH_KEY}" ]]; then
-            echo "VLLM_ASCEND_HUST_BENCHMARK_SSH_KEY is required for git@github.com checkout." >&2
-            exit 2
-          fi
-
-          mkdir -p "$HOME/.ssh"
-          chmod 700 "$HOME/.ssh"
-
-          key_file="$HOME/.ssh/vllm_hust_benchmark_key"
-          printf '%s\n' "$VLLM_HUST_BENCHMARK_SSH_KEY" > "$key_file"
-          chmod 600 "$key_file"
-
-          known_hosts_tmp="$(mktemp)"
-          ssh-keyscan -t rsa,ecdsa,ed25519 github.com > "$known_hosts_tmp" 2>/dev/null
-          if [[ ! -s "$known_hosts_tmp" ]]; then
-            echo "Unable to scan github.com host keys." >&2
-            exit 2
-          fi
-          cat "$known_hosts_tmp" >> "$HOME/.ssh/known_hosts"
-          chmod 600 "$HOME/.ssh/known_hosts"
-
-          cat > "$HOME/.ssh/config" <<EOF
-          Host github.com
-            HostName github.com
-            User git
-            IdentityFile $key_file
-            IdentitiesOnly yes
-            StrictHostKeyChecking yes
-          EOF
-          chmod 600 "$HOME/.ssh/config"
-
-          ssh_output="$(ssh -o BatchMode=yes -T git@github.com 2>&1)" && ssh_status=$? || ssh_status=$?
-          echo "$ssh_output"
-          if [[ "$ssh_output" == *"Permission denied"* ]]; then
-            echo "GitHub SSH authentication failed for the configured key." >&2
-            exit 2
-          fi
-          if [[ "$ssh_status" -ne 0 && "$ssh_status" -ne 1 ]]; then
-            echo "GitHub SSH probe failed with status $ssh_status." >&2
-            exit "$ssh_status"
-          fi
-
       - name: Checkout target repo with retry
         run: |
           clone_with_retry() {
@@ -125,48 +81,6 @@ jobs:
 
           clone_with_retry "$TARGET_REPO_URL" "$GITHUB_WORKSPACE" "$TARGET_REPO_SHA"
 
-      - name: Checkout pinned vllm-ascend-hust with retry
-        run: |
-          clone_with_retry() {
-            local repo_url=$1
-            local target_dir=$2
-            local target_sha=$3
-            local attempts=4
-            local delay_seconds=15
-            local try=1
-            local parent_dir
-            local temp_dir
-
-            parent_dir=$(dirname "$target_dir")
-            temp_dir="${parent_dir}/.checkout-tmp-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-ascend"
-
-            mkdir -p "$parent_dir"
-            rm -rf "$temp_dir"
-            while [[ "$try" -le "$attempts" ]]; do
-              if git clone --depth 1 "$repo_url" "$temp_dir"; then
-                if ! git -C "$temp_dir" rev-parse --verify --quiet "$target_sha^{commit}" >/dev/null; then
-                  git -C "$temp_dir" fetch --depth 1 origin "$target_sha"
-                fi
-                git -C "$temp_dir" checkout --force "$target_sha"
-                rm -rf "$target_dir"
-                mv "$temp_dir" "$target_dir"
-                return 0
-              fi
-
-              echo "Clone failed ($try/$attempts): $repo_url" >&2
-              rm -rf "$temp_dir"
-              if [[ "$try" -lt "$attempts" ]]; then
-                sleep "$delay_seconds"
-              fi
-              try=$((try + 1))
-            done
-
-            echo "Failed to clone $repo_url after ${attempts} attempts" >&2
-            return 1
-          }
-
-          clone_with_retry "$VLLM_ASCEND_HUST_REPO_URL" "$VLLM_ASCEND_HUST_REPO" "$VLLM_ASCEND_HUST_REPO_REF"
-
       - name: Prepare Hugging Face cache directories
         run: |
           mkdir -p "$HF_HOME" "$HUGGINGFACE_HUB_CACHE" "$TRANSFORMERS_CACHE"
@@ -179,73 +93,86 @@ jobs:
             echo "HF token: not configured"
           fi
 
+      - name: Checkout vllm-ascend-hust repo
+        run: |
+          clone_with_retry() {
+            local repo_url=$1
+            local target_dir=$2
+            local attempts=4
+            local delay_seconds=15
+            local try=1
+
+            rm -rf "$target_dir"
+            while [[ "$try" -le "$attempts" ]]; do
+              if git clone --depth 1 "$repo_url" "$target_dir"; then
+                return 0
+              fi
+              echo "Clone failed ($try/$attempts): $repo_url" >&2
+              if [[ "$try" -lt "$attempts" ]]; then
+                sleep "$delay_seconds"
+              fi
+              try=$((try + 1))
+            done
+
+            echo "Failed to clone $repo_url after ${attempts} attempts" >&2
+            return 1
+          }
+
+          clone_with_retry "git@github.com:vLLM-HUST/vllm-ascend-hust.git" "$VLLM_ASCEND_HUST_REPO"
+
+      - name: Checkout ascend-runtime-manager repo
+        run: |
+          clone_with_retry() {
+            local repo_url=$1
+            local target_dir=$2
+            local attempts=4
+            local delay_seconds=15
+            local try=1
+
+            rm -rf "$target_dir"
+            while [[ "$try" -le "$attempts" ]]; do
+              if git clone --depth 1 "$repo_url" "$target_dir"; then
+                return 0
+              fi
+              echo "Clone failed ($try/$attempts): $repo_url" >&2
+              if [[ "$try" -lt "$attempts" ]]; then
+                sleep "$delay_seconds"
+              fi
+              try=$((try + 1))
+            done
+
+            echo "Failed to clone $repo_url after ${attempts} attempts" >&2
+            return 1
+          }
+
+          clone_with_retry "git@github.com:vLLM-HUST/ascend-runtime-manager.git" "$HUST_ASCEND_MANAGER_REPO"
+
+      - name: Resolve Ascend Python runtime
+        run: |
+          source "$VLLM_ASCEND_HUST_REPO/scripts/hust_ascend_manager_helper.sh"
+          PYTHON_BIN="$(hust_resolve_python_bin)"
+          echo "PYTHON_BIN=$PYTHON_BIN" >> "$GITHUB_ENV"
+          dirname "$PYTHON_BIN" >> "$GITHUB_PATH"
+          "$PYTHON_BIN" --version
+
       - name: Acquire Ascend hardware lock
         run: bash .github/workflows/scripts/acquire_ascend_hardware_lock.sh
 
       - name: Prepare Ascend runtime and install current checkout
-        env:
-          COMPILE_CUSTOM_KERNELS: "0"
         run: |
-          source "${VLLM_ASCEND_HUST_REPO}/scripts/use_single_ascend_env.sh"
-          bash "${VLLM_ASCEND_HUST_REPO}/scripts/install_local_ascend_plugin.sh" "$VLLM_ASCEND_HUST_REPO"
-          python -m pip install --upgrade --retries 8 --timeout 120 "numpy<2.0.0"
-          grep -v '^torch==' requirements/build.txt > /tmp/vllm-hust-build-requirements.txt
-          python -m pip install --upgrade --retries 8 --timeout 120 -r /tmp/vllm-hust-build-requirements.txt
-          python -m pip install --upgrade --retries 8 --timeout 120 -r requirements/common.txt
-          TORCH_DEVICE_BACKEND_AUTOLOAD=0 python -m pip install -e . --no-build-isolation --no-deps
+          source "$VLLM_ASCEND_HUST_REPO/scripts/use_single_ascend_env.sh"
+          bash "$VLLM_ASCEND_HUST_REPO/scripts/install_local_ascend_plugin.sh" "$VLLM_ASCEND_HUST_REPO"
+          "$PYTHON_BIN" -m pip install -e . --no-build-isolation --no-deps
 
       - name: Verify installation
-        env:
-          COMPILE_CUSTOM_KERNELS: "0"
-          TORCH_DEVICE_BACKEND_AUTOLOAD: "0"
         run: |
-          source "${VLLM_ASCEND_HUST_REPO}/scripts/use_single_ascend_env.sh"
-          python --version
-          python - <<'PY'
-          import importlib.metadata as metadata
-          import importlib.util
-          import os
-          from pathlib import Path
-
-          def module_path(module_name: str) -> Path:
-              spec = importlib.util.find_spec(module_name)
-              if spec is None or spec.origin is None:
-                  raise SystemExit(f"{module_name} is not importable")
-              return Path(spec.origin).resolve()
-
-          def dist_version(*dist_names: str) -> str:
-              for dist_name in dist_names:
-                  try:
-                      return metadata.version(dist_name)
-                  except metadata.PackageNotFoundError:
-                      continue
-              return "<unknown>"
-
-          expected_repo = Path(os.environ["VLLM_ASCEND_HUST_REPO"]).resolve()
-          vllm_path = module_path("vllm")
-          vllm_ascend_path = module_path("vllm_ascend")
-          platform_plugins = metadata.entry_points(group="vllm.platform_plugins")
-          ascend_plugin = [ep for ep in platform_plugins if ep.name == "ascend"]
-
-          print(f"vLLM version: {dist_version('vllm-hust', 'vllm')}")
-          print(f"vllm_ascend version: {dist_version('vllm-ascend-hust', 'vllm-ascend')}")
-          print(f"vLLM module path: {vllm_path}")
-          print(f"vllm_ascend module path: {vllm_ascend_path}")
-          print(f"vllm.platform_plugins ascend entry point: {ascend_plugin[0].value if ascend_plugin else '<missing>'}")
-
-          if expected_repo not in vllm_ascend_path.parents:
-              raise SystemExit(
-                  "vllm_ascend is not resolved from the checked-out workspace: "
-                  f"{vllm_ascend_path} (expected under {expected_repo})"
-              )
-          if not ascend_plugin:
-              raise SystemExit("ascend platform plugin entry point is not installed")
-          PY
+          source "$VLLM_ASCEND_HUST_REPO/scripts/use_single_ascend_env.sh"
+          which python
+          "$PYTHON_BIN" --version
+          "$PYTHON_BIN" -c "import vllm; print(f'vLLM version: {vllm.__version__}')"
 
       - name: Run real inference regression checks
         env:
-          COMPILE_CUSTOM_KERNELS: "0"
-          VLLM_ASCEND_HUST_REPO: ${{ github.workspace }}/vllm-ascend-hust
           MODEL_NAME: Qwen/Qwen2.5-0.5B-Instruct
           DTYPE: bfloat16
           MAX_MODEL_LEN: "256"
@@ -255,13 +182,13 @@ jobs:
           MAX_TOKENS: "8"
           BENCH_NUM_PROMPTS: "5"
         run: |
-          source "${VLLM_ASCEND_HUST_REPO}/scripts/use_single_ascend_env.sh"
+          source "$VLLM_ASCEND_HUST_REPO/scripts/use_single_ascend_env.sh"
           bash .github/workflows/scripts/run_e2e_inference_regression.sh
 
       - name: Cleanup leftover Ascend CI processes
         if: always()
         run: |
-          source "${VLLM_ASCEND_HUST_REPO}/scripts/use_single_ascend_env.sh"
+          source "$VLLM_ASCEND_HUST_REPO/scripts/use_single_ascend_env.sh"
           bash .github/workflows/scripts/cleanup_ascend_ci_processes.sh
 
       - name: Release Ascend hardware lock

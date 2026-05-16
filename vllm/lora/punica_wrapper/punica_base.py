@@ -493,3 +493,65 @@ class PunicaWrapperBase(PunicaWrapperABC):
         """
         # TODO: implement it based on torch ops
         raise NotImplementedError
+
+    def add_lora_w13(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: tuple[torch.Tensor, ...],
+        lora_b_stacked: tuple[torch.Tensor, ...],
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        expert_map: torch.Tensor | None,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        num_tokens: int,
+        top_k_num: int,
+        max_loras: int,
+        adapter_enabled: torch.Tensor,
+        local_num_experts: int,
+        top_k: int,
+        num_slices: int,
+        fully_sharded: bool,
+        use_tuned_config: bool,
+    ) -> tuple[
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ]:
+        """Apply w13 LoRA to y (intermediate_cache1) in-place before activation.
+
+        Returns (sorted_token_ids_lora, expert_ids_lora,
+                 num_tokens_post_padded_lora, token_lora_mapping)
+        for reuse by add_lora_w2.
+        """
+        raise NotImplementedError
+
+    def add_lora_w2(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: tuple[torch.Tensor, ...],
+        lora_b_stacked: tuple[torch.Tensor, ...],
+        topk_weights: torch.Tensor,
+        sorted_token_ids_lora: torch.Tensor | None,
+        expert_ids_lora: torch.Tensor | None,
+        num_tokens_post_padded_lora: torch.Tensor | None,
+        token_lora_mapping: torch.Tensor | None,
+        num_tokens: int,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        top_k_num: int,
+        max_loras: int,
+        adapter_enabled: torch.Tensor,
+        top_k: int,
+        fully_sharded: bool,
+        tp_rank: int,
+        use_tuned_config: bool,
+    ) -> None:
+        """Apply w2 LoRA to y (intermediate_cache3) in-place before moe_sum.
+
+        Reuses routing tensors returned by add_lora_w13.
+        """
+        raise NotImplementedError

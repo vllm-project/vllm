@@ -1,0 +1,117 @@
+%%
+%% This is file `amsopn.sty',
+%% generated with the docstrip utility.
+%%
+%% The original source files were:
+%%
+%% amsopn.dtx 
+%% 
+%% Copyright (C) 1995, 1999 American Mathematical Society.
+%% Copyright (C) 2016-2021  LaTeX Project and American Mathematical Society.
+%% 
+%% This work may be distributed and/or modified under the
+%% conditions of the LaTeX Project Public License, either version 1.3c
+%% of this license or (at your option) any later version.
+%% The latest version of this license is in
+%%   https://www.latex-project.org/lppl.txt
+%% and version 1.3c or later is part of all distributions of LaTeX
+%% version 2005/12/01 or later.
+%% 
+%% This work has the LPPL maintenance status `maintained'.
+%% 
+%% The Current Maintainer of this work is the LaTeX Project.
+%% 
+\NeedsTeXFormat{LaTeX2e}% LaTeX 2.09 can't be used (nor non-LaTeX)
+[1994/12/01]% LaTeX date must December 1994 or later
+\ProvidesPackage{amsopn}[2021/08/26 v2.02 operator names]
+\def\nolimits@{\@ifnextchar\limits{\nolimits\@gobble}{\nolimits}}
+\begingroup \catcode`\"=12
+\ifx\Umathcode\@undefined
+\gdef\newmcodes@{\mathcode`\'39\mathcode`\*42\mathcode`\."613A%
+  \ifnum\mathcode`\-=45 \else
+    \mathchardef\std@minus\mathcode`\-\relax
+  \fi
+  \mathcode`\-45\mathcode`\/47\mathcode`\:"603A\relax}
+\else
+\gdef\newmcodes@{\mathcode`\'39\mathcode`\*42\mathcode`\."613A%
+  \ifnum\Umathcodenum`\-=45 \else
+    \Umathcharnumdef\std@minus\Umathcodenum`\-\relax
+  \fi
+  \mathcode`\-45\mathcode`\/47\mathcode`\:"603A\relax}
+\fi
+\endgroup
+\DeclareRobustCommand{\operatorname}{%
+  \@ifstar{\qopname\newmcodes@ m}%
+          {\qopname\newmcodes@ o}}%
+\DeclareRobustCommand{\qopname}[3]{%
+  \mathop{#1\kern\z@\operator@font#3}%
+  \csname n#2limits@\endcsname}
+\newcommand{\DeclareMathOperator}{%
+  \@ifstar{\@declmathop m}{\@declmathop o}}
+\long\def\@declmathop#1#2#3{%
+  \@ifdefinable{#2}{%
+    \DeclareRobustCommand{#2}{\qopname\newmcodes@#1{#3}}}}
+\@onlypreamble\DeclareMathOperator
+\@onlypreamble\@declmathop
+\def\arccos{\qopname\relax o{arccos}}
+\def\arcsin{\qopname\relax o{arcsin}}
+\def\arctan{\qopname\relax o{arctan}}
+\def\arg{\qopname\relax o{arg}}
+\def\cos{\qopname\relax o{cos}}
+\def\cosh{\qopname\relax o{cosh}}
+\def\cot{\qopname\relax o{cot}}
+\def\coth{\qopname\relax o{coth}}
+\def\csc{\qopname\relax o{csc}}
+\def\deg{\qopname\relax o{deg}}
+\def\det{\qopname\relax m{det}}
+\def\dim{\qopname\relax o{dim}}
+\def\exp{\qopname\relax o{exp}}
+\def\gcd{\qopname\relax m{gcd}}
+\def\hom{\qopname\relax o{hom}}
+\def\inf{\qopname\relax m{inf}}
+\def\injlim{\qopname\relax m{inj\,lim}}
+\def\ker{\qopname\relax o{ker}}
+\def\lg{\qopname\relax o{lg}}
+\def\lim{\qopname\relax m{lim}}
+\def\liminf{\qopname\relax m{lim\,inf}}
+\def\limsup{\qopname\relax m{lim\,sup}}
+\def\ln{\qopname\relax o{ln}}
+\def\log{\qopname\relax o{log}}
+\def\max{\qopname\relax m{max}}
+\def\min{\qopname\relax m{min}}
+\def\Pr{\qopname\relax m{Pr}}
+\def\projlim{\qopname\relax m{proj\,lim}}
+\def\sec{\qopname\relax o{sec}}
+\def\sin{\qopname\relax o{sin}}
+\def\sinh{\qopname\relax o{sinh}}
+\def\sup{\qopname\relax m{sup}}
+\def\tan{\qopname\relax o{tan}}
+\def\tanh{\qopname\relax o{tanh}}
+\def\operator@font{\mathgroup\symoperators}
+\def\operatorfont{\operator@font}
+\def\operatornamewithlimits{\operatorname*}
+\def\varlim@#1#2{%
+  \vtop{\m@th\ialign{##\cr
+    \hfil$#1\operator@font lim$\hfil\cr
+    \noalign{\nointerlineskip\kern1.5\ex@}#2\cr
+    \noalign{\nointerlineskip\kern-\ex@}\cr}}%
+}
+\def\varinjlim{%
+  \mathop{\mathpalette\varlim@{\rightarrowfill@\textstyle}}\nmlimits@
+}
+\def\varprojlim{%
+  \mathop{\mathpalette\varlim@{\leftarrowfill@\textstyle}}\nmlimits@
+}
+\def\varliminf{\mathop{\mathpalette\varliminf@{}}\nmlimits@}
+\def\varliminf@#1{\@@underline{\vrule\@depth.2\ex@\@width\z@
+   \hbox{$#1\m@th\operator@font lim$}}}
+\def\varlimsup{\mathop{\mathpalette\varlimsup@{}}\nmlimits@}
+\def\varlimsup@#1{\@@overline{\hbox{$#1\m@th\operator@font lim$}}}
+\let\nmlimits@\displaylimits
+\DeclareOption{namelimits}{\let\nmlimits@\displaylimits}
+\DeclareOption{nonamelimits}{\let\nmlimits@\nolimits}
+\ProcessOptions\relax
+\RequirePackage{amsgen}\relax
+\endinput
+%%
+%% End of file `amsopn.sty'.

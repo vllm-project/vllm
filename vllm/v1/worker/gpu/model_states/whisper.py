@@ -72,17 +72,36 @@ class WhisperModelState(ModelState):
             req_encoder_inputs = scheduled_encoder_inputs.get(req_id, [])
             if req_encoder_inputs:
                 encoder_inputs[req_id] = req_encoder_inputs
-        _, mm_kwargs = self.encoder_runner.prepare_mm_inputs(encoder_inputs)
+        mm_hashes, mm_kwargs = self.encoder_runner.prepare_mm_inputs(encoder_inputs)
         if mm_kwargs:
             # Whisper consumes encoder outputs through `encoder_outputs`, not
             # `inputs_embeds`. Single modality (audio) so execute_mm_encoder
             # preserves request order; use its return value directly.
-            # No need to store in encoder_cache: cross-attention K/V are written
-            # to the KV cache on the first step; decode steps use the cache.
             self.encoder_outputs = self.encoder_runner.execute_mm_encoder(mm_kwargs)
+            self.encoder_cache.encoder_outputs.update(
+                zip(mm_hashes, self.encoder_outputs)
+            )
         else:
-            # Decode steps: encoder K/V are in cross-attention KV cache.
-            self.encoder_outputs = []
+            encoder_outputs: list[torch.Tensor] = []
+            for req_id in input_batch.req_ids:
+                req_idx = req_states.req_id_to_index[req_id]
+                num_computed_tokens = req_states.num_computed_tokens_np[req_idx]
+                if num_computed_tokens > 0:
+                    continue
+
+                mm_features = self.encoder_cache.mm_features.get(req_id, [])
+                if not mm_features:
+                    continue
+
+                assert len(mm_features) == 1, (
+                    "Whisper requests are expected to have exactly one encoder input."
+                )
+                mm_hash = mm_features[0].identifier
+                encoder_output = self.encoder_cache.encoder_outputs.get(mm_hash)
+                assert encoder_output is not None, f"Encoder cache miss for {mm_hash}."
+                encoder_outputs.append(encoder_output)
+
+            self.encoder_outputs = encoder_outputs
         return None
 
     def prepare_inputs(
@@ -117,6 +136,11 @@ class WhisperModelState(ModelState):
 
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
         max_query_len = input_batch.num_scheduled_tokens.max().item()
+        seq_lens_cpu_upper_bound = input_batch.seq_lens_cpu_upper_bound
+        if for_capture:
+            max_seq_len = self.max_model_len
+        else:
+            max_seq_len = int(seq_lens_cpu_upper_bound[:num_reqs].max().item())
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
@@ -125,10 +149,11 @@ class WhisperModelState(ModelState):
             query_start_loc_cpu=query_start_loc_cpu,
             max_query_len=max_query_len,
             seq_lens=input_batch.seq_lens,
-            max_seq_len=self.max_model_len,
+            max_seq_len=max_seq_len,
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=kv_cache_config,
+            seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
             encoder_seq_lens=encoder_seq_lens,
         )

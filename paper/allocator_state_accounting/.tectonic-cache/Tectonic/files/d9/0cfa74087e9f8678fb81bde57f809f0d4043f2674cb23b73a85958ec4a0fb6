@@ -1,0 +1,136 @@
+%%
+%% This is file `amsgen.sty',
+%% generated with the docstrip utility.
+%%
+%% The original source files were:
+%%
+%% amsgen.dtx 
+%% 
+%% Copyright (C) 1995, 1999 American Mathematical Society.
+%% Copyright (C) 2016-2021  LaTeX Project and American Mathematical Society.
+%% 
+%% This work may be distributed and/or modified under the
+%% conditions of the LaTeX Project Public License, either version 1.3c
+%% of this license or (at your option) any later version.
+%% The latest version of this license is in
+%%   https://www.latex-project.org/lppl.txt
+%% and version 1.3c or later is part of all distributions of LaTeX
+%% version 2005/12/01 or later.
+%% 
+%% This work has the LPPL maintenance status `maintained'.
+%% 
+%% The Current Maintainer of this work is the LaTeX Project.
+%% 
+\NeedsTeXFormat{LaTeX2e}% LaTeX 2.09 can't be used (nor non-LaTeX)
+[1994/12/01]% LaTeX date must December 1994 or later
+\ProvidesFile{amsgen.sty}[1999/11/30 v2.0 generic functions]
+\providecommand{\@saveprimitive}[2]{\begingroup\escapechar`\\\relax
+  \edef\@tempa{\string#1}\edef\@tempb{\meaning#1}%
+  \ifx\@tempa\@tempb \global\let#2#1%
+  \else
+    \edef\@tempb{\meaning#2}%
+    \ifx\@tempa\@tempb
+    \else
+      \@latex@error{Unable to properly define \string#2; primitive
+      \noexpand#1no longer primitive}\@eha
+    \fi
+  \fi
+  \endgroup}
+\let\@xp=\expandafter
+\let\@nx=\noexpand
+\newtoks\@emptytoks
+\def\@oparg#1[#2]{\@ifnextchar[{#1}{#1[#2]}}
+\long\def\@ifempty#1{\@xifempty#1@@..\@nil}
+\long\def\@xifempty#1#2@#3#4#5\@nil{%
+  \ifx#3#4\@xp\@firstoftwo\else\@xp\@secondoftwo\fi}
+\long\def\@ifnotempty#1{\@ifempty{#1}{}}
+\def\FN@{\futurelet\@let@token}
+\def\DN@{\def\next@}
+\def\RIfM@{\relax\ifmmode}
+\def\setboxz@h{\setbox\z@\hbox}
+\def\wdz@{\wd\z@}
+\def\boxz@{\box\z@}
+\def\relaxnext@{\let\@let@token\relax}
+\long\def\new@ifnextchar#1#2#3{%
+  \let\reserved@d= #1%
+  \def\reserved@a{#2}\def\reserved@b{#3}%
+  \futurelet\@let@token\new@ifnch
+}
+\def\new@ifnch{%
+  \ifx\@let@token\reserved@d \let\reserved@b\reserved@a \fi
+  \reserved@b
+}
+\def\@ifstar#1#2{\new@ifnextchar *{\def\reserved@a*{#1}\reserved@a}{#2}}
+\@ifundefined{every@math@size}{%
+\let\every@math@size=\every@size
+\def\glb@settings{%
+     \expandafter\ifx\csname S@\f@size\endcsname\relax
+       \calculate@math@sizes
+     \fi
+     \csname S@\f@size\endcsname
+      \ifmath@fonts
+        \begingroup
+          \escapechar\m@ne
+          \csname mv@\math@version \endcsname
+          \globaldefs\@ne
+          \let \glb@currsize \f@size
+          \math@fonts
+        \endgroup
+        \the\every@math@size
+      \else
+      \fi
+}
+\def\set@fontsize#1#2#3{%
+    \@defaultunits\@tempdimb#2pt\relax\@nnil
+    \edef\f@size{\strip@pt\@tempdimb}%
+    \@defaultunits\@tempskipa#3pt\relax\@nnil
+    \edef\f@baselineskip{\the\@tempskipa}%
+    \edef\f@linespread{#1}%
+    \let\baselinestretch\f@linespread
+      \def\size@update{%
+        \baselineskip\f@baselineskip\relax
+        \baselineskip\f@linespread\baselineskip
+        \normalbaselineskip\baselineskip
+        \setbox\strutbox\hbox{%
+          \vrule\@height.7\baselineskip
+                \@depth.3\baselineskip
+                \@width\z@}%
+%%%     \the\every@size
+        \let\size@update\relax}%
+  }
+}{}% end \@ifundefined test
+\newdimen\ex@
+\addto@hook\every@math@size{\compute@ex@}
+\def\compute@ex@{%
+  \begingroup
+  \dimen@-\f@size\p@
+  \ifdim\dimen@<-20\p@
+    \global\ex@ 1.5\p@
+  \else
+    \advance\dimen@10\p@ \multiply\dimen@\tw@
+    \edef\@tempa{\ifdim\dimen@>\z@ -\fi}%
+    \dimen@ \ifdim\dimen@<\z@ -\fi \dimen@
+    \advance\dimen@-\@m sp % fudge factor
+    \vfuzz\p@
+    \def\do{\ifdim\dimen@>\z@
+      \vfuzz=.97\vfuzz
+      \advance\dimen@ -\p@
+      \@xp\do \fi}%
+    \do
+    \dimen@\p@ \advance\dimen@-\vfuzz
+    \global\ex@\p@
+    \global\advance\ex@ \@tempa\dimen@
+  \fi
+  \endgroup
+}
+\def\@addpunct#1{\ifnum\spacefactor>\@m \else#1\fi}
+\def\frenchspacing{\sfcode`\.1006\sfcode`\?1005\sfcode`\!1004%
+  \sfcode`\:1003\sfcode`\;1002\sfcode`\,1001 }
+\def\nomath@env{\@amsmath@err{%
+  \string\begin{\@currenvir} allowed only in paragraph mode%
+}\@ehb% "You've lost some text"
+}
+\def\Invalid@@{Invalid use of \string}
+\endinput
+%%
+%% End of file `amsgen.sty'.

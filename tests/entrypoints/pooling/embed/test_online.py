@@ -288,7 +288,7 @@ async def test_truncate_prompt_tokens(client: openai.AsyncOpenAI, model_name: st
         assert "error" in response.object
         assert (
             "truncate_prompt_tokens value is greater than max_model_len. "
-            "Please, select a smaller truncation size." in response.message
+            "Please request a smaller truncation size." in response.message
         )
 
 
@@ -732,28 +732,9 @@ async def test_pooling_embed(server: RemoteOpenAIServer, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_pooling_token_embed(server: RemoteOpenAIServer, model_name: str):
-    task = "token_embed"
-    response = requests.post(
-        server.url_for("pooling"),
-        json={
-            "model": model_name,
-            "input": input_text,
-            "encoding_format": "float",
-            "task": task,
-        },
-    )
-
-    poolings = PoolingResponse.model_validate(response.json())
-
-    assert len(poolings.data) == 1
-    assert len(poolings.data[0].data) == len(input_tokens)
-    assert len(poolings.data[0].data[0]) == 384
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.parametrize("task", ["classify", "token_classify", "plugin"])
+@pytest.mark.parametrize(
+    "task", ["classify", "token_classify", "token_embed", "plugin"]
+)
 async def test_pooling_not_supported(
     server: RemoteOpenAIServer, model_name: str, task: str
 ):
@@ -767,4 +748,10 @@ async def test_pooling_not_supported(
         },
     )
     assert response.json()["error"]["type"] == "BadRequestError"
-    assert response.json()["error"]["message"].startswith(f"Unsupported task: {task!r}")
+    if task == "plugin":
+        err_msg = "No IOProcessor plugin installed."
+    elif task == "token_embed":
+        err_msg = "Try switching the model's pooling_task via"
+    else:
+        err_msg = f"Unsupported task: {task!r}"
+    assert response.json()["error"]["message"].startswith(err_msg)

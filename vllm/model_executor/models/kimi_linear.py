@@ -11,11 +11,13 @@ from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_reduce,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.kda import KimiDeltaAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -132,22 +134,6 @@ class KimiMoE(nn.Module):
 
         self.gate.e_score_correction_bias = nn.Parameter(torch.empty(num_experts))
 
-        self.experts = FusedMoE(
-            num_experts=num_experts,
-            top_k=config.num_experts_per_token,
-            hidden_size=hidden_size,
-            intermediate_size=moe_intermediate_size,
-            reduce_results=False,
-            renormalize=moe_renormalize,
-            quant_config=quant_config,
-            use_grouped_topk=config.use_grouped_topk,
-            num_expert_group=config.num_expert_group,
-            topk_group=config.topk_group,
-            prefix=f"{prefix}.experts",
-            scoring_func=config.moe_router_activation_func,
-            e_score_correction_bias=self.gate.e_score_correction_bias,
-        )
-
         if self.num_shared_experts is not None:
             intermediate_size = moe_intermediate_size * self.num_shared_experts
             self.shared_experts = KimiMLP(
@@ -158,22 +144,33 @@ class KimiMoE(nn.Module):
                 reduce_results=False,
                 prefix=f"{prefix}.shared_experts",
             )
+        else:
+            self.shared_experts = None
+
+        self.experts = FusedMoE(
+            shared_experts=self.shared_experts,
+            num_experts=num_experts,
+            top_k=config.num_experts_per_token,
+            hidden_size=hidden_size,
+            intermediate_size=moe_intermediate_size,
+            renormalize=moe_renormalize,
+            quant_config=quant_config,
+            use_grouped_topk=config.use_grouped_topk,
+            num_expert_group=config.num_expert_group,
+            topk_group=config.topk_group,
+            prefix=f"{prefix}.experts",
+            scoring_func=config.moe_router_activation_func,
+            e_score_correction_bias=self.gate.e_score_correction_bias,
+            routed_scaling_factor=self.routed_scaling_factor,
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_size)
-        if self.num_shared_experts is not None:
-            shared_output = self.shared_experts(hidden_states)
         router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = (
-            self.experts(hidden_states=hidden_states, router_logits=router_logits)
-            * self.routed_scaling_factor
+        final_hidden_states = self.experts(
+            hidden_states=hidden_states, router_logits=router_logits
         )
-        if shared_output is not None:
-            final_hidden_states = final_hidden_states + shared_output
-
-        if self.tp_size > 1:
-            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
         return final_hidden_states.view(num_tokens, hidden_size)
 
 
@@ -482,7 +479,7 @@ class KimiLinearModel(nn.Module):
         if self.config.is_moe:
             # Params for weights, fp8 weight scales, fp8 activation scales
             # (param_name, weight_name, expert_id, shard_id)
-            expert_params_mapping = FusedMoE.make_expert_params_mapping(
+            expert_params_mapping = fused_moe_make_expert_params_mapping(
                 self,
                 ckpt_gate_proj_name="w1",
                 ckpt_down_proj_name="w2",

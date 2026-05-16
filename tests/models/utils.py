@@ -375,6 +375,7 @@ def softmax(data):
 @dataclass
 class ModelInfo:
     name: str
+    revision: str | None = None
     architecture: str = ""
     dtype: str = "auto"
     max_model_len: int | None = None
@@ -447,9 +448,16 @@ def dummy_hf_overrides(
     Dummy HF overrides function used to create dummy model
     with only minimum nums of layer.
     """
-    hf_config.update(exist_overrides or {})
+    # Copy because this helper is called more than once
+    # while loading config, and we `.pop()`
+    exist_overrides = (exist_overrides or {}).copy()
+    text_config_override = exist_overrides.pop("text_config", None)
+    hf_config.update(exist_overrides)
 
     text_config = hf_config.get_text_config()
+    if text_config_override is not None:
+        # multimodal test models may override *some* text-model fields
+        text_config.update(text_config_override)
 
     # Ensure at least 2 expert per group
     # Since `grouped_topk` assumes top-2
@@ -468,7 +476,16 @@ def dummy_hf_overrides(
     else:
         # Use minimal layers for testing
         num_layers = 1
-        num_hidden_layers = 3 if model_arch == "Gemma3nForConditionalGeneration" else 1
+        num_hidden_layers = (
+            3
+            if model_arch
+            in (
+                "Gemma3nForConditionalGeneration",
+                "Gemma4ForCausalLM",
+                "Gemma4ForConditionalGeneration",
+            )
+            else 1
+        )
 
     update_dict = {
         "num_layers": num_layers,
@@ -506,6 +523,17 @@ def dummy_hf_overrides(
 
     text_config.update(update_dict)
 
+    # Update n_layers and moe configs for Moondream3 model
+    if model_arch in ("Moondream3ForCausalLM", "HfMoondream"):
+        text_config.update(
+            {
+                "n_layers": num_hidden_layers,
+                "moe_num_experts": num_experts,
+                "moe_experts_per_token": 2,
+                "moe_start_layer": num_hidden_layers,
+            }
+        )
+
     if hasattr(hf_config, "vision_config"):
         hf_config.vision_config.update(
             {
@@ -513,6 +541,9 @@ def dummy_hf_overrides(
                 "num_hidden_layers": 1,
             }
         )
+
+        if model_arch in ("Moondream3ForCausalLM", "HfMoondream"):
+            hf_config.vision_config.update({"enc_n_layers": 1})
 
     # e.g.: ibm-granite/granite-speech-3.3-2b
     if hasattr(hf_config, "encoder_config"):

@@ -1,0 +1,219 @@
+%%
+%% This is file `hyphen.cfg',
+%% generated with the docstrip utility.
+%%
+%% The original source files were:
+%%
+%% babel.dtx  (with options: `patterns')
+%% 
+%%
+%% Copyright (C) 2012-2022 Javier Bezos and Johannes L. Braams.
+%% Copyright (C) 1989-2012 Johannes L. Braams and
+%%           any individual authors listed elsewhere in this file.
+%% All rights reserved.
+%%
+%%
+%% This file is part of the Babel system.
+%% --------------------------------------
+%%
+%% It may be distributed and/or modified under the
+%% conditions of the LaTeX Project Public License, either version 1.3
+%% of this license or (at your option) any later version.
+%% The latest version of this license is in
+%%   http://www.latex-project.org/lppl.txt
+%% and version 1.3 or later is part of all distributions of LaTeX
+%% version 2003/12/01 or later.
+%%
+%% This work has the LPPL maintenance status "maintained".
+%%
+%% The Current Maintainer of this work is Javier Bezos.
+%%
+%% The list of derived (unpacked) files belonging to the distribution
+%% and covered by LPPL is defined by the unpacking scripts (with
+%% extension |.ins|) which are part of the distribution.
+%%
+
+\ifx\ProvidesFile\@undefined
+  \def\ProvidesFile#1[#2 #3 #4]{%
+    \wlog{File: #1 #4 #3 <#2>}%
+    \let\ProvidesFile\@undefined}
+\fi
+\ProvidesFile{hyphen.cfg}[2022/02/26 3.73 Babel hyphens]
+\xdef\bbl@format{\jobname}
+\def\bbl@version{3.73}
+\def\bbl@date{2022/02/26}
+\ifx\AtBeginDocument\@undefined
+  \def\@empty{}
+\fi
+\ifx\language\@undefined
+  \csname newcount\endcsname\language
+\fi
+\countdef\last@language=19
+\def\addlanguage{\csname newlanguage\endcsname}
+\def\process@line#1#2 #3 #4 {%
+  \ifx=#1%
+    \process@synonym{#2}%
+  \else
+    \process@language{#1#2}{#3}{#4}%
+  \fi
+  \ignorespaces}
+\toks@{}
+\def\bbl@languages{}
+\def\process@synonym#1{%
+  \ifnum\last@language=\m@ne
+    \toks@\expandafter{\the\toks@\relax\process@synonym{#1}}%
+  \else
+    \expandafter\chardef\csname l@#1\endcsname\last@language
+    \wlog{\string\l@#1=\string\language\the\last@language}%
+    \expandafter\let\csname #1hyphenmins\expandafter\endcsname
+      \csname\languagename hyphenmins\endcsname
+    \let\bbl@elt\relax
+    \edef\bbl@languages{\bbl@languages\bbl@elt{#1}{\the\last@language}{}{}}%
+  \fi}
+\def\process@language#1#2#3{%
+  \expandafter\addlanguage\csname l@#1\endcsname
+  \expandafter\language\csname l@#1\endcsname
+  \edef\languagename{#1}%
+  \bbl@hook@everylanguage{#1}%
+  %  > luatex
+  \bbl@get@enc#1::\@@@
+  \begingroup
+    \lefthyphenmin\m@ne
+    \bbl@hook@loadpatterns{#2}%
+    %  > luatex
+    \ifnum\lefthyphenmin=\m@ne
+    \else
+      \expandafter\xdef\csname #1hyphenmins\endcsname{%
+        \the\lefthyphenmin\the\righthyphenmin}%
+    \fi
+  \endgroup
+  \def\bbl@tempa{#3}%
+  \ifx\bbl@tempa\@empty\else
+    \bbl@hook@loadexceptions{#3}%
+    %  > luatex
+  \fi
+  \let\bbl@elt\relax
+  \edef\bbl@languages{%
+    \bbl@languages\bbl@elt{#1}{\the\language}{#2}{\bbl@tempa}}%
+  \ifnum\the\language=\z@
+    \expandafter\ifx\csname #1hyphenmins\endcsname\relax
+      \set@hyphenmins\tw@\thr@@\relax
+    \else
+      \expandafter\expandafter\expandafter\set@hyphenmins
+        \csname #1hyphenmins\endcsname
+    \fi
+    \the\toks@
+    \toks@{}%
+  \fi}
+\def\bbl@get@enc#1:#2:#3\@@@{\def\bbl@hyph@enc{#2}}
+\def\bbl@hook@everylanguage#1{}
+\def\bbl@hook@loadpatterns#1{\input #1\relax}
+\let\bbl@hook@loadexceptions\bbl@hook@loadpatterns
+\def\bbl@hook@loadkernel#1{%
+  \def\addlanguage{\csname newlanguage\endcsname}%
+  \def\adddialect##1##2{%
+    \global\chardef##1##2\relax
+    \wlog{\string##1 = a dialect from \string\language##2}}%
+  \def\iflanguage##1{%
+    \expandafter\ifx\csname l@##1\endcsname\relax
+      \@nolanerr{##1}%
+    \else
+      \ifnum\csname l@##1\endcsname=\language
+        \expandafter\expandafter\expandafter\@firstoftwo
+      \else
+        \expandafter\expandafter\expandafter\@secondoftwo
+      \fi
+    \fi}%
+  \def\providehyphenmins##1##2{%
+    \expandafter\ifx\csname ##1hyphenmins\endcsname\relax
+      \@namedef{##1hyphenmins}{##2}%
+    \fi}%
+  \def\set@hyphenmins##1##2{%
+    \lefthyphenmin##1\relax
+    \righthyphenmin##2\relax}%
+  \def\selectlanguage{%
+    \errhelp{Selecting a language requires a package supporting it}%
+    \errmessage{Not loaded}}%
+  \let\foreignlanguage\selectlanguage
+  \let\otherlanguage\selectlanguage
+  \expandafter\let\csname otherlanguage*\endcsname\selectlanguage
+  \def\bbl@usehooks##1##2{}% TODO. Temporary!!
+  \def\setlocale{%
+    \errhelp{Find an armchair, sit down and wait}%
+    \errmessage{Not yet available}}%
+  \let\uselocale\setlocale
+  \let\locale\setlocale
+  \let\selectlocale\setlocale
+  \let\localename\setlocale
+  \let\textlocale\setlocale
+  \let\textlanguage\setlocale
+  \let\languagetext\setlocale}
+\begingroup
+  \def\AddBabelHook#1#2{%
+    \expandafter\ifx\csname bbl@hook@#2\endcsname\relax
+      \def\next{\toks1}%
+    \else
+      \def\next{\expandafter\gdef\csname bbl@hook@#2\endcsname####1}%
+    \fi
+    \next}
+  \ifx\directlua\@undefined
+    \ifx\XeTeXinputencoding\@undefined\else
+      \input xebabel.def
+    \fi
+  \else
+    \input luababel.def
+  \fi
+  \openin1 = babel-\bbl@format.cfg
+  \ifeof1
+  \else
+    \input babel-\bbl@format.cfg\relax
+  \fi
+  \closein1
+\endgroup
+\bbl@hook@loadkernel{switch.def}
+\openin1 = language.dat
+\def\languagename{english}%
+\ifeof1
+  \message{I couldn't find the file language.dat,\space
+           I will try the file hyphen.tex}
+  \input hyphen.tex\relax
+  \chardef\l@english\z@
+\else
+  \last@language\m@ne
+  \loop
+    \endlinechar\m@ne
+    \read1 to \bbl@line
+    \endlinechar`\^^M
+    \if T\ifeof1F\fi T\relax
+      \ifx\bbl@line\@empty\else
+        \edef\bbl@line{\bbl@line\space\space\space}%
+        \expandafter\process@line\bbl@line\relax
+      \fi
+  \repeat
+  \begingroup
+    \def\bbl@elt#1#2#3#4{%
+      \global\language=#2\relax
+      \gdef\languagename{#1}%
+      \def\bbl@elt##1##2##3##4{}}%
+    \bbl@languages
+  \endgroup
+\fi
+\closein1
+\if/\the\toks@/\else
+  \errhelp{language.dat loads no language, only synonyms}
+  \errmessage{Orphan language synonym}
+\fi
+\let\bbl@line\@undefined
+\let\process@line\@undefined
+\let\process@synonym\@undefined
+\let\process@language\@undefined
+\let\bbl@get@enc\@undefined
+\let\bbl@hyph@enc\@undefined
+\let\bbl@tempa\@undefined
+\let\bbl@hook@loadkernel\@undefined
+\let\bbl@hook@everylanguage\@undefined
+\let\bbl@hook@loadpatterns\@undefined
+\let\bbl@hook@loadexceptions\@undefined
+\endinput
+%%
+%% End of file `hyphen.cfg'.

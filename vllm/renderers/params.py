@@ -204,7 +204,7 @@ class TokenizeParams:
             and max_output_tokens > max_total_tokens
         ):
             raise VLLMValidationError(
-                f"{self.max_output_tokens_param}={max_output_tokens}"
+                f"{self.max_output_tokens_param}={max_output_tokens} "
                 f"cannot be greater than "
                 f"{self.max_total_tokens_param}={max_total_tokens=}. "
                 f"Please request fewer output tokens.",

@@ -1,0 +1,1464 @@
+%%
+%% This is file `xcolor.sty',
+%% generated with the docstrip utility.
+%%
+%% The original source files were:
+%%
+%% xcolor.dtx  (with options: `package')
+%% 
+%% IMPORTANT NOTICE:
+%% 
+%% For the copyright see the source file.
+%% 
+%% Any modified versions of this file must be renamed
+%% with new filenames distinct from xcolor.sty.
+%% 
+%% For distribution of the original source see the terms
+%% for copying and modification in the file xcolor.dtx.
+%% 
+%% This generated file may be distributed as long as the
+%% original source files, as listed above, are part of the
+%% same distribution. (The sources need not necessarily be
+%% in the same archive or directory.)
+%%
+\ProvidesPackage{xcolor}
+ [2021/10/31 v2.13 LaTeX color extensions (UK)]
+%%
+%% ----------------------------------------------------------------
+%% Copyright (C) 2003-2021 by Dr. Uwe Kern <xcolor at ukern dot de>
+%%               2021      LaTeX Project https://github.com/latex3/xcolor/issues
+%% ----------------------------------------------------------------
+%%
+%% Please send error reports and suggestions for
+%% improvements to https://github.com/latex3/xcolor/issues.
+%%
+%% This package contains code copied from
+%%
+%% color.dtx [1999/02/16 v1.0i Standard LaTeX Color (DPC)]
+%% Copyright (C) 1994--1999 David Carlisle
+%%
+%% which is part of the Standard LaTeX `Graphics Bundle'.
+%%
+\NeedsTeXFormat{LaTeX2e}
+\expandafter\edef\csname XC@catcodes\endcsname
+ {\catcode33 \the\catcode33 % !
+  \catcode34 \the\catcode34 % "
+  \catcode39 \the\catcode39 % '
+  \catcode42 \the\catcode42 % *
+  \catcode44 \the\catcode44 % ,
+  \catcode45 \the\catcode45 % -
+  \catcode46 \the\catcode46 % .
+  \catcode47 \the\catcode47 % /
+  \catcode58 \the\catcode58 % :
+  \catcode59 \the\catcode59 % ;
+  \catcode60 \the\catcode60 % <
+  \catcode61 \the\catcode61 % =
+  \catcode62 \the\catcode62 % >
+  \catcode63 \the\catcode63 % ?
+  \catcode64 \the\catcode64 % @
+  \catcode94 \the\catcode94 % ^
+  \catcode96 \the\catcode96 % `
+  \catcode`\noexpand\^^A\the\catcode`\^^A\relax}
+\catcode64 11 %
+\@makeother\! \@makeother\" \@makeother\' \@makeother\* \@makeother\,
+\@makeother\- \@makeother\. \@makeother\/ \@makeother\: \@makeother\;
+\@makeother\< \@makeother\= \@makeother\> \@makeother\? \@makeother\`
+\catcode94 7 %
+\catcode`\^^A=14 %
+\edef\XC@@{\expandafter\noexpand\csname\@backslashchar XC@@\endcsname}
+\newif\ifcolors@ \colors@true
+\newif\ifcolorerrors@
+\newif\ifglobalcolors \globalcolorsfalse
+\newif\ifdefinecolors \definecolorstrue
+\newif\ifconvertcolorsD
+\newif\ifconvertcolorsU
+\newif\ifblendcolors
+\newif\ifmaskcolors
+\newif\ifXC@@fbox \XC@@fboxtrue
+\newif\ifXC@@tst
+\def\c@lor@error#1%
+ {\ifcolorerrors@\PackageError{xcolor}{Undefined color #1}\@ehc
+  \else\PackageWarning{xcolor}{Undefined color #1}\fi}
+\def\XC@append#1#2%
+ {\ifx#1\@undefined\def#1{#2}\else\ifx#1\relax\def#1{#2}\else
+  \toks@\expandafter{#1#2}\edef#1{\the\toks@}\fi\fi}
+\def\XC@let@cc#1{\expandafter\XC@let@Nc\csname#1\endcsname}
+\providecommand*\@namelet[1]{\expandafter\XC@let@Nc\csname#1\endcsname}
+\def\XC@let@Nc#1#2{\expandafter\let\expandafter#1\csname#2\endcsname}
+\def\XC@let@cN#1{\expandafter\let\csname#1\endcsname}
+\def\@namexdef#1{\expandafter\xdef\csname #1\endcsname}
+\def\aftergroupdef#1#2%
+ {\expandafter\endgroup\expandafter\def\expandafter#1\expandafter{#2}}
+\def\aftergroupedef#1#2%
+ {\edef\@@tmp{\def\noexpand#1{#2}}\expandafter\endgroup\@@tmp}
+\begingroup
+\catcode`\!=13 \catcode`\:=13 \catcode`\-=13 \catcode`\+=13
+\catcode`\;=13 \catcode`\/=13 \catcode`\"=13 \catcode`\>=13
+\gdef\XC@edef#1#2%
+ {\begingroup
+  \ifnum\catcode`\!=13 \edef!{\string!}\fi
+  \ifnum\catcode`\:=13 \edef:{\string:}\fi
+  \ifnum\catcode`\-=13 \edef-{\string-}\fi
+  \ifnum\catcode`\+=13 \edef+{\string+}\fi
+  \ifnum\catcode`\;=13 \edef;{\string;}\fi
+  \ifnum\catcode`\"=13 \edef"{\string"}\fi
+  \ifnum\catcode`\>=13 \edef>{\string>}\fi
+  \edef#1{#2}\@onelevel@sanitize#1\aftergroupdef#1#1}
+\gdef\XC@mdef#1#2%
+ {\begingroup
+  \ifnum\catcode`\/=13 \edef/{\string/}\fi
+  \ifnum\catcode`\:=13 \edef:{\string:}\fi
+  \edef#1{#2}\@onelevel@sanitize#1\aftergroupdef#1#1}
+\endgroup
+\def\XC@sdef#1#2{\edef#1{#2}\@onelevel@sanitize#1}
+\def\@ifxempty#1{\@@ifxempty#1\@@ifxempty\XC@@}
+\def\@@ifxempty#1#2\XC@@
+ {\ifx#1\@@ifxempty
+  \expandafter\@firstoftwo\else\expandafter\@secondoftwo\fi}
+\long\def\XC@ifxcase#1#2#3%
+ {\long\def\XC@if@##1##2%
+   {\ifx#1##1%
+      \toks@{##2}\expandafter\remove@to@nnil\else\expandafter\XC@if@\fi}%
+  \XC@if@#2#1{#3}\@nnil\the\toks@}
+\long\def\XC@ifcase#1#2#3%
+ {\long\def\XC@if@##1##2%
+   {\@expandtwoargs\in@{,#1,}{,##1,}\ifin@
+      \toks@{##2}\expandafter\remove@to@nnil\else\expandafter\XC@if@\fi}%
+  \XC@if@#2{#1}{#3}\@nnil\the\toks@}
+\def\XC@@opt{,}
+\def\@ifXCopt#1%
+ {\@expandtwoargs\in@{,#1,}{\XC@@opt}%
+  \ifin@\expandafter\@firstoftwo\else\expandafter\@secondoftwo\fi}
+\let\XC@@pkg\relax
+\let\XC@declareoption\@declareoption
+\long\def\@declareoption#1#2%
+ {\XC@declareoption{#1}{\edef\XC@@opt{\XC@@opt#1,}#2}}
+\def\selectcolormodel#1%
+ {\@ifundefined{XC@mod@#1}%
+   {\c@lor@error{target model `#1'}}%
+   {\expandafter\ifx\csname XC@mod@#1\endcsname\XC@mod@natural
+      \def\XC@tgt@mod##1{##1}\convertcolorsDfalse\convertcolorsUfalse
+    \else\expandafter\ifx\csname XC@mod@#1\endcsname\XC@mod@named
+      \c@lor@error{target model `#1'}
+    \else
+      \edef\XC@tgt@mod##1{#1}\convertcolorsDtrue\convertcolorsUtrue
+    \fi\fi}}
+\@tfor\@@tmp:={Hsb}{tHsb}{ignore}{named}{ps}{wave}\do
+ {\expandafter\XC@sdef\csname XC@mod@\@@tmp\endcsname{\@@tmp}}
+\@tfor\@@tmp:={natural}{rgb}{cmy}{cmyk}{hsb}{gray}{RGB}{HTML}{HSB}{Gray}\do
+ {\expandafter\XC@sdef\csname XC@mod@\@@tmp\endcsname{\@@tmp}%
+  \edef\@@tmp
+   {\noexpand\DeclareOption{\@@tmp}{\noexpand\selectcolormodel{\@@tmp}}}%
+  \@@tmp}
+\DeclareOption{monochrome}
+ {\ExecuteOptions{hideerrors}%
+  \AtEndOfPackage
+   {\colors@false
+    \def\set@color{\c@lor@special\m@ne
+      {color push \current@color}\aftergroup\reset@color}%
+    \def\reset@color{\c@lor@special\m@ne{color pop}}%
+    \def\set@page@color{\c@lor@special\m@ne{background \current@color}}}}
+\let\XC@@names\relax
+\providecommand*\colornameprefix{XC@}
+\let\XC@@nameprefix\colornameprefix
+\def\XC@declarenames#1#2#3%
+ {\DeclareOption{#1}{\XC@append\XC@@names
+   {#3\definecolorstrue\input{#2.def}\definecolorstrue
+    \let\colornameprefix\XC@@nameprefix}}
+  \DeclareOption{#1*}{\XC@append\XC@@names
+   {#3\definecolorsfalse\input{#2.def}\definecolorstrue
+    \let\colornameprefix\XC@@nameprefix}}}
+\XC@declarenames{dvipsnames}{dvipsnam}{\let\colornameprefix\@empty}
+\XC@declarenames{svgnames}{svgnam}{}
+\XC@declarenames{x11names}{x11nam}{}
+\XC@declarenames{hksnames}%
+ {hks\ifcase\paperquality k\or n\or k\or z\else n\fi nam}{}
+\XC@declarenames{pmsnames}{pmsnam}{}
+\XC@declarenames{ralnames}{ralnam}{}
+\DeclareOption{table}{\XC@append\XC@@pkg{\RequirePackage{colortbl}}}
+\DeclareOption{fixpdftex}{\XC@append\XC@@pkg{\RequirePackage{pdfcolmk}}}
+\DeclareOption{hyperref}
+ {\@tfor\@@tmp:={cite}{file}{link}{menu}{page}{run}{url}\do
+   {\expandafter\edef\csname KV@Hyp@x\@@tmp bordercolor\endcsname #1%
+     {\noexpand\XC@bordercolor{\@@tmp}{#1}}}%
+  \AtEndOfPackage
+   {\GetGinDriver\def\KV@Hyp@xpdfborder#1{\edef\@pdfborder{#1}}%
+    \@tfor\@@tmp:={dvips}\do
+     {\ifx\GinDriver\@@tmp
+       \def\KV@Hyp@xpdfborder#1%
+        {\edef\@pdfborder{#1}\expandafter\XC@pdfborder\@pdfborder\relax}%
+      \@break@tfor\fi}}}
+\providecommand*\Gin@driver{}
+\@tfor\@@tmp:={dvipdf}{dvipdfmx}{dvips}{dvipsone}{dviwin}%
+              {emtex}{luatex}{pctex32}{pctexhp}{pctexps}{pctexwin}{pdftex}%
+              {tcidvi}{textures}{truetex}{vtex}{xetex}{dvisvgm}\do
+ {\edef\@@tmp{\noexpand\DeclareOption{\@@tmp}%
+    {\def\noexpand\Gin@driver{\@@tmp.def}}}%
+  \@@tmp}
+\DeclareOption{dviwindo}{\ExecuteOptions{dvipsone}}
+\DeclareOption{oztex}{\ExecuteOptions{dvips}}
+\DeclareOption{xdvi}{\ExecuteOptions{dvips,monochrome}}
+\DeclareOption{dvipdfm}{\ExecuteOptions{dvipdfmx}}
+\DeclareOption{xcdraw}{\def\XC@@xcd@{1}}
+\DeclareOption{noxcdraw}{\def\XC@@xcd@{-1}}
+\DeclareOption{fixinclude}{\def\XC@@xcf@{1}}
+\DeclareOption{prologue}{\def\XC@@xcp@{1}}
+\DeclareOption{kernelfbox}{\XC@@fboxfalse}
+\DeclareOption{showerrors}{\colorerrors@true}
+\DeclareOption{hideerrors}{\colorerrors@false}
+\DeclareOption{debugshow}{\catcode`\^^A=9 \let\GDebug\typeout}
+\DeclareOption*%
+ {\PackageInfo{xcolor}{Package option `\CurrentOption' ignored}}
+\def\XC@@xcd@{-1}
+\def\XC@@xcf@{-1}
+\def\XC@@xcp@{-1}
+\ExecuteOptions{natural,showerrors}
+\InputIfFileExists{color.cfg}{}{}
+\let\@declareoption\XC@declareoption
+\ProcessOptions\relax
+\edef\Gin@driver{\Gin@driver}
+\if!\Gin@driver!
+  \PackageError{xcolor}
+    {No driver specified}
+    {You should make a default driver option in a file \MessageBreak
+     color.cfg\MessageBreak
+     eg: \protect\ExecuteOptions{dvips}}
+\else
+  \PackageInfo{xcolor}{Driver file: \Gin@driver}
+  \@ifundefined{ver@\Gin@driver}{\input{\Gin@driver}}{}
+  \def\@@tmp#1.def{\def\XC@@drv{#1}}
+  \expandafter\@@tmp\Gin@driver
+\fi
+\count@\XC@@xcd@ \advance\count@\XC@@xcf@ \advance\count@\XC@@xcp@\relax
+\ifnum\count@>-3
+  \XC@ifcase\XC@@drv
+   {{dvips,pctex32}%
+    {\def\@tempa{0}
+     \def\XC@special#1{\special{ps:XC!b}\special{"#1}\special{ps:XC!e}}}%
+    {pdftex}%
+    {\def\@tempa{1}
+     \def\XC@special#1{\pdfliteral{ q #1 Q }}}%
+    {luatex}%
+    {\def\@tempa{1}
+     \ifnum\luatexversion<87%
+       \def\XC@special#1{\pdfliteral{ q #1 Q }}%
+     \else%
+       \def\XC@special#1{\pdfextension literal{ q #1 Q }}%
+     \fi}%
+    {dvipdfm}%
+    {\def\@tempa{1}
+     \def\XC@special#1{\special{pdf: content #1}}}%
+   }{\def\@tempa{-1}}
+  \ifnum\XC@@xcd@>\m@ne\let\XC@@xcd@\@tempa\fi
+  \ifnum\XC@@xcf@>\m@ne\let\XC@@xcf@\@tempa\fi
+  \ifnum\XC@@xcp@>\m@ne\let\XC@@xcp@\@tempa\fi
+  \ifnum\@tempa=0 \AtBeginDvi{\special{header=xcolor.pro}}\fi
+  \ifcase\XC@@xcf@
+    \AtBeginDvi{\special{! XCfixnormalscale}}
+  \fi
+  \ifcase\XC@@xcp@
+    \AtBeginDvi{\special{header=\jobname.xcp}}
+    \newwrite\XC@@xcp\immediate\openout\XC@@xcp=\jobname.xcp
+    \immediate\write\XC@@xcp{\@percentchar!}
+    \immediate\write\XC@@xcp{TeXDict begin}
+    \AtEndDocument
+     {\immediate\write\XC@@xcp{end}\immediate\closeout\XC@@xcp}
+  \fi
+\fi
+\@namedef{ver@color.sty}{1999/02/16}
+\XC@@pkg
+\long\def\@secondoffive#1#2#3#4#5{#2}
+\long\def\@thirdoffive#1#2#3#4#5{#3}
+\def\xglobal{\xglobal@stop\begingroup\futurelet\@@tok\xglobal@test}
+\def\xglobal@test
+ {\expandafter\@tfor\expandafter\@@tmp
+   \expandafter:\expandafter=\xglobal@list\do
+    {\expandafter\ifx\@@tmp\@@tok
+       \aftergroup\let\aftergroup\xglobal@\@break@tfor\fi}%
+  \endgroup\global}
+\def\xglobal@stop{\let\xglobal@\@empty}
+\xglobal@stop
+\def\xglobal@list
+ {\definecolor\definecolors\definecolorset\colorlet\providecolor
+  \providecolors\providecolorset\blendcolors\maskcolors
+  \substitutecolormodel}
+\def\xglobalize@#1{\ifx\xglobal@\global\global\let#1#1\fi}
+\def\GetGinDriver
+ {\@tempswafalse
+  \@tfor\@@tmp:={dvips}{luatex}{pdftex}{dvipdf}{dvipdfm}{dvipsone}{vtex}{textures}%
+  \do{\ifx\XC@@drv\@@tmp\@tempswatrue\@break@tfor\fi}%
+  \edef\GinDriver{\if@tempswa\XC@@drv\else hypertex\fi}}
+\def\@hex@Hex#1{\ifx#1\relax\else\expandafter\@hex@@Hex\expandafter#1\fi}
+\def\@hex@@Hex#1%
+ {\if a#1A\else \if b#1B\else \if c#1C\else \if d#1D\else
+  \if e#1E\else \if f#1F\else #1\fi\fi\fi\fi\fi\fi \@hex@Hex}
+\def\XC@strip@comma#1,#2%
+ {\ifx,#2%
+    #1\expandafter\remove@to@nnil\else#1 \expandafter\XC@strip@comma\fi
+  #2}
+{\catcode`Q=3
+ \gdef\XC@replace#1#2#3%
+  {\begingroup
+   \def\XC@repl@ce##1#2##2Q##3%
+    {\@ifxempty{##2}{\XC@r@pl@ce##1Q}{\XC@repl@ce##1##3##2Q{##3}}}%
+   \def\XC@r@pl@ce##1\@empty Q%
+    {\expandafter\endgroup\expandafter\def\expandafter#1\expandafter{##1}}%
+   \expandafter\XC@repl@ce\expandafter\@empty #1\@empty#2Q{#3}}
+}
+\def\XC@clean#1%
+ {\edef#1{ #1 }%
+  \XC@cle@n#1,{ }\XC@cle@n#1{. }{ }\XC@cle@n#1{ },%
+  \edef#1{\expandafter\@gobbletwo#1}}
+\def\XC@cle@n#1#2#3%
+ {\def\XC@cl@@n##1#2##2{#3##1\ifx##2\@empty\else\expandafter\XC@cl@@n\fi##2}%
+  \edef#1{\expandafter\XC@cl@@n#1#2\@empty}}%
+\def\rdivide#1#2%
+ {\begingroup\toks@{#1}\edef\@@tmp{\noexpand\@tempdima\the#1}%
+  \@defaultunits\@tempdimb=#2pt\relax\@nnil \@@tmp\relax
+  \ifdim\@tempdima<\z@ \@tempdima-\@tempdima\def\@sign{-}\else
+    \def\@sign{}\fi
+  \ifdim\@tempdimb<\z@ \@tempdimb-\@tempdimb\edef\@sign{\@sign-}\fi
+  \ifdim\@tempdima<.1\maxdimen \ifdim\@tempdimb<.01\maxdimen
+    \lshift\@tempdima \lshift\@tempdimb \fi\fi
+  \@tempcnta=\@tempdima \@tempcntb=\@tempdimb
+  \count@=\@tempcnta \divide\count@\@tempcntb
+  \edef\@@tmp{\number\count@.}%
+  \@tempswatrue  \@rdivide \@rdivide \@rdivide \@rdivide \@rdivide
+  \@tempswafalse \@rdivide
+  \dimen@\@@tmp\p@ \ifnum\count@>4\advance\dimen@1sp\fi
+  \dimen@\@sign\dimen@
+  \edef\@@tmp{\the\toks@\the\dimen@}%
+  \expandafter\endgroup\@@tmp}
+\def\@rdivide
+ {\multiply\count@\@tempcntb \advance\@tempcnta-\count@
+  \multiply\@tempcnta10 \count@=\@tempcnta \divide\count@\@tempcntb
+  \if@tempswa\edef\@@tmp{\@@tmp\number\count@}\fi}
+\def\rmultiply#1#2%
+ {\begingroup
+  \edef\@@mul{#2}\@tempdima\the#1\relax
+  \afterassignment\@tempdimb\@tempcntb=\@@mul\p@
+  \ifdim\@tempdima<\z@ \@tempdima-\@tempdima\def\@sign{-}\else
+    \def\@sign{}\fi
+  \ifnum\@tempcntb<\z@ \@tempcntb-\@tempcntb\edef\@sign{\@sign-}\fi
+  \lshift\@tempdima \dimen@\z@
+  \expandafter\@rmultiply\@@mul.0.\@nil
+  \advance\dimen@\@tempcntb\@tempdima \rshift\dimen@
+  \dimen@\@sign\dimen@
+  \edef\@@tmp{#1\the\dimen@}%
+  \expandafter\endgroup\@@tmp}
+\def\@rmultiply#1.#2.#3\@nil
+ {\def\@@tmp{}%
+  \@tfor\@@mul:=#2\do
+   {\edef\@@tmp
+     {\advance\dimen@\@@mul\@tempdima \divide\dimen@10 \@@tmp}}%
+  \@@tmp}
+\def\lshift#1{#1\expandafter\lshift@\the#1}
+\def\llshift#1{\lshift#1\lshift#1}
+\def\lshiftnum#1{\expandafter\lshiftnum@#1.00.:}
+\def\lshiftnum@#1.#2#3.#4:{#1#2\ifnum0#3>\z@.#3\fi}
+\def\llshiftnum#1{\expandafter\llshiftnum@#1\@empty.00.:}
+\def\llshiftnum@#1.#2#3#4.#5:%
+ {#1#2\ifnum0#3>\z@#3\else0\fi\ifnum0#4>\z@.#4\fi}
+\def\lshiftset#1#2{\edef\@@XC{\noexpand\lshiftnum{#2}}#1\@@XC\p@}
+\def\llshiftset#1#2{\edef\@@XC{\noexpand\llshiftnum{#2}}#1\@@XC\p@}
+\def\rshift#1{#1\expandafter\rshift@\the#1}
+\def\rrshift#1{\rshift#1\rshift#1}
+\begingroup
+\catcode`P=12
+\catcode`T=12
+\lowercase
+ {\def\@@tmp{\def\lshift@##1.##2##3PT{##1##2\ifnum0##3>\z@.##3\fi\p@}
+             \def\rshift@##1.##2PT{\rshift@@##1\relax##2\p@}}}
+\expandafter\endgroup\@@tmp
+\def\rshift@@#1#2%
+ {\ifx#2\relax.#1\else#1\expandafter\rshift@@\expandafter#2\fi}
+\def\XC@inflate#1#2#3#4%
+ {\edef#4{#2,\ifx#1\XC@mod@cmyk #3\else
+             \ifx#1\XC@mod@gray ,,,#3,,,\else ,#3,\fi\fi}}
+\def\XC@vec#1,#2,#3,#4,#5,#6,#7,#8,#9%
+ {\def\@@tmp{}%
+  \XC@vec@{#1}{#5}%
+  \ifx,#2,\else
+  \XC@vec@{#2}{#6}\XC@vec@{#3}{#7}\ifx,#4,\else\XC@vec@{#4}{#8}\fi\fi
+  \aftergroupdef#9\@@tmp}
+\def\XC@vec@@{\edef\@@tmp{\ifx\@@tmp\@empty\else\@@tmp,\fi\strip@pt\dimen@}}
+\def\XC@add{\begingroup \let\XC@vec@\XC@add@ \XC@vec}
+\def\XC@add@#1#2%
+ {\llshiftset\dimen@{#1}\llshiftset\@tempdima{#2}%
+  \advance\dimen@\@tempdima \rrshift\dimen@ \XC@vec@@}
+\def\XC@sub{\begingroup \let\XC@vec@\XC@sub@ \XC@vec}
+\def\XC@sub@#1#2{\XC@add@{#1}{-#2}}
+\def\XC@mul{\begingroup \let\XC@vec@\XC@mul@ \XC@vec}
+\def\XC@mul@#1#2%
+ {\llshiftset\dimen@{#1}\rmultiply\dimen@{#2}\rrshift\dimen@ \XC@vec@@}
+\def\XC@mix%
+ {\begingroup
+  \@tempdima\dimen@ \@tempdimb100\p@ \advance\@tempdimb-\@tempdima
+  \let\XC@vec@\XC@mix@ \XC@vec}
+\def\XC@mix@#1#2%
+ {\dimen@#1\@tempdima \advance\dimen@#2\@tempdimb \rrshift\dimen@ \XC@vec@@}
+\def\XC@calc@#1,#2,#3,#4,#5:#6%
+ {\XC@let@Nc\@@cmd{XC@calc#6}\@@cmd{#1}\@@tmp
+  \ifx,#2,\else
+    \@@cmd{#2}\@tempa\@@cmd{#3}\@tempb
+    \ifx,#4,%
+      \edef\@@tmp{\@@tmp,\@tempa,\@tempb}\else
+      \@@cmd{#4}\@tempc\edef\@@tmp{\@@tmp,\@tempa,\@tempb,\@tempc}\fi\fi}
+\def\XC@calcC#1#2%
+ {\llshiftset\dimen@{-#1}\advance\dimen@100\p@
+  \rrshift\dimen@ \XC@calcN{\strip@pt\dimen@}#2}
+\def\XC@calcD{\XC@c@lcD\@@scl{}}
+\def\XC@c@lcD#1#2#3#4%
+ {\dimen@#3\p@ \rdivide\dimen@{#1}\edef#4{\strip@pt\dimen@#2}}
+\def\XC@calcF#1#2%
+ {\edef#2{#1}\expandafter\XC@c@lcF#2.0.:#2}
+\def\XC@c@lcF#1.#2.#3:#4%
+ {\edef#4{\XC@c@@cR#200000:}%
+  \dimen@#1.5\p@ \afterassignment\dimen@\count@=\the\dimen@
+  \edef#4%
+   {\ifnum#4>0 \ifnum\count@=0 \ifdim#1.5\p@<\z@ -\fi\fi\fi
+    \number\count@.#4}}
+\def\XC@calcH#1#2%
+ {\count@#1 \divide\count@\sixt@@n \edef\XC@@tmp{\hexnumber@\count@}%
+  \multiply\count@-\sixt@@n \advance\count@#1
+  \edef#2{\XC@@tmp\hexnumber@\count@}}
+\def\XC@calcM#1#2%
+ {\dimen@#1\p@ \dimen@\@@scl\dimen@ \advance\dimen@.5\p@
+  \afterassignment\dimen@\count@=\the\dimen@ \edef#2{\number\count@}}
+\def\XC@calcN#1#2%
+ {\XC@calcR{#1}#2\edef#2{\expandafter\XC@c@lcN#200000:}}
+\def\XC@c@lcN#1.#200000#3:{#1\ifnum0#2=0 \else.#2\fi}
+\def\XC@calcR#1#2{\edef#2{#1}\edef#2{\expandafter\XC@c@lcR#2.0.:}}
+\def\XC@c@lcR#1.#2.#3:%
+ {\ifnum#10>0 1.00000\else 0.\ifnum#11<0 00000\else
+  \XC@c@@cR#200000:\fi\fi}
+\def\XC@c@@cR#1#2#3#4#5#6:{#1#2#3#4#5}
+\def\XC@calcS{\XC@c@lcS\@@scl{}}
+\def\XC@c@lcS#1#2#3#4%
+ {\lshiftset\dimen@{#3}%
+  \ifdim#1\p@<100\p@
+    \dimen@\lshiftnum#1\dimen@ \rrshift\dimen@ \else
+    \dimen@#1\dimen@ \rshift\dimen@ \fi
+  \edef#4{\strip@pt\dimen@#2}}
+\def\XC@calcT#1#2%
+ {\lshiftset\dimen@{#1}\advance\dimen@\lshiftnum\@@arg\p@ \rshift\dimen@
+  \edef#2%
+   {\ifdim\dimen@>\p@1\else\ifdim\dimen@<\z@0\else\strip@pt\dimen@\fi\fi}}
+\def\XC@calcU#1#2%
+ {\dimen@#1\p@
+  \ifdim\dimen@=\p@\else
+    \afterassignment\dimen@\count@=\the\dimen@
+    \relax\ifdim\dimen@=\z@\else
+      \ifdim#1\p@<\z@ \dimen@-\dimen@ \advance\dimen@\p@ \fi
+    \fi
+  \fi
+  \edef#2{\strip@pt\dimen@}}
+\providecommand*\rangeRGB{255}
+\providecommand*\rangeHSB{240}
+\providecommand*\rangeHsb{360}
+\providecommand*\rangetHsb{60,30;120,60;180,120;210,180;240,240}
+\providecommand*\rangeGray{15}
+\providecommand*\adjustUCRBG{1,1,1,1}
+\providecommand*\paperquality{1}
+\providecommand*\colorseriescycle{16}
+\def\XC@clr@rgb@white{1,1,1}
+\def\XC@clr@cmy@white{0,0,0}
+\def\XC@clr@cmyk@white{0,0,0,0}
+\def\XC@clr@hsb@white{\@@hue,0,1}
+\def\XC@clr@hsb@gray{\@@hue,0,0.5}
+\def\XC@clr@hsb@black{\@@hue,0,0}
+\def\XC@clr@gray@white{1}
+\@tfor\@@tmp:={grad}{last}{step}\do
+ {\XC@let@cN{XC@met@\@@tmp}\@@tmp}
+\def\definecolor{\@testopt{\XC@definecolor}{}}
+\def\XC@definecolor[#1]#2%
+ {\@testopt{\XC@definec@lor[#1]{#2}}\colornameprefix}
+\def\XC@definec@lor[#1]#2[#3]#4#5%
+ {\begingroup
+  \XC@sdef\@@cls{#1}\XC@edef\@@nam{#2}\edef\colornameprefix{#3}%
+  \XC@logdef\@@nam
+  \XC@getmodclr02{#4}{#5}{\let\@@tmp\relax}%
+   {\ifx\@@mod\XC@mod@named
+      \XC@c@l@rlet\@@nam\@@clr
+    \else
+      \ifx\@@cls\XC@mod@ps
+        \edef\@@drv{\@@mod\space\@@clr}\def\@@hue{0}%
+        \edef\@@clr{\@nameuse{XC@clr@\@@mod @white}}%
+      \else
+        \ifconvertcolorsD
+          \let\@@tmp\@@mod\XC@sdef\@@mod{\XC@tgt@mod\@@tmp}%
+          \convertcolorspec\@@tmp\@@clr\@@mod\@@clr
+        \fi
+        \XC@coremodel\@@mod\@@clr
+        \csname color@\@@mod\expandafter\endcsname
+          \expandafter\@@drv\expandafter{\@@clr}%
+        \ifcase\XC@@xcp@
+          \immediate\write\XC@@xcp{/\colornameprefix\@@nam{\expandafter
+            \XC@strip@comma\@@clr,,\@nnil}XC\@@mod}%
+          \let\@@cls\XC@mod@named
+        \fi
+        \ifx\@@cls\@empty\else
+          \let\@@tmp\@@cls
+          \@nameuse{define@color@\@@cls}\@@nam\@@drv
+          \csname color@\@@tmp\expandafter\endcsname
+            \expandafter\@@drv\expandafter{\@@nam}%
+        \fi
+      \fi
+      \toks@\expandafter{\@@drv}%
+      \edef\@@tmp
+       {\ifglobalcolors\global\else\xglobal@\fi
+        \noexpand\@namedef{\@backslashchar color@\@@nam}%
+         {\noexpand\xcolor@{\@@cls}{\the\toks@}{\@@mod}{\@@clr}}}%
+    \fi}%
+  \expandafter\endgroup\@@tmp\xglobal@stop}
+\def\XC@getmodclr#1#2#3#4%
+ {\ifnum\ifcase#1 \ifXC@@getmod1\else0 \fi \or1 \fi>0
+    \XC@mdef\@@mod{#3}\expandafter\XC@getmod\@@mod////////\XC@@
+    \@ifundefinedmodel\@@Mod{\let\@@Mod\XC@mod@ignore}{}\fi
+  \@ifundefined{XC@mod@\@@mod}%
+   {\c@lor@error{model `\@@mod'}\@firstoftwo}%
+   {\ifcase#2\else
+      \XC@mdef\@@clr{#4}%
+      \edef\@@clr{\expandafter\XC@getclr\@@clr////////\XC@@}%
+      \ifx\@@cls\XC@mod@ps\else\XC@clean\@@clr\fi
+      \ifx\@@Mod\XC@mod@ignore\else
+        \convertcolorspec\@@mod\@@clr\@@Mod\@@clr
+        \ifnum#2>1 \let\@@mod\@@Mod\fi
+      \fi
+    \fi \@secondoftwo}}
+\def\XC@getmod#1/#2/#3/#4/#5/#6/#7/#8/#9\XC@@
+ {\XC@g@tm@d0#1::\XC@@ \XC@getm@d1{#2}\XC@getm@d2{#3}%
+  \XC@getm@d3{#4}\XC@getm@d4{#5}\XC@getm@d5{#6}\XC@getm@d6{#7}%
+  \XC@getm@d7{#8}\def\XC@@pos{0}\def\@@mod{#1}\@gobble\@nnil}%
+\def\XC@getm@d#1#2%
+ {\edef\XC@@pos{#2}\XC@sdef\@@mod{\XC@tgt@mod\XC@@pos}%
+  \ifx\XC@@pos\@@mod\def\XC@@pos{#1}\expandafter\remove@to@nnil\fi}%
+\def\XC@g@tm@d#1#2:#3:#4\XC@@
+ {\@ifxempty{#3}{\let\@@Mod\XC@mod@ignore\XC@getm@d0{#2}}%
+    {\def\@@Mod{#2}\XC@getm@d0{#3}}}%
+\def\XC@getclr#1/#2/#3/#4/#5/#6/#7/#8/#9\XC@@
+ {\ifcase\XC@@pos\space #1\or#2\or#3\or#4\or#5\or#6\or#7\or#8\fi}
+\newif\ifXC@@getmod \XC@@getmodtrue
+\let\xdefinecolor\definecolor
+\def\providecolor{\@testopt{\XC@providecolor}{}}
+\def\XC@providecolor[#1]#2%
+ {\@testopt{\XC@providec@lor[#1]{#2}}\colornameprefix}
+\def\XC@providec@lor[#1]#2[#3]%
+ {\XC@edef\XC@@tmp{#2}%
+  \@ifundefinedcolor\XC@@tmp{\XC@definecolor[#1]{#2}[#3]}%
+   {\ifnum\XC@tracing>0
+      \PackageInfo{xcolor}{Ignoring color definition `\XC@@tmp'}\fi
+    \@gobbletwo}}
+\def\xcolor@#1#2#3#4{#2}
+\def\colorlet{\@testopt{\XC@colorlet}{}}
+\def\XC@colorlet[#1]#2{\@testopt{\XC@col@rlet[#1]{#2}}{}}
+\def\XC@col@rlet[#1]#2[#3]#4%
+ {\begingroup
+  \edef\@@cls{#1}\XC@edef\@@nam{#2}\XC@sdef\@@mod{#3}\XC@edef\@@clr{#4}%
+  \XC@info\@@clr\@@tmp\XC@@tstfalse
+  \ifnum\@@tmp=\@ne\ifx\@@mod\@empty
+    \ifx\@@cls\@empty
+      \XC@@tsttrue
+    \else
+      \edef\@@tmp
+       {\expandafter\expandafter\expandafter\@secondoffive
+         \csname\@backslashchar color@\@@clr\endcsname}%
+      \ifx\@@cls\@@tmp\XC@@tsttrue\fi
+    \fi
+  \fi\fi
+  \ifXC@@tst
+    \XC@logdef\@@nam\XC@c@l@rlet\@@nam\@@clr
+  \else
+    \extractcolorspec\@@clr\@@clr
+    \ifx\@@mod\@empty\else
+      \expandafter\convertcolorspec\@@clr\@@mod\@@clr
+      \edef\@@clr{{\@@mod}{\@@clr}}\fi
+    \edef\@@tmp{\noexpand\XC@definecolor[\@@cls]{\@@nam}\@@clr}%
+  \fi
+  \expandafter\endgroup\@@tmp\xglobal@stop}
+\def\XC@c@l@rlet#1#2%
+ {\@ifundefinedcolor{#2}%
+   {\c@lor@error{`#2'}\let\@@tmp\@empty}%
+   {\edef\@@tmp
+     {\ifglobalcolors\global\else\xglobal@\fi
+      \noexpand\XC@let@cc{\@backslashchar color@#1}{\@backslashchar color@#2}}}}
+\def\DefineNamedColor#1%
+ {\@nameuse{XC@\ifdefinecolors defin\else prepar\fi ecolor}[#1]}
+\def\preparecolor{\@testopt{\XC@preparecolor}{}}
+\def\XC@preparecolor[#1]#2%
+ {\@testopt{\XC@preparec@lor[#1]{#2}}\colornameprefix}
+\def\XC@preparec@lor[#1]#2[#3]#4#5%
+ {\XC@sdef\@@cls{#1}\XC@edef\@@nam{#2}%
+  \XC@getmodclr01{#4}{#5}{}%
+   {\xdef\XC@@stack
+     {\ifx\XC@@stack\@empty\else\XC@@stack,\fi{#1}{\@@nam}{#3}%
+      {\ifx\@@Mod\XC@mod@ignore\@@mod\else\@@Mod\fi}{\@@clr}}}}
+\let\XC@@stack\@empty
+\def\definecolors#1%
+ {\let\XC@@cmd\definecolor\let\XC@@glb\xglobal@
+  \expandafter\XC@definecolors#1,,}
+\def\XC@definecolors#1,%
+ {\@ifxempty{#1}{}{\expandafter\XC@definec@lors#1=#1=:\XC@definecolors}}
+\def\XC@definec@lors#1=#2=#3:%
+ {\XC@edef\@@nam{#1}\XC@edef\@@arg{#2}%
+  \let\next\XC@definec@l@rs\expandafter\next\XC@@stack,,\@nnil}
+\def\XC@definec@l@rs#1,%
+ {\ifx,#1,\let\next\remove@to@nnil\else\XC@defin@c@l@rs#1\fi\next}
+\def\XC@defin@c@l@rs#1#2#3#4#5%
+ {\def\@@tmp{#2}%
+  \ifx\@@tmp\@@arg
+    \let\xglobal@\XC@@glb\XC@@cmd[#1]{\@@nam}[#3]{#4}{#5}%
+    \let\next\remove@to@nnil
+  \fi}
+\def\providecolors#1%
+ {\let\XC@@cmd\providecolor\let\XC@@glb\xglobal@
+  \expandafter\XC@definecolors#1,,}
+\def\definecolorset
+ {\let\XC@@cmd\definecolor\@testopt{\XC@definecolorset}{}}
+\def\XC@definecolorset[#1]#2#3#4#5%
+ {\XC@getmodclr10{#2}{}{}%
+   {\XC@@getmodfalse\XC@edef\XC@@tmp{#5}\let\XC@@glb\xglobal@
+    \def\XC@definec@lorset##1,##2;%
+     {\@ifxempty{##1}{}%
+       {\let\xglobal@\XC@@glb
+        \XC@@cmd[#1]{#3##1#4}{\@@mod}{##2}\XC@definec@lorset}}%
+    \expandafter\XC@definec@lorset\XC@@tmp;,;\XC@@getmodtrue}}
+\def\providecolorset
+ {\let\XC@@cmd\providecolor\@testopt{\XC@definecolorset}{}}
+\def\preparecolorset
+ {\ifdefinecolors\let\XC@@cmd\definecolor\else\let\XC@@cmd\preparecolor\fi
+  \@testopt{\XC@definecolorset}{}}
+\def\definecolorseries#1#2#3%
+ {\@testopt{\XC@definecolorseries{#1}{#2}{#3}}{}}
+\def\XC@definecolorseries#1#2#3[#4]#5%
+ {\@testopt{\XC@definec@lorseries{#1}{#2}{#3}[#4]{#5}}{}}
+\def\XC@definec@lorseries#1#2#3[#4]#5[#6]#7%
+ {\begingroup
+  \XC@sdef\@@mod{#2}%
+  \@ifxempty{#4}{\extractcolorspec{#5}\@@clr}{\edef\@@clr{{#4}{#5}}}%
+  \expandafter\convertcolorspec\@@clr\@@mod\@@clr
+  \@namexdef{\@backslashchar colorB@#1}{{\@@mod}{\@@clr}}%
+  \edef\@@met{#3}%
+  \ifx\@@met\XC@met@last
+    \@ifxempty{#6}{\extractcolorspec{#7}\@@tmp}{\edef\@@tmp{{#6}{#7}}}%
+    \expandafter\convertcolorspec\@@tmp\@@mod\@@tmp
+    \XC@inflate\@@mod\@@tmp\@@clr\@@tmp
+    \expandafter\XC@sub\@@tmp,\@@tmp
+  \else
+    \edef\@@tmp{#7}%
+  \fi
+  \@namexdef{\@backslashchar colorD@#1}{{\@@met}{\@@tmp}}%
+  \endgroup}
+\def\resetcolorseries{\@testopt{\XC@resetcolorseries}{}}
+\def\XC@resetcolorseries[#1]#2%
+ {\begingroup
+  \@namexdef
+   {\@backslashchar color@#2}{\noexpand\xcolor@{}{}\@nameuse{\@backslashchar colorB@#2}}%
+  \XC@let@Nc\@@tmp{\@backslashchar colorD@#2}%
+  \edef\@@met{\expandafter\@firstoftwo\@@tmp}%
+  \edef\@@tmp{\expandafter\@secondoftwo\@@tmp}%
+  \ifx\@@met\XC@met@step\else
+    \edef\@@scl{\@ifxempty{#1}\colorseriescycle{#1}}%
+    \expandafter\XC@calc@\@@tmp,,,,:D%
+  \fi
+  \@namexdef{\@backslashchar colorS@#2}{\@@tmp}%
+  \endgroup}
+\def\XC@step#1%
+ {\let\xcolor@\@gobbletwo\edef\@@tmp{\@nameuse{\@backslashchar color@#1}}%
+  \expandafter\XC@st@p\@@tmp{#1}%
+  \@namexdef{\@backslashchar color@#1}{\noexpand\xcolor@{}{}{\@@mod}{\@@tmp}}}
+\def\XC@st@p#1#2#3%
+ {\def\@@mod{#1}\def\@@tmp{#2}\edef\@@vec{\@nameuse{\@backslashchar colorS@#3}}%
+  \@whilenum\@tempcnta>\z@\do
+   {\XC@inflate\@@mod\@@tmp\@@vec\@@tmp
+    \expandafter\XC@add\@@tmp,\@@tmp \expandafter\XC@calc@\@@tmp,,,,:U%
+    \advance\@tempcnta\m@ne}}
+\def\XC@stepabs#1%
+ {\edef\@@tmp{\@nameuse{\@backslashchar colorB@#1}}%
+  \expandafter\XC@st@p\@@tmp{#1}%
+  \edef\@@tmp
+   {\def\noexpand\@@mod{\@@mod}\def\noexpand\@@clr{\@@tmp}}}
+\def\blendcolors{\@ifstar{\XC@blendcolors\colorblend}{\XC@blendcolors{}}}
+\def\XC@blendcolors#1#2%
+ {\edef\colorblend{#1}\XC@edef\XC@@tmp{#2}%
+  \ifx\XC@@tmp\@empty
+    \xglobal@\blendcolorsfalse
+  \else
+    \xglobal@\blendcolorstrue
+    \expandafter\XC@blendc@lors\XC@@tmp!!\@nil
+  \fi
+  \xglobalize@\colorblend \xglobal@stop}
+\def\XC@blendc@lors!#1!#2!#3\@nil
+ {\@ifxempty{#1}{}%
+   {\@ifxempty{#2}%
+    {\edef\colorblend{\colorblend!#1!white}}%
+    {\edef\colorblend{\colorblend!#1!#2}\XC@blendc@lors!#3!\@nil}}}
+\blendcolors{}
+\def\maskcolors{\@testopt{\XC@maskcolors}{}}
+\def\XC@maskcolors[#1]#2%
+ {\XC@edef\colormask{#2}%
+  \ifx\colormask\@empty
+    \xglobal@\maskcolorsfalse \def\XC@mmod{}\def\XC@mclr{}%
+  \else
+    \xglobal@\maskcolorstrue \extractcolorspecs\colormask\XC@mmod\XC@mclr
+    \@ifxempty{#1}{}%
+     {\convertcolorspec\XC@mmod\XC@mclr{#1}\XC@mclr \XC@sdef\XC@mmod{#1}}%
+    \XC@coremodel\XC@mmod\XC@mclr
+  \fi
+  \xglobalize@\colormask \xglobalize@\XC@mmod \xglobalize@\XC@mclr
+  \xglobal@stop}
+\maskcolors{}
+\DeclareRobustCommand\color
+ {\@ifnextchar[\@undeclaredcolor\@declaredcolor}
+\def\@undeclaredcolor[#1]#2%
+ {\begingroup
+  \let\@@cls\@empty
+  \XC@getmodclr12{#1}{#2}{}%
+   {\ifblendcolors
+      \ifx\colorblend\@empty\else
+        \edef\@@mix{\expandafter\@gobble\colorblend}\@tempswafalse
+        \XC@coremodel\@@mod\@@clr\@xcolor@{}{}\@@mod\@@clr
+      \fi
+    \fi
+    \ifconvertcolorsU
+      \edef\@@tmp{\XC@tgt@mod{\@@mod}}%
+      \convertcolorspec\@@mod\@@clr\@@tmp\@@clr \let\@@mod\@@tmp
+    \fi
+    \ifmaskcolors
+      \convertcolorspec\@@mod\@@clr\XC@mmod\@@clr
+      \let\@@mod\XC@mmod
+      \XC@inflate\@@mod\XC@mclr\@@clr\@@tmp
+      \expandafter\XC@mul\@@tmp,\@@clr
+    \fi
+    \edef\@@tmp{\noexpand\XC@undeclaredcolor{\@@mod}{\@@clr}}%
+    \expandafter\endgroup\@@tmp}}
+\def\XC@undeclaredcolor#1#2%
+ {\@ifundefinedmodel{#1}%
+   {\c@lor@error{model `#1'}}%
+   {\@nameuse{color@#1}\current@color{#2}%
+    \edef\XC@current@color{\noexpand\xcolor@{}{\current@color}{#1}{#2}}%
+    \XC@display}}
+\def\@declaredcolor#1%
+ {\XC@edef\XC@@tmp{#1}\XC@@tstfalse
+  \ifcase\XC@type\XC@@tmp\relax \XC@@tsttrue\or \relax\else
+    \ifblendcolors\XC@@tsttrue\fi \ifmaskcolors\XC@@tsttrue\fi
+    \ifconvertcolorsU\XC@@tsttrue\fi
+  \fi
+  \ifXC@@tst
+    \expandafter\XC@declaredcolor\else
+    \expandafter\XC@declaredc@lor\fi}
+\def\XC@declaredcolor
+ {\XC@split\XC@@tmp
+  \edef\@@tmp{\noexpand\@undeclaredcolor[\@@mod]{\@@clr}}%
+  \expandafter\endgroup\@@tmp}
+\def\XC@declaredc@lor
+ {\XC@let@Nc\XC@current@color{\@backslashchar color@\XC@@tmp}%
+  \edef\current@color{\XC@current@color}%
+  \XC@display}
+\def\textcolor#1#{\@textcolor{#1}}
+\def\@textcolor#1#2#3{\protect\leavevmode{\color#1{#2}#3}}
+\def\pagecolor
+ {\begingroup
+  \let\ignorespaces\endgroup \let\set@color\set@page@color
+  \color}
+\def\nopagecolor
+ {\@ifundefined{no@page@color}%
+   {\PackageInfo{xcolor}{\@backslashchar nopagecolor\space is not supported}}%
+   {\no@page@color}}
+\def\colorbox#1#{\protect\color@box{#1}}
+\def\color@box#1#2{\color@b@x\relax{\color#1{#2}}}
+\def\fcolorbox#1#{\color@fbox{#1}}
+\def\color@fbox#1#2#3#{\protect\color@fb@x{#1}{#2}{#3}}
+\def\color@fb@x#1#2#3#4%
+ {\color@b@x{\fboxsep\z@\color#1{#2}\XC@fbox}%
+   {\@ifxempty{#3}{\color#1}{\color#3}{#4}}}
+\long\def\color@b@x#1#2#3%
+ {\leavevmode
+  \setbox\z@\hbox{\kern\fboxsep{\set@color#3}\kern\fboxsep}%
+  \dimen@\ht\z@\advance\dimen@\fboxsep\ht\z@\dimen@
+  \dimen@\dp\z@\advance\dimen@\fboxsep\dp\z@\dimen@
+  {#1{#2\color@block{\wd\z@}{\ht\z@}{\dp\z@}\box\z@}}}
+\def\XC@frameb@x#1%
+ {\hbox
+   {\@tempdima\fboxrule \advance\@tempdima\fboxsep
+    \advance\@tempdima\dp\@tempboxa
+    \setbox\@tempboxa\hbox
+     {\lower\@tempdima\hbox
+       {\vbox
+         {\kern\fboxrule
+          \hbox{\kern\fboxrule#1%
+                \vbox{\kern\fboxsep\box\@tempboxa\kern\fboxsep}%
+                #1\kern\fboxrule}%
+          \kern\fboxrule}}}%
+    \@tempdima\wd\@tempboxa
+    \edef\@tempa{{\the\@tempdima}{\the\ht\@tempboxa}{\the\dp\@tempboxa}}%
+    \box\@tempboxa\kern-\@tempdima\expandafter\boxframe\@tempa}}
+\ifXC@@fbox
+  \let\@frameb@x\XC@frameb@x \let\XC@fbox\fbox
+\else
+  \def\XC@fbox{\let\@frameb@x\XC@frameb@x\fbox}
+\fi
+
+\ifnum\XC@@xcd@>\m@ne
+\def\XC@boxframe#1#2#3#4%
+ {\hbox{\sbox\z@{\ifdim\fboxrule>\z@ #4\fi}%
+    \wd\z@#1\relax\ht\z@#2\relax\dp\z@#3\relax\box\z@}}
+\fi
+\ifcase\XC@@xcd@
+\providecommand*\color@block[3]%
+ {{\set@color\hbox
+    {\dimen@#3\edef\@tempa{ \number\dimen@\space}%
+     \dimen@#2\edef\@tempa{ \number\dimen@\@tempa}%
+     \dimen@#1\relax
+     \XC@special{\number\dimen@\@tempa XCcolorblock}}}}
+\providecommand*\boxframe[3]%
+ {\XC@boxframe{#1}{#2}{#3}%
+   {\dimen@#3\edef\@tempa{ \number\dimen@\space}%
+    \dimen@#2\edef\@tempa{ \number\dimen@\@tempa}%
+    \dimen@#1\relax
+    \XC@special{\number\fboxrule\space\number\dimen@\@tempa XCboxframe}}}
+\or
+\providecommand*\boxframe[3]%
+ {\XC@boxframe{#1}{#2}{#3}%
+   {\dimen@#3\edef\@tempa{ 0 -\strip@pt\dimen@\space}%
+    \edef\@tempb{\advance\dimen@\the\dimen@}%
+    \dimen@#2\advance\dimen@-\fboxrule\@tempb
+    \edef\@tempb{ \strip@pt\dimen@\space re s}%
+    \dimen@#1\advance\dimen@-\fboxrule
+    \edef\@tempb{ cm\@tempa\strip@pt\dimen@\@tempb}%
+    \dimen@.5\fboxrule\edef\@tempa{ \strip@pt\dimen@}%
+    \XC@special
+     {0.996264 0 0 0.996264 0 0 cm
+      \strip@pt\fboxrule\space w [] 0 d 2 J 0 j 4 M
+      1 0 0 1\@tempa\@tempa\@tempb}}}
+\fi
+\providecommand*\color@block[3]%
+ {{\set@color\rlap{\ifcolors@\vrule\@width#1\@height#2\@depth#3\fi}}}
+\providecommand*\boxframe[3]%
+ {\hbox
+   {\dimen@#2\advance\dimen@#3\relax
+    \lower#3\vbox
+     {\hrule\@height\fboxrule
+      \@tempdima-0.5\fboxrule \ifodd\fboxrule\advance\@tempdima\m@ne sp\fi
+      \kern\@tempdima
+      \hbox
+       {\advance\dimen@-\fboxrule
+        \vrule\@width\fboxrule\@height\dimen@\@depth\z@
+        \@tempdima#1\advance\@tempdima-\tw@\fboxrule \kern\@tempdima
+        \vrule\@width\fboxrule\@height\dimen@\@depth\z@}%
+      \kern-0.5\fboxrule
+      \hrule\@height\fboxrule}}}
+\def\@xcolor@#1#2#3#4%
+ {\XC@sdef\@@mod{#3}\edef\@@clr{#4}%
+  \ifx\@@mix\@empty\else\expandafter\@xcolor@@\@@mix!!!!\@nil\fi
+  \if@tempswa
+    \XC@let@Nc\@@tmp{XC@cnv@\@@mod @compl}%
+    \ifx\@@tmp\relax \expandafter\XC@calc@\@@clr,,,,:C\else
+                     \expandafter\@@tmp\@@clr,\fi
+    \let\@@clr\@@tmp
+  \fi}
+\def\@xcolor@@#1!#2!#3!#4!#5\@nil
+ {\dimen@\@ifxempty{#1}{100}{#1}\p@
+  \edef\@@mix{\@ifxempty{#2}{white}{#2}}%
+  \ifdim\dimen@=100\p@
+    \expandafter\XC@postfix\@@mix]\relax
+  \else\ifdim\dimen@=\z@
+    \extractcolorspecs\@@mix\@@mod\@@clr
+  \else
+    \XC@let@Nc\@@tmp{XC@clr@\@@mod @\@@mix}%
+    \ifx\@@tmp\relax
+      \extractcolorspec\@@mix\@@tmp
+      \ifx\@@mod\XC@mod@gray
+        \edef\@@mod{\expandafter\@firstoftwo\@@tmp}%
+        \edef\@@tmp{\expandafter\@secondoftwo\@@tmp}%
+        \convertcolorspec\XC@mod@gray\@@clr\@@mod\@@clr
+      \else
+        \expandafter\convertcolorspec\@@tmp\@@mod\@@tmp
+      \fi
+    \else
+      \ifx\@@mod\XC@mod@hsb\expandafter\XC@extract@hue\@@clr:\@@hue\fi
+    \fi
+    \XC@inflate\@@mod\@@clr\@@tmp\@@tmp
+    \expandafter\XC@mix\@@tmp,\@@clr
+  \fi\fi
+  \@ifxempty{#3}%
+   {\@ifxempty{#4}{}{\@xcolor@@!#4!#5\@nil}}%
+   {\@xcolor@@#3!#4!#5\@nil}}
+\def\XC@split#1%
+ {\begingroup\XC@edef\@@tmp{#1}\expandafter\XC@split@i\@@tmp>>\@nnil}
+\def\XC@split@i#1>%
+ {\def\@@tmp{#1}\XC@split@ii#1:\@nil \XC@func}
+\def\XC@split@ii#1:#2\@nil
+ {\@ifxempty{#2}{\XC@split@vi}{\XC@split@iii#1,,:#2}}
+\def\XC@split@iii#1,#2,#3:#4:%
+ {\edef\XC@@mod{#1}\let\@tempa\@empty
+  \ifx,#2,\XC@@tsttrue\@tempdima\z@\else\XC@@tstfalse\@tempdima#2\p@\fi
+  \XC@split@iv#4;,;}
+\def\XC@split@iv#1,#2;%
+ {\@ifxempty{#1}%
+   {\let\XC@@clr\@empty \@tempa \expandafter\XC@calc@\XC@@clr,,,,:U%
+    \let\@@mod\XC@@mod \let\@@clr\@@tmp}
+   {\XC@append\@tempa{\XC@split@v{#1}{#2}}%
+    \ifXC@@tst\advance\@tempdima#2\p@\fi
+    \XC@split@iv}}
+\def\XC@split@v#1#2%
+ {\def\@@tmp{#1}\XC@split@vi
+  \ifx\@@mod\XC@@mod\else
+    \convertcolorspec\@@mod\@@clr\XC@@mod\@@clr
+  \fi
+  \dimen@#2\p@ \rdivide\dimen@\@tempdima
+  \edef\@@scl{\strip@pt\dimen@}%
+  \expandafter\XC@calc@\@@clr,,,,:S%
+  \ifx\XC@@clr\@empty\let\XC@@clr\@@tmp\else
+    \XC@inflate\XC@@mod\XC@@clr\@@tmp\@@tmp
+    \expandafter\XC@add\@@tmp,\XC@@clr
+  \fi}
+\def\XC@split@vi{\count@\z@ \expandafter\XC@split@vii\@@tmp!\@nil}
+\def\XC@split@vii#1%
+ {\ifx#1-\advance\count@\@ne\expandafter\XC@split@vii
+  \else\expandafter\XC@split@viii\expandafter#1\fi}
+\def\XC@split@viii#1!#2\@nil
+ {\edef\@@nam{#1}\edef\@@mix{#2}%
+  \ifodd\count@\@tempswatrue\else\@tempswafalse\fi
+  \@ifundefinedcolor\@@nam
+   {\c@lor@error{`\@@nam'}\def\@@nam{black}}{}%
+  \let\xcolor@\@xcolor@\@nameuse{\@backslashchar color@\@@nam}}
+\def\XC@postfix#1#2]#3\relax
+ {\begingroup
+  \if[#1\@tempcnta#2\relax\XC@stepabs\@@nam
+  \else\@tempcnta\z@
+    \@tfor\@@tok:=#1#2\do
+     {\if+\@@tok\advance\@tempcnta\@ne
+      \else\if-\@@tok\advance\@tempcnta\m@ne
+      \else\@tempcnta\z@\expandafter\@break@tfor\fi\fi}%
+    \ifnum\@tempcnta=\z@\relax\else\XC@step\@@nam\fi
+    \let\@@tmp\@empty
+  \fi\expandafter\endgroup\@@tmp}
+\def\XC@func#1>{\@ifxempty{#1}{\remove@to@nnil}{\XC@fun@#1,>\XC@func}}
+\def\XC@fun@#1,#2>{\@nameuse{XC@func@#1}#2,,>}
+\def\XC@func@wheel#1,#2,#3>{\XC@func@wh@el{#1}{#2}0}
+\def\XC@func@twheel#1,#2,#3>{\XC@func@wh@el{#1}{#2}1}
+\def\XC@func@wh@el#1#2#3%
+ {\convertcolorspec\@@mod\@@clr
+   {\ifcase#3 \XC@mod@Hsb\or\XC@mod@tHsb\fi}\@@clr
+  \expandafter\XC@extract@hue\@@clr:\@@hue \dimen@#1\p@
+  \@ifxempty{#2}{}%
+   {\rdivide\dimen@{#2}\lshift\dimen@
+    \dimen@\rangeHsb\dimen@\rshift\dimen@}%
+  \advance\dimen@\@@hue\p@ \rdivide\dimen@\rangeHsb
+  \edef\@@hue{\strip@pt\dimen@}\XC@calcU\@@hue\@@hue
+  \ifcase#3
+    \expandafter\XC@replace@hue\@@clr:\@@hue,\@@clr
+  \or
+    \XC@c@lcS\rangeHsb{}\@@hue\@@hue
+    \expandafter\XC@replace@hue\@@clr:\@@hue,\@@clr
+    \convertcolorspec\XC@mod@tHsb\@@clr\XC@mod@hsb\@@clr
+  \fi
+  \let\@@mod\XC@mod@hsb}
+\def\XC@display
+ {\XC@bcolor\XC@let@cN{\@backslashchar color@.}\XC@current@color
+  \ifnum\XC@type{.}=1
+    \PackageWarning{xcolor}{Incompatible color definition}\else
+  \ifnum\XC@tracing>2
+    \begingroup \let\xcolor@\@empty \def\@nil{\@backslashchar @nil}%
+    \PackageInfo{xcolor}{Setting color `\XC@current@color'}%
+    \endgroup
+  \fi\fi
+  \XC@mcolor\set@color\XC@ecolor\ignorespaces}
+\let\XC@bcolor\relax
+\let\XC@mcolor\relax
+\let\XC@ecolor\relax
+\def\XC@bordercolor#1#2%
+ {\extractcolorspec{#2}\XC@@tmp
+  \expandafter\convertcolorspec\XC@@tmp\XC@mod@rgb\XC@@tmp
+  \expandafter\edef\csname @#1bordercolor\endcsname
+   {\expandafter\XC@strip@comma\XC@@tmp,,\@nnil}}
+\def\XC@pdfborder#1 #2 #3\relax
+ {\def\@@scl{80}\XC@calc@#1,#2,#3,,:S%
+  \edef\@pdfborder{\expandafter\XC@strip@comma\@@tmp,,\@nnil}}
+\@ifXCopt{table}{%
+ \def\rowcolors
+  {\@ifstar{\@rowcmdfalse\rowc@lors}{\@rowcmdtrue\rowc@lors}}
+ \def\rowc@lors{\@testopt{\rowc@l@rs}{}}
+ \def\rowc@l@rs[#1]#2#3#4%
+  {\global\rownum=\z@
+   \global\@rowcolorstrue
+   \@ifxempty{#3}%
+     {\def\@oddrowcolor{\@norowcolor}}%
+     {\def\@oddrowcolor{\gdef\CT@row@color{\CT@color{#3}}}}%
+   \@ifxempty{#4}%
+     {\def\@evenrowcolor{\@norowcolor}}%
+     {\def\@evenrowcolor{\gdef\CT@row@color{\CT@color{#4}}}}%
+   \if@rowcmd
+     \def\@rowcolors
+      {#1\if@rowcolors
+         \noalign{\relax\ifnum\rownum<#2\@norowcolor\else
+                  \ifodd\rownum\@oddrowcolor\else\@evenrowcolor\fi\fi}%
+       \fi}%
+   \else
+     \def\@rowcolors
+      {\if@rowcolors
+         \ifnum\rownum<#2\noalign{\@norowcolor}\else
+         #1\noalign{\ifodd\rownum\@oddrowcolor\else\@evenrowcolor\fi}\fi
+       \fi}%
+   \fi
+   \CT@everycr{\@rowc@lors\the\everycr}%
+   \ignorespaces}
+ \def\@rowc@lors{\noalign{\global\advance\rownum\@ne}\@rowcolors}
+ \let\@rowcolors\@empty
+ \def\showrowcolors{\noalign{\global\@rowcolorstrue}\@rowcolors}
+ \def\hiderowcolors{\noalign{\global\@rowcolorsfalse\@norowcolor}}
+ \def\@norowcolor{\global\let\CT@row@color\relax}
+ \@norowcolor
+ \newif\if@rowcolors
+ \newif\if@rowcmd
+ \@ifundefined{rownum}{\newcount\rownum}{}
+ \def\CT@extract#1\columncolor#2#3\@nil
+  {\if!#2%
+     \let\CT@column@color\@empty
+   \else
+     \if[#2%
+       \expandafter\CT@extractb
+     \else
+       \XC@edef\XC@@tmp{#2}%
+       \edef\CT@column@color{\noexpand\CT@color{\XC@@tmp}}%
+       \expandafter\CT@extractd
+     \fi
+     {#1}#3\@nil
+   \fi}
+}{}
+\def\extractcolorspec#1#2%
+ {\XC@split{#1}\edef\@@tmp{{\@@mod}{\@@clr}}\aftergroupdef#2\@@tmp}
+\def\extractcolorspecs#1#2#3%
+ {\extractcolorspec{#1}#3%
+  \edef#2{\expandafter\@firstoftwo#3}%
+  \edef#3{\expandafter\@secondoftwo#3}}
+\def\XC@extract@hue#1,#2:#3{\edef#3{#1}}
+\def\XC@replace@hue#1,#2:#3,#4{\edef#4{#3,#2}}
+\def\@ifundefinedcolor#1{\@ifundefined{\@backslashchar color@#1}}
+\def\@ifundefinedmodel#1{\@ifundefined{color@#1}}
+\def\XC@type#1%
+ {\expandafter\expandafter\expandafter\XC@typ@
+  \csname\@backslashchar color@#1\endcsname\@empty\@empty\@empty\XC@@}
+\def\XC@typ@#1#2#3#4\XC@@
+ {\ifx#1\relax 0\else
+    \ifx#1\xcolor@
+      \ifx$#2$%
+        \ifx$#3$4\else3\fi\@gobbletwo
+      \else2\fi\@gobbletwo
+    \else1\fi
+  \fi}
+\def\XC@info#1#2%
+ {\XC@edef#2{#1}%
+  \expandafter\in@\expandafter>\expandafter{#2}%
+  \ifin@\def#2{4}\else\expandafter\in@\expandafter:\expandafter{#2}%
+  \ifin@\def#2{3}\else\expandafter\in@\expandafter!\expandafter{#2}%
+  \ifin@\def#2{2}\else % now there's no >,:,!
+  \if-\expandafter\@car#2\@nil\def#2{2}\else % catches -red
+  \edef#2{\noexpand\in@{/./}{/#2/}}#2%
+  \edef#2{\ifin@0\else1\fi}\fi\fi\fi\fi}
+\def\tracingcolors{\begingroup\afterassignment\XC@tracingcolors\count@}
+\def\XC@tracingcolors{\aftergroupdef\XC@tracing{\the\count@}}
+\tracingcolors=0
+\def\XC@logdef#1%
+ {\ifnum\XC@tracing>1
+    \@ifundefinedcolor{#1}%
+     {\ifnum\XC@tracing>2
+        \PackageInfo{xcolor}{Defining color `#1'}%
+      \fi}%
+     {\PackageInfo{xcolor}{Redefining color `#1'}}%
+  \fi}
+\newenvironment*{testcolors}[1][rgb,cmyk,hsb,HTML]%
+ {\let\@@nam\@empty\count@\z@
+  \@for\@@tmp:=#1\do
+    {\advance\count@\@ne
+     \XC@sdef\@@tmp{\@@tmp}\edef\@@nam{\@@nam{\@@tmp}}}%
+  \edef\@@num{\the\count@}%
+  \def\XC@@gt{\textgreater}\def\@@tmp{OT1}%
+  \ifx\f@encoding\@@tmp
+    \@expandtwoargs\in@{,\f@family,}{,cmtt,pcr,}%
+    \ifin@\def\XC@@gt{>}\fi
+  \fi
+  \def\XC@@xcp@{-1}\ifnum\XC@tracing>1 \def\XC@tracing{1}\fi
+  \def\testcolor{\@testopt{\@testcolor}{}}%
+  \def\@testcolor[##1]##2%
+   {\XC@mdef\@@mod{##1}\XC@edef\@@clr{##2}%
+    \ifx\@@mod\@empty
+      \let\@@arg\@@clr\XC@replace\@@arg>\XC@@gt\else
+      \edef\@@arg{[\@@mod]{\@@clr}}\XC@definecolor[]{*}\@@mod\@@clr
+      \def\@@clr{*}\fi
+    \XC@append\@@arg{&}\extractcolorspecs\@@clr\@@mod\@@clr
+    \@testc@lor}%
+  \def\@testc@lor
+   {\count@\z@
+    \expandafter\@tfor\expandafter\@@tmp\expandafter:\expandafter=\@@nam\do
+     {\ifx\@@clr\@empty
+        \edef\@@cmd{\noexpand\textbf{\@@tmp}}%
+      \else
+        \convertcolorspec\@@mod\@@clr\@@tmp\@@cmd
+        \edef\@@cmd
+         {\noexpand\@testc@l@r{\@@tmp}{\@@cmd}%
+          \ifx\@@mod\@@tmp\noexpand\underline\fi
+          {\expandafter\XC@strip@comma\@@cmd,,\@nnil}}%
+      \fi
+      \expandafter\XC@append\expandafter\@@arg\expandafter{\@@cmd}%
+      \advance\count@\@ne
+      \ifnum\count@=\@@num\XC@append\@@arg{\\}\else\XC@append\@@arg{&}\fi}%
+    \@@arg}%
+  \def\@testc@l@r##1##2%
+   {\fboxsep\z@\fbox{\colorbox[##1]{##2}{\phantom{XX}}} }%
+  \tabular{@{}l*{\@@num}{l}@{}}%
+  \def\@@arg{\textbf{color}& }\let\@@clr\@empty\@testc@lor}%
+ {\endtabular\ignorespacesafterend}
+\def\color@setgroup{\begingroup\set@color}
+\let\color@begingroup\begingroup
+\def\color@endgroup{\endgraf\endgroup}
+\def\color@hbox{\hbox\bgroup\color@begingroup}
+\def\color@vbox{\vbox\bgroup\color@begingroup}
+\def\color@endbox{\color@endgroup\egroup}
+\def\convertcolorspec#1#2#3#4%
+ {\begingroup
+  \XC@sdef\sm{#1}\XC@sdef\tm{#3}\edef\@@tmp{#2}%
+  \ifx\sm\XC@mod@named\extractcolorspecs\@@tmp\sm\@@tmp\fi
+  \ifx\sm\tm\else\csname XC@cnv@\sm\expandafter\endcsname\@@tmp,\fi
+  \aftergroupdef#4\@@tmp}
+\def\XC@coremodel#1#2%
+ {\XC@ifxcase#1%
+   {\XC@mod@RGB {\convertcolorspec#1#2\XC@mod@rgb#2\let#1\XC@mod@rgb}%
+    \XC@mod@HTML{\convertcolorspec#1#2\XC@mod@rgb#2\let#1\XC@mod@rgb}%
+    \XC@mod@Hsb {\convertcolorspec#1#2\XC@mod@hsb#2\let#1\XC@mod@hsb}%
+    \XC@mod@tHsb{\convertcolorspec#1#2\XC@mod@hsb#2\let#1\XC@mod@hsb}%
+    \XC@mod@HSB {\convertcolorspec#1#2\XC@mod@hsb#2\let#1\XC@mod@hsb}%
+    \XC@mod@Gray{\convertcolorspec#1#2\XC@mod@gray#2\let#1\XC@mod@gray}%
+    \XC@mod@wave{\convertcolorspec#1#2\XC@mod@hsb#2\let#1\XC@mod@hsb}%
+    \XC@mod@named{}%
+    \XC@mod@ps{}}%
+   {\expandafter\XC@calc@#2,,,,:N\let#2\@@tmp}}
+\def\XC@cnv@rgb#1,#2,#3,%
+ {\XC@ifxcase\tm
+   {\XC@mod@cmy {\XC@calc@#1,#2,#3,,:C}%
+    \XC@mod@cmyk
+     {\XC@calc@#1,#2,#3,,:C\expandafter\XC@cnv@cmy@cmyk\@@tmp,}%
+    \XC@mod@RGB {\edef\@@scl{\rangeRGB}\XC@calc@#1,#2,#3,,:M}%
+    \XC@mod@HTML{\edef\@@scl{\@cclv}\XC@calc@#1,#2,#3,,:M%
+      \expandafter\XC@calc@\@@tmp,,:H%
+      \expandafter\XC@cnv@rgb@HTML\@@tmp,}%
+    \XC@mod@gray{\XC@cnv@rgb@gray#1,#2,#3,}%
+    \XC@mod@Gray{\XC@cnv@rgb@gray#1,#2,#3,\XC@cnv@gray\@@tmp,}}%
+   {\XC@cnv@rgb@hsb#1,#2,#3,\XC@cnv@hsb@}}
+\def\XC@cnv@rgb@
+ {\ifx\tm\XC@mod@rgb\else\expandafter\XC@cnv@rgb\@@tmp,\fi}
+\def\XC@cnv@rgb@hsb#1,#2,#3,%
+ {\count@\z@
+  \ifdim#2\p@>#1\p@ \else\advance\count@4 \fi
+  \ifdim#3\p@>#2\p@ \else\advance\count@2 \fi
+  \ifdim#1\p@>#3\p@ \else\advance\count@1 \fi
+  \ifcase\count@\or
+  \XC@c@v@rgb@hsb{#3}{#2}{#1}3{}\or
+  \XC@c@v@rgb@hsb{#2}{#1}{#3}1{}\or
+  \XC@c@v@rgb@hsb{#2}{#3}{#1}3-\or
+  \XC@c@v@rgb@hsb{#1}{#3}{#2}5{}\or
+  \XC@c@v@rgb@hsb{#3}{#1}{#2}5-\or
+  \XC@c@v@rgb@hsb{#1}{#2}{#3}1-\or
+  \def\@tempa{0}\def\@tempb{0}\XC@calcN{#3}\@tempc
+  \fi
+  \edef\@@tmp{\@tempa,\@tempb,\@tempc}}
+\def\XC@c@v@rgb@hsb#1#2#3#4#5%
+ {\XC@calcN{#1}\@tempc \llshiftset\dimen@{#1}%
+  \llshiftset\@tempdimb{-#3}\advance\@tempdimb\dimen@
+  \llshiftset\@tempdima{-#5#2}\advance\@tempdima#5\dimen@
+  \advance\@tempdima#4\@tempdimb \rdivide\@tempdima{6\@tempdimb}%
+  \edef\@tempa{\ifdim\@tempdima>\p@1\else\strip@pt\@tempdima\fi}%
+  \rdivide\@tempdimb\dimen@
+  \edef\@tempb{\strip@pt\@tempdimb}}
+\def\XC@cnv@rgb@gray#1,#2,#3,%
+ {\llshiftset\dimen@{#1}\@tempdima30\dimen@
+  \llshiftset\dimen@{#2}\advance\@tempdima59\dimen@
+  \llshiftset\dimen@{#3}\advance\@tempdima11\dimen@
+  \rrshift\@tempdima \rdivide\@tempdima{100}%
+  \edef\@@tmp{\strip@pt\@tempdima}}
+\def\XC@cnv@rgb@HTML#1,#2,#3,%
+ {\edef\@@tmp{#1#2#3}}
+\def\XC@cnv@cmy#1,#2,#3,%
+ {\XC@ifxcase\tm
+   {\XC@mod@cmyk{\XC@cnv@cmy@cmyk#1,#2,#3,}%
+    \XC@mod@gray{\XC@cnv@rgb@gray#1,#2,#3,\XC@calcC\@@tmp\@@tmp}%
+    \XC@mod@Gray{\XC@cnv@rgb@gray#1,#2,#3,\XC@calcC\@@tmp\@@tmp
+      \XC@cnv@gray\@@tmp,}}%
+   {\XC@calc@#1,#2,#3,,:C\XC@cnv@rgb@}}
+\def\XC@cnv@cmy@cmyk#1,#2,#3,%
+ {\edef\@@scl
+   {\ifdim#1\p@<#2\p@
+    \ifdim#1\p@<#3\p@ #1\else #3\fi \else
+    \ifdim#2\p@<#3\p@ #2\else #3\fi \fi}%
+  \expandafter\XC@calc@\adjustUCRBG,:S%
+  \expandafter\XC@c@v@cmy@cmyk\@@tmp,#1,#2,#3,}
+\def\XC@c@v@cmy@cmyk#1,#2,#3,#4,#5,#6,#7,%
+ {\XC@add#5,#6,#7,,-#1,-#2,-#3,,\@@tmp \edef\@@tmp{\@@tmp,#4}%
+  \expandafter\XC@calc@\@@tmp,:N}
+\def\XC@cnv@cmyk#1,#2,#3,#4,%
+ {\XC@ifxcase\tm
+   {\XC@mod@gray{\XC@cnv@rgb@gray#1,#2,#3,\edef\@@arg{#4}%
+      \XC@calcT\@@tmp\@@tmp \XC@calcC\@@tmp\@@tmp}%
+    \XC@mod@Gray{\XC@cnv@rgb@gray#1,#2,#3,\edef\@@arg{#4}%
+      \XC@calcT\@@tmp\@@tmp \XC@calcC\@@tmp\@@tmp \XC@cnv@gray\@@tmp,}}%
+   {\XC@cnv@cmyk@cmy#1,#2,#3,#4,%
+    \ifx\tm\XC@mod@cmy\else\expandafter\XC@cnv@cmy\@@tmp,\fi}}
+\def\XC@cnv@cmyk@cmy#1,#2,#3,#4,%
+ {\edef\@@arg{#4}\XC@calc@#1,#2,#3,,:T}
+\def\XC@cnv@hsb#1,#2,#3,%
+ {\XC@ifxcase\tm
+   {\XC@mod@Hsb {\XC@cnv@hsb@Hsb#1,#2,#3,}%
+    \XC@mod@tHsb{\XC@cnv@hsb@Hsb#1,#2,#3,\expandafter\XC@cnv@Hsb\@@tmp,}%
+    \XC@mod@HSB {\edef\@@scl{\rangeHSB}\XC@calc@#1,#2,#3,,:M}}%
+   {\XC@cnv@hsb@rgb#1,#2,#3,\XC@cnv@rgb@}}
+\def\XC@cnv@hsb@
+ {\ifx\tm\XC@mod@hsb\else\expandafter\XC@cnv@hsb\@@tmp,\fi}
+\def\XC@cnv@hsb@rgb#1,#2,#3,%
+ {\llshiftset\dimen@{#1}\dimen@6\dimen@ \rrshift\dimen@
+  \afterassignment\dimen@\count@=\the\dimen@
+  \edef\@@tmp{\strip@pt\dimen@}%
+  \ifodd\count@\else\XC@calcC\@@tmp\@@tmp\fi
+  \edef\@@tmp
+   {\ifcase\count@ 0,\@@tmp,1\or \@@tmp,0,1\or 1,0,\@@tmp\or
+    1,\@@tmp,0\or \@@tmp,1,0\or 0,1,\@@tmp\or 0,\@@tmp,1\fi}%
+  \edef\@@scl{#2}\expandafter\XC@calc@\@@tmp,,:S%
+  \expandafter\XC@calc@\@@tmp,,:C%
+  \edef\@@scl{#3}\expandafter\XC@calc@\@@tmp,,:S%
+  \expandafter\XC@calc@\@@tmp,,:N}
+\def\XC@cnv@hsb@Hsb#1,#2,#3,%
+ {\XC@c@lcS\rangeHsb{,#2,#3}{#1}\@@tmp}
+\def\XC@cnv@gray#1,%
+ {\XC@ifxcase\tm
+   {\XC@mod@rgb {\XC@calcN{#1}\@@tmp \edef\@@tmp{\@@tmp,\@@tmp,\@@tmp}}%
+    \XC@mod@cmy {\XC@calcC{#1}\@@tmp \edef\@@tmp{\@@tmp,\@@tmp,\@@tmp}}%
+    \XC@mod@cmyk{\XC@calcC{#1}\@@tmp \edef\@@tmp{0,0,0,\@@tmp}}%
+    \XC@mod@RGB {\edef\@@scl{\rangeRGB}\XC@calcM{#1}\@@tmp
+      \edef\@@tmp{\@@tmp,\@@tmp,\@@tmp}}%
+    \XC@mod@HTML{\edef\@@scl{\@cclv}\XC@calcM{#1}\@@tmp
+      \XC@calcH\@@tmp\@@tmp \edef\@@tmp{\@@tmp\@@tmp\@@tmp}}%
+    \XC@mod@HSB {\edef\@@scl{\rangeHSB}\XC@calcM{#1}\@@tmp
+      \edef\@@tmp{0,0,\@@tmp}}%
+    \XC@mod@Gray{\edef\@@scl{\rangeGray}\XC@calcM{#1}\@@tmp}}%
+   {\XC@calcN{#1}\@@tmp \edef\@@tmp{0,0,\@@tmp}}}
+\def\XC@cnv@RGB#1,#2,#3,%
+ {\edef\@@scl{\rangeRGB}\XC@calc@#1,#2,#3,,:D\XC@cnv@rgb@}
+\def\XC@cnv@HTML#1,%
+ {\edef\@@tmp{\expandafter\@hex@Hex#1\relax}\expandafter\XC@cnv@HTML@\@@tmp
+  \edef\@@scl{\@cclv}\expandafter\XC@calc@\@@tmp,,:D\XC@cnv@rgb@}
+\def\XC@cnv@HTML@#1#2#3#4#5#6%
+ {\edef\@@tmp{\number"#1#2,\number"#3#4,\number"#5#6}}
+\def\XC@cnv@Hsb#1,#2,#3,%
+ {\ifx\tm\XC@mod@tHsb\XC@cnv@@Hsb#1,#2,#3,\XC@cnv@Hsb@
+  \else\XC@cnv@Hsb@hsb#1,#2,#3,\XC@cnv@hsb@\fi}
+\def\XC@cnv@Hsb@hsb#1,#2,#3,%
+ {\XC@c@lcD\rangeHsb{,#2,#3}{#1}\@@tmp}
+\def\XC@cnv@@Hsb#1,#2,#3,#4%
+ {\dimen@\rangeHsb\p@ \advance\dimen@\p@ \edef\@@tmp{\strip@pt\dimen@}%
+  \edef\@@tmp{0,0;\rangetHsb;\rangeHsb,\rangeHsb;\@@tmp,\@@tmp;}%
+  \dimen@#1\p@ \expandafter#4\@@tmp\@nnil
+  \edef\@@tmp{\strip@pt\dimen@,#2,#3}}
+\def\XC@cnv@Hsb@#1,#2;#3,#4;%
+ {\ifdim\dimen@<#4\p@
+    \@tempdima#3\p@ \advance\@tempdima-#1\p@
+    \@tempdimb#4\p@ \advance\@tempdimb-#2\p@
+    \rdivide\@tempdima\@tempdimb
+    \advance\dimen@-#2\p@ \rmultiply\dimen@{\strip@pt\@tempdima}%
+    \advance\dimen@#1\p@ \expandafter\remove@to@nnil
+  \else
+    \def\@@tmp{\XC@cnv@Hsb@#3,#4;}\expandafter\@@tmp
+  \fi}
+\def\XC@cnv@tHsb#1,#2,#3,%
+ {\XC@cnv@@Hsb#1,#2,#3,\XC@cnv@tHsb@
+  \ifx\tm\XC@mod@Hsb\else\expandafter\XC@cnv@Hsb\@@tmp,\fi}
+\def\XC@cnv@tHsb@#1,#2;#3,#4;%
+ {\ifdim\dimen@<#3\p@
+    \@tempdima#4\p@ \advance\@tempdima-#2\p@
+    \@tempdimb#3\p@ \advance\@tempdimb-#1\p@
+    \rdivide\@tempdima\@tempdimb
+    \advance\dimen@-#1\p@ \rmultiply\dimen@{\strip@pt\@tempdima}%
+    \advance\dimen@#2\p@ \expandafter\remove@to@nnil
+  \else
+    \def\@@tmp{\XC@cnv@tHsb@#3,#4;}\expandafter\@@tmp
+  \fi}
+\def\XC@cnv@HSB#1,#2,#3,%
+ {\edef\@@scl{\rangeHSB}\XC@calc@#1,#2,#3,,:D\XC@cnv@hsb@}
+\def\XC@cnv@Gray#1,%
+ {\XC@c@lcD\rangeGray{}{#1}\@@tmp \XC@cnv@gray\@@tmp,}
+\def\XC@cnv@wave#1,%
+ {\XC@cnv@wave@hsb#1,\XC@cnv@hsb@}
+\def\XC@cnv@wave@hsb#1,%
+ {\@tempdima#1\p@
+  \ifdim\@tempdima<440\p@
+    \XC@c@v@wave@hsb{-.0166667}{7.33333}4{}\else
+  \ifdim\@tempdima<490\p@
+    \XC@c@v@wave@hsb{.02}{-8.8}4-\else
+  \ifdim\@tempdima<510\p@
+    \XC@c@v@wave@hsb{-.05}{25.5}2{}\else
+  \ifdim\@tempdima<580\p@
+    \XC@c@v@wave@hsb{.0142857}{-7.28571}2-\else
+  \ifdim\@tempdima<645\p@
+    \XC@c@v@wave@hsb{-.0153846}{9.92308}0{}\else
+  \dimen@\z@ \fi\fi\fi\fi\fi
+  \divide\dimen@6\relax
+  \edef\@@tmp{\strip@pt\dimen@,1,}%
+  \ifdim\@tempdima<420\p@
+    \XC@c@v@wave@hsb{.0175}{-6.35}0{}\else
+  \ifdim\@tempdima>700\p@
+    \XC@c@v@wave@hsb{-.00875}{7.125}0{}\else
+  \dimen@\p@ \fi\fi
+  \edef\@@tmp{\@@tmp\strip@pt\dimen@}}
+\def\XC@c@v@wave@hsb#1#2#3#4%
+ {\dimen@#1\@tempdima \advance\dimen@#2\p@
+  \XC@calcR{\strip@pt\dimen@}\@tempa
+  \dimen@#4\@tempa\p@ \advance\dimen@#3\p@}
+\def\XC@cnv@cmyk@compl#1,#2,#3,#4,%
+ {\XC@cnv@cmyk@cmy#1,#2,#3,#4,%
+  \expandafter\XC@calc@\@@tmp,,:C\expandafter\XC@cnv@cmy@cmyk\@@tmp,}
+\def\XC@cnv@hsb@compl#1,#2,#3,%
+ {\lshiftset\dimen@{#1}\advance\dimen@\ifdim\dimen@<5\p@-\fi-5\p@
+  \rshift\dimen@ \edef\@@tmp{\strip@pt\dimen@}%
+  \lshiftset\dimen@{#3}\@tempdima#2\dimen@
+  \@tempdimb\@tempdima \advance\@tempdimb10\p@ \advance\@tempdimb-\dimen@
+  \ifdim\@tempdimb=\z@
+    \edef\@@tmp{\@@tmp,0,0}%
+  \else
+    \rdivide\@tempdima\@tempdimb \rshift\@tempdimb
+    \edef\@@tmp{\@@tmp,\strip@pt\@tempdima,\strip@pt\@tempdimb}%
+  \fi}
+\def\substitutecolormodel#1#2%
+ {\XC@sdef\XC@@tmp{\expandafter\XC@substitutecolormodel#2/ignore/\@nnil}%
+  \ifx\XC@@tmp\XC@mod@ignore
+    \XC@let@cN{color@#1}\color@ignore
+  \else
+    \expandafter\edef\csname color@#1\endcsname##1##2%
+     {\noexpand\convertcolorspec
+      \expandafter\noexpand\csname XC@mod@#1\endcsname{##2}%
+      \expandafter\noexpand\csname XC@mod@\XC@@tmp\endcsname
+      \noexpand\XC@@tmp\noexpand\expandafter
+      \expandafter\noexpand\csname color@\XC@@tmp\endcsname
+      \noexpand\expandafter##1\noexpand\expandafter{\noexpand\XC@@tmp}}%
+  \fi
+  \expandafter\xglobalize@\csname color@#1\endcsname \xglobal@stop
+  \PackageInfo{xcolor}{Model `#1' substituted by `\XC@@tmp'}}
+\def\XC@substitutecolormodel#1/%
+ {\@ifundefinedmodel{#1}{\XC@substitutecolormodel}{#1\remove@to@nnil}}
+\def\color@ignore#1#2{\def#1{}}
+\@ifundefinedmodel{rgb}%
+ {\substitutecolormodel{rgb}{RGB/HTML/hsb/Hsb/HSB/cmy/cmyk/gray/Gray}}{}
+\@ifundefinedmodel{cmyk}{\substitutecolormodel{cmyk}{cmy/rgb}}{}
+\@ifundefinedmodel{cmy}%
+ {\PackageInfo{xcolor}{Model `cmy' substituted by `cmy0'}
+  \def\color@cmy#1#2{\color@cmyk#1{#2,0}}}{}
+\@ifundefinedmodel{hsb}{\@tempswatrue}%
+ {\XC@ifcase\XC@@drv{{dvipdfm,textures}\@tempswatrue}\@tempswafalse}
+\if@tempswa
+  \substitutecolormodel{hsb}{Hsb/HSB/rgb}
+\fi
+\@ifundefinedmodel{RGB}%
+ {\substitutecolormodel{RGB}{HTML/rgb}}
+ {\PackageInfo{xcolor}{Model `RGB' extended}
+  \let\XC@color@RGB\color@RGB
+  \def\color@RGB#1#2%
+   {\relax\ifnum\rangeRGB=255
+      \XC@color@RGB#1{#2}%
+    \else
+      \convertcolorspec\XC@mod@RGB{#2}\XC@mod@rgb\XC@@tmp
+      \expandafter\color@rgb\expandafter#1\expandafter{\XC@@tmp}%
+    \fi}}
+\@ifundefinedmodel{gray}{\substitutecolormodel{gray}{Gray/rgb}}{}
+\@ifundefinedmodel{HTML}{\substitutecolormodel{HTML}{rgb}}{}
+\@ifundefinedmodel{Hsb}{\substitutecolormodel{Hsb}{hsb}}{}
+\@ifundefinedmodel{tHsb}{\substitutecolormodel{tHsb}{hsb}}{}
+\@ifundefinedmodel{HSB}{\substitutecolormodel{HSB}{hsb}}{}
+\@ifundefinedmodel{Gray}{\substitutecolormodel{Gray}{gray}}{}
+\@ifundefinedmodel{wave}{\substitutecolormodel{wave}{hsb}}{}
+\def\XC@getcolor#1#2%
+ {\begingroup\toks@{#1}\XC@getc@lor#1\XC@@\aftergroupdef#2{\@@tmp}}
+\def\XC@getc@lor#1#2\XC@@
+ {\@ifxempty{#2}%
+   {\expandafter\XC@getc@l@r#1\XC@@}%
+   {\let\set@color\relax
+    \ifx#1[%
+      \expandafter\@undeclaredcolor\the\toks@\else
+      \expandafter\@declaredcolor\expandafter{\the\toks@}\fi
+    \let\@@tmp\XC@current@color}}
+\def\XC@getc@l@r#1#2\XC@@
+ {\ifx#1\xcolor@
+    \def\@@tmp{\xcolor@#2}%
+  \else
+    \let\set@color\relax
+    \expandafter\@declaredcolor\expandafter{\the\toks@}%
+    \let\@@tmp\XC@current@color
+  \fi}
+\def\XC@usecolor#1{\expandafter\XC@usec@lor#1\XC@@}
+\def\XC@usec@lor#1#2\XC@@
+ {\ifx#1\xcolor@
+    \expandafter\expandafter\expandafter\c@lor@to@ps#1#2\@@
+  \else
+    \expandafter\expandafter\expandafter\expandafter\expandafter\expandafter
+    \expandafter\c@lor@to@ps\csname\@backslashchar color@#1#2\endcsname\@@
+  \fi
+  \space}
+\let\XC@c@lor@to@ps\XC@usecolor
+\let\pst@getcolor\XC@getcolor
+\let\pst@usecolor\XC@usecolor
+\def\c@lor@special#1#2{\edef\@tempa{\write#1{#2}}\@tempa}
+\def\normalcolor{\let\current@color\default@color\set@color}
+\AtBeginDocument{\let\default@color\current@color}
+\XC@ifcase\XC@@drv
+ {{dvipdf,dvipdfm,dvipdfmx,dvips,pctex32}%
+  {\def\c@lor@@named#1,#2,#3\@@#4%
+    {\edef#4{\expandafter\expandafter\expandafter\@thirdoffive
+             \csname\@backslashchar color@#1\endcsname}}
+   \def\define@color@named#1#2%
+    {\@namedef{\@backslashchar color@#1}{{}{}{ \colornameprefix#1}{}{}}}}%
+  {dvipsone,luatex,pctexps,pdftex,tcidvi,truetex,vtex,xetex}%
+  {\def\c@lor@@named#1,#2,#3\@@#4%
+    {\edef#4{\expandafter\expandafter\expandafter\@thirdoffive
+             \csname\@backslashchar color@#1\endcsname}}
+   \def\define@color@named#1#2%
+    {\let\@@cls\@empty\@namedef{\@backslashchar color@#1}{{}{}{#2}{}{}}}}%
+  {textures}%
+  {\def\c@lor@@named#1,#2,#3\@@#4%
+    {\edef\@tempa{\color@P@custom{#1}{\if!#2!1\else#2\fi}}%
+     \expandafter\def\expandafter#4\@tempa}
+   \def\define@color@named#1#2%
+    {\edef\@tempa{{#1}{#2}}\expandafter\AddCustomColor\@tempa}
+   \def\c@lor@ps@#1 #2\@@
+    {\expandafter\expandafter\expandafter\expandafter\expandafter
+     \expandafter\expandafter\c@lor@to@ps@
+     \csname\@backslashchar color@#1\expandafter\endcsname\space
+     #2. \@@{#1}}}%
+ }{}
+\definecolorset{rgb/hsb/cmyk/gray}{}{}%
+ {red,1,0,0/0,1,1/0,1,1,0/.3;%
+  green,0,1,0/.33333,1,1/1,0,1,0/.59;%
+  blue,0,0,1/.66667,1,1/1,1,0,0/.11;%
+  brown,.75,.5,.25/.083333,.66667,.75/0,.25,.5,.25/.5475;%
+  lime,.75,1,0/.20833,1,1/.25,0,1,0/.815;%
+  orange,1,.5,0/.083333,1,1/0,.5,1,0/.595;%
+  pink,1,.75,.75/0,.25,1/0,.25,.25,0/.825;%
+  purple,.75,0,.25/.94444,1,.75/0,.75,.5,.25/.2525;%
+  teal,0,.5,.5/.5,1,.5/.5,0,0,.5/.35;%
+  violet,.5,0,.5/.83333,1,.5/0,.5,0,.5/.205}%
+\definecolorset{cmyk/rgb/hsb/gray}{}{}%
+ {cyan,1,0,0,0/0,1,1/.5,1,1/.7;%
+  magenta,0,1,0,0/1,0,1/.83333,1,1/.41;%
+  yellow,0,0,1,0/1,1,0/.16667,1,1/.89;%
+  olive,0,0,1,.5/.5,.5,0/.16667,1,.5/.39}
+\definecolorset{gray/rgb/hsb/cmyk}{}{}%
+ {black,0/0,0,0/0,0,0/0,0,0,1;%
+  darkgray,.25/.25,.25,.25/0,0,.25/0,0,0,.75;%
+  gray,.5/.5,.5,.5/0,0,.5/0,0,0,.5;%
+  lightgray,.75/.75,.75,.75/0,0,.75/0,0,0,.25;%
+  white,1/1,1,1/0,0,1/0,0,0,0}
+\XC@@names
+\AtBeginDocument{\let\XC@@stack\@empty}
+\let\colornameprefix\XC@@nameprefix
+\XC@catcodes
+\csname xcolorcmd\endcsname
+\color{black}
+\endinput
+%%
+%% End of file `xcolor.sty'.

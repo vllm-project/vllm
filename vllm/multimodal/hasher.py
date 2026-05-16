@@ -49,6 +49,17 @@ def _get_hasher_factory(algorithm: str) -> Callable[[], "hashlib._Hash"]:
 
 class MultiModalHasher:
     @classmethod
+    def hash_ordered_items(cls, items: Iterable[tuple[str, object]]) -> str:
+        hasher_factory = _get_hasher_factory(envs.VLLM_MM_HASHER_ALGORITHM)
+        hasher = hasher_factory()
+
+        for key, value in items:
+            for bytes_ in cls.iter_item_to_bytes(key, value):
+                hasher.update(bytes_)
+
+        return hasher.hexdigest()
+
+    @classmethod
     def serialize_item(cls, obj: object) -> Iterable[bytes | memoryview]:
         # Simple cases
         if isinstance(obj, (bytes, memoryview)):
@@ -84,7 +95,9 @@ class MultiModalHasher:
             return cls.iter_item_to_bytes("image", obj.original_bytes)
 
         if isinstance(obj, torch.Tensor):
-            tensor_obj: torch.Tensor = obj.cpu()
+            tensor_obj = obj.detach()
+            if tensor_obj.device.type != "cpu":
+                tensor_obj = tensor_obj.to("cpu")
             tensor_dtype = tensor_obj.dtype
             tensor_shape = tensor_obj.shape
 
@@ -152,11 +165,4 @@ class MultiModalHasher:
 
     @classmethod
     def hash_kwargs(cls, **kwargs: object) -> str:
-        hasher_factory = _get_hasher_factory(envs.VLLM_MM_HASHER_ALGORITHM)
-        hasher = hasher_factory()
-
-        for k, v in sorted(kwargs.items(), key=lambda kv: kv[0]):
-            for bytes_ in cls.iter_item_to_bytes(k, v):
-                hasher.update(bytes_)
-
-        return hasher.hexdigest()
+        return cls.hash_ordered_items(sorted(kwargs.items(), key=lambda kv: kv[0]))

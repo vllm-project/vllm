@@ -1,0 +1,125 @@
+%%
+%% This is file `ot1enc.def',
+%% generated with the docstrip utility.
+%%
+%% The original source files were:
+%%
+%% ltoutenc.dtx  (with options: `OT1')
+%% 
+%% This is a generated file.
+%% 
+%% The source is maintained by the LaTeX Project team and bug
+%% reports for it can be opened at https://latex-project.org/bugs.html
+%% (but please observe conditions on bug reports sent to that address!)
+%% 
+%% 
+%% Copyright (C) 1993-2021
+%% The LaTeX Project and any individual authors listed elsewhere
+%% in this file.
+%% 
+%% This file was generated from file(s) of the LaTeX base system.
+%% --------------------------------------------------------------
+%% 
+%% It may be distributed and/or modified under the
+%% conditions of the LaTeX Project Public License, either version 1.3c
+%% of this license or (at your option) any later version.
+%% The latest version of this license is in
+%%    https://www.latex-project.org/lppl.txt
+%% and version 1.3c or later is part of all distributions of LaTeX
+%% version 2008 or later.
+%% 
+%% This file has the LPPL maintenance status "maintained".
+%% 
+%% This file may only be distributed together with a copy of the LaTeX
+%% base system. You may however distribute the LaTeX base system without
+%% such generated files.
+%% 
+%% The list of all files belonging to the LaTeX base distribution is
+%% given in the file `manifest.txt'. See also `legal.txt' for additional
+%% information.
+%% 
+%% The list of derived (unpacked) files belonging to the distribution
+%% and covered by LPPL is defined by the unpacking scripts (with
+%% extension .ins) which are part of the distribution.
+%%% From File: ltoutenc.dtx
+\ProvidesFile{ot1enc.def}
+ [2021/04/29 v2.0v
+      Standard LaTeX file]
+\DeclareFontEncoding{OT1}{}{}
+\DeclareTextAccent{\"}{OT1}{127}
+\DeclareTextAccent{\'}{OT1}{19}
+\DeclareTextAccent{\.}{OT1}{95}
+\DeclareTextAccent{\=}{OT1}{22}
+\DeclareTextAccent{\^}{OT1}{94}
+\DeclareTextAccent{\`}{OT1}{18}
+\DeclareTextAccent{\~}{OT1}{126}
+\DeclareTextAccent{\H}{OT1}{125}
+\DeclareTextAccent{\u}{OT1}{21}
+\DeclareTextAccent{\v}{OT1}{20}
+\DeclareTextAccent{\r}{OT1}{23}
+\DeclareTextCommand{\b}{OT1}[1]
+   {\hmode@bgroup\o@lign{\relax#1\crcr\hidewidth\ltx@sh@ft{-3ex}%
+     \vbox to.2ex{\hbox{\char22}\vss}\hidewidth}\egroup}
+\DeclareTextCommand{\c}{OT1}[1]
+   {\leavevmode\setbox\z@\hbox{#1}\ifdim\ht\z@=1ex\accent24 #1%
+    \else{\ooalign{\unhbox\z@\crcr\hidewidth\char24\hidewidth}}\fi}
+\DeclareTextCommand{\d}{OT1}[1]
+   {\hmode@bgroup
+    \o@lign{\relax#1\crcr\hidewidth\ltx@sh@ft{-1ex}.\hidewidth}\egroup}
+\DeclareTextSymbol{\AE}{OT1}{29}
+\DeclareTextSymbol{\OE}{OT1}{30}
+\DeclareTextSymbol{\O}{OT1}{31}
+\DeclareTextSymbol{\ae}{OT1}{26}
+\DeclareTextSymbol{\i}{OT1}{16}
+\DeclareTextSymbol{\j}{OT1}{17}
+\DeclareTextSymbol{\oe}{OT1}{27}
+\DeclareTextSymbol{\o}{OT1}{28}
+\DeclareTextSymbol{\ss}{OT1}{25}
+\DeclareTextSymbol{\textemdash}{OT1}{124}
+\DeclareTextSymbol{\textendash}{OT1}{123}
+\DeclareTextCommand{\textnonbreakinghyphen}{OT1}{\mbox{-}\nobreak\hskip\z@}
+\DeclareTextCommand{\textfiguredash}       {OT1}{\textendash}
+\DeclareTextCommand{\texthorizontalbar}    {OT1}{\textemdash}
+\DeclareTextCommand{\textexclamdown}{OT1}{!`}
+\DeclareTextCommand{\textquestiondown}{OT1}{?`}
+\DeclareTextSymbol{\textquotedblleft}{OT1}{92}
+\DeclareTextSymbol{\textquotedblright}{OT1}{`\"}
+\DeclareTextSymbol{\textquoteleft}{OT1}{`\`}
+\DeclareTextSymbol{\textquoteright}{OT1}{`\'}
+\DeclareTextCommand{\L}{OT1}
+   {\leavevmode\setbox\z@\hbox{L}\hb@xt@\wd\z@{\hss\@xxxii L}}
+\DeclareTextCommand{\l}{OT1}
+   {\hmode@bgroup\@xxxii l\egroup}
+\DeclareTextCompositeCommand{\r}{OT1}{A}
+   {\leavevmode\setbox\z@\hbox{!}\dimen@\ht\z@\advance\dimen@-1ex%
+    \rlap{\raise.67\dimen@\hbox{\char23}}A}
+\DeclareTextCommand{\ij}{OT1}{%
+  \nobreak\hskip\z@skip i\kern-0.02em\nobreak\hskip\z@skip j}
+\DeclareTextCommand{\IJ}{OT1}{%
+  \nobreak\hskip\z@skip I\kern-0.02em\nobreak\hskip\z@skip J}
+\DeclareTextCommand{\textdollar}{OT1}{\hmode@bgroup
+   \ifdim \fontdimen\@ne\font >\z@
+      \slshape
+   \else
+      \upshape
+   \fi
+   \char`\$\egroup}
+\DeclareTextCommand{\textsterling}{OT1}{\hmode@bgroup
+   \ifdim \fontdimen\@ne\font >\z@
+      \itshape
+   \else
+      \fontshape{ui}\selectfont
+   \fi
+   \char`\$\egroup}
+\DeclareTextComposite{\.}{OT1}{i}{`\i}
+\DeclareTextComposite{\.}{OT1}{\i}{`\i}
+\DeclareTextCompositeCommand{\`}{OT1}{i}{\@tabacckludge`\i}
+\DeclareTextCompositeCommand{\'}{OT1}{i}{\@tabacckludge'\i}
+\DeclareTextCompositeCommand{\^}{OT1}{i}{\^\i}
+\DeclareTextCompositeCommand{\"}{OT1}{i}{\"\i}
+\ifx\textcommaabove\@undefined\else
+\DeclareTextCompositeCommand{\c}{OT1}{g}{\textcommaabove{g}}
+\fi
+\endinput
+%%
+%% End of file `ot1enc.def'.

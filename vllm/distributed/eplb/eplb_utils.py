@@ -3,11 +3,62 @@
 """Utility functions for EPLB (Expert Parallel Load Balancing)."""
 
 import os
+import threading
+
+import torch
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+
+class CpuGpuEvent:
+    """
+    Combines a CUDA event with a CPU threading event to enforce record->wait
+    ordering across two threads.
+
+    This class is designed for exactly two threads: one producer that calls
+    record() and one consumer that calls wait(). Using it with more than two
+    threads is not supported and will produce undefined behavior.
+
+    CUDA events alone are insufficient for cross-thread synchronization because
+    waiting on an unrecorded CUDA event is a no-op. The wait will return
+    immediately instead of blocking. This class adds a threading.Event so
+    that the waiting thread blocks on the CPU side until record() is called, at
+    which point the CUDA event is guaranteed to be in-flight and event.wait() will
+    correctly synchronize the GPU stream.
+    """
+
+    def __init__(self):
+        self._event = torch.cuda.Event()
+        self._recorded = threading.Event()
+
+    def wait(self, stream: torch.cuda.Stream | None = None):
+        """
+        Blocks the calling thread until record finishes. Used to guarantee that the
+        record kernel is called before wait.
+
+        Should only be called by the Async Eplb thread.
+        """
+        self._recorded.wait()
+        self._event.wait(stream)
+        self._recorded.clear()
+
+    def record(self, stream: torch.cuda.Stream | None = None):
+        """
+        Unblocks the waiting thread after calling event.record().
+
+        Should only be called by the main thread.
+        """
+        if self._recorded.is_set():
+            raise RuntimeError(
+                "CpuGpuEvent.record() called before the previous event was "
+                "consumed by wait()"
+            )
+        self._event = torch.cuda.Event()
+        self._event.record(stream)
+        self._recorded.set()
 
 
 def override_envs_for_eplb(parallel_config: ParallelConfig) -> None:
@@ -21,6 +72,10 @@ def override_envs_for_eplb(parallel_config: ParallelConfig) -> None:
     is_eplb_enabled = parallel_config.enable_eplb
     async_eplb = parallel_config.eplb_config.use_async
     is_deepep_ll = parallel_config.all2all_backend == "deepep_low_latency"
+    is_nccl_based_eplb_communicator = parallel_config.eplb_config.communicator in (
+        "torch_nccl",
+        "pynccl",
+    )
 
     # Override NCCL_MAX_CTAS to avoid hangs when using async EPLB with the
     # DeepEP low-latency backend.
@@ -39,7 +94,13 @@ def override_envs_for_eplb(parallel_config: ParallelConfig) -> None:
     # Limiting NCCL occupancy via NCCL_MAX_CTAS leaves space for the DeepEP
     # cooperative kernel to launch and complete, breaking the deadlock.
     # See: https://github.com/deepseek-ai/DeepEP/issues/496
-    if is_data_parallel and is_eplb_enabled and is_deepep_ll and async_eplb:
+    if (
+        is_data_parallel
+        and is_eplb_enabled
+        and is_deepep_ll
+        and async_eplb
+        and is_nccl_based_eplb_communicator
+    ):
         current_value_str = os.getenv("NCCL_MAX_CTAS")
 
         if current_value_str and current_value_str.isdigit():
@@ -49,6 +110,7 @@ def override_envs_for_eplb(parallel_config: ParallelConfig) -> None:
         os.environ["NCCL_MAX_CTAS"] = str(override_value)
         logger.info_once(
             f"EPLB: Setting NCCL_MAX_CTAS={override_value} "
-            "for expert parallel with EPLB and deepep_low_latency backend",
+            "for expert parallel with NCCL-based EPLB communicator and "
+            "deepep_low_latency backend",
             scope="global",
         )

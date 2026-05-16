@@ -38,7 +38,7 @@ for output in outputs:
 ```bash
 vllm serve XiaomiMiMo/MiMo-7B-Base \
     --tensor-parallel-size 1 \
-    --speculative_config '{"method":"mtp","num_speculative_tokens":1}'
+    --speculative-config '{"method":"mtp","num_speculative_tokens":1}'
 ```
 
 ## Notes

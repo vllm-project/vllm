@@ -267,12 +267,39 @@ You can modify the `problem_type` via problem_type in the Hugging Face config. T
 
 Implement alignment with transformers [ForSequenceClassificationLoss](https://github.com/huggingface/transformers/blob/57bb6db6ee4cfaccc45b8d474dfad5a17811ca60/src/transformers/loss/loss_utils.py#L92).
 
-### Logit bias
+### Affine Score Calibration
 
-You can modify the `logit_bias` (aka `sigmoid_normalize`) through the logit_bias parameter in `vllm.config.PoolerConfig`.
+Affine Score Calibration, also known as [Platt Scaling](https://en.wikipedia.org/wiki/Platt_scaling) (Platt, 1999), is the most widely used method for calibrating classifier outputs into well-calibrated probabilities.
+
+The calibration follows the transformation:
+
+`activation((logit - logit_mean) / logit_sigma)`
+
+| Parameter | Default | Description |
+| --------- | ------- | ----------- |
+| `logit_mean` | `None` | Mean subtracted from logits (centers scores) |
+| `logit_sigma` | `None` | Standard deviation used to scale logits after mean subtraction |
+
+The computation order is as follows:
+
+```python
+logits -= logit_mean   # subtract mean (center scores)
+logits /= logit_sigma  # divide by sigma (scale)
+logits = activation(logits)  # e.g. sigmoid
+```
+
+Example configuration:
+
+```bash
+--pooler-config '{"use_activation": true, "logit_mean": 4.5, "logit_sigma": 1.0}'
+```
 
 ## Removed Features
 
 ### Remove softmax from PoolingParams
 
 We have already removed `softmax` and `activation` from PoolingParams. Instead, use `use_activation`, since we allow `classify` and `token_classify` to use any activation function.
+
+### Remove `logit_bias` and `logit_scale`
+
+`logit_bias` and `logit_scale` are deprecated aliases for `logit_mean` and `logit_sigma` respectively. When using `logit_scale`, it is automatically converted to `logit_sigma = 1/logit_scale`. These deprecated parameters will be removed in v0.21.

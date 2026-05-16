@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
+from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast, overload
 
+from mistral_common.guidance.grammar_factory import GrammarFactory
+from mistral_common.guidance.tokenizer import from_mistral_tokenizer
 from mistral_common.protocol.instruct.request import (
     ChatCompletionRequest as MistralChatCompletionRequest,
 )
@@ -45,9 +48,54 @@ except ImportError:
     )
 
 if TYPE_CHECKING:
+    import llguidance
     from transformers import BatchEncoding
 
 logger = init_logger(__name__)
+
+
+def _pop_unallowed_keys_and_warn(
+    dictionary: dict[str, Any], allowed_keys: set[str], err_dict_name: str
+):
+    keys = list(dictionary.keys())
+    for key in keys:
+        if key not in allowed_keys:
+            dictionary.pop(key)
+            logger.warning_once(
+                f"'{key=}' is not supported by mistral-common "
+                f"for {err_dict_name}. It has been popped from the "
+                "object."
+            )
+
+
+# TODO(juliendenize): remove this once OpenAI API is better supported by
+# `mistral-common`.
+def adapt_inplace_to_mistral_tool(
+    tool: dict[str, Any],
+) -> dict[str, Any]:
+    tools_fields = set(Tool.model_fields.keys())
+    function_fields = set(Function.model_fields.keys())
+
+    # The Mistral client, in comparison to the OpenAI client, requires the
+    # "parameters" dict and the "description" string to be present
+    # even if they are empty.
+    if function := tool.get("function"):
+        if function.get("parameters") is None:
+            function["parameters"] = {}
+        if function.get("description") is None:
+            function["description"] = ""
+
+        _pop_unallowed_keys_and_warn(
+            dictionary=function,
+            allowed_keys=function_fields,
+            err_dict_name="function",
+        )
+
+    _pop_unallowed_keys_and_warn(
+        dictionary=tool, allowed_keys=tools_fields, err_dict_name="tools"
+    )
+
+    return tool
 
 
 def maybe_serialize_tool_calls(request: "MistralChatCompletionRequest"):
@@ -155,44 +203,11 @@ def _prepare_apply_chat_template_tools_and_messages(
         # Remove reasoning as unsupported by Mistral
         _ = message.pop("reasoning", None)  # type: ignore
 
-    # The Mistral client, in comparison to the OpenAI client, requires the
-    # "parameters" dict and the "description" string to be present
-    # even if they are empty.
-    if tools:
-        for function in [
-            tool["function"] for tool in tools if tool["type"] == "function"
-        ]:
-            if function.get("parameters") is None:
-                function["parameters"] = {}
-            if function.get("description") is None:
-                function["description"] = ""
-
-        # We filter not supported arguments to avoid throwing an error.
-        # TODO(juliendenize): remove this once OpenAI API is better supported by
-        # `mistral-common`.
-        tools_fields = set(Tool.model_fields.keys())
-        function_fields = set(Function.model_fields.keys())
-        for tool in tools:
-            tool_keys = list(tool.keys())
-            for tool_key in tool_keys:
-                if tool_key not in tools_fields:
-                    tool.pop(tool_key)
-                    logger.warning_once(
-                        f"'{tool_key}' is not supported by mistral-common for tools. "
-                        "It has been popped from the tool definition."
-                    )
-                if tool["type"] == "function":
-                    function_keys = list(tool["function"].keys())
-                    for function_key in function_keys:
-                        if function_key not in function_fields:
-                            tool["function"].pop(function_key)
-                            logger.warning_once(
-                                f"'{function_key}' is not supported by mistral-common "
-                                "for function tools. It has been popped from the "
-                                "function definition."
-                            )
-                else:
-                    raise ValueError("mistral-common only supports function tools.")
+    tools = (
+        [adapt_inplace_to_mistral_tool(tool=tool) for tool in tools]
+        if tools is not None
+        else None
+    )
 
     return messages, tools
 
@@ -574,3 +589,24 @@ class MistralTokenizer(TokenizerLike):
             ]
 
         return tokens
+
+    @property
+    def supports_grammar(self) -> bool:
+        return GrammarFactory.is_supported(self.mistral)
+
+    @cached_property
+    def grammar_factory(self) -> GrammarFactory:
+        if not self.supports_grammar:
+            raise AttributeError(
+                "This tokenizer does not support `grammar_factory`. "
+                "This is only supported for tekken tokenizers with "
+                "version >= 11."
+            )
+        # Cache grammar factory to avoid creating a llguidance tokenizer at every usage.
+        return GrammarFactory(self.mistral)
+
+    @cached_property
+    def llg_tokenizer(self) -> "llguidance.LLTokenizer":
+        if not self.is_tekken:
+            raise ValueError("`llg_tokenizer` is only supported for Tekkenizers.")
+        return from_mistral_tokenizer(self.mistral)

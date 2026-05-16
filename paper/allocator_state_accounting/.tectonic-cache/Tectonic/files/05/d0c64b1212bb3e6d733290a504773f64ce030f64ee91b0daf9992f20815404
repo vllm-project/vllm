@@ -1,0 +1,64 @@
+%%
+%% This is file `preload.ltx',
+%% generated with the docstrip utility.
+%%
+%% The original source files were:
+%%
+%% preload.dtx  (with options: `preload,cm,xpt,tex')
+%% 
+%% This is a generated file.
+%% 
+%% Copyright (C) 1993-2021
+%% The LaTeX Project and any individual authors listed elsewhere
+%% in this file.
+%% 
+%% This file was generated from file(s) of the LaTeX base system.
+%% --------------------------------------------------------------
+%% 
+%% It may be distributed and/or modified under the
+%% conditions of the LaTeX Project Public License, either version 1.3c
+%% of this license or (at your option) any later version.
+%% The latest version of this license is in
+%%    https://www.latex-project.org/lppl.txt
+%% and version 1.3c or later is part of all distributions of LaTeX
+%% version 2008 or later.
+%% 
+%% This file may only be distributed together with a copy of the LaTeX
+%% base system. You may however distribute the LaTeX base system without
+%% such generated files.
+%% 
+%% The list of all files belonging to the LaTeX base distribution is
+%% given in the file `manifest.txt'. See also `legal.txt' for additional
+%% information.
+%% 
+%% Details of how to use a configuration file to modify this part of
+%% the system are in the document `cfgguide.tex'.
+%% 
+%% 
+%%% From File: preload.dtx
+ \ProvidesFile{preload.ltx}
+         [2021/10/04 v2.1g LaTeX Kernel (Font Preloading)]
+\expandafter\font\csname OMX/cmex/m/n/10\endcsname=cmex10\relax
+\font\tenln  =line10   \font\tenlnw  =linew10\relax
+\font\tencirc=lcircle10 \font\tencircw=lcirclew10\relax
+%%
+%% Computer Modern Roman:
+%%-----------------------
+ \DeclarePreloadSizes{OT1}{cmr}{m}{n}{5,7,10}
+%%
+%% Computer Modern Sans:
+%%----------------------
+%%
+%% Computer Modern Typewriter:
+%%----------------------------
+%%
+%% Computer Modern Math:
+%%----------------------
+\DeclarePreloadSizes{OML}{cmm}{m}{it}{5,7,10}
+\DeclarePreloadSizes{OMS}{cmsy}{m}{n}{5,7,10}
+%%
+%% LaTeX symbol fonts:
+%%--------------------
+\endinput
+%%
+%% End of file `preload.ltx'.

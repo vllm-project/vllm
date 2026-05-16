@@ -5,6 +5,7 @@ import copy
 import json
 import os
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -12,6 +13,7 @@ import torch
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.utils.import_utils import LazyLoader
+from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
     StructuredOutputGrammar,
@@ -29,6 +31,21 @@ else:
     llguidance_torch = LazyLoader("llguidance.torch", globals(), "llguidance.torch")
 
 logger = init_logger(__name__)
+
+
+@lru_cache(maxsize=256)
+def _cached_serialize_guidance_grammar(
+    request_type: StructuredOutputOptions,
+    grammar_spec: str,
+    disable_any_whitespace: bool,
+    disable_additional_properties: bool,
+) -> str:
+    return serialize_guidance_grammar(
+        request_type,
+        grammar_spec,
+        disable_any_whitespace,
+        disable_additional_properties,
+    )
 
 
 def _walk_json_for_additional_properties(data: object):
@@ -92,14 +109,17 @@ class GuidanceBackend(StructuredOutputBackend):
             self.vllm_config.structured_outputs_config.disable_additional_properties
         )
 
-        self.ll_tokenizer = llguidance_hf.from_tokenizer(
-            self.tokenizer, max(self.vocab_size, len(self.tokenizer))
-        )
+        if is_mistral_tokenizer(self.tokenizer):
+            self.ll_tokenizer = self.tokenizer.llg_tokenizer
+        else:
+            self.ll_tokenizer = llguidance_hf.from_tokenizer(
+                self.tokenizer, max(self.vocab_size, len(self.tokenizer))
+            )
 
     def compile_grammar(
         self, request_type: StructuredOutputOptions, grammar_spec: str
     ) -> StructuredOutputGrammar:
-        self.serialized_grammar = serialize_guidance_grammar(
+        serialized_grammar = _cached_serialize_guidance_grammar(
             request_type,
             grammar_spec,
             self.disable_any_whitespace,
@@ -108,7 +128,7 @@ class GuidanceBackend(StructuredOutputBackend):
 
         ll_matcher = llguidance.LLMatcher(
             self.ll_tokenizer,
-            self.serialized_grammar,
+            serialized_grammar,
             log_level=int(os.environ.get("LLGUIDANCE_LOG_LEVEL", "1")),
         )
 

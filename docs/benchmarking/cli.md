@@ -37,6 +37,7 @@ th {
 | HuggingFace-Blazedit | ✅ | ✅ | `vdaita/edit_5k_char`, `vdaita/edit_10k_char` |
 | HuggingFace-ASR | ✅ | ✅ | `openslr/librispeech_asr`, `facebook/voxpopuli`,  `LIUM/tedlium`, `edinburghcstr/ami`,        `speechcolab/gigaspeech`,        `kensho/spgispeech` |
 | Spec Bench | ✅ | ✅ | `wget https://raw.githubusercontent.com/hemingkx/Spec-Bench/refs/heads/main/data/spec_bench/question.jsonl` |
+| SPEED-Bench | ✅ | ✅ | `curl -LsSf https://raw.githubusercontent.com/NVIDIA-NeMo/Skills/refs/heads/main/nemo_skills/dataset/speed-bench/prepare.py \| python3 -` |
 | Custom | ✅ | ✅ | Local file: `data.jsonl` |
 | Custom MM | ✅ | ✅ | Local file: `mm_data.jsonl` |
 
@@ -106,6 +107,38 @@ Median ITL (ms):                         7.70
 P99 ITL (ms):                            8.39
 ==================================================
 ```
+
+#### Results Visualization
+
+The `--plot-timeline` and `--plot-dataset-stats` can be used to generate respectively the requests completion timeline and dataset prompt and output tokens statistics, which can be useful for debugging purpose or for deeper analysis.
+
+```bash
+vllm bench serve \
+    --backend vllm \
+    --model meta-llama/Llama-3.1-8B-Instruct \
+    --endpoint /v1/completions \
+    --dataset-name sharegpt \
+    --dataset-path <your data path>/ShareGPT_V3_unfiltered_cleaned_split.json \
+    --num-prompts 100 \
+    --plot-timeline \
+    --timeline-itl-thresholds 2,5 \
+    --plot-dataset-stats \
+    --save-result
+```
+
+##### Interactive Timeline
+
+The generated timeline is an interactive visualization in the form of an HTML file that can be rendered in most browsers. To customize the ITL color thresholds, one can use `--timeline-itl-thresholds` flag (default: 25ms, 50ms)
+
+Example output:
+
+<iframe src="../../assets/contributing/vllm_bench_serve_timeline.html" width="100%" height="600" frameborder="0"></iframe>
+
+##### Dataset statistics
+
+The generated figure shows the input prompt and output tokens distribution.
+
+Example output: ![Dataset Statistics](../assets/contributing/vllm_bench_serve_dataset_stats.png)
 
 #### Custom Dataset
 
@@ -238,6 +271,69 @@ vllm bench serve \
     --num-prompts -1
     --spec-bench-category "summarization"
 ```
+
+#### SPEED-Bench Benchmark with Speculative Decoding
+
+[SPEED-Bench](https://huggingface.co/datasets/nvidia/SPEED-Bench) is a unified and diverse dataset for speculative decoding, supporting acceptance rate and length measurements using the Qualitative split and throughput measurements using the Throughput splits in 5 configuration of input sequence length (1k, 2k, 8k, 16k, 32k).
+
+!!! note
+    This dataset is governed by the [NVIDIA Evaluation Dataset License Agreement](https://huggingface.co/datasets/nvidia/SPEED-Bench/blob/main/License.pdf). For each dataset a user elects to use, the user is responsible for checking if the dataset license is fit for the intended purpose. The `prepare.py` script automatically fetches data from all the source datasets.
+
+First, download the dataset to a folder, using this one liner:
+
+```bash
+curl -LsSf https://raw.githubusercontent.com/NVIDIA-NeMo/Skills/refs/heads/main/nemo_skills/dataset/speed-bench/prepare.py \| python3 -
+```
+
+The command supports also the following arguments:
+
+- `--config`: download only a subset of the dataset: `qualitative`, `throughput_1k`, `throughput_2k`, `throughput_8k`, `throughput_16k` and `throughput_32k`. By default, it will download all subsets.
+- `--output_dir`: download to a specified folder. By default, it will download to the current directory.
+
+Start a server with speculative decoding:
+
+```bash
+vllm serve meta-llama/Llama-3.3-70B-Instruct \
+    --speculative-config $'{"method": "eagle3",
+    "num_speculative_tokens": 3,
+    "model": "nvidia/Llama-3.3-70B-Instruct-Eagle3"}'
+```
+
+Run all categories in the Qualitative split:
+
+```bash
+vllm bench serve \
+    --model meta-llama/Llama-3.3-70B-Instruct \
+    --dataset-name speed_bench \
+    --dataset-path "<YOUR_DOWNLOADED_PATH>/data/speed_bench" \
+    --num-prompts -1
+```
+
+Available categories include `[writing, roleplay, reasoning, math, coding, stem, humanities, multilingual, summarization, qa, rag]`.
+
+Run only a specific category like "multilingual":
+
+```bash
+vllm bench serve \
+    --model meta-llama/Llama-3.3-70B-Instruct \
+    --dataset-name speed_bench \
+    --dataset-path "<YOUR_DOWNLOADED_PATH>/data/speed_bench" \
+    --num-prompts -1
+    --speed-bench-category "multilingual"
+```
+
+Run all categories in the Throughput split (2k ISL):
+
+```bash
+vllm bench serve \
+    --model meta-llama/Llama-3.3-70B-Instruct \
+    --dataset-name speed_bench \
+    --speed-bench-dataset-subset throughput_2k
+    --dataset-path "<YOUR_DOWNLOADED_PATH>/data/speed_bench/" \
+    --num-prompts -1
+```
+
+Available categories include `[high_entropy, mixed, low_entropy]`, where high entropy data contains unstructued data such as creative writing while low entropy data contains more structured data such as coding, more details are in the dataset card.
 
 #### Other HuggingFaceDataset Examples
 

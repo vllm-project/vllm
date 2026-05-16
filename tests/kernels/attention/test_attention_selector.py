@@ -427,3 +427,90 @@ def test_per_head_quant_scales_backend_selection(
                     use_per_head_quant_scales=True,
                 )
             assert backend_name in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "backend_name,use_non_causal,should_succeed",
+    [
+        ("FLASH_ATTN", True, True),  # FlashAttn supports non-causal
+        ("FLASH_ATTN", False, True),  # FlashAttn also works with causal
+        ("FLASHINFER", True, False),  # FlashInfer does not support non-causal
+        ("FLASHINFER", False, True),  # FlashInfer works with causal
+    ],
+)
+def test_non_causal_backend_selection(
+    backend_name: str, use_non_causal: bool, should_succeed: bool
+):
+    """Test that use_non_causal on AttentionConfig controls backend filtering.
+
+    DFlashProposer sets use_non_causal=True on the draft model's
+    AttentionConfig so only non-causal-capable backends are selected.
+    The target model keeps use_non_causal=False (default) and can use
+    any backend.
+    """
+    _cached_get_attn_backend.cache_clear()
+
+    attention_config = AttentionConfig(
+        backend=AttentionBackendEnum[backend_name],
+        use_non_causal=use_non_causal,
+    )
+    cache_config = CacheConfig(block_size=16)
+    vllm_config = VllmConfig(
+        attention_config=attention_config, cache_config=cache_config
+    )
+
+    if CudaPlatform is None:
+        pytest.skip("CudaPlatform not available")
+    with (
+        set_current_vllm_config(vllm_config),
+        patch("vllm.platforms.current_platform", CudaPlatform()),
+    ):
+        if should_succeed:
+            backend = get_attn_backend(
+                head_size=128,
+                dtype=torch.float16,
+                kv_cache_dtype=None,
+            )
+            assert backend.get_name() == backend_name
+        else:
+            with pytest.raises(ValueError) as exc_info:
+                get_attn_backend(
+                    head_size=128,
+                    dtype=torch.float16,
+                    kv_cache_dtype=None,
+                )
+            assert "non-causal" in str(exc_info.value).lower()
+
+
+def test_non_causal_autoselect_backend():
+    """Test that when backend=None with use_non_causal=True, auto-selection
+    picks a compatible backend.
+
+    This simulates the DFlash scenario where the user doesn't specify
+    --attention-backend or --speculative-config.attention_backend.
+    The drafter inherits backend=None and auto-selects a backend that
+    supports non-causal attention.
+    """
+    _cached_get_attn_backend.cache_clear()
+
+    attention_config = AttentionConfig(
+        backend=None,
+        use_non_causal=True,
+    )
+    cache_config = CacheConfig(block_size=16)
+    vllm_config = VllmConfig(
+        attention_config=attention_config, cache_config=cache_config
+    )
+
+    if CudaPlatform is None:
+        pytest.skip("CudaPlatform not available")
+    with (
+        set_current_vllm_config(vllm_config),
+        patch("vllm.platforms.current_platform", CudaPlatform()),
+    ):
+        backend = get_attn_backend(
+            head_size=128,
+            dtype=torch.float16,
+            kv_cache_dtype=None,
+        )
+        assert backend.supports_non_causal()

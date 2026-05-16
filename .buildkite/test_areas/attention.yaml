@@ -3,6 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: V1 attention (H100)
+  key: v1-attention-h100
   timeout_in_minutes: 30
   device: h100
   source_file_dependencies:
@@ -14,6 +15,7 @@ steps:
     - pytest -v -s v1/attention
 
 - label: V1 attention (B200)
+  key: v1-attention-b200
   timeout_in_minutes: 30
   device: b200
   source_file_dependencies:

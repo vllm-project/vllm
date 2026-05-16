@@ -1,0 +1,2942 @@
+%%
+%% This is file `amsmath.sty',
+%% generated with the docstrip utility.
+%%
+%% The original source files were:
+%%
+%% amsmath.dtx 
+%% 
+%% Copyright (C) 1995, 1999, 2000, 2013 American Mathematical Society.
+%% Copyright (C) 2016-2021  LaTeX Project and American Mathematical Society.
+%% 
+%% This work may be distributed and/or modified under the
+%% conditions of the LaTeX Project Public License, either version 1.3c
+%% of this license or (at your option) any later version.
+%% The latest version of this license is in
+%%   https://www.latex-project.org/lppl.txt
+%% and version 1.3c or later is part of all distributions of LaTeX
+%% version 2005/12/01 or later.
+%% 
+%% This work has the LPPL maintenance status `maintained'.
+%% 
+%% The Current Maintainer of this work is the LaTeX Project.
+%% 
+\NeedsTeXFormat{LaTeX2e}% LaTeX 2.09 can't be used (nor non-LaTeX)
+[1994/12/01]% LaTeX date must be December 1994 or later
+\providecommand\DeclareRelease[3]{}
+\providecommand\DeclareCurrentRelease[2]{}
+\DeclareRelease{}{2018-12-01}{amsmath-2018-12-01.sty}
+\DeclareCurrentRelease{}{2019-04-01}
+\ProvidesPackage{amsmath}[2021/10/15 v2.17l AMS math features]
+\edef\@temp{\catcode 96=\number\catcode 96 }
+\catcode\string `\`=12
+\def\do#1{\catcode\number`#1=\number\catcode`#1}
+\edef\@temp{%
+  \noexpand\AtEndOfPackage{%
+    \@temp
+    \do\"\do\'\do\(\do\)\do\*\do\+\do\,\do\-\do\.%
+    \do\/\do\<\do\=\do\>\do\[\do\]\do\^\do\_\relax
+  }%
+}
+\@temp
+\def\do#1{\catcode\number`#1=12 }
+\do\"\do\'\do\(\do\)\do\*\do\+\do\,\do\-\do\.
+\do\/\do\<\do\=\do\>\do\[\do\]
+\catcode`\^=7 \catcode`\_=8
+\DeclareOption{intlimits}{\let\ilimits@\displaylimits}
+\DeclareOption{nointlimits}{\let\ilimits@\nolimits}
+\DeclareOption{sumlimits}{\let\slimits@\displaylimits}
+\DeclareOption{nosumlimits}{\let\slimits@\nolimits}
+\DeclareOption{namelimits}{\PassOptionsToPackage{namelimits}{amsopn}}
+\DeclareOption{nonamelimits}{%
+  \PassOptionsToPackage{nonamelimits}{amsopn}}
+\newif\ifctagsplit@
+\newif\iftagsleft@
+\DeclareOption{leqno}{\tagsleft@true}
+\DeclareOption{reqno}{\tagsleft@false}
+\DeclareOption{centertags}{\ctagsplit@true}
+\DeclareOption{tbtags}{\ctagsplit@false}
+\DeclareOption{cmex10}{%
+  \ifnum\cmex@opt=\@ne \def\cmex@opt{0}%
+  \else \def\cmex@opt{10}\fi
+}
+\@ifundefined{cmex@opt}{\def\cmex@opt{7}}{}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\newif\if@fleqn
+\newskip\@mathmargin
+\@mathmargin\@centering
+\DeclareOption{fleqn}{%
+    \@fleqntrue
+    \@mathmargin = -1sp
+    \let\mathindent=\@mathmargin
+    \AtBeginDocument{%
+        \ifdim\@mathmargin= -1sp
+            \@mathmargin\leftmargini minus\leftmargini
+        \fi
+    }%
+}
+\DeclareOption{alignedleftspaceyes}{\def\alignedspace@left{\null\,}}
+\DeclareOption{alignedleftspaceno}{\def\alignedspace@left{\null}}
+\DeclareOption{alignedleftspaceyesifneg}{%
+\def\alignedspace@left{%
+  \edef\@tempa{\expandafter\@car\the\lastskip\@nil}%
+  \if-\@tempa\null\,%
+  \else
+    \edef\@tempa{\expandafter\@car\the\lastkern\@nil}%
+    \if-\@tempa\null\,%
+    \else\null
+    \fi
+  \fi}%
+}
+\DeclareOption{?}{}
+\ExecuteOptions{%
+  nointlimits,sumlimits,namelimits,centertags,alignedleftspaceyesifneg}
+\ProcessOptions\par
+\@ifpackagewith{amsmath}{?}{%
+  \typeout{^^J%
+Documentation for the amsmath package is found in amsldoc.dvi^^J%
+(or .pdf or .tex).^^J%
+^^J%
+See also https://www.ams.org/tex/amslatex.html.^^J%
+^^J%
+Note: Using the first edition of The LaTeX Companion (1994) without^^J%
+errata as a guide for amsmath use is not recommended.^^J%
+  }%
+}{%
+  \typeout{%
+For additional information on amsmath, use the \lq ?\rq\space option.%
+  }%
+}
+\ifnum\cmex@opt=7 \relax
+  \DeclareFontShape{OMX}{cmex}{m}{n}{%
+    <-8>cmex7<8>cmex8<9>cmex9%
+    <10><10.95><12><14.4><17.28><20.74><24.88>cmex10%
+  }{}%
+  \expandafter\let\csname OMX/cmex/m/n/10\endcsname\relax
+\else
+  \ifnum\cmex@opt=\z@ % need to override cmex7 fontdef from amsfonts
+    \begingroup
+    \fontencoding{OMX}\fontfamily{cmex}%
+    \expandafter\let\csname OMX+cmex\endcsname\relax
+    \try@load@fontshape
+    \endgroup
+    \expandafter\let\csname OMX/cmex/m/n/10\endcsname\relax
+    \def\cmex@opt{10}%
+  \fi
+\fi
+\RequirePackage{amstext}[1995/01/25]
+\RequirePackage{amsbsy}[1995/01/20]
+\RequirePackage{amsopn}[1995/01/20]
+\@ifpackageloaded{stix}{%
+    \let\ams@newcommand\providecommand
+    \let\ams@renewcommand\providecommand
+    \let\ams@def\providecommand
+    \let\ams@DeclareRobustCommand\providecommand
+}{%
+    \let\ams@newcommand\newcommand
+    \let\ams@renewcommand\renewcommand
+    \let\ams@def\def
+    \let\ams@DeclareRobustCommand\DeclareRobustCommand
+}
+\def\@amsmath@err{\PackageError{amsmath}}
+\providecommand{\AmS}{{\protect\AmSfont
+  A\kern-.1667em\lower.5ex\hbox{M}\kern-.125emS}}
+\newcommand{\AmSfont}{%
+  \usefont{OMS}{cmsy}{\if\@xp\@car\f@series\@nil bb\else m\fi}{n}}
+\ifx\leavevmode@ifvmode\@undefined  % kernel is < 2018/12
+\def\@mathmeasure#1#2#3{\setbox#1\hbox{\frozen@everymath\@emptytoks
+    \m@th$#2#3$}}
+\else
+\def\@mathmeasure#1#2#3{\setbox#1\hbox{%
+  \m@th$#2#3$}}
+\fi
+\@ifundefined{inf@bad}{%
+  \newcount\inf@bad \inf@bad=1000000 \relax
+}{}
+\let\tmspace\@undefined
+\let\,\@undefined
+\let\!\@undefined
+\let\:\@undefined
+\let\negmedspace\@undefined
+\let\negthickspace\@undefined
+\ifx\leavevmode@ifvmode\@undefined
+\DeclareRobustCommand\tmspace[3]{%
+  \ifmmode\mskip#1#2\else\kern#1#3\fi\relax}
+\else
+\DeclareRobustCommand\tmspace[3]{%
+  \ifmmode\mskip#1#2\else\leavevmode@ifvmode\kern#1#3\fi\relax}
+\fi
+\DeclareRobustCommand\,{\tmspace+\thinmuskip{.1667em}}
+\let\thinspace\,
+\DeclareRobustCommand\!{\tmspace-\thinmuskip{.1667em}}
+\let\negthinspace\!
+\DeclareRobustCommand\:{\tmspace+\medmuskip{.2222em}}
+\let\medspace\:
+\DeclareRobustCommand\negmedspace{\tmspace-\medmuskip{.2222em}}
+\renewcommand\;{\tmspace+\thickmuskip{.2777em}}
+\let\thickspace\;
+\DeclareRobustCommand\negthickspace{\tmspace-\thickmuskip{.2777em}}
+\newcommand{\mspace}[1]{\mskip#1\relax}
+\def\@tempa#1#2\@nil{%
+  \ifx\delimiter#1\@tempcnta#2\relax\else\@tempcnta\z@\fi
+}
+\@xp\@tempa\vert\@empty\@nil
+\ifnum\@tempcnta>\z@
+  \advance\@tempcnta "4000000
+  \protected\xdef\lvert{\delimiter\number\@tempcnta\space }
+  \advance\@tempcnta "1000000
+  \protected\xdef\rvert{\delimiter\number\@tempcnta\space }
+\else
+  \ifx\@@undefined\lvert
+    % Fall back to cmex encoding since we don't know what else to do.
+    \DeclareMathDelimiter{\lvert}
+      {\mathopen}{symbols}{"6A}{largesymbols}{"0C}
+    \DeclareMathDelimiter{\rvert}
+      {\mathclose}{symbols}{"6A}{largesymbols}{"0C}
+  \fi
+\fi
+\@xp\@tempa\Vert\@empty\@nil
+\ifnum\@tempcnta>\z@
+  \advance\@tempcnta "4000000
+  \protected\xdef\lVert{\delimiter\number\@tempcnta\space }
+  \advance\@tempcnta "1000000
+  \protected\xdef\rVert{\delimiter\number\@tempcnta\space }
+\else
+  \ifx\@@undefined\lVert
+    \DeclareMathDelimiter{\lVert}
+      {\mathopen}{symbols}{"6B}{largesymbols}{"0D}
+    \DeclareMathDelimiter{\rVert}
+      {\mathclose}{symbols}{"6B}{largesymbols}{"0D}
+  \fi
+\fi
+\@saveprimitive\over\@@over
+\@saveprimitive\atop\@@atop
+\@saveprimitive\above\@@above
+\@saveprimitive\overwithdelims\@@overwithdelims
+\@saveprimitive\atopwithdelims\@@atopwithdelims
+\@saveprimitive\abovewithdelims\@@abovewithdelims
+\DeclareRobustCommand{\primfrac}[1]{%
+  \PackageWarning{amsmath}{%
+Foreign command \@backslashchar#1;\MessageBreak
+\protect\frac\space or \protect\genfrac\space should be used instead%
+\MessageBreak
+  }
+  \global\@xp\let\csname#1\@xp\endcsname\csname @@#1\endcsname
+  \csname#1\endcsname
+}
+\renewcommand{\over}{\primfrac{over}}
+\renewcommand{\atop}{\primfrac{atop}}
+\renewcommand{\above}{\primfrac{above}}
+\renewcommand{\overwithdelims}{\primfrac{overwithdelims}}
+\renewcommand{\atopwithdelims}{\primfrac{atopwithdelims}}
+\renewcommand{\abovewithdelims}{\primfrac{abovewithdelims}}
+\ifx\directlua\@undefined
+\DeclareRobustCommand{\frac}[2]{{\begingroup#1\endgroup\@@over#2}}
+\else
+\DeclareRobustCommand{\frac}[2]{{\Ustack{\begingroup#1\endgroup\@@over#2}}}
+\fi
+\newcommand{\dfrac}{\genfrac{}{}{}0}
+\newcommand{\tfrac}{\genfrac{}{}{}1}
+\DeclareRobustCommand{\binom}{\genfrac()\z@{}}
+\newcommand{\dbinom}{\genfrac(){0pt}0}
+\newcommand{\tbinom}{\genfrac(){0pt}1}
+\ifx\directlua\@undefined
+\ifx\XeTeXcharclass\@undefined
+\DeclareRobustCommand{\genfrac}[4]{%
+  \def\@tempa{#1#2}%
+  \edef\@tempb{\@nx\@genfrac\@mathstyle{#4}%
+    \csname @@\ifx @#3@over\else above\fi
+    \ifx\@tempa\@empty \else withdelims\fi\endcsname}
+  \@tempb{#1#2#3}}
+\else
+\def\genfrac@rule#1#2#3#4{%
+\hbox{$\left#1\vcenter{\hrule \@width\z@
+                       \@height
+                       \ifdim\fontdimen#2#3\tw@=\z@
+                       #4\fontdimen6#3\tw@
+                       \else
+                       \fontdimen#2#3\tw@
+                       \fi
+                      }\right.$}}
+\def\genfrac@choice#1#2{%
+\ifx @#2@\else
+\ifx c#1\kern-\nulldelimiterspace\fi
+{\delimitershortfall\z@\delimiterfactor\@m
+ \mathsurround\z@\nulldelimiterspace\z@
+\mathchoice
+{\genfrac@rule{#2}{20}\textfont{2.39}}%
+{\genfrac@rule{#2}{21}\textfont{1}}%
+{\genfrac@rule{#2}{21}\scriptfont{1.45}}%
+{\genfrac@rule{#2}{21}\scriptscriptfont{1.35}}%
+}%
+\ifx o#1\kern-\nulldelimiterspace\fi
+\fi
+}
+\DeclareRobustCommand{\genfrac}[6]{{%
+\@mathstyle{#4}%
+\genfrac@choice o{#1}%
+{\begingroup#5\endgroup\ifx @#3@\@@over\else\@@above\fi#3\relax#6}%
+\genfrac@choice c{#2}%
+}}
+\fi
+\else
+\def\genfrac@rule#1#2#3{%
+\hbox{$\left#1\vcenter{\hrule \@width\z@
+                       \@height
+                       \ifdim\Umathfractiondelsize#2=\z@
+                       #3\fontdimen6#3\tw@
+                       \else
+                       \Umathfractiondelsize#2%
+                       \fi
+                      }\right.$}}
+\def\genfrac@choice#1#2{%
+\ifx @#2@\else
+\ifx c#1\kern-\nulldelimiterspace\fi
+{\delimitershortfall\z@\delimiterfactor\@m
+ \mathsurround\z@\nulldelimiterspace\z@
+\mathchoice
+{\genfrac@rule{#2}\displaystyle{2.39}}%
+{\genfrac@rule{#2}\textstyle{1}}%
+{\genfrac@rule{#2}\scriptstyle{1.45}}%
+{\genfrac@rule{#2}\scriptscriptstyle{1.35}}%
+}%
+\ifx o#1\kern-\nulldelimiterspace\fi
+\fi
+}
+\DeclareRobustCommand{\genfrac}[6]{{%
+\@mathstyle{#4}%
+\genfrac@choice o{#1}%
+{\Ustack {\begingroup#5\endgroup\ifx @#3@\@@over\else\@@above\fi#3\relax#6}}%
+\genfrac@choice c{#2}%
+}}
+\fi
+\def\@genfrac#1#2#3#4#5{{#1{\begingroup#4\endgroup#2#3\relax#5}}}
+\def\@mathstyle#1{%
+  \ifx\@empty#1\@empty\relax
+  \else\ifcase#1\displaystyle % case 0
+    \or\textstyle\or\scriptstyle\else\scriptscriptstyle\fi\fi}
+\begingroup
+\edef\@tempa{\string\mathchar"}
+\edef\@tempd{\string\Umathchar"}
+\def\@tempb#1"#2\@nil{#1"}
+\edef\@tempc{\expandafter\@tempb\meaning\coprod "\@nil}
+\ifx\@tempc\@tempd\let\@tempc\@tempa\fi
+\ifx\@tempa\@tempc
+  \global\let\coprod@\coprod
+  \gdef\coprod{\DOTSB\coprod@\slimits@}
+  \global\let\bigvee@\bigvee
+  \gdef\bigvee{\DOTSB\bigvee@\slimits@}
+  \global\let\bigwedge@\bigwedge
+  \gdef\bigwedge{\DOTSB\bigwedge@\slimits@}
+  \global\let\biguplus@\biguplus
+  \gdef\biguplus{\DOTSB\biguplus@\slimits@}
+  \global\let\bigcap@\bigcap
+  \gdef\bigcap{\DOTSB\bigcap@\slimits@}
+  \global\let\bigcup@\bigcup
+  \gdef\bigcup{\DOTSB\bigcup@\slimits@}
+  \global\let\prod@\prod
+  \gdef\prod{\DOTSB\prod@\slimits@}
+  \global\let\sum@\sum
+  \gdef\sum{\DOTSB\sum@\slimits@}
+  \global\let\bigotimes@\bigotimes
+  \gdef\bigotimes{\DOTSB\bigotimes@\slimits@}
+  \global\let\bigoplus@\bigoplus
+  \gdef\bigoplus{\DOTSB\bigoplus@\slimits@}
+  \global\let\bigodot@\bigodot
+  \gdef\bigodot{\DOTSB\bigodot@\slimits@}
+  \global\let\bigsqcup@\bigsqcup
+  \gdef\bigsqcup{\DOTSB\bigsqcup@\slimits@}
+\fi
+\endgroup
+\newcommand{\leftroot}{\@amsmath@err{\Invalid@@\leftroot}\@eha}
+\newcommand{\uproot}{\@amsmath@err{\Invalid@@\uproot}\@eha}
+\newcount\uproot@
+\newcount\leftroot@
+\renewcommand{\root}{\relaxnext@
+  \DN@{\ifx\@let@token\uproot\let\next@\nextii@\else
+   \ifx\@let@token\leftroot\let\next@\nextiii@\else
+   \let\next@\plainroot@\fi\fi\next@}%
+  \def\nextii@\uproot##1{\uproot@##1\relax\FN@\nextiv@}%
+  \def\nextiv@{\ifx\@let@token\@sptoken\DN@. {\FN@\nextv@}\else
+   \DN@.{\FN@\nextv@}\fi\next@.}%
+  \def\nextv@{\ifx\@let@token\leftroot\let\next@\nextvi@\else
+   \let\next@\plainroot@\fi\next@}%
+  \def\nextvi@\leftroot##1{\leftroot@##1\relax\plainroot@}%
+   \def\nextiii@\leftroot##1{\leftroot@##1\relax\FN@\nextvii@}%
+  \def\nextvii@{\ifx\@let@token\@sptoken
+   \DN@. {\FN@\nextviii@}\else
+   \DN@.{\FN@\nextviii@}\fi\next@.}%
+  \def\nextviii@{\ifx\@let@token\uproot\let\next@\nextix@\else
+   \let\next@\plainroot@\fi\next@}%
+  \def\nextix@\uproot##1{\uproot@##1\relax\plainroot@}%
+  \bgroup\uproot@\z@\leftroot@\z@\FN@\next@}
+\def\plainroot@#1\of#2{\setbox\rootbox\hbox{%
+ $\m@th\scriptscriptstyle{#1}$}%
+ \mathchoice{\r@@t\displaystyle{#2}}{\r@@t\textstyle{#2}}
+ {\r@@t\scriptstyle{#2}}{\r@@t\scriptscriptstyle{#2}}\egroup}
+
+\@ifundefined{sqrtsign}{\let\sqrtsign\@@sqrt}{}
+\def\r@@t#1#2{\setboxz@h{$\m@th#1\sqrtsign{#2}$}%
+ \dimen@\ht\z@\advance\dimen@-\dp\z@
+ \setbox\@ne\hbox{$\m@th#1\mskip\uproot@ mu$}%
+ \advance\dimen@ by1.667\wd\@ne
+ \mkern-\leftroot@ mu\mkern5mu\raise.6\dimen@\copy\rootbox
+ \mkern-10mu\mkern\leftroot@ mu\boxz@}
+\@ifundefined{varGamma}{%
+  \DeclareMathSymbol{\varGamma}{\mathord}{letters}{"00}
+  \DeclareMathSymbol{\varDelta}{\mathord}{letters}{"01}
+  \DeclareMathSymbol{\varTheta}{\mathord}{letters}{"02}
+  \DeclareMathSymbol{\varLambda}{\mathord}{letters}{"03}
+  \DeclareMathSymbol{\varXi}{\mathord}{letters}{"04}
+  \DeclareMathSymbol{\varPi}{\mathord}{letters}{"05}
+  \DeclareMathSymbol{\varSigma}{\mathord}{letters}{"06}
+  \DeclareMathSymbol{\varUpsilon}{\mathord}{letters}{"07}
+  \DeclareMathSymbol{\varPhi}{\mathord}{letters}{"08}
+  \DeclareMathSymbol{\varPsi}{\mathord}{letters}{"09}
+  \DeclareMathSymbol{\varOmega}{\mathord}{letters}{"0A}
+}{}
+\@saveprimitive\overline\@@overline
+\DeclareRobustCommand{\overline}[1]{\@@overline{#1}}
+\newcommand{\boxed}[1]{\fbox{\m@th$\displaystyle#1$}}
+\newcommand{\implies}{\DOTSB\;\Longrightarrow\;}
+\newcommand{\impliedby}{\DOTSB\;\Longleftarrow\;}
+\def\And{\DOTSB\;\mathchar"3026 \;}
+\newcommand{\nobreakdash}{\leavevmode
+  \toks@\@emptytoks \def\@tempa##1{\toks@\@xp{\the\toks@-}\FN@\next@}%
+  \DN@{\ifx\@let@token-\@xp\@tempa
+       \else\setboxz@h{\the\toks@\nobreak}\unhbox\z@\fi}%
+  \FN@\next@
+}
+\renewcommand{\colon}{\nobreak\mskip2mu\mathpunct{}\nonscript
+  \mkern-\thinmuskip{:}\mskip6muplus1mu\relax}
+\let\ifgtest@\iffalse                              % initial value
+\def\gtest@true{\global\let\ifgtest@\iftrue}
+\def\gtest@false{\global\let\ifgtest@\iffalse}
+\let\DOTSI\relax
+\let\DOTSB\relax
+\let\DOTSX\relax
+{\uccode`7=`\\ \uccode`8=`m \uccode`9=`a \uccode`0=`t \uccode`!=`h
+ \uppercase{%
+  \gdef\math@#1#2#3#4#5#6\math@{\gtest@false\ifx 7#1\ifx 8#2%
+  \ifx 9#3\ifx 0#4\ifx !#5\xdef\meaning@{#6}\gtest@true
+  \fi\fi\fi\fi\fi}}}
+{\uccode`7=`c \uccode`8=`h \uccode`9=`\"
+ \uppercase{\gdef\mathch@#1#2#3#4#5#6\mathch@{\gtest@false
+  \ifx 7#1\ifx 8#2\ifx 9#5\gtest@true\xdef\meaning@{9#6}\fi\fi\fi}}}
+{\uccode`(=`U \uccode`)=`m
+ \uppercase{\gdef\Umathch@#1#2#3#4"#5"#6\Umathch@{\gtest@false
+  \ifx(#2\ifx)#3\gtest@true
+  \ifcase"#5 \or\or\gdef\thedots@{\dotsb@}\or\gdef\thedots@{\dotsb@}\fi
+  \fi\fi
+  }}}
+\ifx\Umathcharnumdef\@undefined
+\gdef\thecharacter@#1\thecharacter@{}
+\else
+{\uccode`(=`t \uccode`)=`c
+ \uppercase{\gdef\thecharacter@#1#2#3#4#5\thecharacter@{%
+  \ifx(#1\ifx)#4%
+    \@xp\getmathcode@\meaning@\getmathcode@
+  \fi\fi
+}}}
+\def\getmathcode@#1 #2 #3#4\getmathcode@{%
+  \Umathcharnumdef\@tempa\Umathcodenum`#3\relax
+  \edef\meaning@{\meaning\@tempa}%
+  \@xp\Umathch@\meaning@\Umathch@
+}
+\fi
+\newcount\classnum@
+\def\getmathch@#1.#2\getmathch@{\classnum@#1 \divide\classnum@4096
+ \ifcase\number\classnum@\or\or\gdef\thedots@{\dotsb@}\or
+ \gdef\thedots@{\dotsb@}\fi}
+{\uccode`4=`b \uccode`5=`i \uccode`6=`n
+ \uppercase{\gdef\mathbin@#1#2#3{\relaxnext@
+  \def\nextii@##1\mathbin@{\ifx\@sptoken\@let@token\gtest@true\fi}%
+  \gtest@false\DN@##1\mathbin@{}%
+ \ifx 4#1\ifx 5#2\ifx 6#3\DN@{\FN@\nextii@}\fi\fi\fi\next@}}}
+{\uccode`4=`r \uccode`5=`e \uccode`6=`l
+ \uppercase{\gdef\mathrel@#1#2#3{\relaxnext@
+  \def\nextii@##1\mathrel@{\ifx\@sptoken\@let@token\gtest@true\fi}%
+ \gtest@false\DN@##1\mathrel@{}%
+ \ifx 4#1\ifx 5#2\ifx 6#3\DN@{\FN@\nextii@}\fi\fi\fi\next@}}}
+{\uccode`5=`m \uccode`6=`a \uccode`7=`c
+ \uppercase{\gdef\macro@#1#2#3#4\macro@{\gtest@false
+  \ifx 5#1\ifx 6#2\ifx 7#3\gtest@true
+  \xdef\meaning@{\macro@@#4\macro@@}\fi\fi\fi}}}
+\def\macro@@#1->#2\macro@@{#2}
+\newcount\DOTSCASE@
+{\uccode`6=`\\ \uccode`7=`D \uccode`8=`O \uccode`9=`T \uccode`0=`S
+ \uppercase{\gdef\DOTS@#1#2#3#4#5{\gtest@false\DN@##1\DOTS@{}%
+  \ifx 6#1\ifx 7#2\ifx 8#3\ifx 9#4\ifx 0#5\let\next@\DOTS@@
+  \fi\fi\fi\fi\fi
+  \next@}}}
+{\uccode`3=`B \uccode`4=`I \uccode`5=`X
+ \uppercase{\gdef\DOTS@@#1{\relaxnext@
+  \def\nextii@##1\DOTS@{\ifx\@sptoken\@let@token\gtest@true\fi}%
+  \DN@{\FN@\nextii@}%
+  \ifx 3#1\global\DOTSCASE@\z@\else
+  \ifx 4#1\global\DOTSCASE@\@ne\else
+  \ifx 5#1\global\DOTSCASE@\tw@\else\DN@##1\DOTS@{}%
+  \fi\fi\fi\next@}}}
+{\uccode`5=`\\ \uccode`6=`n \uccode`7=`o \uccode`8=`t
+ \uppercase{\gdef\not@#1#2#3#4{\relaxnext@
+  \def\nextii@##1\not@{\ifx\@sptoken\@let@token\gtest@true\fi}%
+ \gtest@false\DN@##1\not@{}%
+ \ifx 5#1\ifx 6#2\ifx 7#3\ifx 8#4\DN@{\FN@\nextii@}\fi\fi\fi
+ \fi\next@}}}
+{\uccode`9=`\l %
+ \uppercase{\gdef\striplong@#1#2#3\relax{%
+  \ifx9#2 \@xp\@xp\@xp\zap@to@space\fi}}}
+\def\zap@to@space#1 {}
+\def\keybin@{\gtest@true
+ \ifx\@let@token+\else\ifx\@let@token=\else
+ \ifx\@let@token<\else\ifx\@let@token>\else
+ \ifx\@let@token-\else\ifx\@let@token*\else\ifx\@let@token:\else
+   \gtest@false\fi\fi\fi\fi\fi\fi\fi}
+\@ifundefined{@ldots}{\def\@ldots{\mathellipsis}}{}
+\DeclareRobustCommand{\ldots}{%
+  \ifmmode \mathellipsis \else \textellipsis \fi
+}
+\DeclareRobustCommand{\dots}{%
+  \ifmmode \@xp\mdots@\else \@xp\textellipsis \fi
+}
+\def\tdots@{\leavevmode\unskip\relaxnext@
+ \DN@{$\m@th\@ldots\,
+   \ifx\@let@token,\,$\else\ifx\@let@token.\,$\else
+   \ifx\@let@token;\,$\else\ifx\@let@token:\,$\else
+   \ifx\@let@token?\,$\else\ifx\@let@token!\,$\else
+     $ \fi\fi\fi\fi\fi\fi}%
+  \ \FN@\next@}
+\def\mdots@{\FN@\mdots@@}
+\def\mdots@@{\gdef\thedots@{\dotso@}%
+ \ifx\@let@token\boldsymbol
+   \gdef\thedots@\boldsymbol{\boldsymboldots@}%
+ \else
+   \ifx,\@let@token \gdef\thedots@{\dotsc}%
+   \else
+     \ifx\not\@let@token
+       \gdef\thedots@{\dotsb@}%
+     \else
+       \keybin@
+       \ifgtest@ % if \keybin@ test
+         \gdef\thedots@{\dotsb@}%
+       \else
+         \xdef\meaning@{\meaning\@let@token. .........}%
+         \xdef\meaning@@{\@xp\striplong@\meaning@\relax\meaning@}%
+         \@xp\math@\meaning@\math@
+         \ifgtest@ % if \mathxxx test
+           \@xp\mathch@\meaning@\mathch@
+           \ifgtest@ % if \mathchar
+             \@xp\getmathch@\meaning@\getmathch@
+           \fi % end if \mathchar
+         \else  % \not \mathxxx
+             \@xp\Umathch@\meaning@"0"\Umathch@
+             \ifgtest@ % if \Umathchar
+             \else % else not \Umathcar
+           \@xp\macro@\meaning@@\macro@
+           \ifgtest@ % if macro test
+             \@xp\not@\meaning@\not@
+             \ifgtest@ % if macro starts \not test
+               \gdef\thedots@{\dotsb@}%
+             \else% else not \not
+               \@xp\DOTS@\meaning@\DOTS@
+               \ifgtest@ % \if DOTS
+                 \ifcase\number\DOTSCASE@ %ifcase dots
+                   \gdef\thedots@{\dotsb@}%
+                 \or\gdef\thedots@{\dotsi}\else
+                 \fi % endifcase dots
+               \else % not macro starts \DOTS
+                 \@xp\math@\meaning@\math@
+                 \ifgtest@ % \if macro starts \mathxxxx
+                   \@xp\mathbin@\meaning@\mathbin@
+                   \ifgtest@ % if macro starts \mathbin
+                     \gdef\thedots@{\dotsb@}%
+                   \else % not macro starting \mathbin
+                     \@xp\mathrel@\meaning@\mathrel@
+                     \ifgtest@ % if macro starts \mathrel
+                       \gdef\thedots@{\dotsb@}%
+                     \fi % endif macro starts \mathrel (no else)
+                   \fi % endif macro starts \mathbin
+                 \fi % endif macro starts with \mathxxx (no else)
+               \fi % endif macro starts \DOTS else
+             \fi % end macro  starting \not \ifgtest@ test (no else)
+             \else
+               \@xp\thecharacter@\meaning@\thecharacter@
+             \fi % end macro \ifgtest@ test (no else)
+           \fi % end if \Umathchar test
+         \fi % end \math@   \ifgtest@
+       \fi % end \keybin@ \ifgtest@ test (no else)
+     \fi % end if \not (no else)
+   \fi % end if comma (no else)
+ \fi % end if boldsymbol (no else)
+ \thedots@}
+\def\boldsymboldots@#1{%
+  \bold@true\let\@let@token=#1\let\delayed@=#1\mdots@@
+  \boldsymbol#1\bold@false}
+\ams@def\@cdots{\mathinner{\cdotp\cdotp\cdotp}}
+\newcommand{\dotsi}{\!\@cdots}
+\let\dotsb@\@cdots
+\def\rightdelim@{\gtest@true
+ \ifx\@let@token)\else
+ \ifx\@let@token]\else
+ \ifx\@let@token\rbrack\else
+ \ifx\@let@token\}\else
+ \ifx\@let@token\rbrace\else
+ \ifx\@let@token\rangle\else
+ \ifx\@let@token\rceil\else
+ \ifx\@let@token\rfloor\else
+ \ifx\@let@token\rgroup\else
+ \ifx\@let@token\rmoustache\else
+ \ifx\@let@token\right\else
+ \ifx\@let@token\bigr\else
+ \ifx\@let@token\biggr\else
+ \ifx\@let@token\Bigr\else
+ \ifx\@let@token\Biggr\else\gtest@false
+ \fi\fi\fi\fi\fi\fi\fi\fi\fi\fi\fi\fi\fi\fi\fi}
+\def\extra@{%
+ \rightdelim@\ifgtest@
+ \else\ifx\@let@token$\gtest@true
+ \else\xdef\meaning@{\meaning\@let@token..........}%
+ \@xp\macro@\meaning@\macro@\ifgtest@
+ \@xp\DOTS@\meaning@\DOTS@
+ \ifgtest@
+ \ifnum\DOTSCASE@=\tw@\gtest@true\else\gtest@false
+ \fi\fi\fi\fi\fi}
+\newif\ifbold@
+\def\dotso@{\relaxnext@
+ \ifbold@
+  \let\@let@token\delayed@
+  \def\nextii@{\extra@\@ldots\ifgtest@\,\fi}%
+ \else
+  \def\nextii@{\DN@{\extra@\@ldots\ifgtest@\,\fi}\FN@\next@}%
+ \fi
+ \nextii@}
+\def\extrap@#1{%
+ \DN@{#1\,}%
+ \ifx\@let@token,\else
+ \ifx\@let@token;\else
+ \ifx\@let@token.\else\extra@
+ \ifgtest@\else
+ \let\next@#1\fi\fi\fi\fi\next@}
+\ams@DeclareRobustCommand{\cdots}{\DN@{\extrap@\@cdots}\FN@\next@}
+\let\dotsb\cdots
+\let\dotsm\cdots
+\DeclareRobustCommand{\dotso}{\relax
+  \ifmmode \DN@{\extrap@\@ldots}%
+  \else \let\next@\tdots@\fi
+  \FN@\next@}
+\DeclareRobustCommand{\dotsc}{%
+  \DN@{\ifx\@let@token;\@ldots\,%
+       \else \ifx\@let@token.\@ldots\,%
+       \else \extra@\@ldots \ifgtest@\,\fi
+       \fi\fi}%
+  \FN@\next@}
+\renewcommand{\longrightarrow}{%
+  \DOTSB\protect\relbar\protect\joinrel\rightarrow}
+\renewcommand{\Longrightarrow}{%
+  \DOTSB\protect\Relbar\protect\joinrel\Rightarrow}
+\renewcommand{\longleftarrow}{%
+  \DOTSB\leftarrow\protect\joinrel\protect\relbar}
+\renewcommand{\Longleftarrow}{%
+  \DOTSB\Leftarrow\protect\joinrel\protect\Relbar}
+\renewcommand{\longleftrightarrow}{\DOTSB\leftarrow\joinrel\rightarrow}
+\renewcommand{\Longleftrightarrow}{\DOTSB\Leftarrow\joinrel\Rightarrow}
+\renewcommand{\mapsto}{\DOTSB\mapstochar\rightarrow}
+\renewcommand{\longmapsto}{\DOTSB\mapstochar\longrightarrow}
+\renewcommand{\hookrightarrow}{\DOTSB\lhook\joinrel\rightarrow}
+\renewcommand{\hookleftarrow}{\DOTSB\leftarrow\joinrel\rhook}
+\renewcommand{\iff}{\DOTSB\;\Longleftrightarrow\;}
+\renewcommand{\doteq}{%
+  \DOTSB\mathrel{\mathop{\kern0pt =}\limits^{\textstyle.}}}
+\newif\if@display
+\everydisplay\@xp{\the\everydisplay \@displaytrue}
+\renewcommand{\int}{\DOTSI\intop\ilimits@}
+\renewcommand{\oint}{\DOTSI\ointop\ilimits@}
+\def\intkern@{\mkern-6mu\mathchoice{\mkern-3mu}{}{}{}}
+\def\intdots@{\mathchoice{\@cdots}%
+ {{\cdotp}\mkern1.5mu{\cdotp}\mkern1.5mu{\cdotp}}%
+ {{\cdotp}\mkern1mu{\cdotp}\mkern1mu{\cdotp}}%
+ {{\cdotp}\mkern1mu{\cdotp}\mkern1mu{\cdotp}}}
+\ams@newcommand{\iint}{\DOTSI\protect\MultiIntegral{2}}
+\ams@newcommand{\iiint}{\DOTSI\protect\MultiIntegral{3}}
+\ams@newcommand{\iiiint}{\DOTSI\protect\MultiIntegral{4}}
+\newcommand{\idotsint}{\DOTSI\protect\MultiIntegral{0}}
+\newcommand{\MultiIntegral}[1]{%
+  \edef\ints@c{\noexpand\intop
+    \ifnum#1=\z@\noexpand\intdots@\else\noexpand\intkern@\fi
+    \ifnum#1>\tw@\noexpand\intop\noexpand\intkern@\fi
+    \ifnum#1>\thr@@\noexpand\intop\noexpand\intkern@\fi
+    \noexpand\intop
+    \noexpand\ilimits@
+  }%
+  \futurelet\@let@token\ints@a
+}
+\def\ints@a{%
+  \ifx\limits\@let@token \ints@b
+  \else \ifx\displaylimits\@let@token \ints@b
+  \else\ifx\ilimits@\displaylimits \ints@b
+  \fi\fi\fi
+  \ints@c
+}
+\def\ints@b{%
+  \mkern-7mu\mathchoice{\mkern-2mu}{}{}{}%
+  \mathop\bgroup
+    \mkern7mu\mathchoice{\mkern2mu}{}{}{}%
+    \let\ilimits@\egroup
+}%
+\newbox\Mathstrutbox@
+\setbox\Mathstrutbox@=\hbox{}
+\def\Mathstrut@{\copy\Mathstrutbox@}
+\ifx\Umathcharnumdef\@undefined
+\def\resetMathstrut@{%
+  \begingroup
+  \setbox\z@\hbox{%
+    \mathchardef\@tempa\mathcode`\(\relax
+    \def\@tempb##1"##2##3{\the\textfont"##3\char"}%
+    \expandafter\@tempb\meaning\@tempa \relax
+  }%
+ \edef\@tempa{%
+     \ht\Mathstrutbox@\the\ht\z@\relax
+     \dp\Mathstrutbox@\the\dp\z@\relax}%
+  \expandafter\endgroup\@tempa
+}
+\else
+\def\resetMathstrut@{%
+    \begingroup
+    \Umathcharnumdef\@tempa\Umathcodenum`\(\relax
+    \def\@tempb##1"##2"##3"##4\relax{%
+      \endgroup
+      \ht\Mathstrutbox@=\fontcharht\textfont"##3 "##4\relax
+      \dp\Mathstrutbox@=\fontchardp\textfont"##3 "##4\relax}%
+    \expandafter\@tempb\meaning\@tempa \relax
+}
+\fi
+\addto@hook\every@math@size{\resetMathstrut@}
+\newbox\strutbox@
+\def\strut@{\copy\strutbox@}
+\def\reset@strutbox@{%
+  \global\setbox\strutbox@\hbox{%
+    \lower.5\normallineskiplimit
+       \vbox{\kern-\normallineskiplimit\copy\strutbox}}}
+\addto@hook\every@math@size{\reset@strutbox@}
+\AtBeginDocument{\reset@strutbox@}
+\renewcommand{\big}{\bBigg@\@ne}
+\renewcommand{\Big}{\bBigg@{1.5}}
+\renewcommand{\bigg}{\bBigg@\tw@}
+\renewcommand{\Bigg}{\bBigg@{2.5}}
+\ifx\leavevmode@ifvmode\@undefined
+\def\bBigg@#1#2{%
+  {\@mathmeasure\z@{\nulldelimiterspace\z@}%
+     {\left#2\vcenter to#1\big@size{}\right.}%
+   \box\z@}}
+\else
+\def\bBigg@#1#2{\leavevmode@ifvmode
+  {\@mathmeasure\z@{\nulldelimiterspace\z@}%
+     {\left#2\vcenter to#1\big@size{}\right.}%
+   \box\z@}}
+\fi
+\addto@hook\every@math@size{%
+  \global\big@size 1.2\ht\Mathstrutbox@
+  \global\advance\big@size 1.2\dp\Mathstrutbox@ }
+\newdimen\big@size
+\def\accentclass@{7}
+\def\noaccents@{\def\accentclass@{0}}
+\DeclareFontEncoding{OML}{}{\noaccents@}
+\DeclareFontEncoding{OMS}{}{\noaccents@}
+\ams@newcommand{\dddot}[1]{%
+  {\mathop{\kern\z@#1}\limits^{\vbox to-1.4\ex@{\kern-\tw@\ex@
+   \hbox{\,\normalfont...}\vss}}}}
+\ams@newcommand{\ddddot}[1]{%
+  {\mathop{\kern\z@#1}\limits^{\vbox to-1.4\ex@{\kern-\tw@\ex@
+   \hbox{\,\normalfont....}\vss}}}}
+\def\set@mathaccent#1#2#3#4{%
+  \xdef#2{%
+    \@nx\mathaccentV
+    {\@xp\@gobble\string#2}\hexnumber@#1#4}%
+  \MakeRobust#2%
+}
+\def\@tempa#1{%
+  \@ifundefined{\@xp\@gobble\string#1\space}%
+     {\@xp\@tempb\meaning#1\@nil#1}%
+     {\@xp\@xp\@xp\@tempb\@xp\meaning
+       \csname\@xp\@gobble\string#1\space\endcsname\@nil#1}%
+}
+\def\@tempb#1>#2#3 #4\@nil#5{%
+  \@xp\ifx\csname#3\endcsname\mathaccent
+    \@tempc#4?"7777\@nil#5%
+  \else
+  \@xp\ifx\csname#3\endcsname\Umathaccent
+    \@tempd#4\@nil#5%
+  \else
+    \PackageWarningNoLine{amsmath}{%
+      Unable to redefine math accent \string#5}%
+  \fi\fi}
+\def\@tempc#1"#2#3#4#5#6\@nil#7{%
+  \@xp\let\csname\@xp\@gobble\string#7\space\endcsname\@undefined
+  \chardef\@tempd="#3\relax\set@mathaccent\@tempd{#7}{#2}{#4#5}}
+\def\@tempd#1\@nil#2{%
+    \PackageWarningNoLine{amsmath}{%
+      Unable to redefine \string\Umathaccent\space\string#2}%
+}
+\@tempa{\hat}
+\@tempa{\check}
+\@tempa{\tilde}
+\@tempa{\acute}
+\@tempa{\grave}
+\@tempa{\dot}
+\@tempa{\ddot}
+\@tempa{\breve}
+\@tempa{\bar}
+\@tempa{\vec}
+\@ifundefined{mathring}{%
+  \DeclareMathAccent{\mathring}{\mathalpha}{operators}{"17}
+}{%
+  \@tempa{\mathring}
+}
+%%\@tempa\widetilde
+%%\@tempa\widehat
+\newcommand{\acc@check}{}
+\newcommand{\acc@error}{}
+\def\acc@check{\@ifnextchar\@empty\relax\acc@error}
+\def\acc@error{%
+  \@amsmath@err{%
+    Improper argument for math accent:\MessageBreak
+    Extra braces must be added to prevent wrong output%
+  }\@ehc
+}
+\newcount\macc@depth
+\long\def\@gobblethree#1#2#3{}
+\def\mathaccentV#1#2#3#4#5{%
+  \ifmmode
+    \gdef\macc@tmp{\macc@depth\@ne}%
+    \setbox\z@\hbox{%
+      \let\mathaccentV\macc@test
+      \let\use@mathgroup\@gobbletwo \let\select@group\@gobblethree
+      \frozen@everymath{}$#5$%
+    }%
+    \macc@tmp
+    \ifnum\macc@depth=\@ne
+      \global\let\macc@nucleus\@empty
+      \mathaccent"\accentclass@
+    \else
+      \@xp\macc@nested
+    \fi
+    #2#3#4{#5}%
+    \macc@nucleus
+  \else
+    \@xp\nonmatherr@\csname#1\endcsname
+  \fi
+}
+\def\macc@test#1#2#3#4{\xdef\macc@tmp{\macc@tmp\advance\macc@depth\@ne}}
+\def\macc@group{-1}
+\def\macc@nested#1#2#3#4{%
+  \begingroup
+  \let\math@bgroup\@empty \let\math@egroup\macc@set@skewchar
+  \mathsurround\z@ \frozen@everymath{\mathgroup\macc@group\relax}%
+  \macc@set@skewchar\relax
+  \let\mathaccentV\macc@nested@a
+  \macc@nested@a\relax#1#2#3{#4}%
+  \endgroup
+}
+\let\macc@palette\mathpalette
+\def\macc@nested@a#1#2#3#4#5{%
+  \ifnum\macc@group=\mathgroup
+  \else \macc@set@skewchar\relax \edef\macc@group{\the\mathgroup}%
+  \fi
+  \mathchardef\macc@code "\accentclass@ #2#3#4\relax
+  \macc@palette\macc@a{#5}%
+}
+\def\macc@set@skewchar#1{%
+  \begingroup
+  \ifnum\mathgroup=\m@ne \let\@tempa\@ne
+  \else
+    \ifnum\skewchar\textfont\mathgroup=\m@ne \let\@tempa\@ne
+    \else \let\@tempa\mathgroup
+    \fi
+  \fi
+  \count@=\skewchar\textfont\@tempa
+  \advance\count@"7100
+  \edef\@tempa{\endgroup
+    \mathchardef\noexpand\macc@skewchar=\number\count@\relax}%
+  \@tempa
+  #1%
+}
+\def\macc@a#1#2{%
+  \begingroup
+  \let\macc@style#1\relax
+  \def\macc@palette##1{##1\macc@style}%
+  \advance\macc@depth\m@ne
+  \ifnum\macc@depth=\z@
+    \gdef\macc@nucleus{#2}%
+    \setbox\z@\hbox{$#1#2\@empty{}\macc@skewchar$}%
+    \setbox\tw@\hbox{$#1#2\@empty\macc@skewchar$}%
+    \dimen@\tw@\wd\tw@ \advance\dimen@-\tw@\wd\z@
+    \xdef\macc@kerna{\the\dimen@\relax}%
+    \setbox4\hbox{$#1#2\acc@check\@empty$}%
+    \global\setbox\@ne\hbox to\wd4{}%
+    \ht\@ne\ht4 \dp\@ne\dp4
+    \xdef\macc@kernb{\the\wd4\relax}%
+    \mathaccent\macc@code{\box\@ne\kern\macc@kerna}%
+  \else
+    \mathaccent\macc@code{\let\macc@adjust\@empty #1#2\@empty}%
+    \macc@adjust
+  \fi
+  \endgroup
+}
+\def\macc@adjust{%
+  \dimen@\macc@kerna\advance\dimen@\macc@kernb
+  \kern-\dimen@
+}
+\def\Hat{\hat}
+\def\Check{\check}
+\def\Tilde{\tilde}
+\def\Acute{\acute}
+\def\Grave{\grave}
+\def\Dot{\dot}
+\def\Ddot{\ddot}
+\def\Breve{\breve}
+\def\Bar{\bar}
+\def\Vec{\vec}
+\def\nonmatherr@#1{\@amsmath@err{\protect
+  #1 allowed only in math mode}\@ehd}
+\renewcommand{\bmod}{\nonscript\mskip-\medmuskip\mkern5mu\mathbin
+  {\operator@font mod}\penalty900
+  \mkern5mu\nonscript\mskip-\medmuskip}
+\newcommand{\pod}[1]{\allowbreak
+  \if@display\mkern18mu\else\mkern8mu\fi(#1)}
+\renewcommand{\pmod}[1]{\pod{{\operator@font mod}\mkern6mu#1}}
+\newcommand{\mod}[1]{\allowbreak\if@display\mkern18mu
+  \else\mkern12mu\fi{\operator@font mod}\,\,#1}
+\newcommand{\cfrac}[3][c]{{\displaystyle\frac{%
+  \strut\ifx r#1\hfill\fi#2\ifx l#1\hfill\fi}{#3}}%
+  \kern-\nulldelimiterspace}
+\newcommand{\overset}[2]{\binrel@{#2}%
+  \binrel@@{\mathop{\kern\z@#2}\limits^{#1}}}
+\newcommand{\underset}[2]{\binrel@{#2}%
+  \binrel@@{\mathop{\kern\z@#2}\limits_{#1}}}
+\newcommand{\overunderset}[3]{\binrel@{#3}%
+  \binrel@@{\mathop{\kern\z@#3}\limits^{#1}_{#2}}}
+\newcommand{\sideset}[3]{%
+  \@mathmeasure\z@\displaystyle{#3}%
+  \global\setbox\@ne\vbox to\ht\z@{}\dp\@ne\dp\z@
+  \setbox\tw@\box\@ne
+  \@mathmeasure4\displaystyle{\copy\tw@#1}%
+  \@mathmeasure6\displaystyle{#3\nolimits#2}%
+  \dimen@-\wd6 \advance\dimen@\wd4 \advance\dimen@\wd\z@
+  \hbox to\dimen@{}\mathop{\kern-\dimen@\box4\box6}%
+}
+\ifx\leavevmode@ifvmode\@undefined
+\renewcommand{\smash}[1][tb]{%
+  \def\mb@t{\ht}\def\mb@b{\dp}\def\mb@tb{\ht\z@\z@\dp}%
+  \edef\finsm@sh{\csname mb@#1\endcsname\z@\z@\box\z@}%
+  \ifmmode \@xp\mathpalette\@xp\mathsm@sh
+  \else \@xp\makesm@sh
+  \fi
+}
+\else
+\renewcommand{\smash}[1][tb]{%
+  \def\mb@t{\ht}\def\mb@b{\dp}\def\mb@tb{\ht\z@\z@\dp}%
+  \edef\finsm@sh{\csname mb@#1\endcsname\z@\z@ \leavevmode@ifvmode\box\z@}%
+  \ifmmode \@xp\mathpalette\@xp\mathsm@sh
+  \else \@xp\makesm@sh
+  \fi
+}
+\fi
+\@ifundefined{Umathcode}
+  {%
+    \mathchardef\std@minus\mathcode`\-\relax
+    \mathchardef\std@equal\mathcode`\=\relax
+  }
+  {%
+   \Umathcharnumdef\std@minus\Umathcodenum`\-\relax
+   \Umathcharnumdef\std@equal\Umathcodenum`\=\relax
+  }
+\@ifundefined{Umathcode}
+  {%
+    \AtBeginDocument{%
+      \mathchardef\std@minus\mathcode`\-\relax
+      \mathchardef\std@equal\mathcode`\=\relax
+      }%
+  }
+  {%
+    \AtBeginDocument{%
+      \Umathcharnumdef\std@minus\Umathcodenum`\-\relax
+      \Umathcharnumdef\std@equal\Umathcodenum`\=\relax
+    }%
+  }
+\ams@def\relbar{\mathrel{\mathpalette\mathsm@sh\std@minus}}
+\ams@def\Relbar{\mathrel\std@equal}
+\def\arrowfill@#1#2#3#4{%
+  $\m@th\thickmuskip0mu\medmuskip\thickmuskip\thinmuskip\thickmuskip
+   \relax#4#1\mkern-7mu%
+   \cleaders\hbox{$#4\mkern-2mu#2\mkern-2mu$}\hfill
+   \mkern-7mu#3$%
+}
+\def\leftarrowfill@{\arrowfill@\leftarrow\relbar\relbar}
+\def\rightarrowfill@{\arrowfill@\relbar\relbar\rightarrow}
+\def\leftrightarrowfill@{\arrowfill@\leftarrow\relbar\rightarrow}
+\def\Leftarrowfill@{\arrowfill@\Leftarrow\Relbar\Relbar}
+\def\Rightarrowfill@{\arrowfill@\Relbar\Relbar\Rightarrow}
+\def\Leftrightarrowfill@{\arrowfill@\Leftarrow\Relbar\Rightarrow}
+\def\overarrow@#1#2#3{\vbox{\ialign{##\crcr#1#2\crcr
+ \noalign{\nointerlineskip}$\m@th\hfil#2#3\hfil$\crcr}}}
+\ams@renewcommand{\overrightarrow}{%
+  \mathpalette{\overarrow@\rightarrowfill@}}
+\ams@renewcommand{\overleftarrow}{%
+  \mathpalette{\overarrow@\leftarrowfill@}}
+\ams@newcommand{\overleftrightarrow}{%
+  \mathpalette{\overarrow@\leftrightarrowfill@}}
+\def\underarrow@#1#2#3{%
+ \vtop{\ialign{##\crcr$\m@th\hfil#2#3\hfil$\crcr
+ \noalign{\nointerlineskip\kern1.3\ex@}#1#2\crcr}}}
+\ams@newcommand{\underrightarrow}{%
+  \mathpalette{\underarrow@\rightarrowfill@}}
+\ams@newcommand{\underleftarrow}{%
+  \mathpalette{\underarrow@\leftarrowfill@}}
+\ams@newcommand{\underleftrightarrow}{%
+  \mathpalette{\underarrow@\leftrightarrowfill@}}
+\def\ext@arrow#1#2#3#4#5#6#7{%
+  \mathrel{\mathop{%
+    \setbox\z@\hbox{#5\displaystyle}%
+    \setbox\tw@\vbox{\m@th
+      \hbox{$\scriptstyle\mkern#3mu{#6}\mkern#4mu$}%
+      \hbox{$\scriptstyle\mkern#3mu{#7}\mkern#4mu$}%
+      \copy\z@
+    }%
+    \hbox to\wd\tw@{\unhbox\z@}}%
+  \limits
+    \@ifnotempty{#7}{^{\if0#1\else\mkern#1mu\fi
+                       #7\if0#2\else\mkern#2mu\fi}}%
+    \@ifnotempty{#6}{_{\if0#1\else\mkern#1mu\fi
+                       #6\if0#2\else\mkern#2mu\fi}}}%
+}
+\newcommand{\xrightarrow}[2][]{\ext@arrow 0359\rightarrowfill@{#1}{#2}}
+\newcommand{\xleftarrow}[2][]{\ext@arrow 3095\leftarrowfill@{#1}{#2}}
+\ifx\directlua\@undefined
+\newenvironment{subarray}[1]{%
+  \vcenter\bgroup
+  \Let@ \restore@math@cr \default@tag
+  \baselineskip\fontdimen10 \scriptfont\tw@
+  \advance\baselineskip\fontdimen12 \scriptfont\tw@
+  \lineskip\thr@@\fontdimen8 \scriptfont\thr@@
+  \lineskiplimit\lineskip
+  \ialign\bgroup\ifx c#1\hfil\fi
+    $\m@th\scriptstyle##$\hfil\crcr
+}{%
+  \crcr\egroup\egroup
+}
+\else
+\newenvironment{subarray}[1]{%
+  \vcenter\bgroup
+  \Let@ \restore@math@cr \default@tag
+  \baselineskip \Umathstacknumup \scriptstyle
+  \advance\baselineskip \Umathstackdenomdown \scriptstyle
+  \lineskip \Umathstackvgap \scriptstyle
+  \lineskiplimit \lineskip
+  \ialign\bgroup\ifx c#1\hfil\fi
+  \Ustartmath
+    \m@th\scriptstyle##
+  \Ustopmath
+  \hfil\crcr
+}{%
+  \crcr\egroup\egroup
+}
+\fi
+\newcommand{\substack}[1]{\subarray{c}#1\endsubarray}
+\newenvironment{smallmatrix}{\null\,\vcenter\bgroup
+  \Let@\restore@math@cr\default@tag
+  \baselineskip6\ex@ \lineskip1.5\ex@ \lineskiplimit\lineskip
+  \ialign\bgroup\hfil$\m@th\scriptstyle##$\hfil&&\thickspace\hfil
+  $\m@th\scriptstyle##$\hfil\crcr
+}{%
+  \crcr\egroup\egroup\,%
+}
+\renewenvironment{matrix}{%
+  \matrix@check\matrix\env@matrix
+}{%
+  \endarray \hskip -\arraycolsep
+}
+\def\env@matrix{\hskip -\arraycolsep
+  \let\@ifnextchar\new@ifnextchar
+  \array{*\c@MaxMatrixCols c}}
+\newcount\c@MaxMatrixCols \c@MaxMatrixCols=10
+\def\matrix@check#1{%
+  \@xp\ifx\csname\@currenvir\endcsname#1%
+  \else\matrix@error#1%
+    \@xp\@gobble
+  \fi
+}
+\def\matrix@error#1{%
+  \@amsmath@err{%
+Old form `\string#1' should be \string\begin{\@xp\@gobble\string#1}%
+  }{%
+`\string#1{...}' is old Plain-TeX syntax whose use is
+ill-advised in LaTeX.%
+  }%
+}
+\renewenvironment{pmatrix}{%
+  \left(%
+  \matrix@check\pmatrix\env@matrix
+}{
+  \endmatrix\right)%
+}
+\newenvironment{bmatrix}{\left[\env@matrix}{\endmatrix\right]}
+\newenvironment{Bmatrix}{%
+  \left\lbrace\env@matrix
+}{%
+  \endmatrix\right\rbrace
+}
+\newenvironment{vmatrix}{\left\lvert\env@matrix}{\endmatrix\right\rvert}
+\newenvironment{Vmatrix}{\left\lVert\env@matrix}{\endmatrix\right\rVert}
+\let\hdots\@ldots
+\newcommand{\hdotsfor}[1]{%
+  \ifx[#1\@xp\shdots@for\else\hdots@for\@ne{#1}\fi}
+\newmuskip\dotsspace@
+\def\shdots@for#1]{\hdots@for{#1}}
+\def\hdots@for#1#2{\multicolumn{#2}c%
+  {\m@th\dotsspace@1.5mu\mkern-#1\dotsspace@
+   \xleaders\hbox{$\m@th\mkern#1\dotsspace@.\mkern#1\dotsspace@$}%
+           \hfill
+   \mkern-#1\dotsspace@}%
+   }
+\renewenvironment{cases}{%
+  \matrix@check\cases\env@cases
+}{%
+  \endarray\right.%
+}
+\def\env@cases{%
+  \let\@ifnextchar\new@ifnextchar
+  \left\lbrace
+  \def\arraystretch{1.2}%
+  \array{@{}l@{\quad}l@{}}%
+}
+\newcounter{parentequation}% Counter for ``parent equation''.
+\@ifundefined{ignorespacesafterend}{%
+  \def\ignorespacesafterend{\global\@ignoretrue}%
+}{}
+\newenvironment{subequations}{%
+  \refstepcounter{equation}%
+  \protected@edef\theparentequation{\theequation}%
+  \setcounter{parentequation}{\value{equation}}%
+  \setcounter{equation}{0}%
+  \def\theequation{\theparentequation\alph{equation}}%
+  \ignorespaces
+}{%
+  \setcounter{equation}{\value{parentequation}}%
+  \ignorespacesafterend
+}
+\newcommand{\numberwithin}[3][\arabic]{%
+  \@ifundefined{c@#2}{\@nocounterr{#2}}{%
+    \@ifundefined{c@#3}{\@nocnterr{#3}}{%
+      \@addtoreset{#2}{#3}%
+      \@xp\xdef\csname the#2\endcsname{%
+        \@xp\@nx\csname the#3\endcsname .\@nx#1{#2}}}}%
+}
+\newcommand{\eqref}[1]{\textup{\tagform@{\ref{#1}}}}
+\newcount\dspbrk@lvl
+\dspbrk@lvl=-1
+\interdisplaylinepenalty\@M
+\newcommand{\allowdisplaybreaks}[1][4]{%
+  \interdisplaylinepenalty\getdsp@pen{#1}\relax
+}
+\def\getdsp@pen#1{%
+  \ifcase #1\@M \or 9999 \or 6999 \or 2999 \or \z@\fi
+}
+\newcommand{\displaybreak}{\new@ifnextchar[\dspbrk@{\dspbrk@[4]}}
+\chardef\dspbrk@context=\sixt@@n
+\def\dspbrk@[#1]{%
+  \ifmeasuring@
+  \else
+    \ifcase\dspbrk@context % case 0 --- OK
+      \global\dspbrk@lvl #1\relax
+    \or                    % case 1 --- inside a box
+      \nogood@displaybreak
+    \else                  % other cases --- outside of a display
+      \@amsmath@err{\Invalid@@\displaybreak}\@eha
+    \fi
+  \fi
+}
+\def\nogood@displaybreak{%
+  \@amsmath@err{\protect
+\displaybreak\space cannot be applied here}%
+{One of the enclosing environments creates an
+  unbreakable box\MessageBreak
+(e.g., split, aligned, gathered, ...).}%
+}
+\protected\def\math@cr{\relax\iffalse{\fi\ifnum0=`}\fi
+  \@ifstar{\global\@eqpen\@M\math@cr@}%
+          {\global\@eqpen
+             \ifnum\dspbrk@lvl <\z@ \interdisplaylinepenalty
+              \else -\@getpen\dspbrk@lvl \fi
+           \math@cr@}}
+\def\math@cr@{\new@ifnextchar[\math@cr@@{\math@cr@@[\z@]}}
+\def\math@cr@@[#1]{\ifnum0=`{\fi \iffalse}\fi\math@cr@@@
+  \noalign{\vskip#1\relax}}
+\def\Let@{\let\\\math@cr}
+\def\restore@math@cr{\def\math@cr@@@{\cr}}
+\restore@math@cr
+\newcommand{\intertext}{\@amsmath@err{\Invalid@@\intertext}\@eha}
+\def\intertext@{%
+  \def\intertext##1{%
+    \ifvmode\else\\\@empty\fi
+    \noalign{%
+      \penalty\postdisplaypenalty\vskip\belowdisplayskip
+      \vbox{\normalbaselines
+        \ifdim\linewidth=\columnwidth
+        \else \parshape\@ne \@totalleftmargin \linewidth
+        \fi
+        \noindent\ignorespaces##1\par}%
+      \penalty\predisplaypenalty\vskip\abovedisplayskip%
+    }%
+}}
+\newhelp\tag@help
+  {tag cannot be used at this point.\space
+   If you don't understand why^^Jyou should consult
+   the documentation.^^JBut don't worry: just continue, and I'll
+   forget what happened.}
+\def\gobble@tag{\@ifstar\@gobble\@gobble}
+\def\invalid@tag#1{\@amsmath@err{#1}{\the\tag@help}\gobble@tag}
+\def\dft@tag{\invalid@tag{\string\tag\space not allowed here}}
+\def\default@tag{\let\tag\dft@tag}
+\default@tag
+\def\maketag@@{\@ifstar\maketag@@@\tagform@}
+\def\maketag@@@#1{\hbox{\m@th\normalfont#1}}
+\def\tagform@#1{\maketag@@@{(\ignorespaces#1\unskip\@@italiccorr)}}
+\iftagsleft@
+  \def\@eqnnum{\hbox to1sp{}\rlap{\normalfont\normalcolor
+    \hskip -\displaywidth\tagform@\theequation}}
+\else
+  \def\@eqnnum{{\normalfont\normalcolor \tagform@\theequation}}
+\fi
+\newcommand{\thetag}{\leavevmode\tagform@}
+\let\df@tag\@empty
+\def\make@df@tag{%
+  \def\@currentcounter{equation}%
+  \@ifstar\make@df@tag@@\make@df@tag@@@}
+\def\make@df@tag@@#1{%
+  \gdef\df@tag{\maketag@@@{#1}\def\@currentlabel{#1}}}
+\def\make@df@tag@@@#1{\gdef\df@tag{\tagform@{#1}%
+  \toks@\@xp{\p@equation{#1}}\edef\@currentlabel{\the\toks@}}}
+\let\ltx@label\label
+\def\label@in@display{%
+    \ifx\df@label\@empty\else
+        \@amsmath@err{Multiple \string\label's:
+            label '\df@label' will be lost}\@eha
+    \fi
+    \gdef\df@label
+}
+\toks@\@xp{\@arrayparboxrestore \let\label\ltx@label}%
+\edef\@arrayboxrestore{\the\toks@}
+\let\df@label\@empty
+\def\make@display@tag{%
+  \if@eqnsw \incr@eqnum \print@eqnum
+  \else \iftag@ \df@tag \global\let\df@tag\@empty \fi
+  \fi
+  \ifmeasuring@
+  \else
+    \ifx\df@label\@empty
+    \else
+      \@xp\ltx@label\@xp{\df@label}%
+      \global\let\df@label\@empty
+    \fi
+  \fi
+}
+\def\tag@in@align{%
+    \relax
+    \iftag@
+        \DN@{\invalid@tag{Multiple \string\tag}}%
+    \else
+    \global\tag@true
+    \nonumber
+        \let\next@\make@df@tag
+    \fi
+    \next@
+}
+\newcommand{\raisetag}[1]{\skip@#1\relax
+  \xdef\raise@tag{\vskip\iftagsleft@\else-\fi\the\skip@\relax}%
+}
+\let\raise@tag\@empty
+\newcommand{\notag}{\nonumber}
+\renewcommand{\nonumber}{%
+  \if@eqnsw
+    \ifx\incr@eqnum\@empty \addtocounter{equation}\m@ne \fi
+  \fi
+  \let\print@eqnum\@empty \let\incr@eqnum\@empty
+  \global\@eqnswfalse
+}
+\def\print@eqnum{\tagform@\theequation}
+\def\incr@eqnum{\refstepcounter{equation}\let\incr@eqnum\@empty}
+\newif\ifinalign@
+\newif\ifingather@
+\@xp\def\@xp\@arrayparboxrestore\@xp{\@arrayparboxrestore
+  \ingather@false\inalign@false \default@tag
+  \let\spread@equation\@spread@equation
+  \let\reset@equation\@empty
+  \def\print@eqnum{\tagform@\theequation}%
+  \def\incr@eqnum{\refstepcounter{equation}\let\incr@eqnum\@empty}%
+}
+\newif\iftag@
+\newif\ifst@rred
+\newif\ifmeasuring@
+\newif\ifshifttag@
+\newcount\row@
+\newcount\column@
+\def\column@plus{%
+    \global\advance\column@\@ne
+}
+\newcount\maxfields@
+\def\add@amp#1{\if m#1&\@xp\add@amp\fi}
+\def\add@amps#1{%
+    \begingroup
+    \count@#1\advance\count@-\column@
+    \edef\@tempa{\endgroup
+      \@xp\add@amp\romannumeral\number\count@ 000q}%
+    \@tempa
+}
+\newhelp\andhelp@
+{An extra & here is so disastrous that you should probably exit^^J
+and fix things up.}
+\newdimen\eqnshift@
+\newdimen\alignsep@
+\newdimen\tagshift@
+\newcommand{\mintagsep}{.5\fontdimen6\textfont\tw@}
+\newcommand{\minalignsep}{10pt}
+\newdimen\tagwidth@
+\newdimen\totwidth@
+\newdimen\lineht@
+\def\tag@width#1{%
+    \ifcase\@xp#1\tag@lengths\fi
+}
+
+\def\savetaglength@{%
+    \begingroup
+        \let\or\relax
+        \xdef\tag@lengths{\tag@lengths\or \the\wdz@}%
+    \endgroup
+}
+
+\def\shift@tag#1{%
+    \ifcase\@xp#1\tag@shifts\fi\relax
+}
+
+\let\tag@shifts\@empty
+\def\saveshift@#1{%
+    \begingroup
+        \let\or\relax
+        \xdef\tag@shifts{\or#1\tag@shifts}%
+    \endgroup
+}
+\def\spread@equation{\reset@strutbox@
+  \openup\jot \let\spread@equation\@empty}
+\let\@spread@equation\spread@equation
+\def\displ@y{\@display@init{}}
+\def\@display@init#1{%
+    \global\dt@ptrue \spread@equation
+    \everycr{%
+        \noalign{%
+            #1%
+            \ifdt@p
+                \global\dt@pfalse
+                \vskip-\lineskiplimit
+                \vskip\normallineskiplimit
+            \else
+                \penalty\@eqpen \global\dspbrk@lvl\m@ne
+            \fi
+        }%
+    }%
+}
+\def\displ@y@{\@display@init{%
+  \global\column@\z@ \global\dspbrk@lvl\m@ne
+  \global\tag@false \global\let\raise@tag\@empty
+}}
+\def\black@#1{%
+    \noalign{%
+        \ifdim#1>\displaywidth
+            \dimen@\prevdepth
+            \nointerlineskip
+            \vskip-\ht\strutbox@
+            \vskip-\dp\strutbox@
+            \vbox{\noindent\hbox to\displaywidth{%
+                           \hbox to#1{\strut@\hfill}}}%
+            \prevdepth\dimen@
+        \fi
+    }%
+}
+\def\savecounters@{%
+    \begingroup
+        \def\@elt##1{%
+          \global\csname c@##1\endcsname\the\csname c@##1\endcsname}%
+        \xdef\@gtempa{%
+            \cl@@ckpt
+            \let\@nx\restorecounters@\@nx\@empty
+        }%
+    \endgroup
+    \let\restorecounters@\@gtempa
+}
+\let\restorecounters@\@empty
+\def\savealignstate@{%
+    \begingroup
+        \let\or\relax
+        \xdef\@gtempa{%
+            \global\totwidth@\the\totwidth@
+            \global\row@\the\row@
+            \gdef\@nx\tag@lengths{\tag@lengths}%
+            \let\@nx\restorealignstate@\@nx\@empty
+        }%
+    \endgroup
+    \let\restorealignstate@\@gtempa
+}
+
+\let\restorealignstate@\@empty
+\def\savecolumn@{%
+  \edef\restorecolumn@{%
+    \global\column@\number\column@
+    \let\@nx\restorecolumn@\@nx\@empty
+  }%
+}
+\let\restorecolumn@\@empty
+\newtoks\@envbody
+\def\addto@envbody#1{\global\@envbody\@xp{\the\@envbody#1}}
+\def\collect@body#1{%
+  \@envbody{\@xp#1\@xp{\the\@envbody}}%
+  \edef\process@envbody{\the\@envbody\@nx\end{\@currenvir}}%
+  \@envbody\@emptytoks \def\begin@stack{b}%
+  \begingroup
+  \@xp\let\csname\@currenvir\endcsname\collect@@body
+  \edef\process@envbody{\@xp\@nx\csname\@currenvir\endcsname}%
+  \process@envbody
+}
+\def\push@begins#1\begin#2{%
+  \ifx\end#2\else b\@xp\push@begins\fi
+}
+\def\collect@@body#1\end#2{%
+  \edef\begin@stack{\push@begins#1\begin\end \@xp\@gobble\begin@stack}%
+  \ifx\@empty\begin@stack
+    \endgroup
+    \@checkend{#2}%
+    \addto@envbody{#1}%
+  \else
+    \addto@envbody{#1\end{#2}}%
+  \fi
+  \process@envbody % A little tricky! Note the grouping
+}
+\def\math@cr@@@aligned{%
+  \ifodd\column@ \let\next@\@empty
+  \else \def\next@{&\kern-\alignsep@}%
+  \fi
+  \next@ \cr
+}
+\def\ams@start@box#1{%
+  \edef\reserved@a{\csname ams@pos@\expandafter\detokenize
+    \expandafter{\romannumeral-`\0#1}\endcsname}%
+  \expandafter\ifx\reserved@a\relax
+     \PackageWarning{amsmath}{%
+       Bracket group \detokenize{[#1]} at formula start!\MessageBreak
+       It could be a misspelled positional argument.\MessageBreak
+       If it belongs to the formula add a \relax in\MessageBreak
+        front to hide it}%
+     \def\ams@return@opt@arg{[#1]}\vcenter
+  \else
+     \let\ams@return@opt@arg\@empty\reserved@a
+  \fi
+}
+\def\ams@pos@t{\vtop}
+\def\ams@pos@b{\vbox}
+\def\ams@pos@c{\vcenter}
+\let\ams@pos@\ams@pos@c
+\newcommand{\start@aligned}[2]{%
+    \RIfM@\else
+        \nonmatherr@{\begin{\@currenvir}}%
+    \fi
+    \savecolumn@ % Assumption: called inside a group
+    \alignedspace@left
+      \ams@start@box{#1}\bgroup
+        \maxfields@#2\relax
+        \ifnum\maxfields@>\m@ne
+            \multiply\maxfields@\tw@
+            \let\math@cr@@@\math@cr@@@alignedat
+            \alignsep@\z@skip
+        \else
+            \let\math@cr@@@\math@cr@@@aligned
+            \alignsep@\minalignsep
+        \fi
+        \Let@ \chardef\dspbrk@context\@ne
+        \default@tag
+        \spread@equation % no-op if already called
+        \global\column@\z@
+        \ialign\bgroup
+           &\column@plus
+            \hfil
+            \strut@
+            $\m@th\displaystyle{##}$%
+            \tabskip\z@skip
+           &\column@plus
+            $\m@th\displaystyle{{}##}$%
+            \hfil
+            \tabskip\alignsep@
+            \crcr
+          \ams@return@opt@arg
+}
+\def\math@cr@@@alignedat{%
+    \ifnum\column@>\maxfields@
+        \begingroup
+          \measuring@false
+          \@amsmath@err{Extra & on this line}%
+            {\the\andhelp@}% "An extra & here is disastrous"
+        \endgroup
+    \fi
+    \global\column@\z@
+    \cr
+}
+\def\alignsafe@testopt#1#2{%
+  \relax\iffalse{\fi\ifnum`}=0\fi
+  \@ifnextchar[%
+    {\let\@let@token\relax \ifnum`{=\z@\fi\iffalse}\fi#1}%
+    {\let\@let@token\relax \ifnum`{=\z@\fi\iffalse}\fi#1[#2]}%
+}
+\newenvironment{aligned}{%
+  \let\@testopt\alignsafe@testopt
+  \aligned@a
+}{%
+  \crcr\egroup
+  \restorecolumn@
+  \egroup
+}
+\newcommand{\aligned@a}[1][c]{\start@aligned{#1}\m@ne}
+\newenvironment{alignedat}{%
+  \let\@testopt\alignsafe@testopt
+  \alignedat@a
+}{%
+  \endaligned
+}
+\newcommand{\alignedat@a}[1][c]{\start@aligned{#1}}
+\newenvironment{gathered}[1][c]{%
+    \RIfM@\else
+        \nonmatherr@{\begin{gathered}}%
+    \fi
+    \alignedspace@left
+    \ams@start@box{#1}\bgroup
+        \Let@ \chardef\dspbrk@context\@ne \restore@math@cr
+        \spread@equation
+        \ialign\bgroup
+            \hfil\strut@$\m@th\displaystyle##$\hfil
+            \crcr
+    \ams@return@opt@arg
+}{%
+  \endaligned
+}
+\def\start@gather#1{%
+    \RIfM@
+        \nomath@env
+        \DN@{\@namedef{end\@currenvir}{}\@gobble}%
+    \else
+        $$%
+        #1%
+        \ifst@rred \else \global\@eqnswtrue \fi
+        \let\next@\gather@
+    \fi
+    \collect@body\next@
+}
+\newenvironment{gather}{%
+  \start@gather\st@rredfalse
+}{%
+  \math@cr \black@\totwidth@ \egroup
+  $$\ignorespacesafterend
+}
+
+\newenvironment{gather*}{%
+  \start@gather\st@rredtrue
+}{%
+  \endgather
+}
+\def\gather@#1{%
+    \ingather@true \let\split\insplit@
+    \let\tag\tag@in@align \let\label\label@in@display
+    \chardef\dspbrk@context\z@
+    \intertext@ \displ@y@ \Let@
+    \let\math@cr@@@\math@cr@@@gather
+    \gmeasure@{#1}%
+    \global\shifttag@false
+    \tabskip\z@skip
+    \global\row@\@ne
+    \halign to\displaywidth\bgroup
+        \strut@
+        \setboxz@h{$\m@th\displaystyle{##}$}%
+        \calc@shift@gather
+        \set@gather@field
+        \tabskip\@centering
+       &\setboxz@h{\strut@{##}}%
+        \place@tag@gather
+        \tabskip \iftagsleft@ \gdisplaywidth@ \else \z@skip \span\fi
+        \crcr
+        #1%
+}
+\def\gmeasure@#1{%
+    \begingroup
+        \measuring@true
+        \totwidth@\z@
+        \global\let\tag@lengths\@empty
+        \savecounters@
+        \setbox\@ne\vbox{%
+            \everycr{\noalign{\global\tag@false
+              \global\let\raise@tag\@empty \global\column@\z@}}%
+            \let\label\@gobble
+            \halign{%
+                \setboxz@h{$\m@th\displaystyle{##}$}%
+                \ifdim\wdz@>\totwidth@
+                    \global\totwidth@\wdz@
+                \fi
+               &\setboxz@h{\strut@{##}}%
+                \savetaglength@
+                \crcr
+                #1%
+                \math@cr@@@
+            }%
+        }%
+        \restorecounters@
+        \if@fleqn
+            \global\advance\totwidth@\@mathmargin
+        \fi
+        \iftagsleft@
+            \ifdim\totwidth@>\displaywidth
+                \global\let\gdisplaywidth@\totwidth@
+            \else
+                \global\let\gdisplaywidth@\displaywidth
+            \fi
+        \fi
+    \endgroup
+}
+\def\math@cr@@@gather{%
+    \ifst@rred\nonumber\fi
+   &\relax
+    \make@display@tag
+    \ifst@rred\else\global\@eqnswtrue\fi
+    \global\advance\row@\@ne
+    \cr
+}
+\def\calc@shift@gather{%
+    \dimen@\mintagsep\relax
+    \tagwidth@\tag@width\row@\relax
+    \if@fleqn
+        \global\eqnshift@\@mathmargin
+        \ifdim\tagwidth@>\z@
+            \advance\dimen@\tagwidth@
+            \iftagsleft@
+                \ifdim\dimen@>\@mathmargin
+                    \global\shifttag@true
+                \fi
+            \else
+                \advance\dimen@\@mathmargin
+                \advance\dimen@\wdz@
+                \ifdim\dimen@>\displaywidth
+                   \global\shifttag@true
+                \fi
+            \fi
+        \fi
+    \else
+        \global\eqnshift@\displaywidth
+        \global\advance\eqnshift@-\wdz@
+        \ifdim\tagwidth@>\z@
+            \multiply\dimen@\tw@
+            \advance\dimen@\wdz@
+            \advance\dimen@\tagwidth@
+            \ifdim\dimen@>\displaywidth
+                \global\shifttag@true
+            \else
+                \ifdim\eqnshift@<4\tagwidth@
+                    \global\advance\eqnshift@-\tagwidth@
+                \fi
+            \fi
+        \fi
+        \global\divide\eqnshift@\tw@
+        \iftagsleft@
+            \global\eqnshift@-\eqnshift@
+            \global\advance\eqnshift@\displaywidth
+            \global\advance\eqnshift@-\wdz@
+        \fi
+        \ifdim\eqnshift@<\z@
+            \global\eqnshift@\z@
+        \fi
+    \fi
+}
+\def\place@tag@gather{%
+    \iftagsleft@
+        \kern-\gdisplaywidth@
+        \ifshifttag@
+            \rlap{\vbox{%
+                \normalbaselines
+                \boxz@
+                \vbox to\lineht@{}%
+                \raise@tag
+            }}%
+            \global\shifttag@false
+        \else
+            \rlap{\boxz@}%
+        \fi
+    \else
+        \ifdim\totwidth@>\displaywidth
+            \dimen@\totwidth@
+            \advance\dimen@-\displaywidth
+            \kern-\dimen@
+        \fi
+        \ifshifttag@
+            \llap{\vtop{%
+                \raise@tag
+                \normalbaselines
+                \setbox\@ne\null
+                \dp\@ne\lineht@
+                \box\@ne
+                \boxz@
+            }}%
+            \global\shifttag@false
+        \else
+            \llap{\boxz@}%
+        \fi
+    \fi
+}
+\def\set@gather@field{%
+    \iftagsleft@
+        \global\lineht@\ht\z@
+    \else
+        \global\lineht@\dp\z@
+    \fi
+    \kern\eqnshift@
+    \boxz@
+    \hfil
+}
+\newif\ifxxat@
+
+\newif\ifcheckat@
+
+\let\xatlevel@\@empty
+\def\start@align#1#2#3{%
+    \let\xatlevel@#1% always \z@, \@ne, or \tw@
+    \maxfields@#3\relax
+    \ifnum\maxfields@>\m@ne
+        \checkat@true
+        \ifnum\xatlevel@=\tw@
+            \xxat@true
+        \fi
+        \multiply\maxfields@\tw@
+    \else
+        \checkat@false
+    \fi
+    \ifingather@
+        \iffalse{\fi\ifnum0=`}\fi
+        \DN@{\vcenter\bgroup\savealignstate@\align@#2}%
+    \else
+        \ifmmode
+          \if@display
+             \DN@{\align@recover}%
+          \else
+            \nomath@env
+            \DN@{\@namedef{end\@currenvir}{}\@gobble}%
+          \fi
+        \else
+            $$%
+            \let\split\insplit@
+            \DN@{\align@#2}%
+        \fi
+    \fi
+    \collect@body\next@
+}
+\def\align@recover#1#2#3{%
+  \endgroup
+  \@amsmath@err{%
+Erroneous nesting of equation structures;\MessageBreak
+trying to recover with `aligned'%
+  }\@ehc
+  \begin{aligned}\relax#1\end{aligned}%
+}
+\newenvironment{alignat}{%
+  \start@align\z@\st@rredfalse
+}{%
+  \endalign
+}
+\newenvironment{alignat*}{%
+  \start@align\z@\st@rredtrue
+}{%
+  \endalign
+}
+\newenvironment{xalignat}{%
+  \start@align\@ne\st@rredfalse
+}{%
+  \endalign
+}
+\newenvironment{xalignat*}{%
+  \start@align\@ne\st@rredtrue
+}{%
+  \endalign
+}
+\newenvironment{xxalignat}{%
+  \start@align\tw@\st@rredtrue
+}{%
+  \endalign
+}
+\newenvironment{align}{%
+  \start@align\@ne\st@rredfalse\m@ne
+}{%
+  \math@cr \black@\totwidth@
+  \egroup
+  \ifingather@
+    \restorealignstate@
+    \egroup
+    \nonumber
+    \ifnum0=`{\fi\iffalse}\fi
+  \else
+    $$%
+  \fi
+  \ignorespacesafterend
+}
+\newenvironment{align*}{%
+  \start@align\@ne\st@rredtrue\m@ne
+}{%
+  \endalign
+}
+\newenvironment{flalign}{%
+  \start@align\tw@\st@rredfalse\m@ne
+}{%
+  \endalign
+}
+\newenvironment{flalign*}{%
+  \start@align\tw@\st@rredtrue\m@ne
+}{%
+  \endalign
+}
+\def\align@#1#2{%
+    \inalign@true \intertext@ \Let@ \chardef\dspbrk@context\z@
+    \ifingather@\else\displ@y@\fi
+    \let\math@cr@@@\math@cr@@@align
+    \ifxxat@\else \let\tag\tag@in@align \fi
+    \let\label\label@in@display
+    #1% set st@r
+    \ifst@rred\else \global\@eqnswtrue \fi
+    \measure@{#2}%
+    \global\row@\z@
+    \tabskip\eqnshift@
+    \halign\bgroup
+        \span\align@preamble\crcr
+        #2%
+}
+\def\math@cr@@@align{%
+  \ifst@rred\nonumber\fi
+  \if@eqnsw \global\tag@true \fi
+  \global\advance\row@\@ne
+  \add@amps\maxfields@
+  \omit
+  \kern-\alignsep@
+  \iftag@
+    \setboxz@h{\@lign\strut@{\make@display@tag}}%
+    \place@tag
+  \fi
+  \ifst@rred\else\global\@eqnswtrue\fi
+  \global\lineht@\z@
+  \cr
+}
+\def\math@cr@@@align@measure{%
+   &\omit
+    \global\advance\row@\@ne
+    \ifst@rred\nonumber\fi
+    \if@eqnsw \global\tag@true \fi
+    \ifnum\column@>\maxfields@
+        \ifcheckat@
+            \begingroup
+              \measuring@false
+              \@amsmath@err{Extra & on this line}%
+                {\the\andhelp@}% "An extra & here is disastrous"
+            \endgroup
+        \else
+            \global\maxfields@\column@
+        \fi
+    \fi
+    \setboxz@h{\@lign\strut@{%
+        \if@eqnsw
+            \stepcounter{equation}%
+            \tagform@\theequation
+        \else
+            \iftag@\df@tag\fi
+        \fi
+    }}%
+    \savetaglength@
+    \ifst@rred\else\global\@eqnswtrue\fi
+    \cr
+}
+\let\field@lengths\@empty
+
+\def\savefieldlength@{%
+    \begingroup
+        \let\or\relax
+        \xdef\field@lengths{%
+            \field@lengths
+            \ifnum\column@=0
+                \or
+            \else
+                ,%
+            \fi
+            \the\wdz@
+        }%
+    \endgroup
+}
+
+\def\fieldlengths@#1{%
+    \ifcase\@xp#1\field@lengths\fi
+}
+\let\maxcolumn@widths\@empty
+\def\maxcol@width#1{%
+    \ifcase\@xp#1\maxcolumn@widths\fi\relax
+}
+\def\measure@#1{%
+    \begingroup
+        \measuring@true
+        \global\eqnshift@\z@
+        \global\alignsep@\z@
+        \global\let\tag@lengths\@empty
+        \global\let\field@lengths\@empty
+        \savecounters@
+        \global\setbox0\vbox{%
+            \let\math@cr@@@\math@cr@@@align@measure
+            \everycr{\noalign{\global\tag@false
+              \global\let\raise@tag\@empty \global\column@\z@}}%
+            \let\label\@gobble
+            \global\row@\z@
+            \tabskip\z@
+            \halign{\span\align@preamble\crcr
+                #1%
+                \math@cr@@@
+                \global\column@\z@
+                \add@amps\maxfields@\cr
+            }%
+        }%
+        \restorecounters@
+        \ifodd\maxfields@
+            \global\advance\maxfields@\@ne
+        \fi
+        \ifnum\xatlevel@=\tw@
+            \ifnum\maxfields@<\thr@@
+                \let\xatlevel@\z@
+            \fi
+        \fi
+        \setbox\z@\vbox{%
+          \unvbox\z@ \unpenalty \global\setbox\@ne\lastbox
+        }%
+        \global\totwidth@\wd\@ne
+        \if@fleqn \global\advance\totwidth@\@mathmargin \fi
+        \global\let\maxcolumn@widths\@empty
+        \begingroup
+          \let\or\relax
+          \loop
+            \global\setbox\@ne\hbox{%
+              \unhbox\@ne \unskip \global\setbox\thr@@\lastbox
+            }%
+          \ifhbox\thr@@
+           \xdef\maxcolumn@widths{ \or \the\wd\thr@@ \maxcolumn@widths}%
+          \repeat
+        \endgroup
+        \dimen@\displaywidth
+        \advance\dimen@-\totwidth@
+        \ifcase\xatlevel@
+            \global\alignsep@\z@
+            \let\minalignsep\z@
+            \@tempcntb\z@
+            \if@fleqn
+                \@tempcnta\@ne
+                \global\eqnshift@\@mathmargin
+            \else
+                \@tempcnta\tw@
+                \global\eqnshift@\dimen@
+                \global\divide\eqnshift@\@tempcnta
+            \fi
+        \or
+            \@tempcntb\maxfields@
+            \divide\@tempcntb\tw@
+            \@tempcnta\@tempcntb
+            \advance\@tempcntb\m@ne
+            \if@fleqn
+                \global\eqnshift@\@mathmargin
+                \global\alignsep@\dimen@
+                \global\divide\alignsep@\@tempcnta
+            \else
+                \global\advance\@tempcnta\@ne
+                \global\eqnshift@\dimen@
+                \global\divide\eqnshift@\@tempcnta
+                \global\alignsep@\eqnshift@
+            \fi
+        \or
+            \@tempcntb\maxfields@
+            \divide\@tempcntb\tw@
+            \global\advance\@tempcntb\m@ne
+            \global\@tempcnta\@tempcntb
+            \global\eqnshift@\z@
+            \global\alignsep@\dimen@
+            \if@fleqn
+                \global\advance\alignsep@\@mathmargin\relax
+            \fi
+            \global\divide\alignsep@\@tempcntb
+        \fi
+        \ifdim\alignsep@<\minalignsep\relax
+            \global\alignsep@\minalignsep\relax
+            \ifdim\eqnshift@>\z@
+                \if@fleqn\else
+                    \global\eqnshift@\displaywidth
+                    \global\advance\eqnshift@-\totwidth@
+                    \global\advance\eqnshift@-\@tempcntb\alignsep@
+                    \global\divide\eqnshift@\tw@
+                \fi
+            \fi
+        \fi
+        \ifdim\eqnshift@<\z@
+            \global\eqnshift@\z@
+        \fi
+        \calc@shift@align
+        \global\tagshift@\totwidth@
+        \global\advance\tagshift@\@tempcntb\alignsep@
+        \if@fleqn
+            \ifnum\xatlevel@=\tw@
+                \global\advance\tagshift@-\@mathmargin\relax
+            \fi
+        \else
+            \global\advance\tagshift@\eqnshift@
+        \fi
+        \iftagsleft@ \else
+            \global\advance\tagshift@-\displaywidth
+        \fi
+        \dimen@\minalignsep\relax
+        \global\advance\totwidth@\@tempcntb\dimen@
+        \ifdim\totwidth@>\displaywidth
+            \global\let\displaywidth@\totwidth@
+        \else
+            \global\let\displaywidth@\displaywidth
+        \fi
+    \endgroup
+}
+\iftagsleft@\if@fleqn
+    \def\calc@shift@align{%
+        \global\let\tag@shifts\@empty
+        \begingroup
+            \@tempdima\@mathmargin\relax
+            \advance\@tempdima-\mintagsep\relax
+            \loop
+                \ifnum\row@>0
+                    \ifdim\tag@width\row@>\z@
+                        \x@calc@shift@lf
+                    \else
+                        \saveshift@0%
+                    \fi
+                    \advance\row@\m@ne
+            \repeat
+        \endgroup
+    }
+    \def\x@calc@shift@lf{%
+        \ifdim\eqnshift@=\z@
+            \global\eqnshift@\@mathmargin\relax
+            \alignsep@\displaywidth
+            \advance\alignsep@-\totwidth@
+            \global\divide\alignsep@\@tempcntb
+            \ifdim\alignsep@<\minalignsep\relax
+                \global\alignsep@\minalignsep\relax
+            \fi
+        \fi
+        \ifdim\tag@width\row@>\@tempdima
+            \saveshift@1%
+        \else
+            \saveshift@0%
+        \fi
+    }
+\fi\fi
+\iftagsleft@\else\if@fleqn
+    \def\calc@shift@align{%
+        \global\let\tag@shifts\@empty
+        \begingroup
+            \loop
+                \ifnum\row@>0
+                    \ifdim\tag@width\row@>\z@
+                        \x@calc@shift@rf
+                    \else
+                        \saveshift@0%
+                    \fi
+                    \advance\row@\m@ne
+            \repeat
+        \endgroup
+    }
+    \def\x@calc@shift@rf{%
+        \column@\z@
+        \@tempdimb\z@
+        \@tempdimc\z@
+        \edef\@tempb{\fieldlengths@\row@}%
+        \@for\@tempa:=\@tempb\do{%
+            \advance\column@\@ne
+            \x@rcalc@width
+        }%
+        \begingroup
+            \advance\column@\m@ne
+            \divide\column@\tw@
+            \ifnum\@tempcntb>\column@
+                \advance\@tempcnta-\@tempcntb
+                \advance\@tempcnta\column@
+                \@tempcntb\column@
+            \fi
+            \tagwidth@\tag@width\row@\relax
+            \@tempdima\eqnshift@
+            \advance\@tempdima\@tempdimc\relax
+            \advance\@tempdima\tagwidth@
+            \dimen@\minalignsep\relax
+            \multiply\dimen@\@tempcntb
+            \advance\dimen@\mintagsep\relax
+            \advance\dimen@\@tempdima
+            \ifdim\dimen@>\displaywidth
+                \saveshift@1%
+            \else
+                \saveshift@0%
+                \dimen@\alignsep@\relax
+                \multiply\dimen@\@tempcntb
+                \advance\dimen@\@tempdima
+                \advance\dimen@\tagwidth@
+                \ifdim\dimen@>\displaywidth
+                    \dimen@\displaywidth
+                    \advance\dimen@-\@tempdima
+                    \ifnum\xatlevel@=\tw@
+                        \advance\dimen@-\mintagsep\relax
+                    \fi
+                    \divide\dimen@\@tempcnta
+                    \ifdim\dimen@<\minalignsep\relax
+                        \global\alignsep@\minalignsep\relax
+                    \else
+                        \global\alignsep@\dimen@
+                    \fi
+                \fi
+            \fi
+        \endgroup
+    }
+\fi\fi
+\iftagsleft@\else\if@fleqn\else
+    \def\calc@shift@align{%
+        \global\let\tag@shifts\@empty
+        \begingroup
+            \loop
+                \ifnum\row@>0
+                    \ifdim\tag@width\row@>\z@
+                        \x@calc@shift@rc
+                    \else
+                        \saveshift@0%
+                    \fi
+                    \advance\row@\m@ne
+            \repeat
+        \endgroup
+    }
+    \def\x@calc@shift@rc{%
+        \column@\z@
+        \@tempdimb\z@
+        \@tempdimc\z@
+        \edef\@tempb{\fieldlengths@\row@}%
+        \@for\@tempa:=\@tempb\do{%
+            \advance\column@\@ne
+            \x@rcalc@width
+        }%
+        \begingroup
+            \advance\column@\m@ne
+            \divide\column@\tw@
+            \ifnum\@tempcntb>\column@
+                \advance\@tempcnta-\@tempcntb
+                \advance\@tempcnta\column@
+                \@tempcntb\column@
+            \fi
+            \tagwidth@\tag@width\row@\relax
+            \@tempdima\@tempdimc
+            \advance\@tempdima\tagwidth@
+            \dimen@\minalignsep\relax
+            \multiply\dimen@\@tempcntb
+            \advance\dimen@\mintagsep\relax
+            \ifnum\xatlevel@=\tw@ \else
+                \advance\dimen@\mintagsep\relax
+            \fi
+            \advance\dimen@\@tempdima
+            \ifdim\dimen@>\displaywidth
+                \saveshift@1%
+            \else
+                \saveshift@0%
+                \dimen@\eqnshift@
+                \advance\dimen@\@tempdima
+                \advance\dimen@\@tempcntb\alignsep@
+                \advance\dimen@\tagwidth@
+                \ifdim\dimen@>\displaywidth
+                    \dimen@\displaywidth
+                    \advance\dimen@-\@tempdima
+                    \ifnum\xatlevel@=\tw@
+                        \advance\dimen@-\mintagsep\relax
+                    \fi
+                    \divide\dimen@\@tempcnta
+                    \ifdim\dimen@<\minalignsep\relax
+                        \global\alignsep@\minalignsep\relax
+                        \eqnshift@\displaywidth
+                        \advance\eqnshift@-\@tempdima
+                        \advance\eqnshift@-\@tempcntb\alignsep@
+                        \global\divide\eqnshift@\tw@
+                    \else
+                        \ifdim\dimen@<\eqnshift@
+                            \ifdim\dimen@<\z@
+                                \global\eqnshift@\z@
+                            \else
+                                \global\eqnshift@\dimen@
+                            \fi
+                        \fi
+                        \ifdim\dimen@<\alignsep@
+                            \global\alignsep@\dimen@
+                        \fi
+                    \fi
+                \fi
+            \fi
+        \endgroup
+    }
+\fi\fi
+\iftagsleft@\else
+    \def\x@rcalc@width{%
+        \ifdim\@tempa > \z@
+            \advance\@tempdimc\@tempdimb
+            \ifodd\column@
+                \advance\@tempdimc\maxcol@width\column@
+                \@tempdimb\z@
+            \else
+                \advance\@tempdimc\@tempa\relax
+                \@tempdimb\maxcol@width\column@
+                \advance\@tempdimb-\@tempa\relax
+            \fi
+        \else
+            \advance\@tempdimb\maxcol@width\column@\relax
+        \fi
+    }
+\fi
+\iftagsleft@\if@fleqn\else
+    \def\calc@shift@align{%
+        \global\let\tag@shifts\@empty
+        \begingroup
+            \loop
+                \ifnum\row@>\z@
+                    \ifdim\tag@width\row@>\z@
+                        \x@calc@shift@lc
+                    \else
+                        \saveshift@0%
+                    \fi
+                    \advance\row@\m@ne
+            \repeat
+        \endgroup
+    }
+    \def\x@calc@shift@lc{%
+        \column@\z@
+        \@tempdima\z@ % ``width of equation''
+        \@tempdimb\z@ % ``indent of equation''
+        \edef\@tempb{\fieldlengths@\row@}%
+        \@for\@tempa:=\@tempb\do{%
+            \advance\column@\@ne
+            \x@lcalc@width
+        }%
+        \begingroup
+            \tagwidth@\tag@width\row@\relax
+            \@tempdima\totwidth@
+            \advance\@tempdima-\@tempdimb
+            \advance\@tempdima\tagwidth@
+            \dimen@\minalignsep\relax
+            \multiply\dimen@\@tempcntb
+            \advance\dimen@\mintagsep\relax
+            \ifnum\xatlevel@=\tw@ \else
+                \advance\dimen@\mintagsep\relax
+            \fi
+            \advance\dimen@\@tempdima
+            \ifdim\dimen@>\displaywidth
+                \saveshift@1%
+            \else
+                \saveshift@0%
+                \dimen@\alignsep@
+                \multiply\dimen@\count@
+                \advance\dimen@\eqnshift@
+                \advance\dimen@\@tempdimb
+                \ifdim\dimen@<2\tagwidth@
+                    \dimen@\displaywidth
+                    \advance\dimen@-\@tempdima
+                    \ifnum\xatlevel@=\tw@
+                        \advance\dimen@-\mintagsep\relax
+                    \fi
+                    \ifnum\@tempcnta>\z@
+                      \divide\dimen@\@tempcnta
+                    \else \dimen@\z@
+                    \fi
+                    \ifdim\dimen@<\minalignsep\relax
+                        \global\alignsep@\minalignsep\relax
+                        \dimen@\displaywidth
+                        \advance\dimen@-\@tempdima
+                        \advance\dimen@-\@tempcntb\alignsep@
+                        \global\divide\dimen@\tw@
+                    \else
+                        \ifdim\dimen@<\alignsep@
+                            \global\alignsep@\dimen@
+                        \fi
+                    \fi
+                    \ifnum\xatlevel@=\tw@
+                        \dimen@\mintagsep\relax
+                    \fi
+                    \advance\dimen@\tagwidth@
+                    \advance\dimen@-\@tempdimb
+                    \advance\dimen@-\count@\alignsep@
+                    \ifdim\dimen@>\eqnshift@
+                        \global\eqnshift@\dimen@
+                    \fi
+                \fi
+            \fi
+        \endgroup
+    }
+    \def\x@lcalc@width{%
+        \ifdim\@tempdima = \z@
+            \ifdim\@tempa > \z@
+                \@tempdima\p@
+                \ifodd\column@
+                    \advance\@tempdimb \maxcol@width\column@
+                    \advance\@tempdimb-\@tempa
+                \fi
+                \count@\column@
+                \advance\count@\m@ne
+                \divide\count@\tw@
+                \advance\@tempcnta-\count@
+                \advance\@tempcntb-\count@
+            \else
+                \advance\@tempdimb \maxcol@width\column@\relax
+            \fi
+        \fi
+    }
+\fi\fi
+\def\place@tag{%
+    \iftagsleft@
+        \kern-\tagshift@
+        \if1\shift@tag\row@\relax
+            \rlap{\vbox{%
+                \normalbaselines
+                \boxz@
+                \vbox to\lineht@{}%
+                \raise@tag
+            }}%
+        \else
+            \rlap{\boxz@}%
+        \fi
+        \kern\displaywidth@
+    \else
+        \kern-\tagshift@
+        \if1\shift@tag\row@\relax
+            \llap{\vtop{%
+                \raise@tag
+                \normalbaselines
+                \setbox\@ne\null
+                \dp\@ne\lineht@
+                \box\@ne
+                \boxz@
+            }}%
+        \else
+            \llap{\boxz@}%
+        \fi
+    \fi
+}
+\def\align@preamble{%
+   &\hfil
+    \strut@
+    \setboxz@h{\@lign$\m@th\displaystyle{##}$}%
+    \ifmeasuring@\savefieldlength@\fi
+    \set@field
+    \tabskip\z@skip
+   &\setboxz@h{\@lign$\m@th\displaystyle{{}##}$}%
+    \ifmeasuring@\savefieldlength@\fi
+    \set@field
+    \hfil
+    \tabskip\alignsep@
+}
+\def\set@field{%
+    \column@plus
+    \iftagsleft@
+        \ifdim\ht\z@>\lineht@
+            \global\lineht@\ht\z@
+        \fi
+    \else
+        \ifdim\dp\z@>\lineht@
+            \global\lineht@\dp\z@
+        \fi
+    \fi
+    \boxz@
+}
+\edef\split@err#1{%
+    \@nx\@amsmath@err{%
+        \string\begin{split} won't work here%
+    }{%
+        \@xp\@nx\csname
+  Did you forget a preceding \string\begin{equation}?^^J%
+  If not, perhaps the `aligned' environment is what
+  you want.\endcsname}%
+}
+\newenvironment{split}{%
+  \if@display
+    \ifinner
+      \@xp\@xp\@xp\split@aligned
+    \else
+      \ifst@rred \else \global\@eqnswtrue \fi
+    \fi
+  \else \let\endsplit\@empty \@xp\collect@body\@xp\split@err
+  \fi
+  \collect@body\gather@split
+}{%
+      \crcr
+    \egroup
+  \egroup
+  \iftagsleft@ \@xp\lendsplit@ \else \@xp\rendsplit@ \fi
+}
+\let\split@tag\relax % init
+\def\gather@split#1#2#3{%
+  \@xp\endgroup \reset@equation % math@cr will handle equation numbering
+  \iftag@
+     \toks@\@xp{\df@tag}%
+     \edef\split@tag{%
+       \gdef\@nx\df@tag{\the\toks@}%
+       \global\@nx\tag@true \@nx\nonumber
+     }%
+  \else \let\split@tag\@empty
+  \fi
+  \spread@equation
+  \vcenter\bgroup
+    \gather@{\split@tag  \begin{split}#1\end{split}}%
+    \def\endmathdisplay@a{%
+      \math@cr \black@ \totwidth@ \egroup
+      \egroup
+    }%
+}
+\def\insplit@{%
+  \global\setbox\z@\vbox\bgroup
+    \Let@ \chardef\dspbrk@context\@ne \restore@math@cr
+    \default@tag % disallow use of \tag here
+    \ialign\bgroup
+      \hfil
+      \strut@
+      $\m@th\displaystyle{##}$%
+     &$\m@th\displaystyle{{}##}$%
+      \hfill % Why not \hfil?---dmj, 1994/12/28
+      \crcr
+}
+\def\rendsplit@{%
+    \ifinalign@
+        \global\setbox9 \vtop{%
+            \unvcopy\z@
+            \global\setbox8 \lastbox
+            \unskip
+        }%
+        \setbox\@ne\hbox{%
+            \unhcopy8
+            \unskip
+            \global\setbox\tw@\lastbox
+            \unskip
+            \global\setbox\thr@@\lastbox
+        }%
+        \ifctagsplit@
+            \gdef\split@{%
+                \hbox to\wd\thr@@{}%
+               &\vcenter{\vbox{\moveleft\wd\thr@@\boxz@}}%
+            }%
+        \else
+            \global\setbox7 \hbox{\unhbox\tw@\unskip}%
+            \gdef\split@{%
+                \global\@tempcnta\column@
+               &\setboxz@h{}%
+                \savetaglength@
+                \global\advance\row@\@ne
+                \vbox{\moveleft\wd\thr@@\box9}%
+                \crcr
+                \noalign{\global\lineht@\z@}%
+                \add@amps\@tempcnta
+                \box\thr@@
+               &\box7
+            }%
+        \fi
+    \else
+        \ifctagsplit@
+            \gdef\split@{\vcenter{\boxz@}}%
+        \else
+            \gdef\split@{%
+                \boxz@
+            }%
+        \fi
+    \fi
+    \aftergroup\split@
+}
+\def\lendsplit@{%
+    \global\setbox9\vtop{\unvcopy\z@}%
+    \ifinalign@
+        \setbox\@ne\vbox{%
+            \unvcopy\z@
+            \global\setbox8\lastbox
+        }%
+        \setbox\@ne\hbox{%
+            \unhcopy8%
+            \unskip
+            \setbox\tw@\lastbox
+            \unskip
+            \global\setbox\thr@@\lastbox
+        }%
+        \ifctagsplit@
+            \gdef\split@{%
+                \hbox to\wd\thr@@{}%
+               &\vcenter{\vbox{\moveleft\wd\thr@@\box9}}%
+            }%
+        \else
+            \gdef\split@{%
+                \hbox to\wd\thr@@{}%
+               &\vbox{\moveleft\wd\thr@@\box9}%
+            }%
+        \fi
+    \else
+        \ifctagsplit@
+            \gdef\split@{\vcenter{\box9}}%
+        \else
+            \gdef\split@{\box9}%
+        \fi
+    \fi
+    \aftergroup\split@
+}
+\def\split@aligned#1#2{%
+   \iffalse{\fi\ifnum0=`}\fi
+   \collect@body\split@al@a}
+\def\split@al@a#1#2#3{%
+  \split@warning
+  \endgroup
+  \toks@{\begin{aligned}}%
+  \if@fleqn \split@al@tagcheck \fi
+  \the\toks@\relax#1\end{aligned}%
+  \ifnum0=`{\fi\iffalse}\fi
+}
+\def\split@al@tagcheck{%
+   \ifctagsplit@
+   \else
+     \iftagsleft@ \toks@\@xp{\the\toks@ [t]}%
+     \else \toks@\@xp{\the\toks@ [b]}%
+     \fi
+   \fi
+}
+\def\split@warning{%
+  \PackageWarning{amsmath}{%
+Cannot use `split' here;\MessageBreak trying to recover with `aligned'}%
+}
+\newskip\multlinegap
+\multlinegap10pt
+\newskip\multlinetaggap
+\multlinetaggap10pt
+\def\start@multline#1{%
+    \RIfM@
+        \nomath@env
+        \DN@{\@namedef{end\@currenvir}{}\@gobble}%
+    \else
+        $$%
+        #1%
+        \ifst@rred
+            \nonumber
+        \else
+            \global\@eqnswtrue
+        \fi
+        \let\next@\multline@
+    \fi
+    \collect@body\next@
+}
+\newenvironment{multline}{%
+  \start@multline\st@rredfalse
+}{%
+  \iftagsleft@ \@xp\lendmultline@ \else \@xp\rendmultline@ \fi
+  \ignorespacesafterend
+}
+\newenvironment{multline*}{\start@multline\st@rredtrue}{\endmultline}
+\def\multline@#1{%
+    \Let@
+    \@display@init{\global\advance\row@\@ne \global\dspbrk@lvl\m@ne}%
+    \chardef\dspbrk@context\z@
+    \restore@math@cr
+    \let\tag\tag@in@align
+    \global\tag@false \global\let\raise@tag\@empty
+    \mmeasure@{#1}%
+    \let\tag\gobble@tag \let\label\@gobble
+    \tabskip \if@fleqn \@mathmargin \else \z@skip \fi
+    \totwidth@\displaywidth
+    \if@fleqn
+        \advance\totwidth@-\@mathmargin
+    \fi
+    \halign\bgroup
+        \hbox to\totwidth@{%
+            \if@fleqn
+                \hskip \@centering \relax
+            \else
+                \hfil
+            \fi
+            \strut@
+            $\m@th\displaystyle{}##\endmultline@math
+            \hfil
+        }%
+        \crcr
+        \if@fleqn
+            \hskip-\@mathmargin
+            \def\multline@indent{\hskip\@mathmargin}% put it back
+        \else
+            \hfilneg
+            \def\multline@indent{\hskip\multlinegap}%
+        \fi
+        \iftagsleft@
+            \iftag@
+                \begingroup
+                    \ifshifttag@
+                        \rlap{\vbox{%
+                                \normalbaselines
+                                \hbox{%
+                                    \strut@
+                                    \make@display@tag
+                                }%
+                                \vbox to\lineht@{}%
+                                \raise@tag
+                        }}%
+                        \multline@indent
+                    \else
+                        \setbox\z@\hbox{\make@display@tag}%
+                        \dimen@\@mathmargin \advance\dimen@-\wd\z@
+                        \ifdim\dimen@<\multlinetaggap
+                          \dimen@\multlinetaggap
+                        \fi
+                        \box\z@ \hskip\dimen@\relax
+                    \fi
+                \endgroup
+            \else
+                \multline@indent
+            \fi
+        \else
+            \multline@indent
+        \fi
+    #1%
+}
+\def\endmultline@math{$}
+\def\lendmultline@{%
+        \hfilneg
+        \hskip\multlinegap
+        \math@cr
+    \egroup
+    $$%
+}
+\def\rendmultline@{%
+    \iftag@
+        $\let\endmultline@math\relax
+            \ifshifttag@
+                \hskip\multlinegap
+                \llap{\vtop{%
+                    \raise@tag
+                    \normalbaselines
+                    \setbox\@ne\null
+                    \dp\@ne\lineht@
+                    \box\@ne
+                    \hbox{\strut@\make@display@tag}%
+                }}%
+            \else
+                \hskip\multlinetaggap
+                \make@display@tag
+            \fi
+    \else
+        \hskip\multlinegap
+    \fi
+    \hfilneg
+        \math@cr
+    \egroup$$%
+}
+\def\mmeasure@#1{%
+    \begingroup
+        \measuring@true
+        \def\label##1{%
+          \begingroup\measuring@false\label@in@display{##1}\endgroup}%
+        \def\math@cr@@@{\cr}%
+        \let\shoveleft\@iden \let\shoveright\@iden
+        \savecounters@
+        \global\row@\z@
+        \setbox\@ne\vbox{%
+            \global\let\df@tag\@empty
+            \halign{%
+                \setboxz@h{\@lign$\m@th\displaystyle{}##$}%
+                \iftagsleft@
+                    \ifnum\row@=\@ne
+                        \global\totwidth@\wdz@
+                        \global\lineht@\ht\z@
+                    \fi
+                \else
+                    \global\totwidth@\wdz@
+                    \global\lineht@\dp\z@
+                \fi
+                \crcr
+                #1%
+                \crcr
+            }%
+        }%
+        \ifx\df@tag\@empty\else\global\tag@true\fi
+        \if@eqnsw\global\tag@true\fi
+        \iftag@
+            \setboxz@h{%
+                \if@eqnsw
+                    \stepcounter{equation}%
+                    \tagform@\theequation
+                \else
+                    \df@tag
+                \fi
+            }%
+            \global\tagwidth@\wdz@
+            \dimen@\totwidth@
+            \advance\dimen@\tagwidth@
+            \advance\dimen@\multlinetaggap
+            \iftagsleft@\else
+                \if@fleqn
+                    \advance\dimen@\@mathmargin
+                \fi
+            \fi
+            \ifdim\dimen@>\displaywidth
+                \global\shifttag@true
+            \else
+                \global\shifttag@false
+            \fi
+        \fi
+        \restorecounters@
+    \endgroup
+}
+\iftagsleft@
+    \def\shoveright#1{%
+        #1%
+        \hfilneg
+        \hskip\multlinegap
+    }
+\else
+    \def\shoveright#1{%
+        #1%
+        \hfilneg
+        \iftag@
+            \ifshifttag@
+                \hskip\multlinegap
+            \else
+                \hskip\tagwidth@
+                \hskip\multlinetaggap
+            \fi
+        \else
+            \hskip\multlinegap
+        \fi
+    }
+\fi
+
+\if@fleqn
+    \def\shoveleft#1{#1}%
+\else
+    \iftagsleft@
+        \def\shoveleft#1{%
+            \setboxz@h{$\m@th\displaystyle{}#1$}%
+            \setbox\@ne\hbox{$\m@th\displaystyle#1$}%
+            \hfilneg
+            \iftag@
+                \ifshifttag@
+                    \hskip\multlinegap
+                \else
+                    \hskip\tagwidth@
+                    \hskip\multlinetaggap
+                \fi
+            \else
+                \hskip\multlinegap
+            \fi
+            \hskip.5\wd\@ne
+            \hskip-.5\wdz@
+            #1%
+        }
+    \else
+        \def\shoveleft#1{%
+            \setboxz@h{$\m@th\displaystyle{}#1$}%
+            \setbox\@ne\hbox{$\m@th\displaystyle#1$}%
+            \hfilneg
+            \hskip\multlinegap
+            \hskip.5\wd\@ne
+            \hskip-.5\wdz@
+            #1%
+        }
+    \fi
+\fi
+\@saveprimitive\leqno\@@leqno
+\@saveprimitive\eqno\@@eqno
+\def\eqno{\@@eqno\let\eqno\relax\let\leqno\relax}
+\def\leqno{\@@leqno\let\leqno\relax\let\eqno\relax}
+\let\veqno=\@@eqno
+\iftagsleft@ \let\veqno=\@@leqno \fi
+\@ifundefined{SK@@label}{%
+  \let\SK@@label\relax \let\SK@equationtrue\relax
+}{}
+\let\reset@equation\@empty
+\let\alt@tag\@empty
+\def\tag@in@display#1#{\relax\tag@in@display@a{#1}}
+\def\tag@in@display@a#1#2{%
+  \iftag@
+    \invalid@tag{Multiple \string\tag}\relax
+  \else
+    \global\tag@true \nonumber \reset@equation \st@rredtrue
+    \if *\string#1%
+      \gdef\alt@tag{\def\SK@tagform@{#2\@gobble}%
+        \ifx\SK@@label\relax \let\tagform@\SK@tagform@ \fi
+      }%
+      \make@df@tag@@{#2}%
+    \else
+      \make@df@tag@@@{#2}%
+    \fi
+  \fi
+}
+\let\restore@hfuzz\@empty
+\def\mathdisplay#1{%
+  \ifmmode \@badmath
+  \else
+    $$\def\@currenvir{#1}%
+    \let\dspbrk@context\z@
+    \let\tag\tag@in@display \let\label\label@in@display \SK@equationtrue
+    \global\let\df@label\@empty \global\let\df@tag\@empty
+    \global\tag@false
+    \let\mathdisplay@push\mathdisplay@@push
+    \let\mathdisplay@pop\mathdisplay@@pop
+    \if@fleqn
+      \edef\restore@hfuzz{\hfuzz\the\hfuzz\relax}%
+      \hfuzz\maxdimen
+      \setbox\z@\hbox to\displaywidth\bgroup
+        \let\split@warning\relax \restore@hfuzz
+        \everymath\@emptytoks \m@th $\displaystyle
+    \fi
+  \fi
+}
+\def\endmathdisplay#1{%
+  \ifmmode \else \@badmath \fi
+  \endmathdisplay@a
+  $$%
+  \global\let\df@label\@empty \global\let\df@tag\@empty
+  \global\tag@false \global\let\alt@tag\@empty
+  \global\@eqnswfalse
+}
+\def\endmathdisplay@a{%
+  \if@eqnsw \gdef\df@tag{\tagform@\theequation}\fi
+  \if@fleqn \@xp\endmathdisplay@fleqn
+  \else \ifx\df@tag\@empty \else \veqno \alt@tag \df@tag \fi
+    \ifx\df@label\@empty \else \@xp\ltx@label\@xp{\df@label}\fi
+  \fi
+  \ifnum\dspbrk@lvl>\m@ne
+    \postdisplaypenalty -\@getpen\dspbrk@lvl
+    \global\dspbrk@lvl\m@ne
+  \fi
+}
+\let\too@wide\@ne
+\def\endmathdisplay@fleqn{%
+  $\hfil\hskip\@mathmargin\egroup
+  \ifnum\badness<\inf@bad \let\too@wide\@ne \else \let\too@wide\z@ \fi
+  \ifx\@empty\df@tag
+  \else
+    \setbox4\hbox{\df@tag
+      \ifx\df@label\@empty \else \@xp\ltx@label\@xp{\df@label}\fi
+    }%
+  \fi
+  \csname emdf@%
+    \ifx\df@tag\@empty U\else \iftagsleft@ L\else R\fi\fi
+  \endcsname
+}
+\def\emdf@U{%
+  \restore@hfuzz
+  \ifodd\too@wide % not too wide: just need to swap the glue around
+    \hbox to\displaywidth{\hskip\@mathmargin\unhbox\z@\unskip}%
+  \else % M+B > displaywidth
+    \emdf@Ua
+  \fi
+}
+\def\emdf@Ua{%
+  \hbox to\columnwidth{%
+    \ifdim\displayindent>\z@
+      \hskip\displayindent minus\displayindent
+    \fi
+    \hskip\@mathmargin \unhbox\z@ \unskip
+  }%
+  \displayindent\z@ \displaywidth\columnwidth
+}
+\def\emdf@R{%
+  \setbox\tw@\hbox to\displaywidth{%
+    \hskip\@mathmargin \unhcopy\z@\unskip\hfil\hskip\mintagsep\copy4
+  }%
+  \restore@hfuzz
+  \ifnum\badness<\inf@bad \box\tw@ \else \emdf@Ra \fi
+}
+\def\emdf@Ra{%
+  \skip@\displayindent minus\displayindent
+  \displayindent\z@ \displaywidth\columnwidth
+  \spread@equation \everycr{}\tabskip\z@skip
+  \halign{\hbox to\displaywidth{##}\cr
+    \relax
+    \ifdim\skip@>\z@ \hskip\skip@ \fi
+    \hskip\@mathmargin\unhbox\z@\unskip\hfil\cr
+    \noalign{\raise@tag}%
+    \hfil\box4 \cr}%
+}
+\def\emdf@L{%
+  \@tempdima\@mathmargin
+  \advance\@tempdima-\wd4 \advance\@tempdima-\mintagsep
+  \skip@\@tempdima minus\@tempdima
+  \setbox\tw@\hbox to\displaywidth{%
+    \copy4\hskip\mintagsep
+    \ifdim\skip@>\z@ \hskip\skip@\fi
+    \unhcopy\z@\unskip
+  }%
+  \restore@hfuzz
+  \ifnum\badness<\inf@bad \box\tw@ \else \emdf@La \fi
+}
+\def\emdf@La{%
+  \spread@equation \everycr{}\tabskip\z@skip
+  \halign{\hbox to\displaywidth{##}\cr
+    \box4 \hfil \cr
+    \noalign{\raise@tag}%
+    \hskip\@mathmargin\unhbox\z@\unskip\hfil\cr}%
+}
+\newtoks\mathdisplay@stack
+\let\mathdisplay@push\@empty
+\def\mathdisplay@@push{%
+  \begingroup
+  \toks@\@xp{\df@label}\@temptokena\@xp{\df@tag}%
+  \toks8\@xp{\alt@tag}%
+  \edef\@tempa{%
+    \global\if@eqnsw\@nx\@eqnswtrue\else\@nx\@eqnswfalse\fi
+    \global\iftag@\@nx\tag@false\else\@nx\tag@true\fi
+    \gdef\@nx\df@label{\the\toks@}\gdef\@nx\df@tag{\the\@temptokena}%
+    \gdef\@nx\alt@tag{\the\toks8}%
+    \global\mathdisplay@stack{\the\mathdisplay@stack}%
+  }%
+  \global\mathdisplay@stack\@xp{\@tempa}
+  \endgroup
+}
+\let\mathdisplay@pop\@empty
+\def\mathdisplay@@pop{\the\mathdisplay@stack}
+\if@fleqn
+\renewenvironment{equation}{%
+  \incr@eqnum
+  \mathdisplay@push
+  \st@rredfalse \global\@eqnswtrue
+  \mathdisplay{equation}%
+}{%
+  \endmathdisplay{equation}%
+  \mathdisplay@pop
+  \ignorespacesafterend
+}
+\else
+\renewenvironment{equation}{%
+  \mathdisplay@push
+  \st@rredfalse \global\@eqnswtrue
+  \mathdisplay{equation}%
+  \incr@eqnum\mathopen{}%
+}{%
+  \endmathdisplay{equation}%
+  \mathdisplay@pop
+  \ignorespacesafterend
+}
+\fi
+\newenvironment{equation*}{%
+  \mathdisplay@push
+  \st@rredtrue \global\@eqnswfalse
+  \mathdisplay{equation*}%
+}{%
+  \endmathdisplay{equation*}%
+  \mathdisplay@pop
+  \ignorespacesafterend
+}
+\DeclareRobustCommand{\[}{\begin{equation*}}
+\DeclareRobustCommand{\]}{\end{equation*}}
+\endinput
+%%
+%% End of file `amsmath.sty'.

@@ -1,0 +1,716 @@
+%%
+%% This is file `atveryend.sty',
+%% generated with the docstrip utility.
+%%
+%% The original source files were:
+%%
+%% atveryend.dtx  (with options: `package')
+%% 
+%% This is a generated file.
+%% 
+%% Project: atveryend
+%% Version: 2019-12-11 v1.11
+%% 
+%% Copyright (C)
+%%    2009-2011 Heiko Oberdiek
+%%    2016-2019 Oberdiek Package Support Group
+%% 
+%% This work may be distributed and/or modified under the
+%% conditions of the LaTeX Project Public License, either
+%% version 1.3c of this license or (at your option) any later
+%% version. This version of this license is in
+%%    https://www.latex-project.org/lppl/lppl-1-3c.txt
+%% and the latest version of this license is in
+%%    https://www.latex-project.org/lppl.txt
+%% and version 1.3 or later is part of all distributions of
+%% LaTeX version 2005/12/01 or later.
+%% 
+%% This work has the LPPL maintenance status "maintained".
+%% 
+%% The Current Maintainers of this work are
+%% Heiko Oberdiek and the Oberdiek Package Support Group
+%% https://github.com/ho-tex/atveryend/issues
+%% 
+%% 
+%% This work consists of the main source file atveryend.dtx
+%% and the derived files
+%%    atveryend.sty, atveryend.pdf, atveryend.ins, atveryend.drv,
+%%    atveryend-test1.tex.
+%% 
+\begingroup\catcode61\catcode48\catcode32=10\relax%
+  \catcode13=5 % ^^M
+  \endlinechar=13 %
+  \catcode123=1 % {
+  \catcode125=2 % }
+  \catcode64=11 % @
+  \def\x{\endgroup
+    \expandafter\edef\csname AtVeryEnd@AtEnd\endcsname{%
+      \endlinechar=\the\endlinechar\relax
+      \catcode13=\the\catcode13\relax
+      \catcode32=\the\catcode32\relax
+      \catcode35=\the\catcode35\relax
+      \catcode61=\the\catcode61\relax
+      \catcode64=\the\catcode64\relax
+      \catcode123=\the\catcode123\relax
+      \catcode125=\the\catcode125\relax
+    }%
+  }%
+\x\catcode61\catcode48\catcode32=10\relax%
+\catcode13=5 % ^^M
+\endlinechar=13 %
+\catcode35=6 % #
+\catcode64=11 % @
+\catcode123=1 % {
+\catcode125=2 % }
+\def\TMP@EnsureCode#1#2{%
+  \edef\AtVeryEnd@AtEnd{%
+    \AtVeryEnd@AtEnd
+    \catcode#1=\the\catcode#1\relax
+  }%
+  \catcode#1=#2\relax
+}
+\TMP@EnsureCode{9}{10}% (tab)
+\TMP@EnsureCode{39}{12}% '
+\TMP@EnsureCode{40}{12}% (
+\TMP@EnsureCode{41}{12}% )
+\TMP@EnsureCode{42}{12}% *
+\TMP@EnsureCode{45}{12}% -
+\TMP@EnsureCode{46}{12}% .
+\TMP@EnsureCode{47}{12}% /
+\TMP@EnsureCode{62}{12}% >
+\TMP@EnsureCode{91}{12}% [
+\TMP@EnsureCode{93}{12}% ]
+\TMP@EnsureCode{96}{12}% `
+\edef\AtVeryEnd@AtEnd{\AtVeryEnd@AtEnd\noexpand\endinput}
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{atveryend}%
+  [2019-12-11 v1.11 Hooks at the very end of document (HO)]
+\def\AtVeryEnd@ifundefined#1{%
+  \begingroup\expandafter\expandafter\expandafter\endgroup
+  \expandafter\ifx\csname #1\endcsname\relax
+    \expandafter\@firstoftwo
+  \else
+    \expandafter\@secondoftwo
+  \fi
+}
+\let\AtVeryEnd@BeforeClearDocumentHook\@empty
+\let\AtVeryEnd@AfterLastShipoutHook\@empty
+\let\AtVeryEnd@AtVeryEndDocumentHook\@empty
+\let\AtVeryEnd@AtEndAfterFileListHook\@empty
+\let\AtVeryEnd@AtVeryVeryEndHook\@empty
+\newcommand*{\BeforeClearDocument}{%
+  \g@addto@macro\AtVeryEnd@BeforeClearDocumentHook
+}
+\newcommand*{\AfterLastShipout}{%
+  \g@addto@macro\AtVeryEnd@AfterLastShipoutHook
+}
+\newcommand*{\AtVeryEndDocument}{%
+  \g@addto@macro\AtVeryEnd@AtVeryEndDocumentHook
+}
+\newcommand*{\AtEndAfterFileList}{%
+  \g@addto@macro\AtVeryEnd@AtEndAfterFileListHook
+}
+\newcommand*{\AtVeryVeryEnd}{%
+  \g@addto@macro\AtVeryEnd@AtVeryVeryEndHook
+}
+\newcommand*{\Call@BeforeClearDocument}{%
+  \let\BeforeClearDocument\@firstofone
+  \ifx\AtVeryEnd@BeforeClearDocumentHook\@empty
+    \PackageInfo{atveryend}{Empty hook `BeforeClearDocument'}%
+  \else
+    \PackageInfo{atveryend}{Executing hook `BeforeClearDocument'}%
+    \AtVeryEnd@BeforeClearDocumentHook
+  \fi
+  \global\let\AtVeryEnd@BeforeClearDocumentHook\@undefined
+  \global\let\Call@BeforeClearDocument\relax
+}
+\newcommand*{\Call@AfterLastShipout}{%
+  \let\AfterLastShipout\@firstofone
+  \ifx\AtVeryEnd@AfterLastShipoutHook\@empty
+    \PackageInfo{atveryend}{Empty hook `AfterLastShipout'}%
+  \else
+    \PackageInfo{atveryend}{Executing hook `AfterLastShipout'}%
+    \AtVeryEnd@AfterLastShipoutHook
+  \fi
+  \global\let\AtVeryEnd@AfterLastShipoutHook\@undefined
+  \global\let\Call@AfterLastShipout\relax
+}
+\newcommand*{\Call@AtVeryEndDocument}{%
+  \let\AtVeryEndDocument\@firstofone
+  \ifx\AtVeryEnd@AtVeryEndDocumentHook\@empty
+    \PackageInfo{atveryend}{Empty hook `AtVeryEndDocument'}%
+  \else
+    \PackageInfo{atveryend}{Executing hook `AtVeryEndDocument'}%
+    \AtVeryEnd@AtVeryEndDocumentHook
+  \fi
+  \global\let\AtVeryEnd@AtVeryEndDocumentHook\@undefined
+  \global\let\Call@AtVeryEndDocument\relax
+}
+\newcommand*{\Call@AtEndAfterFileList}{%
+  \Call@AtVeryEndDocument
+  \let\AtEndAfterFileList\@firstofone
+  \ifx\AtVeryEnd@AtEndAfterFileListHook\@empty
+    \PackageInfo{atveryend}{Empty hook `AtEndAfterFileList'}%
+  \else
+    \PackageInfo{atveryend}{Executing hook `AtEndAfterFileList'}%
+    \AtVeryEnd@AtEndAfterFileListHook
+  \fi
+  \global\let\AtVeryEnd@AtEndAfterFileListHook\@undefined
+  \global\let\Call@AtEndAfterFileList\relax
+}
+\newcommand*{\Call@AtVeryVeryEnd}{%
+  \Call@AtEndAfterFileList
+  \let\AtVeryVeryEnd\@firstofone
+  \ifx\AtVeryEnd@AtVeryVeryEndHook\@empty
+    \PackageInfo{atveryend}{Empty hook `AtVeryVeryEnd'}%
+  \else
+    \PackageInfo{atveryend}{Executing hook `AtVeryVeryEnd'}%
+    \AtVeryEnd@AtVeryVeryEndHook
+  \fi
+  \global\let\AtVeryEnd@AtVeryVeryEndHook\@undefined
+  \global\let\Call@AtVeryVeryEnd\relax
+}
+\def\AtVeryEnd@test@standard{%
+  \let\AtEndDocument\@firstofone
+  \@enddocumenthook
+  \@checkend{document}%
+  \clearpage
+  \begingroup
+    \if@filesw
+      \immediate\closeout\@mainaux
+      \let\@setckpt\@gobbletwo
+      \let\@newl@bel\@testdef
+      \@tempswafalse
+      \makeatletter
+      \input\jobname.aux %
+    \fi
+    \@dofilelist
+    \ifdim \font@submax >\fontsubfuzz\relax
+      \@font@warning{Size substitutions with differences\MessageBreak
+                 up to \font@submax\space have occurred.\@gobbletwo}%
+    \fi
+    \@defaultsubs
+    \@refundefined
+    \if@filesw
+      \ifx \@multiplelabels \relax
+        \if@tempswa
+          \@latex@warning@no@line{Label(s) may have changed. %
+              Rerun to get cross-references right}%
+        \fi
+      \else
+        \@multiplelabels
+      \fi
+    \fi
+  \endgroup
+  \deadcycles\z@
+  \@@end
+}
+\def\AtVeryEnd@enddocument@standard{%
+  \let\AtEndDocument\@firstofone
+  \@enddocumenthook
+  \@checkend{document}%
+  \Call@BeforeClearDocument
+  \clearpage
+  \Call@AfterLastShipout
+  \begingroup
+    \if@filesw
+      \immediate\closeout\@mainaux
+      \let\@setckpt\@gobbletwo
+      \let\@newl@bel\@testdef
+      \@tempswafalse
+      \makeatletter
+      \input\jobname.aux %
+    \fi
+    \Call@AtVeryEndDocument
+    \@dofilelist
+    \Call@AtEndAfterFileList
+    \ifdim \font@submax >\fontsubfuzz\relax
+      \@font@warning{Size substitutions with differences\MessageBreak
+                 up to \font@submax\space have occurred.\@gobbletwo}%
+    \fi
+    \@defaultsubs
+    \@refundefined
+    \if@filesw
+      \ifx \@multiplelabels \relax
+        \if@tempswa
+          \@latex@warning@no@line{Label(s) may have changed. %
+              Rerun to get cross-references right}%
+        \fi
+      \else
+        \@multiplelabels
+      \fi
+    \fi
+  \endgroup
+  \deadcycles\z@
+  \Call@AtVeryVeryEnd
+  \@@end
+}
+\expandafter\def\csname AtVeryEnd@test@standard20110627\endcsname{%
+  \let\AtEndDocument\@firstofone
+  \@enddocumenthook
+  \@checkend{document}%
+  \clearpage
+  \begingroup
+    \if@filesw
+      \immediate\closeout\@mainaux
+      \let\@setckpt\@gobbletwo
+      \let\@newl@bel\@testdef
+      \@tempswafalse
+      \makeatletter
+      \@@input\jobname.aux %
+    \fi
+    \@dofilelist
+    \ifdim \font@submax >\fontsubfuzz\relax
+      \@font@warning{Size substitutions with differences\MessageBreak
+                 up to \font@submax\space have occurred.\@gobbletwo}%
+    \fi
+    \@defaultsubs
+    \@refundefined
+    \if@filesw
+      \ifx \@multiplelabels \relax
+        \if@tempswa
+          \@latex@warning@no@line{Label(s) may have changed. %
+              Rerun to get cross-references right}%
+        \fi
+      \else
+        \@multiplelabels
+      \fi
+    \fi
+  \endgroup
+  \deadcycles\z@
+  \@@end
+}
+\expandafter\def\csname AtVeryEnd@enddocument@standard20110627\endcsname{%
+  \let\AtEndDocument\@firstofone
+  \@enddocumenthook
+  \@checkend{document}%
+  \Call@BeforeClearDocument
+  \clearpage
+  \Call@AfterLastShipout
+  \begingroup
+    \if@filesw
+      \immediate\closeout\@mainaux
+      \let\@setckpt\@gobbletwo
+      \let\@newl@bel\@testdef
+      \@tempswafalse
+      \makeatletter
+      \@@input\jobname.aux %
+    \fi
+    \Call@AtVeryEndDocument
+    \@dofilelist
+    \Call@AtEndAfterFileList
+    \ifdim \font@submax >\fontsubfuzz\relax
+      \@font@warning{Size substitutions with differences\MessageBreak
+                 up to \font@submax\space have occurred.\@gobbletwo}%
+    \fi
+    \@defaultsubs
+    \@refundefined
+    \if@filesw
+      \ifx \@multiplelabels \relax
+        \if@tempswa
+          \@latex@warning@no@line{Label(s) may have changed. %
+              Rerun to get cross-references right}%
+        \fi
+      \else
+        \@multiplelabels
+      \fi
+    \fi
+  \endgroup
+  \deadcycles\z@
+  \Call@AtVeryVeryEnd
+  \@@end
+}
+\expandafter\def\expandafter\AtVeryEnd@test@booklet\expandafter{%
+  \expandafter\twoupclearpage
+  \AtVeryEnd@test@standard
+}
+\expandafter\def\expandafter\AtVeryEnd@enddocument@booklet\expandafter{%
+  \expandafter\twoclearpage
+  \AtVeryEnd@enddocument@standard
+}
+\def\AtVeryEnd@test@dinbrief{%
+  \@checkend{document} %
+  \newpage
+  \begingroup
+    \if@filesw
+      \ifnum\c@labelgen>0 %
+        \immediate\closeout\@mainlbl
+        \makeatletter
+        \input \jobname@lbl\relax
+        \clearpage
+      \fi
+      \immediate\closeout\@mainaux
+    \fi
+  \endgroup
+  \deadcycles\z@
+  \@@end
+}
+\def\AtVeryEnd@enddocument@dinbrief{%
+  \@checkend{document}%
+  \Call@BeforeClearDocument
+  \newpage
+  \Call@AfterLastShipout
+  \begingroup
+    \if@filesw
+      \ifnum\c@labelgen>\z@
+        \immediate\closeout\@mainlbl
+        \makeatletter
+        \input \jobname@lbl\relax
+        \clearpage
+      \fi
+      \immediate\closeout\@mainaux
+    \fi
+    \Call@AtVeryEndDocument
+    \csname @dofilelist\endcsname
+    \Call@AtEndAfterFileList
+  \endgroup
+  \deadcycles\z@
+  \Call@AtVeryVeryEnd
+  \@@end
+}
+\def\AtVeryEnd@test@combine{%
+  \@enddocumenthook
+  \@checkend{document}%
+  \clearpage
+  \begingroup
+    \if@filesw
+      \immediate\closeout\@mainaux
+      \immediate\closeout\@partaux
+      \let\@setckpt\@gobbletwo
+      \let\@newl@bel\@testdef
+      \@tempswafalse
+      \makeatletter \input\c@lmainauxfile  %% change here
+    \fi
+    \c@lenddoca                            %% a replacement
+    \@refundefined
+  \endgroup
+  \deadcycles\z@
+  \@@end
+}
+\def\AtVeryEnd@enddocument@combine{%
+  \@enddocumenthook
+  \@checkend{document}%
+  \Call@BeforeClearDocument
+  \clearpage
+  \Call@AfterLastShipout
+  \begingroup
+    \if@filesw
+      \immediate\closeout\@mainaux
+      \immediate\closeout\@partaux
+      \let\@setckpt\@gobbletwo
+      \let\@newl@bel\@testdef
+      \@tempswafalse
+      \makeatletter \input\c@lmainauxfile  %% change here
+    \fi
+    \Call@AtVeryEndDocument
+    \c@lenddoca                            %% a replacement
+    \@refundefined
+  \endgroup
+  \deadcycles\z@
+  \Call@AtVeryVeryEnd
+  \@@end
+}
+\long\def\AtVeryEnd@test@c@lenddoca{%
+  \@dofilelist
+  \ifdim\font@submax>\fontsubfuzz\relax
+    \@font@warning{%
+      Size substitutions with differences\MessageBreak
+      up to \font@submax\space have occured.\@gobbletwo
+    }%
+  \fi
+  \@defaultsubs
+  \if@filesw
+    \ifx\@multiplelabels\relax
+      \if@tempswa
+        \@latex@warning@no@line{%
+          Label(s) may have changed. %
+          Rerun to get cross-references right%
+        }%
+      \fi
+    \else
+      \@multiplelabels
+    \fi
+  \fi
+}
+\ifx\AtVeryEnd@c@lenddoca\c@lenddoca
+  \def\c@lenddoca{%
+    \@dofilelist
+    \Call@AtEndAfterFileList
+    \ifdim\font@submax>\fontsubfuzz\relax
+      \@font@warning{%
+        Size substitutions with differences\MessageBreak
+        up to \font@submax\space have occured.\@gobbletwo
+      }%
+    \fi
+    \@defaultsubs
+    \if@filesw
+      \ifx\@multiplelabels\relax
+        \if@tempswa
+          \@latex@warning@no@line{%
+            Label(s) may have changed. %
+            Rerun to get cross-references right%
+          }%
+        \fi
+      \else
+        \@multiplelabels
+      \fi
+    \fi
+  }%
+\fi
+\def\AtVeryEnd@test@jpsj{%
+  \if@lastpagebalancing
+    \global\let\@outputdblcol=\balancing@outputdblcol
+  \fi
+  \@checkend{document}%
+  \clearpage
+  \begingroup
+    \if@filesw
+      \immediate\closeout\@mainaux
+      \def\global\@namedef##1##2{}%
+      \def\newlabel{\@testdef r}%
+      \def\bibcite{\@testdef b}%
+      \@tempswafalse
+      \makeatletter
+      \input \jobname.aux %
+      \if@tempswa
+        \@warning{%
+          Label(s) may have changed. %
+          Rerun to get cross-references right%
+        }%
+      \fi
+    \fi
+  \endgroup
+  \deadcycles\z@
+  \@@end
+}
+\def\AtVeryEnd@enddocument@jpsj{%
+  \if@lastpagebalancing
+    \global\let\@outputdblcol=\balancing@outputdblcol
+  \fi
+  \@checkend{document}%
+  \Call@BeforeClearDocument
+  \clearpage
+  \Call@AfterLastShipout
+  \begingroup
+    \if@filesw
+      \immediate\closeout\@mainaux
+      \def\global\@namedef##1##2{}%
+      \def\newlabel{\@testdef r}%
+      \def\bibcite{\@testdef b}%
+      \@tempswafalse
+      \makeatletter
+      \input \jobname.aux %
+      \if@tempswa
+        \@warning{%
+          Label(s) may have changed. %
+          Rerun to get cross-references right%
+        }%
+      \fi
+    \fi
+    \Call@AtVeryEndDocument
+    \csname @dofilelist\endcsname
+    \Call@AtEndAfterFileList
+  \endgroup
+  \deadcycles\z@
+  \Call@AtVeryVeryEnd
+  \@@end
+}
+\def\AtVeryEnd@Test#1#2{%
+  \expandafter\ifx\csname AtVeryEnd@test@#2\endcsname#1%
+    \expandafter\let\expandafter#1%
+    \csname AtVeryEnd@enddocument@#2\endcsname
+    \begingroup
+      \let\on@line\@empty
+      \PackageInfo{atveryend}{%
+        \string#1 detected (#2)%
+      }%
+    \endgroup
+    \expandafter\AtVeryEnd@SkipToNil
+  \fi
+}
+\def\AtVeryEnd@SkipToNil#1\@nil{}
+\def\AtVeryEnd@RedefEndDocument#1{%
+  \ifx#1\@undefined
+  \else
+    \AtVeryEnd@Test#1{standard20110627}%
+    \AtVeryEnd@Test#1{standard}%
+    \AtVeryEnd@Test#1{booklet}%
+    \AtVeryEnd@Test#1{dinbrief}%
+    \AtVeryEnd@Test#1{combine}%
+    \AtVeryEnd@Test#1{jpsj}%
+    \AtVeryEnd@SkipToNil
+    \@nil
+  \fi
+}
+\AtVeryEnd@RedefEndDocument\enddocument
+\AtVeryEnd@RedefEndDocument\AP@enddocument % afterpage.sty
+\AtVeryEnd@RedefEndDocument\hyper@back@cite@enddocument % htx-bc.sty
+\AtVeryEnd@RedefEndDocument\hyper@enddocument % hyper.sty
+\AtVeryEnd@RedefEndDocument\hyper@fn@enddocument % hyper.sty
+\AtVeryEnd@RedefEndDocument\cweb@save@enddocument % cweb.cls
+\AtVeryEnd@RedefEndDocument\prev@enddocument % flushend.sty
+\AtVeryEnd@RedefEndDocument\endorigdocument % gaceta.cls
+\AtVeryEnd@RedefEndDocument\keependdoc % aguplus.sty
+\AtVeryEnd@RedefEndDocument\EMenddocument % t-angles.sty
+\AtVeryEnd@RedefEndDocument\docmute@enddocument % docmute.sty
+\AtVeryEnd@RedefEndDocument\a@enddocument % alatex.sty
+\AtVeryEnd@RedefEndDocument\enddocumentasusual % frenchle.sty
+\AtVeryEnd@RedefEndDocument\old@enddocument % uwthesis.cls
+\def\AtVeryEnd@document{document}%
+\def\AtVeryEnd@RedefCheckEnd{%
+  \expandafter\def\expandafter\@checkend
+  \expandafter##\expandafter1\expandafter{%
+    \@checkend{##1}%
+    \def\AtVeryEnd@temp{##1}%
+    \ifx\AtVeryEnd@temp\AtVeryEnd@document
+      \let\AtVeryEnd@OrgClearpage\clearpage
+      \def\clearpage{%
+        \let\clearpage\AtVeryEnd@OrgClearpage
+        \Call@BeforeClearDocument
+        \clearpage
+        \Call@AfterLastShipout
+      }%
+    \fi
+  }%
+  \aftergroup\AtVeryEnd@RedefCheckEnd
+}%
+\AtBeginDocument{%
+  \AtEndDocument{%
+    \AtVeryEnd@RedefCheckEnd
+  }%
+}
+\AtEndDocument{%
+  \@ifundefined{@dofilelist}{%
+    \gdef\@dofilelist{%
+      \Call@AtVeryEndDocument
+      \Call@AtEndAfterFileList
+    }%
+  }{%
+    \begingroup
+      \toks@\expandafter{\@dofilelist}%
+      \xdef\@dofilelist{%
+        \noexpand\Call@AtVeryEndDocument
+        \the\toks@
+        \noexpand\Call@AtEndAfterFileList
+      }%
+    \endgroup
+  }%
+}
+\AtBeginDocument{%
+  \@ifpackageloaded{scrlfile}{%
+    \AtVeryEnd@ifundefined{BeforeClosingMainAux}{}{%
+      \BeforeClosingMainAux{\Call@AfterLastShipout}%
+    }%
+    \AtVeryEnd@ifundefined{AfterReadingMainAux}{}{%
+      \AfterReadingMainAux{\Call@AtVeryEndDocument}%
+    }%
+  }{}%
+  \@ifpackageloaded{etoolbox}{%
+    \AtVeryEnd@ifundefined{AfterEndDocument}{}{%
+      \AfterEndDocument{\Call@AtVeryEndDocument}%
+    }%
+  }{}%
+}
+\def\AtVeryEnd@temp{%
+  \AtBeginDocument{%
+    \let\@startlabels\startlabels
+    \let\@mlabel\mlabel
+    \if@filesw
+      \immediate\write\@mainaux{\string\@startlabels}%
+    \fi
+  }%
+  \AtEndDocument{%
+    \if@filesw
+      \immediate\write\@mainaux{\string\clearpage}%
+    \fi
+  }%
+}
+\ifx\makelabels\AtVeryEnd@temp
+\else
+  \expandafter\AtVeryEnd@AtEnd
+\fi%
+\let\AtVeryEnd@PatchLetter=N%
+\begingroup\expandafter\expandafter\expandafter\endgroup
+\expandafter\ifx\csname endletter\endcsname\relax
+\else
+  \long\def\AtVeryEnd@TestEndLetter#1\@auxout#2#3\AtVeryEnd@Nil{%
+    \def\AtVeryEnd@temp{#2}%
+    \ifx\AtVeryEnd@temp\@empty
+    \else
+      \@onelevel@sanitize\AtVeryEnd@temp
+      \edef\AtVeryEnd@StringMlabel{%
+        \string\string
+        \string\@mlabel
+        \expandafter\@gobble\string\{%
+      }%
+      \def\AtVeryEnd@CatchFirst##1##2##3##4##5##6##7##8{%
+        ##1##2##3##4##5##6##7##8\AtVeryEnd@CatchSecond
+      }%
+      \def\AtVeryEnd@CatchSecond##1##2##3##4##5##6##7##8##9\@nil{%
+        ##1##2##3##4##5##6##7##8%
+      }%
+      \edef\AtVeryEnd@temp{%
+        \expandafter\AtVeryEnd@CatchFirst\AtVeryEnd@temp
+        {}{}{}{}{}{}{}{}%
+        {}{}{}{}{}{}{}{}%
+        \@nil
+      }%
+      \ifx\AtVeryEnd@temp\AtVeryEnd@StringMlabel
+        \expandafter\def\expandafter\endletter\expandafter{%
+          \endletter
+          \begingroup
+            \let\\=\relax
+            \let\protect\@unexpandable@protect
+            \let\@mlabel=\relax
+            \edef\x{\endgroup
+              \noexpand\AtEndDocument{%
+                \@gobble#2%
+              }%
+            }%
+          \x
+        }%
+        \let\AtVeryEnd@PatchLetter=Y%
+      \fi
+    \fi
+  }%
+  \expandafter\AtVeryEnd@TestEndLetter\endletter
+    \@auxout{}\AtVeryEnd@Nil
+\fi
+\ifx\AtVeryEnd@PatchLetter Y%
+  \begingroup
+    \let\on@line\@empty
+    \PackageInfo{atveryend}{%
+      \@backslashchar makelabels detected. %
+      Moving labels\MessageBreak
+      from `.aux' file to \@backslashchar AtEndDocument%
+    }%
+  \endgroup
+  \def\makelabels{%
+    \AtBeginDocument{%
+      \let\@startlabels\startlabels
+      \let\@mlabel\mlabel
+    }%
+  }%
+  \AtEndDocument{%
+    \AtVeryEnd@ifundefined{@startlabels}{%
+    }{%
+      \clearpage
+      \@startlabels
+    }%
+  }%
+  \AfterLastShipout{%
+    \let\@startlabels\relax
+    \let\@mlabel\@gobbletwo
+  }%
+\else
+  \PackageWarningNoLine{atveryend}{%
+    \@backslashchar makelabels detected, but labels cannot\MessageBreak
+    be moved to \@backslashchar AtEndDocument, because\MessageBreak
+    \@backslashchar endletter is not in expected form%
+  }%
+\fi
+\AtVeryEnd@AtEnd%
+%% \section{Installation}
+\endinput
+%%
+%% End of file `atveryend.sty'.

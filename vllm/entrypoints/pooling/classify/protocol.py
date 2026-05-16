@@ -9,15 +9,16 @@ from pydantic import Field
 from vllm import PoolingParams
 from vllm.config import ModelConfig
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
-from vllm.entrypoints.pooling.base.protocol import (
+from vllm.logger import init_logger
+from vllm.renderers import TokenizeParams
+from vllm.utils import random_uuid
+
+from ..base.protocol import (
     ChatRequestMixin,
     ClassifyRequestMixin,
     CompletionRequestMixin,
     PoolingBasicRequestMixin,
 )
-from vllm.logger import init_logger
-from vllm.renderers import TokenizeParams
-from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 

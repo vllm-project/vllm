@@ -10,6 +10,8 @@ MAX_NUM_SEQS=${MAX_NUM_SEQS:-2}
 MAX_TOKENS=${MAX_TOKENS:-8}
 PROMPT=${PROMPT:-The capital of France is}
 SERVER_LOG=${SERVER_LOG:-/tmp/vllm-e2e-smoke.log}
+PYTHON_BIN=${PYTHON_BIN:-python}
+VLLM_CLI=("$PYTHON_BIN" -m vllm.entrypoints.cli.main)
 
 server_pid=""
 server_group_pid=""
@@ -39,9 +41,61 @@ cleanup() {
   fi
 }
 
+run_runner_npu_preflight_once() {
+  "$PYTHON_BIN" - <<'PY'
+import importlib.util
+import os
+
+import torch
+
+if importlib.util.find_spec("torch_npu") is None:
+    raise RuntimeError("torch_npu is not installed in the smoke-test environment")
+
+import torch_npu  # noqa: F401
+
+device = os.environ.get("VLLM_ASCEND_TORCH_PREFLIGHT_DEVICE", "npu:0")
+print(f"preflight device={device}")
+print("torch_npu import ok=True")
+if not torch.npu.is_available():
+    raise RuntimeError("torch.npu.is_available() returned False")
+torch.npu.set_device(device)
+_ = torch.zeros(1, device=device)
+print("torch.zeros preflight ok")
+PY
+}
+
+ensure_runner_npu_ready() {
+  local max_attempts=${RUNNER_NPU_PREFLIGHT_ATTEMPTS:-3}
+  local delay_seconds=${RUNNER_NPU_PREFLIGHT_DELAY_SECONDS:-10}
+  local attempt=1
+  local preflight_output=""
+
+  while [[ "$attempt" -le "$max_attempts" ]]; do
+    if preflight_output=$(run_runner_npu_preflight_once 2>&1); then
+      return 0
+    fi
+
+    echo "Runner NPU preflight failed ($attempt/$max_attempts)" >&2
+    printf '%s\n' "$preflight_output" >&2
+
+    if [[ "$attempt" -lt "$max_attempts" ]]; then
+      sleep "$delay_seconds"
+    fi
+    attempt=$((attempt + 1))
+  done
+
+  echo "Self-hosted runner NPU runtime is unhealthy before vLLM startup." >&2
+  if [[ "${GITHUB_EVENT_NAME:-}" == "pull_request" ]]; then
+    echo "Skipping smoke test for this PR run because the failure is below vLLM and the runner cannot allocate a basic torch_npu tensor." >&2
+    return 2
+  fi
+
+  return 1
+}
+
 start_server() {
   if command -v setsid >/dev/null 2>&1; then
-    setsid vllm serve "$MODEL_NAME" \
+    setsid "${VLLM_CLI[@]}" serve "$MODEL_NAME" \
       --host "$HOST" \
       --port "$PORT" \
       --dtype "$DTYPE" \
@@ -51,7 +105,7 @@ start_server() {
     server_pid=$!
     server_group_pid=$server_pid
   else
-    vllm serve "$MODEL_NAME" \
+    "${VLLM_CLI[@]}" serve "$MODEL_NAME" \
       --host "$HOST" \
       --port "$PORT" \
       --dtype "$DTYPE" \
@@ -68,7 +122,7 @@ start_server() {
 }
 
 allocate_local_port() {
-  python - <<'PY'
+  "$PYTHON_BIN" - <<'PY'
 import socket
 
 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -100,6 +154,14 @@ mkdir -p "$marker_dir"
 echo "Starting vLLM serve smoke test for $MODEL_NAME"
 echo "Using smoke test port $PORT"
 
+if ! ensure_runner_npu_ready; then
+  status=$?
+  if [[ "$status" -eq 2 ]]; then
+    exit 0
+  fi
+  exit "$status"
+fi
+
 start_server
 
 for attempt in $(seq 1 120); do
@@ -130,7 +192,7 @@ curl -fsS "http://$HOST:$PORT/v1/completions" \
   -d "{\"model\": \"$MODEL_NAME\", \"prompt\": \"$PROMPT\", \"max_tokens\": $MAX_TOKENS, \"temperature\": 0}" \
   > "$completion_response"
 
-python - "$completion_response" "$MODEL_NAME" <<'PY'
+"$PYTHON_BIN" - "$completion_response" "$MODEL_NAME" <<'PY'
 import json
 import sys
 

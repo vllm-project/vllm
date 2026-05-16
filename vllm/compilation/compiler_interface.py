@@ -16,6 +16,7 @@ import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
+from vllm.env_override import _apply_constrain_to_fx_strides_patch
 from vllm.logger import init_logger
 from vllm.utils.hashing import safe_hash
 from vllm.utils.torch_utils import is_torch_equal_or_newer
@@ -151,6 +152,17 @@ class AlwaysHitShapeEnv:
         return ""
 
 
+def _get_vllm_functorch_config() -> dict[str, Any]:
+    """Return the functorch config overrides that vLLM applies at compile time.
+
+    Used by both set_functorch_config() and get_inductor_factors() to ensure
+    the compile-time config and cache key are always consistent."""
+    cfg: dict[str, Any] = {}
+    if not envs.VLLM_USE_MEGA_AOT_ARTIFACT:
+        cfg["bundled_autograd_cache"] = False
+    return cfg
+
+
 def get_inductor_factors() -> list[Any]:
     factors: list[Any] = []
     # summarize system state
@@ -164,6 +176,13 @@ def get_inductor_factors() -> list[Any]:
 
     torch_factors = torch_key()
     factors.append(torch_factors)
+
+    from torch._functorch import config as functorch_config
+    from torch._inductor import config as inductor_config
+
+    factors.append(inductor_config.save_config_portable())
+    with functorch_config.patch(_get_vllm_functorch_config()):
+        factors.append(functorch_config.save_config_portable())
     return factors
 
 
@@ -225,48 +244,6 @@ def _patch_standalone_compile_atomic_save() -> None:
     logger.debug("Patched %s.save for atomic writes (torch < 2.10)", cls.__name__)
 
 
-def _patch_constrain_to_fx_strides() -> contextlib.AbstractContextManager:
-    """Context manager that patches inductor's ``constrain_to_fx_strides``
-    to handle opaque (non-tensor) arguments.
-
-    The original calls ``.stride()`` on every FX arg's meta value, which
-    crashes on ``FakeScriptObject`` (the compile-time proxy for hoisted
-    opaque types).  The patched version skips args whose meta value is
-    not a ``torch.Tensor``.
-
-    Returns ``nullcontext`` on torch < 2.11.
-    Upstream issue: https://github.com/pytorch/pytorch/issues/175973
-    """
-    if not is_torch_equal_or_newer("2.11.0.dev"):
-        return contextlib.nullcontext()
-
-    import torch._inductor.ir as _ir
-    import torch._inductor.lowering as _lowering
-    from torch._inductor.virtualized import V as _V
-
-    def _patched(fx_node, *args, **kwargs):
-        def apply_constraint(arg, fx_arg):
-            if isinstance(arg, _ir.IRNode):
-                meta_val = fx_arg.meta.get("val")
-                if isinstance(meta_val, torch.Tensor):
-                    stride_order = _ir.get_stride_order(
-                        meta_val.stride(), _V.graph.sizevars.shape_env
-                    )
-                    return _ir.ExternKernel.require_stride_order(arg, stride_order)
-                return arg
-            if isinstance(arg, dict):
-                return {key: apply_constraint(arg[key], fx_arg[key]) for key in arg}
-            return arg
-
-        args = tuple(
-            apply_constraint(arg, fx_arg) for arg, fx_arg in zip(args, fx_node.args)
-        )
-        kwargs = {k: apply_constraint(v, fx_node.kwargs[k]) for k, v in kwargs.items()}
-        return args, kwargs
-
-    return patch.object(_lowering, "constrain_to_fx_strides", _patched)
-
-
 class InductorStandaloneAdaptor(CompilerInterface):
     """
     The adaptor for the Inductor compiler.
@@ -304,6 +281,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
         compile_range: Range,
         key: str | None = None,
     ) -> tuple[Callable[..., Any] | None, Any | None]:
+        _apply_constrain_to_fx_strides_patch()
         compilation_counter.num_inductor_compiles += 1
         current_config = {}
         if compiler_config is not None:
@@ -335,6 +313,9 @@ class InductorStandaloneAdaptor(CompilerInterface):
             },
         }
 
+        if is_torch_equal_or_newer("2.13.0.dev"):
+            compile_kwargs["donate_graph_module"] = True  # type: ignore[assignment]
+
         use_aot: bool = supports_aot and envs.VLLM_USE_MEGA_AOT_ARTIFACT
         # only add 'aot' parameter if both supported and enabled...
         # this will set bundled_autograd_cache
@@ -345,9 +326,9 @@ class InductorStandaloneAdaptor(CompilerInterface):
         # Inductor's pre-grad passes don't do anything for vLLM.
         # The pre-grad passes get run even on cache-hit and negatively impact
         # vllm cold compile times by O(1s)
-        # Can remove this after the following issue gets fixed
+        # Fixed upstream in PyTorch 2.12:
         # https://github.com/pytorch/pytorch/issues/174502
-        if envs.VLLM_ENABLE_PREGRAD_PASSES:
+        if is_torch_equal_or_newer("2.12.0.dev") or envs.VLLM_ENABLE_PREGRAD_PASSES:
             pregrad_ctx: Any = contextlib.nullcontext()
         else:
             pregrad_ctx = patch(
@@ -387,7 +368,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
         else:
             fake_mode_ctx = contextlib.nullcontext()
 
-        with pregrad_ctx, fake_mode_ctx, _patch_constrain_to_fx_strides():
+        with pregrad_ctx, fake_mode_ctx:
             compiled_graph = standalone_compile(graph, example_inputs, **compile_kwargs)
 
         if use_aot:
@@ -502,6 +483,7 @@ class InductorAdaptor(CompilerInterface):
         compile_range: Range,
         key: str | None = None,
     ) -> tuple[Callable[..., Any] | None, Any | None]:
+        _apply_constrain_to_fx_strides_patch()
         compilation_counter.num_inductor_compiles += 1
         from torch._inductor.compile_fx import compile_fx
 
@@ -630,7 +612,6 @@ class InductorAdaptor(CompilerInterface):
             stack.enter_context(
                 torch._functorch.config.patch(enable_remote_autograd_cache=False)
             )
-            stack.enter_context(_patch_constrain_to_fx_strides())
 
             # Clear the tracing context before calling compile_fx.
             # vLLM calls compile_fx from within a PiecewiseCompileInterpreter
@@ -776,8 +757,8 @@ def set_inductor_config(config: dict[str, Any], compile_range: Range) -> None:
 
 
 def set_functorch_config() -> None:
-    if not envs.VLLM_USE_MEGA_AOT_ARTIFACT:
-        torch._functorch.config.bundled_autograd_cache = False
+    for k, v in _get_vllm_functorch_config().items():
+        setattr(torch._functorch.config, k, v)
 
 
 class EagerAdaptor(CompilerInterface):

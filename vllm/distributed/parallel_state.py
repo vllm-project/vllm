@@ -394,8 +394,10 @@ class GroupCoordinator:
             current_platform.is_tpu() or current_platform.use_custom_op_collectives()
         )
 
-        self.use_cpu_custom_send_recv = current_platform.is_cpu() and hasattr(
-            torch.ops._C, "init_shm_manager"
+        self.use_cpu_custom_send_recv = (
+            current_platform.is_cpu()
+            and self.device_communicator
+            and getattr(self.device_communicator, "supports_tensor_dict", False)
         )
 
     def create_mq_broadcaster(
@@ -470,6 +472,7 @@ class GroupCoordinator:
         # only cuda uses this function,
         # so we don't abstract it into the base class
         maybe_ca_context = nullcontext()
+        maybe_aiter_context = nullcontext()
         from vllm.distributed.device_communicators.cuda_communicator import (
             CudaCommunicator,
         )
@@ -480,13 +483,20 @@ class GroupCoordinator:
             if ca_comm is not None:
                 maybe_ca_context = ca_comm.capture()  # type: ignore
 
+            from vllm._aiter_ops import rocm_aiter_ops
+
+            if rocm_aiter_ops.is_enabled():
+                aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
+                if aiter_ar is not None:
+                    maybe_aiter_context = aiter_ar.capture()  # type: ignore
+
         # ensure all initialization operations complete before attempting to
         # capture the graph on another stream
         curr_stream = torch.cuda.current_stream()
         if curr_stream != stream:
             stream.wait_stream(curr_stream)
 
-        with torch.cuda.stream(stream), maybe_ca_context:
+        with torch.cuda.stream(stream), maybe_ca_context, maybe_aiter_context:
             yield graph_capture_context
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
@@ -1445,6 +1455,7 @@ def init_distributed_environment(
         # local rank not set, this usually happens in single-node
         # setting, where we can use rank as local rank
         local_rank = envs.LOCAL_RANK if distributed_init_method == "env://" else rank
+
     global _WORLD, _NODE_COUNT, _INNER_DP_WORLD
     if enable_elastic_ep:
         _init_elastic_ep_world(config, local_rank, backend, rank, world_size)
@@ -1690,11 +1701,7 @@ def initialize_model_parallel(
         # using torch.distributed in execution with torch.distributed in EPLB.
         global _EPLB
         assert _EPLB is None, "EPLB group is already initialized"
-        if (
-            config is not None
-            and config.parallel_config is not None
-            and config.parallel_config.enable_eplb
-        ):
+        if config.parallel_config.enable_eplb:
             if enable_elastic_ep:
                 _EPLB = _init_stateless_group(
                     group_ranks,
@@ -1905,6 +1912,17 @@ def destroy_distributed_environment():
 def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
     # Reset environment variable cache
     envs.disable_envs_cache()
+
+    # Reset rocm_aiter_ops class variables to match current os.environ.
+    # These are class-level attributes that persist across tests and are
+    # NOT restored by monkeypatch (which only restores os.environ).
+    from vllm.platforms import current_platform
+
+    if current_platform.is_rocm():
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        rocm_aiter_ops.refresh_env_variables()
+
     # Ensure all objects are not frozen before cleanup
     gc.unfreeze()
 
@@ -1918,7 +1936,11 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
     from vllm.platforms import current_platform
 
     if not current_platform.is_cpu():
-        torch.accelerator.empty_cache()
+        empty_cache = getattr(current_platform, "empty_cache", None)
+        if callable(empty_cache):
+            empty_cache()
+        else:
+            torch.accelerator.empty_cache()
         try:
             torch._C._host_emptyCache()
         except AttributeError:

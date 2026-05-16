@@ -5,7 +5,6 @@ import asyncio
 import json
 import warnings
 
-import librosa
 import numpy as np
 import pybase64 as base64
 import pytest
@@ -14,6 +13,7 @@ import websockets
 from tests.entrypoints.openai.conftest import add_attention_backend
 from tests.utils import ROCM_ENV_OVERRIDES, ROCM_EXTRA_ARGS, RemoteOpenAIServer
 from vllm.assets.audio import AudioAsset
+from vllm.multimodal.media.audio import load_audio
 
 # Increase engine iteration timeout for ROCm where first-use JIT compilation
 # can exceed the default 60s, causing a silent deadlock in feed_tokens.
@@ -56,7 +56,7 @@ async def send_event(ws, event: dict) -> None:
 def mary_had_lamb_audio_chunks() -> list[str]:
     """Audio split into ~1 second chunks for streaming."""
     path = AudioAsset("mary_had_lamb").get_local_path()
-    audio, _ = librosa.load(str(path), sr=16000, mono=True)
+    audio, _ = load_audio(str(path), sr=16000, mono=True)
 
     # Split into ~0.1 second chunks (1600 samples at 16kHz)
     chunk_size = 1600

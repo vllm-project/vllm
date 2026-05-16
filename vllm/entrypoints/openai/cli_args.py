@@ -153,9 +153,21 @@ class BaseFrontendArgs:
     """If set to True, log the stack trace of error responses"""
     tokens_only: bool = False
     """
-    If set to True, only enable the Tokens In<>Out endpoint. 
+    If set to True, only enable the Tokens In<>Out endpoint.
     This is intended for use in a Disaggregated Everything setup.
     """
+    fingerprint_mode: Literal["full", "hash", "custom", "none"] = "full"
+    """Controls the ``system_fingerprint`` field on responses.
+
+    - ``full`` (default): ``vllm-<version>[-<parallelism>]-<hash8>``. Encodes
+      server version, non-trivial parallelism degrees (tp/pp/dp/ep), and an
+      8-char config hash.
+    - ``hash``: ``vllm-<version>-<hash8>``. Parallelism stripped.
+    - ``custom``: emits the literal string from ``--fingerprint-value``.
+    - ``none``: the field is omitted (serialized as ``null``).
+    """
+    fingerprint_value: str | None = None
+    """Literal fingerprint string used when ``--fingerprint-mode=custom``."""
 
     @classmethod
     def _customize_cli_kwargs(
@@ -278,6 +290,9 @@ class FrontendArgs(BaseFrontendArgs):
     Enable offline FastAPI documentation for air-gapped environments.
     Uses vendored static assets bundled with vLLM.
     """
+    enable_flash_late_interaction: bool = True
+    """If set, run pooling score MaxSim on GPU in the API server process.
+    Can significantly improve late-interaction scoring performance."""
 
     @classmethod
     def _customize_cli_kwargs(
@@ -344,6 +359,13 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         help="Read CLI options from a config file. "
         "Must be a YAML with the following options: "
         "https://docs.vllm.ai/en/latest/configuration/serve_args.html",
+    )
+    parser.add_argument(
+        "--grpc",
+        action="store_true",
+        default=False,
+        help="Launch a gRPC server instead of the HTTP OpenAI-compatible "
+        "server. Requires: pip install vllm[grpc].",
     )
     parser = FrontendArgs.add_cli_args(parser)
     parser = AsyncEngineArgs.add_cli_args(parser)

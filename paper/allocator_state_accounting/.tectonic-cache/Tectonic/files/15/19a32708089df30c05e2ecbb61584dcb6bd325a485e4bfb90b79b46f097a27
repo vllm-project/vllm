@@ -1,0 +1,181 @@
+%%
+%% This is file `latex2e-first-aid-for-external-files.ltx',
+%% generated with the docstrip utility.
+%%
+%% The original source files were:
+%%
+%% latex2e-first-aid-for-external-files.dtx  (with options: `kernel')
+%% 
+%% The source is maintained by the LaTeX Project team and bug
+%% reports for it can be opened at https://latex-project.org/bugs/
+%% (but please observe conditions on bug reports sent to that address!)
+%% 
+%% 
+%% Copyright (C) 2020-2021
+%% The LaTeX Project and any individual authors listed elsewhere
+%% in this file.
+%% 
+%% This file was generated from file(s) of the Standard LaTeX `First Aid Bundle'.
+%% ------------------------------------------------------------------------------
+%% 
+%% It may be distributed and/or modified under the
+%% conditions of the LaTeX Project Public License, either version 1.3c
+%% of this license or (at your option) any later version.
+%% The latest version of this license is in
+%%    https://www.latex-project.org/lppl.txt
+%% and version 1.3c or later is part of all distributions of LaTeX
+%% version 2005/12/01 or later.
+%% 
+%% This file may only be distributed together with a copy of the LaTeX
+%% `First Aid Bundle'. You may however distribute the LaTeX `First Aid Bundle'
+%% without such generated files.
+%% 
+%% File: latex2e-first-aid-for-external-files.dtx (C) Copyright 2020-2021
+%%
+%% The LaTeX Project and any individual authors listed elsewhere
+%% in this file.
+\def\LaTeXFirstAidDate{2021/11/11}
+\def\LaTeXFirstAidVersion{v1.0q}
+\ProvidesFile{latex2e-first-aid-for-external-files.ltx}
+             [\LaTeXFirstAidDate\space \LaTeXFirstAidVersion\space
+               LaTeX kernel fixes to external files and packages]
+\ExplSyntaxOn
+\cs_new:Npn\FirstAidNeededT#1#2#3{
+  \exp_args:Ncx\str_if_eq:onF{ver@#1.#2}{#3}
+      { \typeout{==>~ First~ Aid~ for~ #1.#2~ no~ longer~ applied!^^J
+          \@spaces Expected:^^J
+          \@spaces\@spaces #3^^J
+          \@spaces but~ found:^^J
+          \@spaces\@spaces \use:c{ver@#1.#2}^^J
+          \@spaces so~ I'm~ assuming~ it~ got~ fixed.
+      } }
+  \exp_args:Ncx\str_if_eq:onT{ver@#1.#2}{#3}
+}
+\ExplSyntaxOff
+\AddToHook{file/biditools.sty/after}[firstaid]{%
+  \FirstAidNeededT{biditools}{sty}%
+                  {2020/05/13 v2 Programming tools for bidi package}%
+  {%
+  \def\firstaid@bidi@document@patch
+          \endgroup#1\begingroup#2\firstaid@bidi@document@patch
+          {\unexpanded{#1#2}}%
+  \edef\document{\expandafter\firstaid@bidi@document@patch\document
+            \firstaid@bidi@document@patch}%
+  \AddToHook{enddocument/info}%
+            {\let\bidi@AfterEndDocumentCheckLabelsRerun\@firstofone
+              \bidi@afterenddocumentchecklabelsrerunhook}%
+  }%
+}
+\AddToHook{file/dinbrief.cls/after}[firstaid]{%
+  \FirstAidNeededT{dinbrief}{cls}{2000/03/02 LaTeX2e class}%
+                  {\AddToHook{env/document/begin}{\begingroup}}%
+}
+\ExplSyntaxOn
+\AddToHook{file/pgfpages.sty/after}[firstaid]{%
+  \cs_gset_eq:NN \shipout \pgfpages@originalshipout
+  \cs_set_eq:NN \pgfpages@originalshipout \tex_shipout:D
+  \cs_set_eq:NN \tex_shipout:D \pgfpages@interceptshipout
+}
+\ExplSyntaxOff
+\ExplSyntaxOn
+\AddToHook{file/pgfmorepages.sty/after}[firstaid]{
+  \cs_set_nopar:Npn \pgfhookintoshipout {
+    \cs_set_eq:NN \pgfpages@originalshipout \tex_shipout:D
+    \cs_set_eq:NN \tex_shipout:D \pgfpages@interceptshipout
+  }
+}
+\ExplSyntaxOff
+\AddToHook{file/bigfoot.sty/after}{%
+   \ifnum\count10<\insc@unt
+     \global\count10=\insc@unt
+   \fi
+    \def\FN@allmarks#1{\@elt{#1}%
+      \ifnum#1<\count256 %<--- problem: 266 isn't the counter for marks
+        \expandafter\FN@allmarks\expandafter{\number\numexpr#1+\@ne}%
+        \fi}%
+}
+\AddToHook{file/ulem.sty/after}[firstaid]{%
+   \def\@hspace#1{\begingroup\setlength\skip@{#1}%
+                  \edef\x{\endgroup\hskip\the\skip@\relax}\x}%
+   }
+\AddToHook{file/varwidth.sty/after}[firstaid]{%
+  \FirstAidNeededT{varwidth}{sty}%
+       {2009/03/30 ver 0.92; \space Variable-width minipages}%
+     {%
+\def\@vwid@sift{%
+  \skip@\lastskip\unskip
+  \ifdim\lastskip=\z@\unskip\fi   % <---- the first aid here (not just unskip)
+  \dimen@\lastkern\unkern
+  \count@\lastpenalty\unpenalty
+  \setbox\z@\lastbox
+  \ifvoid\z@ \advance\sift@deathcycles\@ne \else \sift@deathcycles\z@ \fi
+  \ifnum\sift@deathcycles>33
+    \let\@vwid@sift\relax
+    \PackageWarning{varwidth}{Failed to reprocess entire contents}%
+  \fi
+  \ifnum\count@=\@vwid@preeqp \@vwid@eqmodefalse\fi
+  \ifnum\count@=\@vwid@posteqp \@vwid@eqmodetrue\fi
+  \ifnum\count@=\@vwid@toppen % finished
+    \let\@vwid@sift\relax
+  \else\ifnum\count@=\@vwid@offsets
+    \@vwid@setoffsets
+  \else
+    \ifnum\count@=\@vwid@postw
+    \else
+      \@vwid@resetb % reset box \z@ or measure it
+    \fi
+    \@vwid@append
+  \fi\fi
+  \@vwid@sift}%
+     }%
+   }
+\ExplSyntaxOn
+\sys_if_engine_luatex:T
+  {
+    \newluafunction \g__para_end_empty_par_id_int
+    \exp_args:Nx \everyjob {
+      \exp_not:V \everyjob
+      \exp_not:N \lua_now:n {
+        local~texnest, flush_list, par_token = tex.nest, node.flush_list, token.create'tex_par:D'~
+        lua.get_functions_table()[\int_use:N \g__para_end_empty_par_id_int] = function()
+          local~nest_level = texnest.top~
+          local~cur_head = nest_level.head~
+          flush_list(cur_head.next)
+          nest_level.tail, cur_head.next = cur_head, nil~
+          token.put_next(par_token)
+        end
+      }
+    }
+    \protected \luadef \__para_end_empty_par: \g__para_end_empty_par_id_int
+    \group_begin:
+    \cs_set:Npn \__para_extract_everypar:w #1 \the \toks #2 \s_stop
+      {
+        \tl_gset:Nn \g__para_standard_everypar_tl {
+          \box_gset_to_last:N \g_para_indent_box
+          \group_begin:
+            \__para_end_empty_par:
+          \group_end:
+          \tex_everypar:D { \msg_error:nnnn { hooks }{ para-mode }{before}{vertical} }
+          \@kernel@before@para@before
+          \hook_use:n {para/before}
+          \group_begin:
+            \tex_everypar:D {}
+            \skip_zero:N \tex_parskip:D
+            \tex_noindent:D
+          \group_end:
+          \tex_everypar:D{\g__para_standard_everypar_tl}
+          \@kernel@before@para@begin
+          \hook_use:n {para/begin}
+          \if_mode_horizontal: \else:
+            \msg_error:nnnn { hooks }{ para-mode }{begin}{vertical} \fi:
+          \__para_handle_indent:
+          \the \toks #2
+        }
+      }
+    \exp_last_unbraced:No \__para_extract_everypar:w \g__para_standard_everypar_tl \s_stop
+    \group_end:
+  }
+\ExplSyntaxOff
+\endinput
+%%
+%% End of file `latex2e-first-aid-for-external-files.ltx'.

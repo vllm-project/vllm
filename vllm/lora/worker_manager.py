@@ -17,11 +17,7 @@ from vllm.lora.model_manager import (
 )
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
-from vllm.lora.utils import (
-    get_adapter_absolute_path,
-    is_in_target_modules,
-    is_supported_lora_module,
-)
+from vllm.lora.utils import get_adapter_absolute_path
 
 logger = init_logger(__name__)
 
@@ -146,30 +142,6 @@ class WorkerLoRAManager:
                 skip_prefixes=lora_skip_prefixes,
             )
 
-            # Warn about adapter modules that will be ignored.
-            target_modules = self.lora_config.target_modules
-            expected_lora_modules_lst = list(expected_lora_modules)
-            for module_name in lora.loras:
-                if not is_supported_lora_module(module_name, expected_lora_modules_lst):
-                    logger.warning_once(
-                        "LoRA module '%s' in adapter '%s' is not in the "
-                        "model's supported LoRA target modules [%s]. "
-                        "These parameters will be ignored, which may "
-                        "cause abnormal model behavior.",
-                        module_name,
-                        lora_request.lora_path,
-                        ", ".join(sorted(expected_lora_modules_lst)),
-                    )
-                elif not is_in_target_modules(module_name, target_modules):
-                    logger.warning_once(
-                        "LoRA module '%s' in adapter '%s' is not in the "
-                        "deployment-time target_modules restriction [%s]."
-                        " These parameters will be ignored.",
-                        module_name,
-                        lora_request.lora_path,
-                        ", ".join(sorted(target_modules)),
-                    )
-
         except FileNotFoundError as e:
             # FileNotFoundError should be raised if both
             # - No adapter found to download from huggingface (or in
@@ -196,6 +168,9 @@ class WorkerLoRAManager:
             if self._cached_dummy_lora is None:
                 self._cached_dummy_lora = dummy_lora
         return self._adapter_manager.add_adapter(dummy_lora)
+
+    def get_dummy_lora_warmup_rank(self, default_rank: int) -> int:
+        return self._adapter_manager.get_dummy_lora_warmup_rank(default_rank)
 
     def pin_adapter(self, adapter_id: int) -> bool:
         return self._adapter_manager.pin_adapter(adapter_id)

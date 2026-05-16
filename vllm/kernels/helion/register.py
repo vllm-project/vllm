@@ -53,26 +53,24 @@ if not has_helion():
     )
 
 import helion
-from helion._compat import requires_torch_version
 from helion.autotuner.base_search import BaseAutotuner
 from helion.runtime.config import Config
 from helion.runtime.settings import default_autotuner_fn
 
 # TODO(gmagogsfm): Remove CustomOp fallback path (_get_or_register_custom_op,
 # vllm_helion_lib, direct_register_custom_op) once vLLM requires PyTorch >= 2.11.
-_HOP_AVAILABLE = requires_torch_version("2.11")
+# FIXME(gmagogsfm): Re-enable HOP path once performance regression is fixed.
+# _HOP_AVAILABLE = requires_torch_version("2.11")
+_HOP_AVAILABLE = False
 
 if _HOP_AVAILABLE:
-    import torch.utils._pytree as pytree
-    from helion._compiler._dynamo.higher_order_ops import (
-        helion_kernel_side_table,
-        helion_kernel_wrapper_mutation,
-    )
-    from helion._compiler._dynamo.variables import infer_output_spec
-    from torch.fx.experimental.proxy_tensor import (
-        disable_proxy_modes_tracing,
-        get_proxy_mode,
-    )
+    from helion._compat import supports_torch_compile_fusion
+    from helion._compiler._dynamo.higher_order_ops import helion_kernel_side_table
+    from helion._compiler._dynamo.variables import HelionKernelVariable
+    from helion.runtime.kernel import Kernel
+    from torch._dynamo.guards import GuardBuilder
+    from torch._dynamo.variables.builder import VariableBuilder
+
 
 logger = init_logger(__name__)
 
@@ -298,75 +296,11 @@ class HelionKernelWrapper:
             f"Kernel '{self.op_name}' was not initialized. "
             "Please open an issue on GitHub."
         )
-        if get_proxy_mode() is not None:
-            return self._call_via_hop(args, kwargs)
+
+        # During Dynamo tracing, this call will be intercepted by our custom
+        # HelionKernelWrapperVariable and handled via proper HOP emission.
+        # During eager execution, call the kernel directly.
         return self._configured_kernel(*args, **kwargs)
-
-    def _call_via_hop(
-        self,
-        args: tuple[Any, ...],
-        kwargs: dict[str, Any],
-    ) -> Any:
-        kernel = self.get_configured_op()._decorated_kernel
-        kernel_idx = helion_kernel_side_table.add_kernel(kernel)
-
-        constant_args, tensor_args = self._partition_args(kernel, args, kwargs)
-
-        all_named = {**constant_args, **tensor_args}
-        full_args = tuple(
-            all_named.get(n, p.default)
-            for n, p in kernel.signature.parameters.items()  # type: ignore[attr-defined]
-            if n in all_named or p.default is not p.empty
-        )
-
-        with disable_proxy_modes_tracing():
-            output_spec = infer_output_spec(kernel, full_args)
-
-        hop_result = helion_kernel_wrapper_mutation(
-            kernel_idx=kernel_idx,
-            constant_args=constant_args,
-            tensor_args=tensor_args,
-            output_spec=output_spec,
-        )
-
-        tree_spec_str = output_spec.get("tree_spec_str")
-        if tree_spec_str is None:
-            return None
-        tree_spec = pytree.treespec_loads(tree_spec_str)
-
-        hop_iter = iter(hop_result)
-        reconstructed = []
-        for spec in output_spec["leaf_specs"]:
-            is_constant_scalar = spec["type"] == "scalar" and not isinstance(
-                spec.get("scalar_value"), torch.SymInt
-            )
-            if is_constant_scalar:
-                reconstructed.append(spec["scalar_value"])
-            else:
-                reconstructed.append(next(hop_iter))
-        return pytree.tree_unflatten(reconstructed, tree_spec)
-
-    @staticmethod
-    def _partition_args(
-        kernel: Any,
-        args: tuple[Any, ...],
-        kwargs: dict[str, Any],
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
-        constant_args: dict[str, Any] = {}
-        tensor_args: dict[str, Any] = {}
-        params = list(kernel.signature.parameters.keys())
-        for i, val in enumerate(args):
-            name = params[i]
-            if isinstance(val, torch.Tensor):
-                tensor_args[name] = val
-            else:
-                constant_args[name] = val
-        for name, val in kwargs.items():
-            if isinstance(val, torch.Tensor):
-                tensor_args[name] = val
-            else:
-                constant_args[name] = val
-        return constant_args, tensor_args
 
     def get_inputs(self) -> dict[str, tuple[Any, ...]]:
         if self._input_generator is None:
@@ -535,3 +469,33 @@ def register_kernel(
         return kernel_wrapper
 
     return decorator
+
+
+# Register HelionKernelWrapper with Dynamo's variable tracker system
+if _HOP_AVAILABLE:
+
+    def _register_vllm_helion_dynamo_variable():
+        """Register HelionKernelWrapper with Dynamo's VariableBuilder.
+
+        When Dynamo encounters a HelionKernelWrapper during tracing, this
+        extracts the underlying Helion Kernel and delegates to Helion's own
+        registered Kernel handler, which handles HOP emission, side table
+        registration, and inductor lowering setup.
+        """
+
+        def wrap_helion_kernel_wrapper(
+            builder: VariableBuilder, value: HelionKernelWrapper
+        ):
+            kernel = value.get_configured_op()._decorated_kernel
+            if supports_torch_compile_fusion():
+                helion_handler = VariableBuilder._type_dispatch()[Kernel]
+                return helion_handler(builder, kernel)
+            kernel_idx = helion_kernel_side_table.add_kernel(kernel)
+            builder.install_guards(GuardBuilder.ID_MATCH)
+            return HelionKernelVariable(kernel, kernel_idx, source=builder.source)
+
+        dispatch = VariableBuilder._type_dispatch()
+        dispatch[HelionKernelWrapper] = wrap_helion_kernel_wrapper
+
+    # Register immediately when the module is imported
+    _register_vllm_helion_dynamo_variable()

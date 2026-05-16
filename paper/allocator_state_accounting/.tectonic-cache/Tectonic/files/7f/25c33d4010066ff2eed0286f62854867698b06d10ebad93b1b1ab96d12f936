@@ -1,0 +1,72 @@
+%%
+%% This is file `amsbsy.sty',
+%% generated with the docstrip utility.
+%%
+%% The original source files were:
+%%
+%% amsbsy.dtx 
+%% 
+%% Copyright (C) 1995, 1999 American Mathematical Society.
+%% Copyright (C) 2016-2021 LaTeX Project and American Mathematical Society.
+%% 
+%% This work may be distributed and/or modified under the
+%% conditions of the LaTeX Project Public License, either version 1.3c
+%% of this license or (at your option) any later version.
+%% The latest version of this license is in
+%%   https://www.latex-project.org/lppl.txt
+%% and version 1.3c or later is part of all distributions of LaTeX
+%% version 2005/12/01 or later.
+%% 
+%% This work has the LPPL maintenance status `maintained'.
+%% 
+%% The Current Maintainer of this work is the LaTeX Project.
+%% 
+\NeedsTeXFormat{LaTeX2e}% LaTeX 2.09 can't be used (nor non-LaTeX)
+[1994/12/01]% LaTeX date must December 1994 or later
+\ProvidesPackage{amsbsy}[1999/11/29 v1.2d Bold Symbols]
+\RequirePackage{amsgen}
+\DeclareRobustCommand{\boldsymbol}[1]{%
+  \begingroup
+  \let\@nomath\@gobble \mathversion{bold}%
+  \math@atom{#1}{%
+  \mathchoice%
+    {\hbox{$\m@th\displaystyle#1$}}%
+    {\hbox{$\m@th\textstyle#1$}}%
+    {\hbox{$\m@th\scriptstyle#1$}}%
+    {\hbox{$\m@th\scriptscriptstyle#1$}}}%
+  \endgroup}
+\def\math@atom#1#2{%
+   \binrel@{#1}\binrel@@{#2}}
+\DeclareRobustCommand{\pmb}{%
+  \ifmmode\else \expandafter\pmb@@\fi\mathpalette\pmb@}
+\def\pmb@@#1#2#3{\leavevmode\setboxz@h{#3}%
+   \dimen@-\wdz@
+   \kern-.5\ex@\copy\z@
+   \kern\dimen@\kern.25\ex@\raise.4\ex@\copy\z@
+   \kern\dimen@\kern.25\ex@\box\z@
+}
+\newdimen\pmbraise@
+\def\pmb@#1#2{\setbox8\hbox{$\m@th#1{#2}$}%
+  \setboxz@h{$\m@th#1\mkern.5mu$}\pmbraise@\wdz@
+  \binrel@{#2}%
+  \dimen@-\wd8 %
+  \binrel@@{%
+    \mkern-.8mu\copy8 %
+    \kern\dimen@\mkern.4mu\raise\pmbraise@\copy8 %
+    \kern\dimen@\mkern.4mu\box8 }%
+}
+\def\binrel@#1{\begingroup
+  \setboxz@h{\thinmuskip0mu
+    \medmuskip\m@ne mu\thickmuskip\@ne mu
+    \setbox\tw@\hbox{$#1\m@th$}\kern-\wd\tw@
+    ${}#1{}\m@th$}%
+  \edef\@tempa{\endgroup\let\noexpand\binrel@@
+    \ifdim\wdz@<\z@ \mathbin
+    \else\ifdim\wdz@>\z@ \mathrel
+    \else \relax\fi\fi}%
+  \@tempa
+}
+\let\binrel@@\relax
+\endinput
+%%
+%% End of file `amsbsy.sty'.

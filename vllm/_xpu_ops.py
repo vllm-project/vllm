@@ -22,6 +22,23 @@ else:
     except ImportError:
         from torch.library import impl_abstract as register_fake
 
+if hasattr(torch.ops._xpu_C, "fp8_gemm"):
+
+    @register_fake("_xpu_C::fp8_gemm")
+    def _fp8_gemm_fake(
+        q_input: torch.Tensor,
+        q_weight: torch.Tensor,
+        out_dtype: torch.dtype,
+        input_scales: torch.Tensor,
+        weight_scale: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        input_2d = q_input.view(-1, q_input.shape[-1])
+        M = input_2d.size(0)
+        N = q_weight.size(1)
+        return torch.empty((M, N), dtype=out_dtype, device=q_input.device)
+
+
 if hasattr(torch.ops._xpu_C, "fp8_gemm_w8a16"):
 
     @register_fake("_xpu_C::fp8_gemm_w8a16")
@@ -75,6 +92,72 @@ if hasattr(torch.ops._xpu_C, "int4_gemm_w4a16"):
         return torch.empty((M, N), dtype=input.dtype, device=input.device)
 
 
+def _gdn_attention_core_xpu_impl(
+    core_attn_out: torch.Tensor,
+    z: torch.Tensor,
+    projected_states_qkvz: torch.Tensor,
+    projected_states_ba: torch.Tensor,
+    layer_name: str,
+) -> None:
+    """Custom op wrapping the XPU SYCL GDN kernel for torch.compile."""
+    from vllm.forward_context import get_forward_context
+    from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+
+    forward_context = get_forward_context()
+    self = forward_context.no_compile_layers[layer_name]
+    attn_metadata_raw = forward_context.attn_metadata
+
+    if attn_metadata_raw is None:
+        return
+
+    assert isinstance(attn_metadata_raw, dict)
+    attn_metadata = attn_metadata_raw[self.prefix]
+    assert isinstance(attn_metadata, GDNAttentionMetadata)
+
+    # TODO: xpu does not support speculative decoding yet
+    assert attn_metadata.spec_sequence_masks is None  # type: ignore[attr-defined]
+
+    conv_weights = self.conv1d.weight.view(
+        self.conv1d.weight.size(0), self.conv1d.weight.size(2)
+    )
+
+    torch.ops._xpu_C.gdn_attention(
+        core_attn_out,
+        z,
+        projected_states_qkvz,
+        projected_states_ba,
+        self.num_k_heads,
+        self.num_v_heads,
+        self.head_k_dim,
+        self.head_v_dim,
+        conv_state=self.kv_cache[0],
+        ssm_state=self.kv_cache[1],
+        conv_weights=conv_weights,
+        conv_bias=self.conv1d.bias,
+        activation=self.activation,
+        A_log=self.A_log,
+        dt_bias=self.dt_bias,
+        num_prefills=attn_metadata.num_prefills,  # type: ignore[attr-defined]
+        num_decodes=attn_metadata.num_decodes,  # type: ignore[attr-defined]
+        has_initial_state=attn_metadata.has_initial_state,  # type: ignore[attr-defined]
+        non_spec_query_start_loc=attn_metadata.non_spec_query_start_loc,  # type: ignore[attr-defined]
+        non_spec_state_indices_tensor=attn_metadata.non_spec_state_indices_tensor,  # type: ignore[attr-defined]
+        num_actual_tokens=attn_metadata.num_actual_tokens,  # type: ignore[attr-defined]
+        tp_size=self.tp_size,
+        reorder_input=not self.gqa_interleaved_layout,
+    )
+
+
+def _gdn_attention_core_xpu_fake(
+    core_attn_out: torch.Tensor,
+    z: torch.Tensor,
+    projected_states_qkvz: torch.Tensor,
+    projected_states_ba: torch.Tensor,
+    layer_name: str,
+) -> None:
+    return
+
+
 def _xpu_ops_deepseek_scaling_rope_impl(
     positions: torch.Tensor,
     query: torch.Tensor,
@@ -100,6 +183,88 @@ def _xpu_ops_deepseek_scaling_rope_fake(
     is_neox_style: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return query, key
+
+
+def _xpu_mxfp8_quantize_impl(
+    x: torch.Tensor, dtype: torch.dtype | None = None
+) -> tuple[torch.Tensor, torch.Tensor]:
+    MXFP8_BLOCK_SIZE = 32
+    assert x.shape[-1] % MXFP8_BLOCK_SIZE == 0
+    if dtype is not None:
+        assert dtype in (torch.float8_e4m3fn, torch.float8_e5m2), (
+            f"Unsupported dtype for xpu_mxfp8_quantize: {dtype}. "
+            f"Expected torch.float8_e4m3fn or torch.float8_e5m2."
+        )
+    else:
+        dtype = current_platform.fp8_dtype()
+
+    finfo = torch.finfo(dtype)
+    fp8_min = finfo.min
+    fp8_max = finfo.max
+    eps = 1e-10
+
+    x_q = torch.empty_like(x, device=x.device, dtype=dtype)
+    shape = x.shape[:-1] + (x.shape[-1] // MXFP8_BLOCK_SIZE,)
+    x_s = torch.empty(shape, device=x.device, dtype=torch.float32)
+    torch.ops._C.per_token_group_fp8_quant(
+        x, x_q, x_s, MXFP8_BLOCK_SIZE, eps, fp8_min, fp8_max, True
+    )
+    x_s = x_s.to(torch.float8_e8m0fnu)
+    return x_q, x_s
+
+
+def _xpu_mxfp8_quantize_fake(
+    x: torch.Tensor, dtype: torch.dtype | None = None
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if dtype is None:
+        dtype = current_platform.fp8_dtype()
+
+    MXFP8_BLOCK_SIZE = 32
+
+    shape = x.shape[:-1] + (x.shape[-1] // MXFP8_BLOCK_SIZE,)
+    x_s = torch.zeros(shape, device=x.device, dtype=torch.float32)
+
+    return x.to(dtype), x_s.to(torch.float8_e8m0fnu)
+
+
+def _xpu_mxfp4_quantize_impl(
+    x: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    MXFP4_BLOCK_SIZE = 32
+    eps = 1e-10
+    assert x.ndim == 2, "input must be 2-D"
+    assert x.shape[-1] % MXFP4_BLOCK_SIZE == 0, (
+        f"last dimension {x.shape[-1]} must be divisible by group_size "
+        f"{MXFP4_BLOCK_SIZE}"
+    )
+    assert x.is_contiguous(), "input groups must be contiguous"
+
+    M, N = x.shape
+
+    # Packed FP4 output: two nibbles per byte
+    x_q = torch.empty(M, N // 2, device=x.device, dtype=torch.uint8)
+    x_s = torch.empty(M, N // MXFP4_BLOCK_SIZE, device=x.device, dtype=torch.float32)
+
+    torch.ops._C.per_token_group_quant_mxfp4(x, x_q, x_s, MXFP4_BLOCK_SIZE, eps)
+
+    x_q = x_q.view(torch.float4_e2m1fn_x2)
+    x_s = x_s.to(dtype=torch.float8_e8m0fnu, memory_format=torch.preserve_format)
+    return x_q, x_s
+
+
+def _xpu_mxfp4_quantize_fake(
+    x: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    MXFP4_BLOCK_SIZE = 32
+    M, N = x.shape
+
+    # Packed FP4 output: two nibbles per byte
+    x_q = torch.empty(M, N // 2, device=x.device, dtype=torch.uint8)
+    x_s = torch.empty(M, N // MXFP4_BLOCK_SIZE, device=x.device, dtype=torch.float32)
+
+    x_q = x_q.view(torch.float4_e2m1fn_x2)
+    x_s = x_s.to(dtype=torch.float8_e8m0fnu, memory_format=torch.preserve_format)
+    return x_q, x_s
 
 
 # Global flag to ensure ops are registered only once
@@ -216,6 +381,9 @@ class xpu_ops:
             # alibi_slopes = alibi_slopes,
             # softcap=softcap,
             return_softmax_lse=return_softmax_lse,
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
         )
 
     @staticmethod
@@ -502,6 +670,25 @@ class xpu_ops:
                 mutates_args=[],
                 fake_impl=_xpu_ops_deepseek_scaling_rope_fake,
                 dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="xpu_mxfp8_quantize",
+                op_func=_xpu_mxfp8_quantize_impl,
+                fake_impl=_xpu_mxfp8_quantize_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="xpu_mxfp4_quantize",
+                op_func=_xpu_mxfp4_quantize_impl,
+                fake_impl=_xpu_mxfp4_quantize_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="gdn_attention_core_xpu",
+                op_func=_gdn_attention_core_xpu_impl,
+                mutates_args=["core_attn_out", "z"],
+                fake_impl=_gdn_attention_core_xpu_fake,
             )
 
             _OPS_REGISTERED = True

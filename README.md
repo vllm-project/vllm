@@ -215,6 +215,20 @@ PYTHONPATH=src python -m hust_ascend_manager.cli runtime repair --repo /path/to/
 - `requirements/common.txt` and `requirements/build.txt`
 - local editable rebuild against the currently selected Python / torch env
 
+After `runtime repair`, or after any manual editable reinstall, verify that the
+active environment exposes the top-level `vllm` package from exactly one
+distribution. This catches the mixed-install failure mode where a stale plain
+`vllm` wheel shadows the editable `vllm-hust` checkout:
+
+```bash
+conda run -p /path/to/target/env python scripts/ensure_vllm_provider.py \
+  --expected-distribution vllm-hust \
+  --remove-conflicts
+```
+
+The helper fails closed if the expected distribution is missing, and prints the
+final imported `vllm` module path after conflict cleanup.
+
 It does not replace host-level fixes such as drivers, CANN / NNAL / ATB system
 packages, model downloads, or public ingress setup.
 

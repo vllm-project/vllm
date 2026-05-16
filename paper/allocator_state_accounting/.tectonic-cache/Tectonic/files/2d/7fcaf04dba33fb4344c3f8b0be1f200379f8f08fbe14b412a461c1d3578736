@@ -1,0 +1,65 @@
+%%
+%% This is file `fonttext.cfg',
+%% generated with the docstrip utility.
+%%
+%% The original source files were:
+%%
+%% fontdef.dtx  (with options: `cfgtext')
+%% 
+%% This is a generated file.
+%% 
+%% Copyright (C) 1993-2021
+%% The LaTeX Project and any individual authors listed elsewhere
+%% in this file.
+%% 
+%% This file was generated from file(s) of the LaTeX base system.
+%% --------------------------------------------------------------
+%% 
+%% It may be distributed and/or modified under the
+%% conditions of the LaTeX Project Public License, either version 1.3c
+%% of this license or (at your option) any later version.
+%% The latest version of this license is in
+%%    https://www.latex-project.org/lppl.txt
+%% and version 1.3c or later is part of all distributions of LaTeX
+%% version 2008 or later.
+%% 
+%% This file may only be distributed together with a copy of the LaTeX
+%% base system. You may however distribute the LaTeX base system without
+%% such generated files.
+%% 
+%% The list of all files belonging to the LaTeX base distribution is
+%% given in the file `manifest.txt'. See also `legal.txt' for additional
+%% information.
+%% 
+%% Details of how to use a configuration file to modify this part of
+%% the system are in the document `cfgguide.tex'.
+%% 
+%% 
+%%% From File: fontdef.dtx
+\ProvidesFile{fonttext.cfg}
+           [2021/01/15 v3.0i LaTeX Kernel
+(Uncustomized text
+           font setup)]
+%%
+%%
+%%
+%% Load the standard setup:
+%%
+\input{fonttext.ltx}
+%%
+%% Small changes could go here; see documentation in cfgguide.tex for
+%% allowed modifications.
+%%
+%% In particular it is not allowed to misuse this configuration file
+%% to modify internal LaTeX commands!
+%%
+%% If you use this file as the basis for configuration please change
+%% the \ProvidesFile lines to clearly identify your modification, e.g.,
+%%
+%%  \ProvidesFile{fonttext.cfg}[2001/06/01
+%%                              Customised local font setup]
+%%
+%%
+\endinput
+%%
+%% End of file `fonttext.cfg'.

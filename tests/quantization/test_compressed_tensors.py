@@ -5,27 +5,38 @@
 Run `pytest tests/quantization/test_compressed_tensors.py`.
 """
 
+from unittest.mock import Mock
+
 import pytest
 import torch
-from compressed_tensors.quantization import QuantizationType
+from compressed_tensors.quantization import (
+    QuantizationArgs,
+    QuantizationStrategy,
+    QuantizationType,
+)
 
 from tests.models.utils import check_logprobs_close
+from vllm.model_executor.kernels.linear import (
+    Fp8BlockScaledMMLinearKernel,
+)
 from vllm.model_executor.layers.fused_moe import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
+    CompressedTensorsConfig,
     CompressedTensorsLinearMethod,
     CompressedTensorsW4A4Fp4,
     CompressedTensorsW4A8Fp8,
     CompressedTensorsW4A16Fp4,
     CompressedTensorsW8A8Fp8,
     CompressedTensorsW8A8Int8,
+    CompressedTensorsW8A8Mxfp8,
     CompressedTensorsW8A16Fp8,
     CompressedTensorsWNA16,
 )
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
-from vllm.model_executor.layers.quantization.utils.fp8_utils import W8A8BlockFp8LinearOp
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     cutlass_fp4_supported,
 )
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 
@@ -358,9 +369,6 @@ def test_compressed_tensors_kv_cache_fp8_per_attn_head(vllm_runner):
         assert output
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
-)
 @pytest.mark.parametrize(
     "args",
     [
@@ -390,7 +398,7 @@ def test_compressed_tensors_nvfp4(vllm_runner, args):
             assert qkv_proj.scheme.group_size == 16
 
         llm.apply_model(check_model)
-        output = llm.generate_greedy("Hello my name is", max_tokens=4)
+        output = llm.generate_greedy(["Hello my name is"], max_tokens=4)
         print(output)
         assert output
 
@@ -468,16 +476,14 @@ def test_compressed_tensors_fp8_block_enabled(vllm_runner):
             qkv_proj = layer.self_attn.qkv_proj
             assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
             assert isinstance(qkv_proj.scheme, CompressedTensorsW8A8Fp8)
-            assert isinstance(
-                qkv_proj.scheme.w8a8_block_fp8_linear, W8A8BlockFp8LinearOp
-            )
+            assert isinstance(qkv_proj.scheme.fp8_linear, Fp8BlockScaledMMLinearKernel)
 
             assert qkv_proj.weight.dtype is fp8_dtype
             assert qkv_proj.weight_scale.dtype is torch.float32
             assert len(qkv_proj.weight.shape) == 2
             assert len(qkv_proj.weight_scale.shape) == 2
 
-            input_quant_op = qkv_proj.scheme.w8a8_block_fp8_linear.input_quant_op
+            input_quant_op = qkv_proj.scheme.fp8_linear.quant_fp8
             assert isinstance(input_quant_op, QuantFP8)
             assert input_quant_op._forward_method in (
                 input_quant_op.forward_cuda,
@@ -557,4 +563,108 @@ def test_w4a16_moe_torch_compile(vllm_runner):
         },
     ) as llm:
         output = llm.generate_greedy("Hi", max_tokens=1)
+        assert output
+
+
+def _make_ct_config(*, target: str = "Linear") -> CompressedTensorsConfig:
+    """Build a minimal CompressedTensorsConfig with INT8 channel quant."""
+    weight_quant = QuantizationArgs(
+        num_bits=8,
+        type=QuantizationType.INT,
+        strategy=QuantizationStrategy.CHANNEL,
+        symmetric=True,
+        dynamic=False,
+    )
+    return CompressedTensorsConfig(
+        target_scheme_map={
+            target: {
+                "weights": weight_quant,
+                "input_activations": None,
+                "format": "pack-quantized",
+            }
+        },
+        ignore=[],
+        quant_format="pack-quantized",
+        sparsity_scheme_map={},
+        sparsity_ignore_list=[],
+    )
+
+
+def test_get_quant_method_returns_linear_method_for_parallel_lm_head():
+    """ParallelLMHead whose name matches a target must get a quantised method."""
+    config = _make_ct_config(target="re:.*lm_head")
+    mock_lm_head = Mock(spec=ParallelLMHead)
+    mock_lm_head.__class__ = ParallelLMHead
+
+    method = config.get_quant_method(mock_lm_head, prefix="model.lm_head")
+
+    assert isinstance(method, CompressedTensorsLinearMethod), (
+        f"Expected CompressedTensorsLinearMethod, got {type(method).__name__}"
+    )
+
+
+def test_get_quant_method_returns_none_for_ignored_parallel_lm_head():
+    """ParallelLMHead on the ignore list should be left unquantized (None)."""
+    config = _make_ct_config(target="re:.*lm_head")
+    config.ignore = ["re:.*lm_head"]
+    mock_lm_head = Mock(spec=ParallelLMHead)
+    mock_lm_head.__class__ = ParallelLMHead
+
+    method = config.get_quant_method(mock_lm_head, prefix="model.lm_head")
+
+    assert method is None, (
+        f"Expected None for ignored ParallelLMHead, got {type(method).__name__}"
+    )
+
+
+def test_get_quant_method_returns_none_for_unmatched_parallel_lm_head():
+    """ParallelLMHead with target='Linear' (typical real model) must not crash.
+
+    Most compressed-tensors models only target 'Linear'. ParallelLMHead does
+    not match that target, so get_quant_method should return None (unquantized)
+    instead of raising ValueError.
+    """
+    config = _make_ct_config(target="Linear")
+    mock_lm_head = Mock(spec=ParallelLMHead)
+    mock_lm_head.__class__ = ParallelLMHead
+
+    method = config.get_quant_method(mock_lm_head, prefix="model.lm_head")
+
+    assert method is None, (
+        f"Expected None for unmatched ParallelLMHead, got {type(method).__name__}"
+    )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not current_platform.has_device_capability(75),
+    reason="MXFP8 requires Turing (sm_75+) or newer.",
+)
+def test_compressed_tensors_mxfp8_moe_setup(vllm_runner):
+    """Verify MXFP8 scheme, dtypes, and generation for a MoE model."""
+    model_path = "AliEdalati97/Qwen3-30B-A3B-MXFP8"
+    with vllm_runner(
+        model_path,
+        enforce_eager=True,
+        load_format="dummy",
+        hf_overrides={"num_hidden_layers": 4},
+    ) as llm:
+
+        def check_model(model):
+            from vllm.model_executor.layers.fused_moe import FusedMoE
+            from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_mxfp8 import (  # noqa: E501
+                CompressedTensorsW8A8Mxfp8MoEMethod,
+            )
+
+            layer = model.model.layers[0]
+
+            qkv = layer.self_attn.qkv_proj
+            assert isinstance(qkv.quant_method, CompressedTensorsLinearMethod)
+            assert isinstance(qkv.scheme, CompressedTensorsW8A8Mxfp8)
+
+            experts = layer.mlp.experts
+            assert isinstance(experts, FusedMoE)
+            assert isinstance(experts.quant_method, CompressedTensorsW8A8Mxfp8MoEMethod)
+
+        llm.apply_model(check_model)
+        output = llm.generate_greedy("Hello my name is", max_tokens=4)
         assert output

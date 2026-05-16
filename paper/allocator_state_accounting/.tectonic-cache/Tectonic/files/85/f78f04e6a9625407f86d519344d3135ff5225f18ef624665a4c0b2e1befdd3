@@ -1,0 +1,116 @@
+%%
+%% This is file `ucmr.fd',
+%% generated with the docstrip utility.
+%%
+%% The original source files were:
+%%
+%% cmfonts.fdd  (with options: `Ucmr')
+%% 
+%% This is a generated file.
+%% 
+%% The source is maintained by the LaTeX Project team and bug
+%% reports for it can be opened at https://latex-project.org/bugs.html
+%% (but please observe conditions on bug reports sent to that address!)
+%% 
+%% 
+%% Copyright (C) 1993-2021
+%% The LaTeX Project and any individual authors listed elsewhere
+%% in this file.
+%% 
+%% This file was generated from file(s) of the LaTeX base system.
+%% --------------------------------------------------------------
+%% 
+%% It may be distributed and/or modified under the
+%% conditions of the LaTeX Project Public License, either version 1.3c
+%% of this license or (at your option) any later version.
+%% The latest version of this license is in
+%%    https://www.latex-project.org/lppl.txt
+%% and version 1.3c or later is part of all distributions of LaTeX
+%% version 2008 or later.
+%% 
+%% This file may only be distributed together with a copy of the LaTeX
+%% base system. You may however distribute the LaTeX base system without
+%% such generated files.
+%% 
+%% The list of all files belonging to the LaTeX base distribution is
+%% given in the file `manifest.txt'. See also `legal.txt' for additional
+%% information.
+%% 
+%% In particular, permission is granted to customize the declarations in
+%% this file to serve the needs of your installation.
+%% 
+%% However, a modified version of this file under its original name
+%% should not be distributed as part of a standard LaTeX distribution, as
+%% the modification will be nontransparent for the user of that
+%% distribution (and thus violating clause 6a of the LPPL license),
+%% making successful document exchange impossible.
+%% 
+\ProvidesFile{ucmr.fd}
+        [2019/12/16 v2.5j Standard LaTeX font definitions]
+\DeclareFontFamily{U}{cmr}{\hyphenchar\font45 }
+\DeclareFontShape{U}{cmr}{m}{n}%
+     {<5><6><7><8><9><10><12>gen*cmr%
+      <10.95>cmr10%
+      <14.4>cmr12%
+      <17.28><20.74><24.88>cmr17}{}
+\DeclareFontShape{U}{cmr}{m}{sl}%
+     {%
+      <5><6><7>cmsl8%
+      <8><9>gen*cmsl%
+      <10><10.95>cmsl10%
+      <12><14.4><17.28><20.74><24.88>cmsl12%
+      }{}
+\DeclareFontShape{U}{cmr}{m}{it}%
+     {%
+      <5><6><7>cmti7%
+      <8>cmti8%
+      <9>cmti9%
+      <10><10.95>cmti10%
+      <12><14.4><17.28><20.74><24.88>cmti12%
+      }{}
+\DeclareFontShape{U}{cmr}{m}{sc}%
+     {%
+      <5><6><7><8><9><10><10.95><12>%
+      <14.4><17.28><20.74><24.88>cmcsc10%
+      }{}
+% Warning: please note that the upright shape below is
+%          used for the \pounds symbol of LaTeX. So this
+%          font definition shouldn't be removed.
+%
+\DeclareFontShape{U}{cmr}{m}{ui}
+   {
+      <5><6><7><8><9><10><10.95><12>%
+      <14.4><17.28><20.74><24.88>cmu10%
+      }{}
+%%%%%%% bold series
+\DeclareFontShape{U}{cmr}{b}{n}%
+     {%
+      <5><6><7><8><9><10><10.95><12>%
+      <14.4><17.28><20.74><24.88>cmb10%
+      }{}
+%%%%%%%% bold extended series
+\DeclareFontShape{U}{cmr}{bx}{n}%
+   {%
+      <5><6><7><8><9>gen*cmbx%
+      <10><10.95>cmbx10%
+      <12><14.4><17.28><20.74><24.88>cmbx12%
+      }{}
+\DeclareFontShape{U}{cmr}{bx}{sl}%
+      {%
+      <5><6><7><8><9>%
+      <10><10.95><12><14.4><17.28><20.74><24.88>cmbxsl10%
+      }{}
+\DeclareFontShape{U}{cmr}{bx}{it}%
+      {%
+      <5><6><7><8><9>%
+      <10><10.95><12><14.4><17.28><20.74><24.88>cmbxti10%
+      }{}
+% Again this is necessary for a correct \pounds symbol in
+% the cmr fonts Hopefully the dc/ec font layout will take
+% over soon.
+%
+\DeclareFontShape{U}{cmr}{bx}{ui}%
+      {<->sub*cmr/m/ui}{}
+\endinput
+%%
+%% End of file `ucmr.fd'.

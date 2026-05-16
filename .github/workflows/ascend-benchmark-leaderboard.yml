@@ -2,6 +2,7 @@ name: Ascend Benchmark Leaderboard
 
 on:
   pull_request:
+    types: [opened, reopened, synchronize, labeled]
   push:
     branches: [main]
   workflow_dispatch:
@@ -59,10 +60,10 @@ on:
         required: false
         type: string
         default: ""
- 
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -78,12 +79,13 @@ jobs:
           echo "Skipping Ascend benchmark on fork PRs because this workflow requires a self-hosted Ascend runner and trusted execution." >> "$GITHUB_STEP_SUMMARY"
 
   ascend-benchmark:
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on:
       - self-hosted
       - linux-aarch64-a2b3-0
       - docker
-      - ascend-benchmark
     timeout-minutes: 60
     env:
       HF_HUB_DISABLE_TELEMETRY: "1"
@@ -111,66 +113,16 @@ jobs:
       BENCH_OUTPUT_LEN: ${{ github.event_name == 'workflow_dispatch' && inputs.output_length || '' }}
       HARDWARE_VENDOR: Huawei
       HARDWARE_CHIP_MODEL: 910B3
-      SOC_VERSION: ascend910b3
       CHIP_COUNT: "1"
       NODE_COUNT: "1"
       ALLOW_RANDOM_HF_PUBLISH: ${{ vars.VLLM_HUST_ALLOW_RANDOM_HF_PUBLISH || '0' }}
       WEBSITE_LEADERBOARD_URL: ${{ vars.VLLM_HUST_LEADERBOARD_URL || '' }}
       PUBLISH_TO_HF: ${{ (((github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.VLLM_HUST_PUBLISH_BENCHMARK_ON_MAIN == '1') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && vars.VLLM_HUST_PUBLISH_BENCHMARK_ON_PR == '1') || (github.event_name == 'workflow_dispatch' && inputs.publish_to_hf)) && secrets.HF_TOKEN != '') && '1' || '0' }}
-      TARGET_REPO_URL: git@github.com:${{ github.repository }}.git
+      TARGET_REPO_URL: https://github.com/${{ github.repository }}.git
       TARGET_REPO_SHA: ${{ github.sha }}
-      ASCEND_RUNTIME_MANAGER_REPO_URL: git@github.com:vLLM-HUST/ascend-runtime-manager.git
-      ASCEND_RUNTIME_MANAGER_REPO: ${{ github.workspace }}/ascend-runtime-manager
+      HUST_ASCEND_MANAGER_REPO: ${{ github.workspace }}/ascend-runtime-manager
 
     steps:
-      - name: Configure GitHub SSH checkout
-        env:
-          VLLM_HUST_BENCHMARK_SSH_KEY: ${{ secrets.VLLM_ASCEND_HUST_BENCHMARK_SSH_KEY }}
-        run: |
-          set -euo pipefail
-
-          if [[ -z "${VLLM_HUST_BENCHMARK_SSH_KEY}" ]]; then
-            echo "VLLM_ASCEND_HUST_BENCHMARK_SSH_KEY is required for git@github.com checkout." >&2
-            exit 2
-          fi
-
-          mkdir -p "$HOME/.ssh"
-          chmod 700 "$HOME/.ssh"
-
-          key_file="$HOME/.ssh/vllm_hust_benchmark_key"
-          printf '%s\n' "$VLLM_HUST_BENCHMARK_SSH_KEY" > "$key_file"
-          chmod 600 "$key_file"
-
-          known_hosts_tmp="$(mktemp)"
-          ssh-keyscan -t rsa,ecdsa,ed25519 github.com > "$known_hosts_tmp" 2>/dev/null
-          if [[ ! -s "$known_hosts_tmp" ]]; then
-            echo "Unable to scan github.com host keys." >&2
-            exit 2
-          fi
-          cat "$known_hosts_tmp" >> "$HOME/.ssh/known_hosts"
-          chmod 600 "$HOME/.ssh/known_hosts"
-
-          cat > "$HOME/.ssh/config" <<EOF
-          Host github.com
-            HostName github.com
-            User git
-            IdentityFile $key_file
-            IdentitiesOnly yes
-            StrictHostKeyChecking yes
-          EOF
-          chmod 600 "$HOME/.ssh/config"
-
-          ssh_output="$(ssh -o BatchMode=yes -T git@github.com 2>&1)" && ssh_status=$? || ssh_status=$?
-          echo "$ssh_output"
-          if [[ "$ssh_output" == *"Permission denied"* ]]; then
-            echo "GitHub SSH authentication failed for the configured key." >&2
-            exit 2
-          fi
-          if [[ "$ssh_status" -ne 0 && "$ssh_status" -ne 1 ]]; then
-            echo "GitHub SSH probe failed with status $ssh_status." >&2
-            exit "$ssh_status"
-          fi
-
       - name: Checkout target repo with retry
         run: |
           clone_with_retry() {
@@ -238,7 +190,7 @@ jobs:
             return 1
           }
 
-          clone_with_retry "git@github.com:vLLM-HUST/vllm-hust-benchmark.git" "$GITHUB_WORKSPACE/vllm-hust-benchmark"
+          clone_with_retry "https://github.com/vLLM-HUST/vllm-hust-benchmark.git" "$GITHUB_WORKSPACE/vllm-hust-benchmark"
 
       - name: Checkout website repo
         run: |
@@ -265,26 +217,20 @@ jobs:
             return 1
           }
 
-          clone_with_retry "git@github.com:vLLM-HUST/vllm-hust-website.git" "$GITHUB_WORKSPACE/vllm-hust-website"
+          clone_with_retry "https://github.com/vLLM-HUST/vllm-hust-website.git" "$GITHUB_WORKSPACE/vllm-hust-website"
 
       - name: Checkout vllm-ascend-hust repo
         run: |
           clone_with_retry() {
             local repo_url=$1
             local target_dir=$2
-            local branch_name=${3:-}
             local attempts=4
             local delay_seconds=15
             local try=1
 
             rm -rf "$target_dir"
             while [[ "$try" -le "$attempts" ]]; do
-              if [[ -n "$branch_name" ]] && git ls-remote --exit-code --heads "$repo_url" "$branch_name" >/dev/null 2>&1; then
-                echo "Cloning $repo_url at branch $branch_name"
-                if git clone --depth 1 --branch "$branch_name" "$repo_url" "$target_dir"; then
-                  return 0
-                fi
-              elif git clone --depth 1 "$repo_url" "$target_dir"; then
+              if git clone --depth 1 "$repo_url" "$target_dir"; then
                 return 0
               fi
               echo "Clone failed ($try/$attempts): $repo_url" >&2
@@ -298,8 +244,7 @@ jobs:
             return 1
           }
 
-          ascend_ref="${VLLM_ASCEND_HUST_REPO_REF:-${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-}}}"
-          clone_with_retry "git@github.com:vLLM-HUST/vllm-ascend-hust.git" "$GITHUB_WORKSPACE/vllm-ascend-hust" "$ascend_ref"
+          clone_with_retry "https://github.com/vLLM-HUST/vllm-ascend-hust.git" "$GITHUB_WORKSPACE/vllm-ascend-hust"
 
       - name: Checkout ascend-runtime-manager repo
         run: |
@@ -326,7 +271,7 @@ jobs:
             return 1
           }
 
-          clone_with_retry "$ASCEND_RUNTIME_MANAGER_REPO_URL" "$ASCEND_RUNTIME_MANAGER_REPO"
+          clone_with_retry "https://github.com/vLLM-HUST/ascend-runtime-manager.git" "$GITHUB_WORKSPACE/ascend-runtime-manager"
 
       - name: Prepare Hugging Face cache directories
         run: |
@@ -334,84 +279,40 @@ jobs:
           chmod 700 "$HF_HOME"
           echo "HF endpoint: $HF_ENDPOINT"
 
-      - name: Ensure Ascend runtime manager is available
+      - name: Resolve benchmark Python runtime
+        env:
+          VLLM_ASCEND_HUST_REPO: ${{ github.workspace }}/vllm-ascend-hust
         run: |
-          python -m pip install --upgrade --no-deps "$ASCEND_RUNTIME_MANAGER_REPO"
-
-          python -c 'import hust_ascend_manager; print(hust_ascend_manager.__file__)'
-          command -v hust-ascend-manager
-          hust-ascend-manager --help >/dev/null
+          source "${VLLM_ASCEND_HUST_REPO}/scripts/hust_ascend_manager_helper.sh"
+          PYTHON_BIN="$(hust_resolve_python_bin)"
+          echo "PYTHON_BIN=$PYTHON_BIN" >> "$GITHUB_ENV"
+          dirname "$PYTHON_BIN" >> "$GITHUB_PATH"
+          "$PYTHON_BIN" --version
 
       - name: Acquire Ascend hardware lock
         run: bash .github/workflows/scripts/acquire_ascend_hardware_lock.sh
 
       - name: Prepare Ascend runtime and install repos
         env:
-          COMPILE_CUSTOM_KERNELS: "0"
           VLLM_ASCEND_HUST_REPO: ${{ github.workspace }}/vllm-ascend-hust
           VLLM_HUST_BENCHMARK_REPO: ${{ github.workspace }}/vllm-hust-benchmark
         run: |
           source "${VLLM_ASCEND_HUST_REPO}/scripts/use_single_ascend_env.sh"
           bash "${VLLM_ASCEND_HUST_REPO}/scripts/install_local_ascend_plugin.sh" "$VLLM_ASCEND_HUST_REPO"
-          python -m pip install --upgrade --retries 8 --timeout 120 "numpy<2.0.0"
-          grep -v '^torch==' requirements/build.txt > /tmp/vllm-hust-build-requirements.txt
-          python -m pip install --upgrade --retries 8 --timeout 120 -r /tmp/vllm-hust-build-requirements.txt
-          python -m pip install --upgrade --retries 8 --timeout 120 -r requirements/common.txt
-          TORCH_DEVICE_BACKEND_AUTOLOAD=0 python -m pip install -e . --no-build-isolation --no-deps
-          python -m pip install -e "${VLLM_HUST_BENCHMARK_REPO}[publish]" jsonschema
+          "${PYTHON_BIN}" -m pip install -e . --no-build-isolation --no-deps
+          "${PYTHON_BIN}" -m pip install -e "${VLLM_HUST_BENCHMARK_REPO}[publish]" jsonschema
 
       - name: Verify installation
         env:
-          COMPILE_CUSTOM_KERNELS: "0"
-          TORCH_DEVICE_BACKEND_AUTOLOAD: "0"
           VLLM_ASCEND_HUST_REPO: ${{ github.workspace }}/vllm-ascend-hust
         run: |
           source "${VLLM_ASCEND_HUST_REPO}/scripts/use_single_ascend_env.sh"
-          python --version
-          python - <<'PY'
-          import importlib.metadata as metadata
-          import importlib.util
-          import os
-          from pathlib import Path
-
-          def module_path(module_name: str) -> Path:
-              spec = importlib.util.find_spec(module_name)
-              if spec is None or spec.origin is None:
-                  raise SystemExit(f"{module_name} is not importable")
-              return Path(spec.origin).resolve()
-
-          def dist_version(*dist_names: str) -> str:
-              for dist_name in dist_names:
-                  try:
-                      return metadata.version(dist_name)
-                  except metadata.PackageNotFoundError:
-                      continue
-              return "<unknown>"
-
-          expected_repo = Path(os.environ["VLLM_ASCEND_HUST_REPO"]).resolve()
-          vllm_path = module_path("vllm")
-          vllm_ascend_path = module_path("vllm_ascend")
-          platform_plugins = metadata.entry_points(group="vllm.platform_plugins")
-          ascend_plugin = [ep for ep in platform_plugins if ep.name == "ascend"]
-
-          print(f"vLLM version: {dist_version('vllm-hust', 'vllm')}")
-          print(f"vllm_ascend version: {dist_version('vllm-ascend-hust', 'vllm-ascend')}")
-          print(f"vLLM module path: {vllm_path}")
-          print(f"vllm_ascend module path: {vllm_ascend_path}")
-          print(f"vllm.platform_plugins ascend entry point: {ascend_plugin[0].value if ascend_plugin else '<missing>'}")
-
-          if expected_repo not in vllm_ascend_path.parents:
-              raise SystemExit(
-                  "vllm_ascend is not resolved from the checked-out workspace: "
-                  f"{vllm_ascend_path} (expected under {expected_repo})"
-              )
-          if not ascend_plugin:
-              raise SystemExit("ascend platform plugin entry point is not installed")
-          PY
+          "${PYTHON_BIN}" --version
+          "${PYTHON_BIN}" -c "import vllm; print(f'vLLM version: {vllm.__version__}')"
+          "${PYTHON_BIN}" -c "import importlib; importlib.import_module('vllm.entrypoints.cli.main'); print('vLLM CLI module import: ok')"
 
       - name: Run benchmark CI and optional HF sync
         env:
-          COMPILE_CUSTOM_KERNELS: "0"
           WORKSPACE_ROOT: ${{ github.workspace }}
           VLLM_ASCEND_HUST_REPO: ${{ github.workspace }}/vllm-ascend-hust
           VLLM_HUST_REPO: ${{ github.workspace }}
@@ -424,10 +325,7 @@ jobs:
 
       - name: Cleanup leftover Ascend CI processes
         if: always()
-        env:
-          VLLM_ASCEND_HUST_REPO: ${{ github.workspace }}/vllm-ascend-hust
         run: |
-          source "${VLLM_ASCEND_HUST_REPO}/scripts/use_single_ascend_env.sh"
           bash .github/workflows/scripts/cleanup_ascend_ci_processes.sh
 
       - name: Release Ascend hardware lock
@@ -437,7 +335,7 @@ jobs:
       - name: Build benchmark summary artifacts
         if: always()
         run: |
-          python - <<'PY'
+          "${PYTHON_BIN}" - <<'PY'
           import json
           import os
           from pathlib import Path
@@ -446,6 +344,7 @@ jobs:
           result_root = Path(os.environ['GITHUB_WORKSPACE']) / '.benchmarks' / 'ci' / run_id
           raw_result = result_root / 'raw_benchmark.json'
           leaderboard_entry = result_root / 'submissions' / run_id / 'run_leaderboard.json'
+          runner_preflight_failure = result_root / 'runner_preflight_failure.txt'
           summary_path = Path(os.environ['GITHUB_STEP_SUMMARY'])
           comment_path = result_root / 'benchmark_comment.md'
           run_url = f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
@@ -473,6 +372,13 @@ jobs:
             f'- Publish mode: `{publish_mode}`',
             f'- Workflow run: [view run]({run_url})',
           ]
+          if runner_preflight_failure.is_file():
+            skip_note = (
+              '- Runner health: `unhealthy` '
+              '(benchmark skipped before vLLM startup because torch_npu basic allocation failed)'
+            )
+            lines.append(skip_note)
+            comment_lines.append(skip_note)
           if raw_result.is_file():
             payload = json.loads(raw_result.read_text(encoding='utf-8'))
             metric_lines = [

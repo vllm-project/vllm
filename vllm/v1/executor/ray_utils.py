@@ -7,6 +7,8 @@ from collections import defaultdict
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Union
 
+import numpy as np
+
 import vllm.platforms
 from vllm.config import ParallelConfig
 from vllm.distributed import get_pp_group
@@ -25,6 +27,17 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 PG_WAIT_TIMEOUT = 1800
+
+# Env vars that are worker-specific and must NOT be copied from the
+# driver to Ray workers — they are set per-worker after GPU discovery.
+WORKER_SPECIFIC_ENV_VARS: set[str] = {
+    "VLLM_HOST_IP",
+    "VLLM_HOST_PORT",
+    "LOCAL_RANK",
+    "CUDA_VISIBLE_DEVICES",
+    "HIP_VISIBLE_DEVICES",
+    "ROCR_VISIBLE_DEVICES",
+}
 
 try:
     import ray
@@ -50,6 +63,8 @@ try:
             # The flag indicates is set_device is called on
             # that thread.
             self.compiled_dag_cuda_device_set = False
+
+        rpc_rank: int
 
         def adjust_rank(self, rank_mapping: dict[int, int]) -> None:
             """
@@ -177,6 +192,48 @@ except ImportError as e:
     RayWorkerWrapper = None  # type: ignore
 
 
+def detach_zero_copy_from_model_runner_output(output: "ModelRunnerOutput") -> None:
+    """Detach Ray SHM-channel zero-copy buffers from a ModelRunnerOutput in-place.
+
+    Ray compiled DAG SHM channels may return zero-copy objects (e.g. `np.ndarray`)
+    backed by Ray's shared-memory object store. Ray's channel docs explicitly
+    warn that subsequent reads may block if such an object is still in scope.
+
+    vLLM can return numpy-backed logprobs in `ModelRunnerOutput.logprobs`. If
+    those arrays are backed by Ray SHM (commonly read-only), retaining them in
+    scope across scheduler iterations can stall the channel and eventually hit
+    `RAY_CGRAPH_get_timeout`.
+
+    Copy read-only numpy arrays so the returned output no longer retains
+    references to Ray's shared-memory buffers.
+
+    We intentionally do not touch `prompt_logprobs_dict`: those entries are
+    `LogprobsTensors` backed by PyTorch-owned CPU tensors (`to_cpu_nonblocking`
+    or `empty_cpu`), not NumPy views decoded from Ray channels.
+    """
+    if output.logprobs is None:
+        return
+
+    token_ids, logprobs, ranks, cu_num_generated_tokens = output.logprobs
+
+    def _copy_if_readonly(arr):
+        if isinstance(arr, np.ndarray) and not arr.flags.writeable:
+            return arr.copy()
+        return arr
+
+    # `cu_num_generated_tokens` is already a plain Python list (or None), so it
+    # never aliases Ray SHM buffers and can be reused as-is.
+    token_ids_c = _copy_if_readonly(token_ids)
+    logprobs_c = _copy_if_readonly(logprobs)
+    ranks_c = _copy_if_readonly(ranks)
+    if token_ids_c is token_ids and logprobs_c is logprobs and ranks_c is ranks:
+        return
+
+    output.logprobs = type(output.logprobs)(
+        token_ids_c, logprobs_c, ranks_c, cu_num_generated_tokens
+    )
+
+
 class FutureWrapper(Future):
     """A wrapper around Ray output reference to meet the interface
     of .execute_model(): The top level (core busy loop) expects .result() api
@@ -194,8 +251,11 @@ class FutureWrapper(Future):
     def result(self, timeout=None):
         outputs = ray.get(self.ref_or_refs, timeout=timeout)
         if self.aggregator is None:
+            detach_zero_copy_from_model_runner_output(outputs)
             return outputs
 
+        for output in outputs:
+            detach_zero_copy_from_model_runner_output(output)
         return self.aggregator.aggregate(outputs, output_rank=0)
 
 
@@ -214,13 +274,17 @@ def assert_ray_available():
 
 
 def _verify_bundles(
-    placement_group: "PlacementGroup", parallel_config: ParallelConfig, device_str: str
+    placement_group: "PlacementGroup",
+    parallel_config: ParallelConfig,
+    device_str: str,
+    require_gpu_on_driver: bool = True,
 ):
     """Verify a given placement group has bundles located in the right place.
 
     There are 2 rules.
     - Warn if all tensor parallel workers cannot fit in a single node.
-    - Fail if driver node is not included in a placement group.
+    - Fail if driver node is not included in a placement group
+      (only when require_gpu_on_driver is True).
     """
     assert ray.is_initialized(), (
         "Ray is not initialized although distributed-executor-backend is ray."
@@ -237,7 +301,7 @@ def _verify_bundles(
         node_id_to_bundle[node_id].append(bundles[bundle_idx])
     driver_node_id = ray.get_runtime_context().get_node_id()
 
-    if driver_node_id not in node_id_to_bundle:
+    if require_gpu_on_driver and driver_node_id not in node_id_to_bundle:
         raise RuntimeError(
             f"driver node id {driver_node_id} is not included in a placement "
             f"group {placement_group.id}. Node id -> bundles "
@@ -264,6 +328,115 @@ def _verify_bundles(
                 node_id,
                 parallel_config.tensor_parallel_size,
             )
+
+
+def build_actor_name(
+    instance_id: str,
+    rank: int,
+    tp_size: int,
+    pp_size: int,
+    pcp_size: int,
+) -> str:
+    """Build a descriptive Ray actor name for dashboard visibility."""
+    name = f"vllm_Worker_{instance_id}"
+    if tp_size > 1:
+        name += f"_TP{rank % tp_size}"
+    if pp_size > 1:
+        name += f"_PP{(rank // tp_size) % pp_size}"
+    if pcp_size > 1:
+        name += f"_PCP{rank // (tp_size * pp_size)}"
+    return name
+
+
+def get_bundles_for_indices(
+    placement_group: "PlacementGroup",
+    bundle_indices: list[int],
+    world_size: int,
+) -> list[tuple[int, str, str]]:
+    """
+    Return GPU bundle indices paired with node IDs and node IPs for
+    explicit bundle indices specified via VLLM_RAY_BUNDLE_INDICES.
+    """
+    assert len(bundle_indices) == world_size, (
+        "VLLM_RAY_BUNDLE_INDICES must have the same size"
+        f" as the world size, but got {bundle_indices=} "
+        f"and {world_size=}"
+    )
+    assert len(set(bundle_indices)) == len(bundle_indices), (
+        "VLLM_RAY_BUNDLE_INDICES cannot have duplicate values,"
+        f" but got {bundle_indices=}"
+    )
+
+    pg_data = placement_group_table(placement_group)
+    pg_bundle_to_node = pg_data["bundles_to_node_id"]
+    node_id_to_ip = {
+        n["NodeID"]: n["NodeManagerAddress"] for n in ray.nodes() if n["Alive"]
+    }
+    return [
+        (bid, pg_bundle_to_node[bid], node_id_to_ip[pg_bundle_to_node[bid]])
+        for bid in bundle_indices
+    ]
+
+
+def get_bundles_sorted_by_node(
+    placement_group: "PlacementGroup",
+) -> list[tuple[int, str, str]]:
+    """
+    Return GPU bundle indices paired with node IDs and node IPs,
+    sorted driver-first.
+
+    This utility has to be invoked from the driver node.
+
+    Example: 3-node cluster, driver on node-A, PG bundles spread
+    across nodes:
+
+      Input: [
+          (0, node-C),
+          (1, node-A),
+          (2, node-B),
+          (3, node-C),
+          (4, node-A),
+          (5, node-B),
+      ]
+      Output: [
+          (1, node-A),
+          (4, node-A),
+          (2, node-B),
+          (5, node-B),
+          (0, node-C),
+          (3, node-C),
+      ]
+    """
+    pg_data = placement_group_table(placement_group)
+    bundle_to_node = pg_data["bundles_to_node_id"]
+
+    ray_device_key = current_platform.ray_device_key
+    if not ray_device_key:
+        raise ValueError(
+            f"current platform {current_platform.device_name} does not support ray."
+        )
+
+    node_id_to_ip = {
+        n["NodeID"]: n["NodeManagerAddress"] for n in ray.nodes() if n["Alive"]
+    }
+
+    bundle_specs = placement_group.bundle_specs
+    assert bundle_specs is not None
+    bundle_to_node_id: list[tuple[int, str, str]] = []
+    for bundle_idx, bundle in enumerate(bundle_specs):
+        if bundle.get(ray_device_key):
+            node_id = bundle_to_node.get(bundle_idx)
+            bundle_to_node_id.append((bundle_idx, node_id, node_id_to_ip[node_id]))
+
+    driver_node = ray.get_runtime_context().get_node_id()
+
+    def _sort_key(item):
+        _, node_id, _ = item
+        return (0 if node_id == driver_node else 1, node_id)
+
+    bundle_to_node_id.sort(key=_sort_key)
+
+    return bundle_to_node_id
 
 
 def _wait_until_pg_ready(current_placement_group: "PlacementGroup"):
@@ -352,6 +525,7 @@ def _wait_until_pg_removed(current_placement_group: "PlacementGroup"):
 def initialize_ray_cluster(
     parallel_config: ParallelConfig,
     ray_address: str | None = None,
+    require_gpu_on_driver: bool = True,
 ):
     """Initialize the distributed cluster with Ray.
 
@@ -363,15 +537,21 @@ def initialize_ray_cluster(
         parallel_config: The configurations for parallel execution.
         ray_address: The address of the Ray cluster. If None, uses
             the default Ray cluster address.
+        require_gpu_on_driver: If True (default), require at least one GPU
+            on the current (driver) node and pin the first PG bundle to it.
+            Set to False for executors like RayExecutorV2 where all GPU work
+            is delegated to remote Ray actors.
     """
     assert_ray_available()
     from vllm.platforms import current_platform
 
+    # Disable Ray usage stats collection
+    if os.environ.get("RAY_USAGE_STATS_ENABLED", "0") != "1":
+        os.environ["RAY_USAGE_STATS_ENABLED"] = "0"
+
     # Prevalidate GPU requirements before Ray processing
     if current_platform.is_cuda() and parallel_config.world_size > 1:
-        from vllm.utils.torch_utils import cuda_device_count_stateless
-
-        available_gpus = cuda_device_count_stateless()
+        available_gpus = current_platform.device_count()
         if parallel_config.world_size > available_gpus:
             logger.warning(
                 "Tensor parallel size (%d) exceeds available GPUs (%d). "
@@ -461,16 +641,20 @@ def initialize_ray_cluster(
         current_ip = get_ip()
         current_node_id = ray.get_runtime_context().get_node_id()
         current_node_resource = available_resources_per_node()[current_node_id]
-        if current_node_resource.get(device_str, 0) < 1:
-            raise ValueError(
-                f"Current node has no {device_str} available. "
-                f"{current_node_resource=}. vLLM engine cannot start without "
-                f"{device_str}. Make sure you have at least 1 {device_str} "
-                f"available in a node {current_node_id=} {current_ip=}."
-            )
-        # This way, at least bundle is required to be created in a current
-        # node.
-        placement_group_specs[0][f"node:{current_ip}"] = 0.001
+        # TODO (jeffreywang): require_gpu_on_driver should be always False
+        # after deprecating RayDistributedExecutor.
+        if require_gpu_on_driver:
+            if current_node_resource.get(device_str, 0) < 1:
+                raise ValueError(
+                    f"Current node has no {device_str} available. "
+                    f"{current_node_resource=}. vLLM engine cannot start "
+                    f"without {device_str}. Make sure you have at least 1 "
+                    f"{device_str} available in a node "
+                    f"{current_node_id=} {current_ip=}."
+                )
+            # This way, at least bundle is required to be created in a
+            # current node.
+            placement_group_specs[0][f"node:{current_ip}"] = 0.001
 
         # By default, Ray packs resources as much as possible.
         current_placement_group = ray.util.placement_group(
@@ -479,7 +663,9 @@ def initialize_ray_cluster(
         _wait_until_pg_ready(current_placement_group)
 
     assert current_placement_group is not None
-    _verify_bundles(current_placement_group, parallel_config, device_str)
+    _verify_bundles(
+        current_placement_group, parallel_config, device_str, require_gpu_on_driver
+    )
     # Set the placement group in the parallel config
     parallel_config.placement_group = current_placement_group
 

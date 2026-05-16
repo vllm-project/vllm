@@ -65,6 +65,14 @@ class KimiK2ReasoningParser(ReasoningParser):
                 "tokens in the tokenizer!"
             )
 
+    @property
+    def reasoning_start_str(self) -> str | None:
+        return self._start_token
+
+    @property
+    def reasoning_end_str(self) -> str | None:
+        return self._end_token
+
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         """
         Check if the reasoning content ends in the input_ids.

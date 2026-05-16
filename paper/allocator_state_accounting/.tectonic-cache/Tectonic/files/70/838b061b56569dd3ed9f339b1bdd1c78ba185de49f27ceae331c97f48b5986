@@ -1,0 +1,269 @@
+%%
+%% This is file `amssymb.sty',
+%% generated with the docstrip utility.
+%%
+%% The original source files were:
+%%
+%% amssymb.dtx 
+%% 
+%% This is a generated file.
+%% 
+%% Copyright 2001, 2009, 2013 American Mathematical Society.
+%% 
+%% American Mathematical Society
+%% Technical Support
+%% Publications Technical Group
+%% 201 Charles Street
+%% Providence, RI 02904
+%% USA
+%% tel: (401) 455-4080
+%%      (800) 321-4267 (USA and Canada only)
+%% fax: (401) 331-3842
+%% email: tech-support@ams.org
+%% 
+%% Unlimited copying and redistribution of this file are permitted as
+%% long as this file is not modified.  Modifications, and distribution
+%% of modified versions, are permitted, but only if the resulting file
+%% is renamed.
+%% 
+\NeedsTeXFormat{LaTeX2e}% LaTeX 2.09 can't be used (nor non-LaTeX)
+[1994/12/01]% LaTeX date must be December 1994 or later
+\ProvidesPackage{amssymb}[2013/01/14 v3.01 AMS font symbols]
+\DeclareOption{psamsfonts}{\PassOptionsToPackage{psamsfonts}{amsfonts}}
+\ProcessOptions\relax
+\RequirePackage{amsfonts}[1995/01/01]
+\@ifpackageloaded{stix}{%
+    \PackageWarningNoLine{amssymb}{The 'amssymb' package is redundant when
+      you are using the 'stix' package, so I'm not going to load amssymb}
+    \endinput
+}{}
+\let\square\relax \let\rightsquigarrow\square \let\lozenge\square
+\let\vartriangleright\square \let\vartriangleleft\square
+\let\trianglerighteq\square \let\trianglelefteq\square
+\begingroup \catcode`\"=12
+\DeclareMathSymbol{\boxdot}       {\mathbin}{AMSa}{"00}
+\DeclareMathSymbol{\boxplus}      {\mathbin}{AMSa}{"01}
+\DeclareMathSymbol{\boxtimes}     {\mathbin}{AMSa}{"02}
+\DeclareMathSymbol{\square}       {\mathord}{AMSa}{"03}
+\DeclareMathSymbol{\blacksquare}  {\mathord}{AMSa}{"04}
+\DeclareMathSymbol{\centerdot}    {\mathbin}{AMSa}{"05}
+\DeclareMathSymbol{\lozenge}      {\mathord}{AMSa}{"06}
+\DeclareMathSymbol{\blacklozenge} {\mathord}{AMSa}{"07}
+\DeclareMathSymbol{\circlearrowright}   {\mathrel}{AMSa}{"08}
+\DeclareMathSymbol{\circlearrowleft}    {\mathrel}{AMSa}{"09}
+%% In amsfonts.sty:
+%%\DeclareMathSymbol{\rightleftharpoons}{\mathrel}{AMSa}{"0A}
+\DeclareMathSymbol{\leftrightharpoons}  {\mathrel}{AMSa}{"0B}
+\DeclareMathSymbol{\boxminus}     {\mathbin}{AMSa}{"0C}
+\DeclareMathSymbol{\Vdash}        {\mathrel}{AMSa}{"0D}
+\DeclareMathSymbol{\Vvdash}       {\mathrel}{AMSa}{"0E}
+\DeclareMathSymbol{\vDash}        {\mathrel}{AMSa}{"0F}
+\DeclareMathSymbol{\twoheadrightarrow}  {\mathrel}{AMSa}{"10}
+\DeclareMathSymbol{\twoheadleftarrow}   {\mathrel}{AMSa}{"11}
+\DeclareMathSymbol{\leftleftarrows}     {\mathrel}{AMSa}{"12}
+\DeclareMathSymbol{\rightrightarrows}   {\mathrel}{AMSa}{"13}
+\DeclareMathSymbol{\upuparrows}         {\mathrel}{AMSa}{"14}
+\DeclareMathSymbol{\downdownarrows} {\mathrel}{AMSa}{"15}
+\DeclareMathSymbol{\upharpoonright} {\mathrel}{AMSa}{"16}
+ \global\let\restriction\upharpoonright
+\DeclareMathSymbol{\downharpoonright}   {\mathrel}{AMSa}{"17}
+\DeclareMathSymbol{\upharpoonleft}  {\mathrel}{AMSa}{"18}
+\DeclareMathSymbol{\downharpoonleft}{\mathrel}{AMSa}{"19}
+\DeclareMathSymbol{\rightarrowtail} {\mathrel}{AMSa}{"1A}
+\DeclareMathSymbol{\leftarrowtail}  {\mathrel}{AMSa}{"1B}
+\DeclareMathSymbol{\leftrightarrows}{\mathrel}{AMSa}{"1C}
+\DeclareMathSymbol{\rightleftarrows}{\mathrel}{AMSa}{"1D}
+\DeclareMathSymbol{\Lsh}            {\mathrel}{AMSa}{"1E}
+\DeclareMathSymbol{\Rsh}            {\mathrel}{AMSa}{"1F}
+\DeclareMathSymbol{\rightsquigarrow}  {\mathrel}{AMSa}{"20}
+\DeclareMathSymbol{\leftrightsquigarrow}{\mathrel}{AMSa}{"21}
+\DeclareMathSymbol{\looparrowleft}  {\mathrel}{AMSa}{"22}
+\DeclareMathSymbol{\looparrowright} {\mathrel}{AMSa}{"23}
+\DeclareMathSymbol{\circeq}       {\mathrel}{AMSa}{"24}
+\DeclareMathSymbol{\succsim}      {\mathrel}{AMSa}{"25}
+\DeclareMathSymbol{\gtrsim}       {\mathrel}{AMSa}{"26}
+\DeclareMathSymbol{\gtrapprox}    {\mathrel}{AMSa}{"27}
+\DeclareMathSymbol{\multimap}     {\mathrel}{AMSa}{"28}
+\DeclareMathSymbol{\therefore}    {\mathrel}{AMSa}{"29}
+\DeclareMathSymbol{\because}      {\mathrel}{AMSa}{"2A}
+\DeclareMathSymbol{\doteqdot}     {\mathrel}{AMSa}{"2B}
+ \global\let\Doteq\doteqdot
+\DeclareMathSymbol{\triangleq}    {\mathrel}{AMSa}{"2C}
+\DeclareMathSymbol{\precsim}      {\mathrel}{AMSa}{"2D}
+\DeclareMathSymbol{\lesssim}      {\mathrel}{AMSa}{"2E}
+\DeclareMathSymbol{\lessapprox}   {\mathrel}{AMSa}{"2F}
+\DeclareMathSymbol{\eqslantless}  {\mathrel}{AMSa}{"30}
+\DeclareMathSymbol{\eqslantgtr}   {\mathrel}{AMSa}{"31}
+\DeclareMathSymbol{\curlyeqprec}  {\mathrel}{AMSa}{"32}
+\DeclareMathSymbol{\curlyeqsucc}  {\mathrel}{AMSa}{"33}
+\DeclareMathSymbol{\preccurlyeq}  {\mathrel}{AMSa}{"34}
+\DeclareMathSymbol{\leqq}         {\mathrel}{AMSa}{"35}
+\DeclareMathSymbol{\leqslant}     {\mathrel}{AMSa}{"36}
+\DeclareMathSymbol{\lessgtr}      {\mathrel}{AMSa}{"37}
+\DeclareMathSymbol{\backprime}    {\mathord}{AMSa}{"38}
+\DeclareMathSymbol{\risingdotseq} {\mathrel}{AMSa}{"3A}
+\DeclareMathSymbol{\fallingdotseq}{\mathrel}{AMSa}{"3B}
+\DeclareMathSymbol{\succcurlyeq}  {\mathrel}{AMSa}{"3C}
+\DeclareMathSymbol{\geqq}         {\mathrel}{AMSa}{"3D}
+\DeclareMathSymbol{\geqslant}     {\mathrel}{AMSa}{"3E}
+\DeclareMathSymbol{\gtrless}      {\mathrel}{AMSa}{"3F}
+%% in amsfonts.sty
+%% \DeclareMathSymbol{\sqsubset}    {\mathrel}{AMSa}{"40}
+%% \DeclareMathSymbol{\sqsupset}    {\mathrel}{AMSa}{"41}
+\DeclareMathSymbol{\vartriangleright}{\mathrel}{AMSa}{"42}
+\DeclareMathSymbol{\vartriangleleft} {\mathrel}{AMSa}{"43}
+\DeclareMathSymbol{\trianglerighteq} {\mathrel}{AMSa}{"44}
+\DeclareMathSymbol{\trianglelefteq}  {\mathrel}{AMSa}{"45}
+\DeclareMathSymbol{\bigstar}    {\mathord}{AMSa}{"46}
+\DeclareMathSymbol{\between}    {\mathrel}{AMSa}{"47}
+\DeclareMathSymbol{\blacktriangledown}  {\mathord}{AMSa}{"48}
+\DeclareMathSymbol{\blacktriangleright} {\mathrel}{AMSa}{"49}
+\DeclareMathSymbol{\blacktriangleleft}  {\mathrel}{AMSa}{"4A}
+\DeclareMathSymbol{\vartriangle}        {\mathrel}{AMSa}{"4D}
+\DeclareMathSymbol{\blacktriangle}      {\mathord}{AMSa}{"4E}
+\DeclareMathSymbol{\triangledown}       {\mathord}{AMSa}{"4F}
+\DeclareMathSymbol{\eqcirc}       {\mathrel}{AMSa}{"50}
+\DeclareMathSymbol{\lesseqgtr}    {\mathrel}{AMSa}{"51}
+\DeclareMathSymbol{\gtreqless}    {\mathrel}{AMSa}{"52}
+\DeclareMathSymbol{\lesseqqgtr}   {\mathrel}{AMSa}{"53}
+\DeclareMathSymbol{\gtreqqless}   {\mathrel}{AMSa}{"54}
+\DeclareMathSymbol{\Rrightarrow}  {\mathrel}{AMSa}{"56}
+\DeclareMathSymbol{\Lleftarrow}   {\mathrel}{AMSa}{"57}
+\DeclareMathSymbol{\veebar}       {\mathbin}{AMSa}{"59}
+\DeclareMathSymbol{\barwedge}     {\mathbin}{AMSa}{"5A}
+\DeclareMathSymbol{\doublebarwedge} {\mathbin}{AMSa}{"5B}
+%% In amsfonts.sty
+%%\DeclareMathSymbol{\angle}        {\mathord}{AMSa}{"5C}
+\DeclareMathSymbol{\measuredangle}  {\mathord}{AMSa}{"5D}
+\DeclareMathSymbol{\sphericalangle} {\mathord}{AMSa}{"5E}
+\DeclareMathSymbol{\varpropto}    {\mathrel}{AMSa}{"5F}
+\DeclareMathSymbol{\smallsmile}   {\mathrel}{AMSa}{"60}
+\DeclareMathSymbol{\smallfrown}   {\mathrel}{AMSa}{"61}
+\DeclareMathSymbol{\Subset}       {\mathrel}{AMSa}{"62}
+\DeclareMathSymbol{\Supset}       {\mathrel}{AMSa}{"63}
+\DeclareMathSymbol{\Cup}          {\mathbin}{AMSa}{"64}
+ \global\let\doublecup\Cup
+\DeclareMathSymbol{\Cap}          {\mathbin}{AMSa}{"65}
+ \global\let\doublecap\Cap
+\DeclareMathSymbol{\curlywedge}   {\mathbin}{AMSa}{"66}
+\DeclareMathSymbol{\curlyvee}     {\mathbin}{AMSa}{"67}
+\DeclareMathSymbol{\leftthreetimes} {\mathbin}{AMSa}{"68}
+\DeclareMathSymbol{\rightthreetimes}{\mathbin}{AMSa}{"69}
+\DeclareMathSymbol{\subseteqq}    {\mathrel}{AMSa}{"6A}
+\DeclareMathSymbol{\supseteqq}    {\mathrel}{AMSa}{"6B}
+\DeclareMathSymbol{\bumpeq}       {\mathrel}{AMSa}{"6C}
+\DeclareMathSymbol{\Bumpeq}       {\mathrel}{AMSa}{"6D}
+\DeclareMathSymbol{\lll}          {\mathrel}{AMSa}{"6E}
+ \global\let\llless\lll
+\DeclareMathSymbol{\ggg}          {\mathrel}{AMSa}{"6F}
+ \global\let\gggtr\ggg
+\DeclareMathSymbol{\circledS}     {\mathord}{AMSa}{"73}
+\DeclareMathSymbol{\pitchfork}    {\mathrel}{AMSa}{"74}
+\DeclareMathSymbol{\dotplus}      {\mathbin}{AMSa}{"75}
+\DeclareMathSymbol{\backsim}      {\mathrel}{AMSa}{"76}
+\DeclareMathSymbol{\backsimeq}    {\mathrel}{AMSa}{"77}
+\DeclareMathSymbol{\complement}   {\mathord}{AMSa}{"7B}
+\DeclareMathSymbol{\intercal}     {\mathbin}{AMSa}{"7C}
+\DeclareMathSymbol{\circledcirc}  {\mathbin}{AMSa}{"7D}
+\DeclareMathSymbol{\circledast}   {\mathbin}{AMSa}{"7E}
+\DeclareMathSymbol{\circleddash}  {\mathbin}{AMSa}{"7F}
+%%   Begin AMSb declarations
+\DeclareMathSymbol{\lvertneqq}    {\mathrel}{AMSb}{"00}
+\DeclareMathSymbol{\gvertneqq}    {\mathrel}{AMSb}{"01}
+\DeclareMathSymbol{\nleq}         {\mathrel}{AMSb}{"02}
+\DeclareMathSymbol{\ngeq}         {\mathrel}{AMSb}{"03}
+\DeclareMathSymbol{\nless}        {\mathrel}{AMSb}{"04}
+\DeclareMathSymbol{\ngtr}         {\mathrel}{AMSb}{"05}
+\DeclareMathSymbol{\nprec}        {\mathrel}{AMSb}{"06}
+\DeclareMathSymbol{\nsucc}        {\mathrel}{AMSb}{"07}
+\DeclareMathSymbol{\lneqq}        {\mathrel}{AMSb}{"08}
+\DeclareMathSymbol{\gneqq}        {\mathrel}{AMSb}{"09}
+\DeclareMathSymbol{\nleqslant}    {\mathrel}{AMSb}{"0A}
+\DeclareMathSymbol{\ngeqslant}    {\mathrel}{AMSb}{"0B}
+\DeclareMathSymbol{\lneq}         {\mathrel}{AMSb}{"0C}
+\DeclareMathSymbol{\gneq}         {\mathrel}{AMSb}{"0D}
+\DeclareMathSymbol{\npreceq}      {\mathrel}{AMSb}{"0E}
+\DeclareMathSymbol{\nsucceq}      {\mathrel}{AMSb}{"0F}
+\DeclareMathSymbol{\precnsim}     {\mathrel}{AMSb}{"10}
+\DeclareMathSymbol{\succnsim}     {\mathrel}{AMSb}{"11}
+\DeclareMathSymbol{\lnsim}        {\mathrel}{AMSb}{"12}
+\DeclareMathSymbol{\gnsim}        {\mathrel}{AMSb}{"13}
+\DeclareMathSymbol{\nleqq}        {\mathrel}{AMSb}{"14}
+\DeclareMathSymbol{\ngeqq}        {\mathrel}{AMSb}{"15}
+\DeclareMathSymbol{\precneqq}     {\mathrel}{AMSb}{"16}
+\DeclareMathSymbol{\succneqq}     {\mathrel}{AMSb}{"17}
+\DeclareMathSymbol{\precnapprox}  {\mathrel}{AMSb}{"18}
+\DeclareMathSymbol{\succnapprox}  {\mathrel}{AMSb}{"19}
+\DeclareMathSymbol{\lnapprox}     {\mathrel}{AMSb}{"1A}
+\DeclareMathSymbol{\gnapprox}     {\mathrel}{AMSb}{"1B}
+\DeclareMathSymbol{\nsim}         {\mathrel}{AMSb}{"1C}
+\DeclareMathSymbol{\ncong}        {\mathrel}{AMSb}{"1D}
+\DeclareMathSymbol{\diagup}       {\mathord}{AMSb}{"1E}
+\DeclareMathSymbol{\diagdown}     {\mathord}{AMSb}{"1F}
+\DeclareMathSymbol{\varsubsetneq}   {\mathrel}{AMSb}{"20}
+\DeclareMathSymbol{\varsupsetneq}   {\mathrel}{AMSb}{"21}
+\DeclareMathSymbol{\nsubseteqq}     {\mathrel}{AMSb}{"22}
+\DeclareMathSymbol{\nsupseteqq}     {\mathrel}{AMSb}{"23}
+\DeclareMathSymbol{\subsetneqq}     {\mathrel}{AMSb}{"24}
+\DeclareMathSymbol{\supsetneqq}     {\mathrel}{AMSb}{"25}
+\DeclareMathSymbol{\varsubsetneqq}  {\mathrel}{AMSb}{"26}
+\DeclareMathSymbol{\varsupsetneqq}  {\mathrel}{AMSb}{"27}
+\DeclareMathSymbol{\subsetneq}      {\mathrel}{AMSb}{"28}
+\DeclareMathSymbol{\supsetneq}      {\mathrel}{AMSb}{"29}
+\DeclareMathSymbol{\nsubseteq}      {\mathrel}{AMSb}{"2A}
+\DeclareMathSymbol{\nsupseteq}      {\mathrel}{AMSb}{"2B}
+\DeclareMathSymbol{\nparallel}      {\mathrel}{AMSb}{"2C}
+\DeclareMathSymbol{\nmid}           {\mathrel}{AMSb}{"2D}
+\DeclareMathSymbol{\nshortmid}      {\mathrel}{AMSb}{"2E}
+\DeclareMathSymbol{\nshortparallel} {\mathrel}{AMSb}{"2F}
+\DeclareMathSymbol{\nvdash}         {\mathrel}{AMSb}{"30}
+\DeclareMathSymbol{\nVdash}         {\mathrel}{AMSb}{"31}
+\DeclareMathSymbol{\nvDash}         {\mathrel}{AMSb}{"32}
+\DeclareMathSymbol{\nVDash}         {\mathrel}{AMSb}{"33}
+\DeclareMathSymbol{\ntrianglerighteq}{\mathrel}{AMSb}{"34}
+\DeclareMathSymbol{\ntrianglelefteq}{\mathrel}{AMSb}{"35}
+\DeclareMathSymbol{\ntriangleleft}  {\mathrel}{AMSb}{"36}
+\DeclareMathSymbol{\ntriangleright} {\mathrel}{AMSb}{"37}
+\DeclareMathSymbol{\nleftarrow}     {\mathrel}{AMSb}{"38}
+\DeclareMathSymbol{\nrightarrow}    {\mathrel}{AMSb}{"39}
+\DeclareMathSymbol{\nLeftarrow}     {\mathrel}{AMSb}{"3A}
+\DeclareMathSymbol{\nRightarrow}    {\mathrel}{AMSb}{"3B}
+\DeclareMathSymbol{\nLeftrightarrow}{\mathrel}{AMSb}{"3C}
+\DeclareMathSymbol{\nleftrightarrow}{\mathrel}{AMSb}{"3D}
+\DeclareMathSymbol{\divideontimes}  {\mathbin}{AMSb}{"3E}
+\DeclareMathSymbol{\varnothing}     {\mathord}{AMSb}{"3F}
+\DeclareMathSymbol{\nexists}        {\mathord}{AMSb}{"40}
+\DeclareMathSymbol{\Finv}           {\mathord}{AMSb}{"60}
+\DeclareMathSymbol{\Game}           {\mathord}{AMSb}{"61}
+%% In amsfonts.sty:
+%%\DeclareMathSymbol{\mho}          {\mathord}{AMSb}{"66}
+\DeclareMathSymbol{\eth}            {\mathord}{AMSb}{"67}
+\DeclareMathSymbol{\eqsim}          {\mathrel}{AMSb}{"68}
+\DeclareMathSymbol{\beth}           {\mathord}{AMSb}{"69}
+\DeclareMathSymbol{\gimel}          {\mathord}{AMSb}{"6A}
+\DeclareMathSymbol{\daleth}         {\mathord}{AMSb}{"6B}
+\DeclareMathSymbol{\lessdot}        {\mathbin}{AMSb}{"6C}
+\DeclareMathSymbol{\gtrdot}         {\mathbin}{AMSb}{"6D}
+\DeclareMathSymbol{\ltimes}         {\mathbin}{AMSb}{"6E}
+\DeclareMathSymbol{\rtimes}         {\mathbin}{AMSb}{"6F}
+\DeclareMathSymbol{\shortmid}       {\mathrel}{AMSb}{"70}
+\DeclareMathSymbol{\shortparallel}  {\mathrel}{AMSb}{"71}
+\DeclareMathSymbol{\smallsetminus}  {\mathbin}{AMSb}{"72}
+\DeclareMathSymbol{\thicksim}       {\mathrel}{AMSb}{"73}
+\DeclareMathSymbol{\thickapprox}    {\mathrel}{AMSb}{"74}
+\DeclareMathSymbol{\approxeq}       {\mathrel}{AMSb}{"75}
+\DeclareMathSymbol{\succapprox}     {\mathrel}{AMSb}{"76}
+\DeclareMathSymbol{\precapprox}     {\mathrel}{AMSb}{"77}
+\DeclareMathSymbol{\curvearrowleft} {\mathrel}{AMSb}{"78}
+\DeclareMathSymbol{\curvearrowright}{\mathrel}{AMSb}{"79}
+\DeclareMathSymbol{\digamma}        {\mathord}{AMSb}{"7A}
+\DeclareMathSymbol{\varkappa}       {\mathord}{AMSb}{"7B}
+\DeclareMathSymbol{\Bbbk}           {\mathord}{AMSb}{"7C}
+\DeclareMathSymbol{\hslash}         {\mathord}{AMSb}{"7D}
+%% In amsfonts.sty:
+%%\DeclareMathSymbol{\hbar}         {\mathord}{AMSb}{"7E}
+\DeclareMathSymbol{\backepsilon}    {\mathrel}{AMSb}{"7F}
+\endgroup
+\endinput
+%%
+%% End of file `amssymb.sty'.

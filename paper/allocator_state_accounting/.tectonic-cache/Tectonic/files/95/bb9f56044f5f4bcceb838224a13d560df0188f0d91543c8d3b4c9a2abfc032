@@ -1,0 +1,101 @@
+% title: Hyphenation patterns for Bahasa Indonesia
+% copyright: Copyright (C) 1996, 1997 Jörg Knappen, Terry Mart
+% notice: This file is part of the hyph-utf8 package.
+%     See http://www.hyphenation.org/tex for more information.
+% language:
+%     name: Bahasa Indonesia, Indonesian
+%     tag: id
+% version: 1.3 19-SEP-1997
+% authors:
+%   -
+%     name: Jörg Knappen
+%     contact: knappen (at) vkpmzd.kph.uni-mainz.de
+%   -
+%     name: Terry Mart
+%     contact: mart (at) kph.uni-mainz.de
+% licence:
+%     name: GPL
+%     version: 2
+%     url: http://www.gnu.org/licenses/old-licenses/gpl-2.0.html
+% hyphenmins:
+%     typesetting:
+%         left: 2
+%         right: 2
+% texlive:
+%     encoding: ascii
+%     babelname: indonesian
+%     legacy_patterns: inhyph.tex
+%     message: Indonesian hyphenation patterns
+%     description: |-
+%         Hyphenation patterns for Indonesian (Bahasa Indonesia) in ASCII
+%         encoding.  They are probably also usable for Malay (Bahasa Melayu).
+% ==========================================
+% The patterns are probably also usable for Bahasa Melayu
+%
+% For bug reports, improvements, and suggestions, contact
+%
+% Jörg Knappen
+% jk Unternehmensberatung
+% Barbarossaring 43
+% 55118 Mainz
+%
+% knappen (at) vkpmzd.kph.uni-mainz.de
+%
+% or:
+% Terry Mart
+%
+% Institut fuer Kernphysik
+% Universitaet Mainz
+% 55099 Mainz
+% Germany
+%
+% phone : +49 6131 395174
+% fax   : +49 6131 395474
+% email : mart (at) kph.uni-mainz.de
+%
+\patterns{%
+a1 e1 i1 o1 u1 % allow hyphens after vowels
+2b1d 2b1j 2b1k 2b1n 2b1s 2b1t
+2c1k 2c1n
+2d1k 2d1n 2d1p
+2f1d 2f1k 2f1n 2f1t
+2g1g 2g1k 2g1n
+2h1k 2h1l 2h1m 2h1n 2h1w
+2j1k 2j1n
+2k1b 2k1k 2k1m 2k1n 2k1r 2k1s 2k1t
+2l1b 2l1f 2l1g 2l1h 2l1k 2l1m 2l1n 2l1s 2l1t 2l1q
+2m1b 2m1k 2m1l 2m1m 2m1n 2m1p 2m1r 2m1s
+2n1c 2n1d 2n1f 2n1j 2n1k 2n1n 2n1p 2n1s 2n1t 2n1v
+2p1k 2p1n 2p1p 2p1r 2p1t
+2r1b 2r1c 2r1f 2r1g 2r1h 2r1j 2r1k 2r1l 2r1m 2r1n 2r1p 2r1r 2r1s 2r1t 2r1w 2r1y
+2s1b 2s1k 2s1l 2s1m 2s1n 2s1p 2s1r 2s1s 2s1t 2s1w
+2t1k 2t1l 2t1n 2t1t
+2w1t                 % two consonant groups to be hyphenated between
+                     % the consonants
+2ng1g 2ng1h 2ng1k 2ng1n 2ng1s    % three consonant groups
+2n3s2t % kon-stan-ta
+.be2r3 .te2r3 .me2ng3 .pe2r3 % prefixes
+2ng. 2ny. % don't hyphenate -ng and -ny at the end of word
+i2o1n % in-ter-na-sio-nal
+a2ir % ber-air
+1ba1ga2i % se-ba-gai-ma-na
+2b1an. 2c1an. 2d1an. 2f1an. 2g1an. 2h1an. 2j1an. 2k1an. 2l1an.
+2m1an. 2ng1an. 2n1an. 2p1an. 2r1an. 2s1an. 2t1an. 2v1an. 2z1an.
+3an. % suffix -an
+.a2ta2u % atau-pan
+.ta3ng4an. .le3ng4an. .ja3ng4an. .ma3ng4an. .pa3ng4an. .ri3ng4an.
+.de3ng4an. % Don't overload the exception list...
+}
+% Exeptions to the above rules, specially words beginning in ber...
+% and ter..
+\hyphenation{be-ra-be be-ra-hi be-rak be-ran-da be-ran-dal be-rang
+             be-ra-ngas-an be-rang-sang be-ra-ngus be-ra-ni
+             be-ran-tak-an be-ran-tam be-ran-tas be-ra-pa be-ras
+             be-ren-deng be-re-ngut be-re-rot be-res be-re-wok
+             be-ri be-ri-ngas be-ri-sik be-ri-ta be-rok be-ron-dong
+             be-ron-tak be-ru-du be-ruk be-run-tun
+             peng-eks-por peng-im-por
+             te-ra te-rang te-ras te-ra-si te-ra-tai te-ra-wang te-ra-weh
+             te-ri-ak te-ri-gu te-rik te-ri-ma te-ri-pang te-ro-bos
+             te-ro-bos-an te-ro-mol te-rom-pah te-rom-pet te-ro-pong
+             te-ro-wong-an te-ru-buk te-ru-na te-rus te-ru-si}

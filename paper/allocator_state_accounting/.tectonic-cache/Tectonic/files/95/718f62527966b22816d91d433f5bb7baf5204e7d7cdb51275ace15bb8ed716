@@ -1,0 +1,307 @@
+%%
+%% This is file `xebabel.def',
+%% generated with the docstrip utility.
+%%
+%% The original source files were:
+%%
+%% babel.dtx  (with options: `xetex')
+%% 
+%%
+%% Copyright (C) 2012-2022 Javier Bezos and Johannes L. Braams.
+%% Copyright (C) 1989-2012 Johannes L. Braams and
+%%           any individual authors listed elsewhere in this file.
+%% All rights reserved.
+%%
+%%
+%% This file is part of the Babel system.
+%% --------------------------------------
+%%
+%% It may be distributed and/or modified under the
+%% conditions of the LaTeX Project Public License, either version 1.3
+%% of this license or (at your option) any later version.
+%% The latest version of this license is in
+%%   http://www.latex-project.org/lppl.txt
+%% and version 1.3 or later is part of all distributions of LaTeX
+%% version 2003/12/01 or later.
+%%
+%% This work has the LPPL maintenance status "maintained".
+%%
+%% The Current Maintainer of this work is Javier Bezos.
+%%
+%% The list of derived (unpacked) files belonging to the distribution
+%% and covered by LPPL is defined by the unpacking scripts (with
+%% extension |.ins|) which are part of the distribution.
+%%
+
+\def\BabelStringsDefault{unicode}
+\let\xebbl@stop\relax
+\AddBabelHook{xetex}{encodedcommands}{%
+  \def\bbl@tempa{#1}%
+  \ifx\bbl@tempa\@empty
+    \XeTeXinputencoding"bytes"%
+  \else
+    \XeTeXinputencoding"#1"%
+  \fi
+  \def\xebbl@stop{\XeTeXinputencoding"utf8"}}
+\AddBabelHook{xetex}{stopcommands}{%
+  \xebbl@stop
+  \let\xebbl@stop\relax}
+\def\bbl@intraspace#1 #2 #3\@@{%
+  \bbl@csarg\gdef{xeisp@\languagename}%
+    {\XeTeXlinebreakskip #1em plus #2em minus #3em\relax}}
+\def\bbl@intrapenalty#1\@@{%
+  \bbl@csarg\gdef{xeipn@\languagename}%
+    {\XeTeXlinebreakpenalty #1\relax}}
+\def\bbl@provide@intraspace{%
+  \bbl@xin@{/s}{/\bbl@cl{lnbrk}}%
+  \ifin@\else\bbl@xin@{/c}{/\bbl@cl{lnbrk}}\fi
+  \ifin@
+    \bbl@ifunset{bbl@intsp@\languagename}{}%
+      {\expandafter\ifx\csname bbl@intsp@\languagename\endcsname\@empty\else
+        \ifx\bbl@KVP@intraspace\@nil
+           \bbl@exp{%
+             \\\bbl@intraspace\bbl@cl{intsp}\\\@@}%
+        \fi
+        \ifx\bbl@KVP@intrapenalty\@nil
+          \bbl@intrapenalty0\@@
+        \fi
+      \fi
+      \ifx\bbl@KVP@intraspace\@nil\else % We may override the ini
+        \expandafter\bbl@intraspace\bbl@KVP@intraspace\@@
+      \fi
+      \ifx\bbl@KVP@intrapenalty\@nil\else
+        \expandafter\bbl@intrapenalty\bbl@KVP@intrapenalty\@@
+      \fi
+      \bbl@exp{%
+        % TODO. Execute only once (but redundant):
+        \\\bbl@add\<extras\languagename>{%
+          \XeTeXlinebreaklocale "\bbl@cl{tbcp}"%
+          \<bbl@xeisp@\languagename>%
+          \<bbl@xeipn@\languagename>}%
+        \\\bbl@toglobal\<extras\languagename>%
+        \\\bbl@add\<noextras\languagename>{%
+          \XeTeXlinebreaklocale "en"}%
+        \\\bbl@toglobal\<noextras\languagename>}%
+      \ifx\bbl@ispacesize\@undefined
+        \gdef\bbl@ispacesize{\bbl@cl{xeisp}}%
+        \ifx\AtBeginDocument\@notprerr
+          \expandafter\@secondoftwo  % to execute right now
+        \fi
+        \AtBeginDocument{\bbl@patchfont{\bbl@ispacesize}}%
+      \fi}%
+  \fi}
+\ifx\DisableBabelHook\@undefined\endinput\fi
+\AddBabelHook{babel-fontspec}{afterextras}{\bbl@switchfont}
+\AddBabelHook{babel-fontspec}{beforestart}{\bbl@ckeckstdfonts}
+\DisableBabelHook{babel-fontspec}
+\bbl@trace{Font handling with fontspec}
+\ifx\ExplSyntaxOn\@undefined\else
+  \ExplSyntaxOn
+  \catcode`\ =10
+  \def\bbl@loadfontspec{%
+    \usepackage{fontspec}%  TODO. Apply patch always
+    \expandafter
+    \def\csname msg~text~>~fontspec/language-not-exist\endcsname##1##2##3##4{%
+      Font '\l_fontspec_fontname_tl' is using the\\%
+      default features for language '##1'.\\%
+      That's usually fine, because many languages\\%
+      require no specific features, but if the output is\\%
+      not as expected, consider selecting another font.}
+    \expandafter
+    \def\csname msg~text~>~fontspec/no-script\endcsname##1##2##3##4{%
+      Font '\l_fontspec_fontname_tl' is using the\\%
+      default features for script '##2'.\\%
+      That's not always wrong, but if the output is\\%
+      not as expected, consider selecting another font.}}
+  \ExplSyntaxOff
+\fi
+\@onlypreamble\babelfont
+\newcommand\babelfont[2][]{%  1=langs/scripts 2=fam
+  \bbl@foreach{#1}{%
+    \expandafter\ifx\csname date##1\endcsname\relax
+      \IfFileExists{babel-##1.tex}%
+        {\babelprovide{##1}}%
+        {}%
+    \fi}%
+  \edef\bbl@tempa{#1}%
+  \def\bbl@tempb{#2}%  Used by \bbl@bblfont
+  \ifx\fontspec\@undefined
+    \bbl@loadfontspec
+  \fi
+  \EnableBabelHook{babel-fontspec}% Just calls \bbl@switchfont
+  \bbl@bblfont}
+\newcommand\bbl@bblfont[2][]{% 1=features 2=fontname, @font=rm|sf|tt
+  \bbl@ifunset{\bbl@tempb family}%
+    {\bbl@providefam{\bbl@tempb}}%
+    {}%
+  % For the default font, just in case:
+  \bbl@ifunset{bbl@lsys@\languagename}{\bbl@provide@lsys{\languagename}}{}%
+  \expandafter\bbl@ifblank\expandafter{\bbl@tempa}%
+    {\bbl@csarg\edef{\bbl@tempb dflt@}{<>{#1}{#2}}% save bbl@rmdflt@
+     \bbl@exp{%
+       \let\<bbl@\bbl@tempb dflt@\languagename>\<bbl@\bbl@tempb dflt@>%
+       \\\bbl@font@set\<bbl@\bbl@tempb dflt@\languagename>%
+                      \<\bbl@tempb default>\<\bbl@tempb family>}}%
+    {\bbl@foreach\bbl@tempa{% ie bbl@rmdflt@lang / *scrt
+       \bbl@csarg\def{\bbl@tempb dflt@##1}{<>{#1}{#2}}}}}%
+\def\bbl@providefam#1{%
+  \bbl@exp{%
+    \\\newcommand\<#1default>{}% Just define it
+    \\\bbl@add@list\\\bbl@font@fams{#1}%
+    \\\DeclareRobustCommand\<#1family>{%
+      \\\not@math@alphabet\<#1family>\relax
+      % \\\prepare@family@series@update{#1}\<#1default>% TODO. Fails
+      \\\fontfamily\<#1default>%
+      \<ifx>\\\UseHooks\\\@undefined\<else>\\\UseHook{#1family}\<fi>%
+      \\\selectfont}%
+    \\\DeclareTextFontCommand{\<text#1>}{\<#1family>}}}
+\def\bbl@nostdfont#1{%
+  \bbl@ifunset{bbl@WFF@\f@family}%
+    {\bbl@csarg\gdef{WFF@\f@family}{}%  Flag, to avoid dupl warns
+     \bbl@infowarn{The current font is not a babel standard family:\\%
+       #1%
+       \fontname\font\\%
+       There is nothing intrinsically wrong with this warning, and\\%
+       you can ignore it altogether if you do not need these\\%
+       families. But if they are used in the document, you should be\\%
+       aware 'babel' will no set Script and Language for them, so\\%
+       you may consider defining a new family with \string\babelfont.\\%
+       See the manual for further details about \string\babelfont.\\%
+       Reported}}
+   {}}%
+\gdef\bbl@switchfont{%
+  \bbl@ifunset{bbl@lsys@\languagename}{\bbl@provide@lsys{\languagename}}{}%
+  \bbl@exp{%  eg Arabic -> arabic
+    \lowercase{\edef\\\bbl@tempa{\bbl@cl{sname}}}}%
+  \bbl@foreach\bbl@font@fams{%
+    \bbl@ifunset{bbl@##1dflt@\languagename}%    (1) language?
+      {\bbl@ifunset{bbl@##1dflt@*\bbl@tempa}%   (2) from script?
+         {\bbl@ifunset{bbl@##1dflt@}%           2=F - (3) from generic?
+           {}%                                  123=F - nothing!
+           {\bbl@exp{%                          3=T - from generic
+              \global\let\<bbl@##1dflt@\languagename>%
+                         \<bbl@##1dflt@>}}}%
+         {\bbl@exp{%                            2=T - from script
+            \global\let\<bbl@##1dflt@\languagename>%
+                       \<bbl@##1dflt@*\bbl@tempa>}}}%
+      {}}%                               1=T - language, already defined
+  \def\bbl@tempa{\bbl@nostdfont{}}%
+  \bbl@foreach\bbl@font@fams{%     don't gather with prev for
+    \bbl@ifunset{bbl@##1dflt@\languagename}%
+      {\bbl@cs{famrst@##1}%
+       \global\bbl@csarg\let{famrst@##1}\relax}%
+      {\bbl@exp{% order is relevant. TODO: but sometimes wrong!
+         \\\bbl@add\\\originalTeX{%
+           \\\bbl@font@rst{\bbl@cl{##1dflt}}%
+                          \<##1default>\<##1family>{##1}}%
+         \\\bbl@font@set\<bbl@##1dflt@\languagename>% the main part!
+                        \<##1default>\<##1family>}}}%
+  \bbl@ifrestoring{}{\bbl@tempa}}%
+\ifx\f@family\@undefined\else   % if latex
+  \ifcase\bbl@engine            % if pdftex
+    \let\bbl@ckeckstdfonts\relax
+  \else
+    \def\bbl@ckeckstdfonts{%
+      \begingroup
+        \global\let\bbl@ckeckstdfonts\relax
+        \let\bbl@tempa\@empty
+        \bbl@foreach\bbl@font@fams{%
+          \bbl@ifunset{bbl@##1dflt@}%
+            {\@nameuse{##1family}%
+             \bbl@csarg\gdef{WFF@\f@family}{}% Flag
+             \bbl@exp{\\\bbl@add\\\bbl@tempa{* \<##1family>= \f@family\\\\%
+                \space\space\fontname\font\\\\}}%
+             \bbl@csarg\xdef{##1dflt@}{\f@family}%
+             \expandafter\xdef\csname ##1default\endcsname{\f@family}}%
+            {}}%
+        \ifx\bbl@tempa\@empty\else
+          \bbl@infowarn{The following font families will use the default\\%
+            settings for all or some languages:\\%
+            \bbl@tempa
+            There is nothing intrinsically wrong with it, but\\%
+            'babel' will no set Script and Language, which could\\%
+             be relevant in some languages. If your document uses\\%
+             these families, consider redefining them with \string\babelfont.\\%
+            Reported}%
+        \fi
+      \endgroup}
+  \fi
+\fi
+\def\bbl@font@set#1#2#3{% eg \bbl@rmdflt@lang \rmdefault \rmfamily
+  \bbl@xin@{<>}{#1}%
+  \ifin@
+    \bbl@exp{\\\bbl@fontspec@set\\#1\expandafter\@gobbletwo#1\\#3}%
+  \fi
+  \bbl@exp{%              'Unprotected' macros return prev values
+    \def\\#2{#1}%         eg, \rmdefault{\bbl@rmdflt@lang}
+    \\\bbl@ifsamestring{#2}{\f@family}%
+      {\\#3%
+       \\\bbl@ifsamestring{\f@series}{\bfdefault}{\\\bfseries}{}%
+       \let\\\bbl@tempa\relax}%
+      {}}}
+\def\bbl@fontspec@set#1#2#3#4{% eg \bbl@rmdflt@lang fnt-opt fnt-nme \xxfamily
+  \let\bbl@tempe\bbl@mapselect
+  \let\bbl@mapselect\relax
+  \let\bbl@temp@fam#4%       eg, '\rmfamily', to be restored below
+  \let#4\@empty      %       Make sure \renewfontfamily is valid
+  \bbl@exp{%
+    \let\\\bbl@temp@pfam\<\bbl@stripslash#4\space>% eg, '\rmfamily '
+    \<keys_if_exist:nnF>{fontspec-opentype}{Script/\bbl@cl{sname}}%
+      {\\\newfontscript{\bbl@cl{sname}}{\bbl@cl{sotf}}}%
+    \<keys_if_exist:nnF>{fontspec-opentype}{Language/\bbl@cl{lname}}%
+      {\\\newfontlanguage{\bbl@cl{lname}}{\bbl@cl{lotf}}}%
+    \\\renewfontfamily\\#4%
+      [\bbl@cl{lsys},#2]}{#3}% ie \bbl@exp{..}{#3}
+  \begingroup
+     #4%
+     \xdef#1{\f@family}%     eg, \bbl@rmdflt@lang{FreeSerif(0)}
+  \endgroup
+  \let#4\bbl@temp@fam
+  \bbl@exp{\let\<\bbl@stripslash#4\space>}\bbl@temp@pfam
+  \let\bbl@mapselect\bbl@tempe}%
+\def\bbl@font@rst#1#2#3#4{%
+  \bbl@csarg\def{famrst@#4}{\bbl@font@set{#1}#2#3}}
+\def\bbl@font@fams{rm,sf,tt}
+\newcommand\babelFSstore[2][]{%
+  \bbl@ifblank{#1}%
+    {\bbl@csarg\def{sname@#2}{Latin}}%
+    {\bbl@csarg\def{sname@#2}{#1}}%
+  \bbl@provide@dirs{#2}%
+  \bbl@csarg\ifnum{wdir@#2}>\z@
+    \let\bbl@beforeforeign\leavevmode
+    \EnableBabelHook{babel-bidi}%
+  \fi
+  \bbl@foreach{#2}{%
+    \bbl@FSstore{##1}{rm}\rmdefault\bbl@save@rmdefault
+    \bbl@FSstore{##1}{sf}\sfdefault\bbl@save@sfdefault
+    \bbl@FSstore{##1}{tt}\ttdefault\bbl@save@ttdefault}}
+\def\bbl@FSstore#1#2#3#4{%
+  \bbl@csarg\edef{#2default#1}{#3}%
+  \expandafter\addto\csname extras#1\endcsname{%
+    \let#4#3%
+    \ifx#3\f@family
+      \edef#3{\csname bbl@#2default#1\endcsname}%
+      \fontfamily{#3}\selectfont
+    \else
+      \edef#3{\csname bbl@#2default#1\endcsname}%
+    \fi}%
+  \expandafter\addto\csname noextras#1\endcsname{%
+    \ifx#3\f@family
+      \fontfamily{#4}\selectfont
+    \fi
+    \let#3#4}}
+\let\bbl@langfeatures\@empty
+\def\babelFSfeatures{% make sure \fontspec is redefined once
+  \let\bbl@ori@fontspec\fontspec
+  \renewcommand\fontspec[1][]{%
+    \bbl@ori@fontspec[\bbl@langfeatures##1]}
+  \let\babelFSfeatures\bbl@FSfeatures
+  \babelFSfeatures}
+\def\bbl@FSfeatures#1#2{%
+  \expandafter\addto\csname extras#1\endcsname{%
+    \babel@save\bbl@langfeatures
+    \edef\bbl@langfeatures{#2,}}}
+\input txtbabel.def
+\endinput
+%%
+%% End of file `xebabel.def'.

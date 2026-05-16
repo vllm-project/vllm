@@ -1,0 +1,55 @@
+% This file belongs to the Latin Modern package. The work is released
+% under the GUST Font License. See the MANIFEST-Latin-Modern.txt and
+% README-Latin-Modern.txt files for the details. For the most recent version of
+% this license see http://www.gust.org.pl/fonts/licenses/GUST-FONT-LICENSE.txt
+% or http://tug.org/fonts/licenses/GUST-FONT-LICENSE.txt
+
+\ProvidesFile{ts1lmr.fd}[2015/05/01 v1.6.1 Font defs for Latin Modern]
+\DeclareFontFamily{TS1}{lmr}{}
+\DeclareFontShape{TS1}{lmr}{m}{n}%
+     {<-5.5>    ts1-lmr5     <5.5-6.5> ts1-lmr6
+      <6.5-7.5> ts1-lmr7     <7.5-8.5> ts1-lmr8
+      <8.5-9.5> ts1-lmr9     <9.5-11>  ts1-lmr10
+      <11-15>   ts1-lmr12
+      <15-> ts1-lmr17
+      }{}
+\DeclareFontShape{TS1}{lmr}{m}{sl}%
+     {<-8.5>    ts1-lmro8    <8.5-9.5> ts1-lmro9
+      <9.5-11>  ts1-lmro10   <11-15>   ts1-lmro12
+      <15-> ts1-lmro17
+      }{}
+\DeclareFontShape{TS1}{lmr}{m}{it}%
+     {<-7.5>    ts1-lmri7
+      <7.5-8.5> ts1-lmri8    <8.5-9.5> ts1-lmri9
+      <9.5-11>  ts1-lmri10   <11->   ts1-lmri12
+      }{}
+\DeclareFontShape{TS1}{lmr}{m}{sc}%
+     {<-> ts1-lmcsc10}{}
+\DeclareFontShape{TS1}{lmr}{m}{ui}%
+     {<-> ts1-lmu10}{}
+%
+% Is this the right 'shape'?:
+\DeclareFontShape{TS1}{lmr}{m}{scsl}%
+     {<-> ts1-lmcsco10}{}
+%%%%%%% bold series
+\DeclareFontShape{TS1}{lmr}{b}{n}
+     {<-> ts1-lmb10}{}
+\DeclareFontShape{TS1}{lmr}{b}{sl}
+     {<-> ts1-lmbo10}{}
+%%%%%%% bold extended series
+\DeclareFontShape{TS1}{lmr}{bx}{n}
+     {<-5.5>   ts1-lmbx5      <5.5-6.5> ts1-lmbx6
+      <6.5-7.5> ts1-lmbx7      <7.5-8.5> ts1-lmbx8
+      <8.5-9.5> ts1-lmbx9      <9.5-11>  ts1-lmbx10
+      <11->   ts1-lmbx12
+      }{}
+\DeclareFontShape{TS1}{lmr}{bx}{it}
+     {<-> ts1-lmbxi10}{}
+\DeclareFontShape{TS1}{lmr}{bx}{sl}
+     {<-> ts1-lmbxo10}{}
+%%%%%%% Font/shape undefined, therefore substituted
+\DeclareFontShape{TS1}{lmr}{b}{it}
+     {<->sub * lmr/b/sl}{}
+\endinput
+%%
+%% End of file `ts1lmr.fd'.

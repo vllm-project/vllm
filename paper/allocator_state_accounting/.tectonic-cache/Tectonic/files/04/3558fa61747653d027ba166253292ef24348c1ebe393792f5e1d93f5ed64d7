@@ -1,0 +1,102 @@
+%%
+%% This is file `tulmr.fd',
+%% generated with the docstrip utility.
+%%
+%% The original source files were:
+%%
+%% tulm.fdd  (with options: `TUlmr')
+%% 
+%% This is a generated file.
+%% 
+%% The source is maintained by the LaTeX Project team and bug
+%% reports for it can be opened at https://latex-project.org/bugs.html
+%% (but please observe conditions on bug reports sent to that address!)
+%% 
+%% 
+%% Copyright (C) 2016-2021
+%% The LaTeX Project and any individual authors listed elsewhere
+%% in this file.
+%% 
+%% This file was generated from file(s) of the LaTeX base system.
+%% --------------------------------------------------------------
+%% 
+%% It may be distributed and/or modified under the
+%% conditions of the LaTeX Project Public License, either version 1.3c
+%% of this license or (at your option) any later version.
+%% The latest version of this license is in
+%%    https://www.latex-project.org/lppl.txt
+%% and version 1.3c or later is part of all distributions of LaTeX
+%% version 2008 or later.
+%% 
+%% This file may only be distributed together with a copy of the LaTeX
+%% base system. You may however distribute the LaTeX base system without
+%% such generated files.
+%% 
+%% The list of all files belonging to the LaTeX base distribution is
+%% given in the file `manifest.txt'. See also `legal.txt' for additional
+%% information.
+%% 
+%% In particular, permission is granted to customize the declarations in
+%% this file to serve the needs of your installation.
+%% 
+%% However, a modified version of this file under its original name
+%% should not be distributed as part of a standard LaTeX distribution, as
+%% the modification will be nontransparent for the user of that
+%% distribution (and thus violating clause 6a of the LPPL license),
+%% making successful document exchange impossible.
+%% 
+\ProvidesFile{tulmr.fd}
+        [2021/07/23 v1.8a Standard LaTeX font definitions for Latin Modern]
+\DeclareFontFamily{TU}{lmr}{}
+\DeclareFontShape{TU}{lmr}{m}{n}%
+  {<-5.5>    \UnicodeFontFile{lmroman5-regular}{\UnicodeFontTeXLigatures}
+   <5.5-6.5> \UnicodeFontFile{lmroman6-regular}{\UnicodeFontTeXLigatures}
+   <6.5-7.5> \UnicodeFontFile{lmroman7-regular}{\UnicodeFontTeXLigatures}
+   <7.5-8.5> \UnicodeFontFile{lmroman8-regular}{\UnicodeFontTeXLigatures}
+   <8.5-9.5> \UnicodeFontFile{lmroman9-regular}{\UnicodeFontTeXLigatures}
+   <9.5-11>  \UnicodeFontFile{lmroman10-regular}{\UnicodeFontTeXLigatures}
+   <11-15>   \UnicodeFontFile{lmroman12-regular}{\UnicodeFontTeXLigatures}
+   <15-> \UnicodeFontFile{lmroman17-regular}{\UnicodeFontTeXLigatures}
+   }{}
+\DeclareFontShape{TU}{lmr}{m}{sl}%
+  {<-8.5>    \UnicodeFontFile{lmromanslant8-regular}{\UnicodeFontTeXLigatures}
+   <8.5-9.5> \UnicodeFontFile{lmromanslant9-regular}{\UnicodeFontTeXLigatures}
+   <9.5-11>  \UnicodeFontFile{lmromanslant10-regular}{\UnicodeFontTeXLigatures}
+   <11-15>   \UnicodeFontFile{lmromanslant12-regular}{\UnicodeFontTeXLigatures}
+   <15-> \UnicodeFontFile{lmromanslant17-regular}{\UnicodeFontTeXLigatures}
+   }{}
+\DeclareFontShape{TU}{lmr}{m}{it}%
+  {<-7.5>    \UnicodeFontFile{lmroman7-italic}{\UnicodeFontTeXLigatures}
+   <7.5-8.5> \UnicodeFontFile{lmroman8-italic}{\UnicodeFontTeXLigatures}
+   <8.5-9.5> \UnicodeFontFile{lmroman9-italic}{\UnicodeFontTeXLigatures}
+   <9.5-11>  \UnicodeFontFile{lmroman10-italic}{\UnicodeFontTeXLigatures}
+   <11->   \UnicodeFontFile{lmroman12-italic}{\UnicodeFontTeXLigatures}
+   }{}
+\DeclareFontShape{TU}{lmr}{m}{sc}%
+  {<-> \UnicodeFontFile{lmromancaps10-regular}{\UnicodeFontTeXLigatures}}{}
+\DeclareFontShape{TU}{lmr}{m}{ui}%
+  {<-> \UnicodeFontFile{lmromanunsl10-regular}{\UnicodeFontTeXLigatures}}{}
+\DeclareFontShape{TU}{lmr}{m}{scsl}%
+  {<-> \UnicodeFontFile{lmromancaps10-oblique}{\UnicodeFontTeXLigatures}}{}
+\DeclareFontShape{TU}{lmr}{b}{n}
+  {<-> \UnicodeFontFile{lmromandemi10-regular}{\UnicodeFontTeXLigatures}}{}
+\DeclareFontShape{TU}{lmr}{b}{sl}
+  {<-> \UnicodeFontFile{lmromandemi10-oblique}{\UnicodeFontTeXLigatures}}{}
+\DeclareFontShape{TU}{lmr}{bx}{n}
+  {<-5.5>   \UnicodeFontFile{lmroman5-bold}{\UnicodeFontTeXLigatures}
+   <5.5-6.5> \UnicodeFontFile{lmroman6-bold}{\UnicodeFontTeXLigatures}
+   <6.5-7.5> \UnicodeFontFile{lmroman7-bold}{\UnicodeFontTeXLigatures}
+   <7.5-8.5> \UnicodeFontFile{lmroman8-bold}{\UnicodeFontTeXLigatures}
+   <8.5-9.5> \UnicodeFontFile{lmroman9-bold}{\UnicodeFontTeXLigatures}
+   <9.5-11>  \UnicodeFontFile{lmroman10-bold}{\UnicodeFontTeXLigatures}
+   <11->   \UnicodeFontFile{lmroman12-bold}{\UnicodeFontTeXLigatures}
+   }{}
+\DeclareFontShape{TU}{lmr}{bx}{it}
+  {<-> \UnicodeFontFile{lmroman10-bolditalic}{\UnicodeFontTeXLigatures}}{}
+\DeclareFontShape{TU}{lmr}{bx}{sl}
+  {<-> \UnicodeFontFile{lmromanslant10-bold}{\UnicodeFontTeXLigatures}}{}
+\DeclareFontShape{TU}{lmr}{b}{it}
+  {<->sub * lmr/b/sl}{}
+\endinput
+%%
+%% End of file `tulmr.fd'.

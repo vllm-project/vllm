@@ -14,11 +14,17 @@ from openai_harmony import (
     load_harmony_encoding,
 )
 
+from tests.conftest import has_harmony_gpt_oss_encoding
 from vllm.entrypoints.openai.engine.protocol import FunctionCall, ToolCall
 from vllm.tokenizers import get_tokenizer
 from vllm.tool_parsers.openai_tool_parser import OpenAIToolParser
 
 MODEL = "gpt2"
+
+pytestmark = pytest.mark.skipif(
+    not has_harmony_gpt_oss_encoding(),
+    reason="Harmony GPT-OSS vocab is unavailable in this environment.",
+)
 
 
 @pytest.fixture(scope="module")

@@ -1,0 +1,61 @@
+%%
+%% This is file `omscmsy.fd',
+%% generated with the docstrip utility.
+%%
+%% The original source files were:
+%%
+%% cmfonts.fdd  (with options: `OMScmsy')
+%% 
+%% This is a generated file.
+%% 
+%% The source is maintained by the LaTeX Project team and bug
+%% reports for it can be opened at https://latex-project.org/bugs.html
+%% (but please observe conditions on bug reports sent to that address!)
+%% 
+%% 
+%% Copyright (C) 1993-2021
+%% The LaTeX Project and any individual authors listed elsewhere
+%% in this file.
+%% 
+%% This file was generated from file(s) of the LaTeX base system.
+%% --------------------------------------------------------------
+%% 
+%% It may be distributed and/or modified under the
+%% conditions of the LaTeX Project Public License, either version 1.3c
+%% of this license or (at your option) any later version.
+%% The latest version of this license is in
+%%    https://www.latex-project.org/lppl.txt
+%% and version 1.3c or later is part of all distributions of LaTeX
+%% version 2008 or later.
+%% 
+%% This file may only be distributed together with a copy of the LaTeX
+%% base system. You may however distribute the LaTeX base system without
+%% such generated files.
+%% 
+%% The list of all files belonging to the LaTeX base distribution is
+%% given in the file `manifest.txt'. See also `legal.txt' for additional
+%% information.
+%% 
+%% In particular, permission is granted to customize the declarations in
+%% this file to serve the needs of your installation.
+%% 
+%% However, a modified version of this file under its original name
+%% should not be distributed as part of a standard LaTeX distribution, as
+%% the modification will be nontransparent for the user of that
+%% distribution (and thus violating clause 6a of the LPPL license),
+%% making successful document exchange impossible.
+%% 
+\ProvidesFile{omscmsy.fd}
+        [2019/12/16 v2.5j Standard LaTeX font definitions]
+\DeclareFontFamily{OMS}{cmsy}{\skewchar\font48 }
+\DeclareFontShape{OMS}{cmsy}{m}{n}{%
+      <5><6><7><8><9><10>gen*cmsy%
+      <10.95><12><14.4><17.28><20.74><24.88>cmsy10%
+      }{}
+\DeclareFontShape{OMS}{cmsy}{b}{n}{%
+      <5><6><7><8><9>gen*cmbsy%
+      <10><10.95><12><14.4><17.28><20.74><24.88>cmbsy10%
+      }{}
+\endinput
+%%
+%% End of file `omscmsy.fd'.

@@ -1,0 +1,61 @@
+% https://creativecommons.org/publicdomain/zero/1.0/
+
+\ProvidesFile{graphics.cfg}%
+  [2016/06/04 v1.11 sample graphics configuration]%
+
+% Select an appropriate default driver
+\begingroup
+  \chardef\x=0\relax
+  % check luatex
+  \ifx\luatexversion\@undefined
+  % check pdfTeX
+  \@ifundefined{pdfoutput}{}{%
+    \ifnum\pdfoutput<1 %
+    \else
+      \chardef\x=1\relax
+    \fi
+  }%
+  % check VTeX
+  \@ifundefined{OpMode}{}{%
+    \chardef\x=2\relax
+  }%
+  % check XeTeX
+  \@ifundefined{XeTeXversion}{}{%
+    \chardef\x=3\relax
+  }%
+  \else
+    \ifnum\luatexversion>85
+      \ifnum\outputmode>0
+      \chardef\x=4\relax
+      \fi
+    \else
+      \ifnum\pdfoutput>0
+      \chardef\x=1\relax
+      \fi
+    \fi
+  \fi
+\expandafter\endgroup
+\ifcase\x
+  % default case
+  \def\Gin@driver{dvips.def}%
+  \ExecuteOptions{dvips}%
+\or
+  % pdfTeX is running in pdf mode
+  \def\Gin@driver{pdftex.def}%
+  \ExecuteOptions{pdftex}%
+\or
+  % VTeX is running
+  \def\Gin@driver{vtex.def}%
+  \ExecuteOptions{vtex}%
+\or
+  % XeTeX is running
+  \def\Gin@driver{xetex.def}%
+  \ExecuteOptions{xetex}%
+\or
+  % luatex (> 0.85)
+  \def\Gin@driver{luatex.def}%
+  \ExecuteOptions{luatex}%
+\else
+  \PackageError{graphics}{Unexpected configuration}{}
+\fi
+\endinput

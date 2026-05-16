@@ -1,0 +1,76 @@
+%%
+%% This is file `amstext.sty',
+%% generated with the docstrip utility.
+%%
+%% The original source files were:
+%%
+%% amstext.dtx 
+%% 
+%% Copyright (C) 1995, 1999 American Mathematical Society.
+%% Copyright (C) 2016-2021  LaTeX Project and American Mathematical Society.
+%% 
+%% This work may be distributed and/or modified under the
+%% conditions of the LaTeX Project Public License, either version 1.3c
+%% of this license or (at your option) any later version.
+%% The latest version of this license is in
+%%   https://www.latex-project.org/lppl.txt
+%% and version 1.3c or later is part of all distributions of LaTeX
+%% version 2005/12/01 or later.
+%% 
+%% This work has the LPPL maintenance status `maintained'.
+%% 
+%% The Current Maintainer of this work is the LaTeX Project.
+%% 
+\NeedsTeXFormat{LaTeX2e}% LaTeX 2.09 can't be used (nor non-LaTeX)
+[1994/12/01]% LaTeX date must be December 1994 or later
+\ProvidesPackage{amstext}[2021/08/26 v2.01 AMS text]
+\RequirePackage{amsgen}
+\DeclareRobustCommand{\text}{%
+  \ifmmode\expandafter\text@\else\expandafter\mbox\fi}
+\let\nfss@text\text
+\def\text@#1{{\mathchoice
+  {\textdef@\displaystyle\f@size{#1}}%
+  {\textdef@\textstyle\f@size{\firstchoice@false #1}}%
+  {\textdef@\textstyle\sf@size{\firstchoice@false #1}}%
+  {\textdef@\textstyle \ssf@size{\firstchoice@false #1}}%
+  \check@mathfonts
+  }%
+}
+\def\textdef@#1#2#3{\hbox{{%
+                    \everymath{#1}%
+                    \let\f@size#2\selectfont
+                    #3}}}
+\newif\iffirstchoice@
+\firstchoice@true
+\def\stepcounter#1{%
+  \iffirstchoice@
+     \addtocounter{#1}\@ne
+     \begingroup \let\@elt\@stpelt \csname cl@#1\endcsname \endgroup
+  \fi
+}
+\def\addtocounter#1#2{%
+  \iffirstchoice@
+  \@ifundefined {c@#1}{\@nocounterr {#1}}%
+    {\global \advance \csname c@#1\endcsname #2\relax}%
+  \fi}
+\let\m@gobble\@empty
+\@xp\let\csname m@gobble4\endcsname\@gobblefour
+\long\@xp\def\csname m@gobble6\endcsname#1#2#3#4#5#6{}
+\toks@{%
+  \csname m@gobble\iffirstchoice@\else 4\fi\endcsname
+  \protect}
+\edef\GenericInfo{\the\toks@
+  \@xp\@nx\csname GenericInfo \endcsname}
+\edef\GenericWarning{\the\toks@
+  \@xp\@nx\csname GenericWarning \endcsname}
+\toks@{%
+  \csname m@gobble\iffirstchoice@\else 6\fi\endcsname
+  \protect}
+\edef\GenericError{\the\toks@
+  \@xp\@nx\csname GenericError \endcsname}
+\begingroup \catcode`\"=12
+\gdef\mathhexbox#1#2#3{\text{$\m@th\mathchar"#1#2#3$}}
+\endgroup
+\endinput
+%%
+%% End of file `amstext.sty'.

@@ -17,7 +17,6 @@ class AsyncOutput(AsyncModelRunnerOutput):
         num_sampled_tokens: torch.Tensor,
         main_stream: torch.cuda.Stream,
         copy_stream: torch.cuda.Stream,
-        copy_event: torch.cuda.Event,
     ):
         # NOTE(woosuk): We must retain references to the GPU tensors,
         # as the copy operations are performed on a different CUDA stream than
@@ -25,7 +24,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.model_runner_output = model_runner_output
         self.sampler_output = sampler_output
         self.num_sampled_tokens = num_sampled_tokens
-        self.copy_event = copy_event
+        self.copy_event = torch.cuda.Event()
 
         with stream(copy_stream, main_stream):
             copy_stream.wait_stream(main_stream)
@@ -49,15 +48,10 @@ class AsyncOutput(AsyncModelRunnerOutput):
     def get_output(self) -> ModelRunnerOutput:
         self.copy_event.synchronize()
 
-        # NOTE(woosuk): The following code is to ensure compatibility with
-        # the existing model runner.
-        # Going forward, we should keep the data structures as NumPy arrays
-        # rather than Python lists.
-        sampled_token_ids: list[list[int]] = self.sampled_token_ids.tolist()
-        num_sampled_tokens: list[int] = self.num_sampled_tokens_np.tolist()
-        for token_ids, num_tokens in zip(sampled_token_ids, num_sampled_tokens):
-            del token_ids[num_tokens:]
-        self.model_runner_output.sampled_token_ids = sampled_token_ids
+        # Keep sampled token ids in array form and defer Python list
+        # materialization until the scheduler consumes each request.
+        self.model_runner_output.sampled_token_ids = self.sampled_token_ids
+        self.model_runner_output.num_sampled_tokens = self.num_sampled_tokens_np
 
         if self.num_nans is not None:
             self.model_runner_output.num_nans_in_logits = dict(
@@ -78,12 +72,11 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
         is_valid: torch.Tensor | None,
         main_stream: torch.cuda.Stream,
         copy_stream: torch.cuda.Stream,
-        copy_event: torch.cuda.Event,
     ):
         self.model_runner_output = model_runner_output
         self.pooler_output = pooler_output
         self.is_valid = is_valid
-        self.copy_event = copy_event
+        self.copy_event = torch.cuda.Event()
 
         with stream(copy_stream, main_stream):
             copy_stream.wait_stream(main_stream)

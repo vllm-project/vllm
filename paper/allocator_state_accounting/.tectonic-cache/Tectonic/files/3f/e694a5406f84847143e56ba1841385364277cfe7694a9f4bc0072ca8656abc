@@ -1,0 +1,175 @@
+%%
+%% This is file `booktabs.sty',
+%% generated with the docstrip utility.
+%%
+%% The original source files were:
+%%
+%% booktabs.dtx  (with options: `package')
+%% 
+%% Copyright (C) 1995--2020 Simon Fear
+%% Maintained by Danie Els <dnjels@gmail.com>
+%% 
+%% -----------------------------------------------------------------
+%%  The booktabs package for publication  quality tables for LaTeX
+%% -----------------------------------------------------------------
+%% 
+%% This work may be distributed and/or modified under the conditions
+%% of the LaTeX Project Public License, either version 1.3c of this
+%% license or (at your option) any later version. The latest version
+%% of this license is in
+%%   http://www.latex-project.org/lppl.txt
+%% and version 1.3c or later is part of all distributions of LaTeX
+%% version 2008/05/04 or later.
+%% 
+%% -----------------------------------------------------------------
+\NeedsTeXFormat{LaTeX2e}[1999/12/01]
+\ProvidesPackage{booktabs}
+    [2020/01/12 v1.61803398 Publication quality tables]
+\newdimen\heavyrulewidth
+\newdimen\lightrulewidth
+\newdimen\cmidrulewidth
+\newdimen\belowrulesep
+\newdimen\belowbottomsep
+\newdimen\aboverulesep
+\newdimen\abovetopsep
+\newdimen\cmidrulesep
+\newdimen\cmidrulekern
+\newdimen\defaultaddspace
+\heavyrulewidth=.08em
+\lightrulewidth=.05em
+\cmidrulewidth=.03em
+\belowrulesep=.65ex
+\belowbottomsep=0pt
+\aboverulesep=.4ex
+\abovetopsep=0pt
+\cmidrulesep=\doublerulesep
+\cmidrulekern=.5em
+\defaultaddspace=.5em
+\newcount\@cmidla
+\newcount\@cmidlb
+\newdimen\@aboverulesep
+\newdimen\@belowrulesep
+\newcount\@thisruleclass
+\newcount\@lastruleclass
+\@lastruleclass=0
+\newdimen\@thisrulewidth
+\def\futurenonspacelet#1{\def\@BTcs{#1}%
+   \afterassignment\@BTfnslone\let\nexttoken= }
+\def\@BTfnslone{\expandafter\futurelet\@BTcs\@BTfnsltwo}
+\def\@BTfnsltwo{\expandafter\ifx\@BTcs\@sptoken\let\next=\@BTfnslthree
+   \else\let\next=\nexttoken\fi \next}
+\def\@BTfnslthree{\afterassignment\@BTfnslone\let\next= }
+\def\toprule{\noalign{\ifnum0=`}\fi
+  \@aboverulesep=\abovetopsep
+  \global\@belowrulesep=\belowrulesep %global cos for use in the next noalign
+  \global\@thisruleclass=\@ne
+  \@ifnextchar[{\@BTrule}{\@BTrule[\heavyrulewidth]}}
+\def\midrule{\noalign{\ifnum0=`}\fi
+  \@aboverulesep=\aboverulesep
+  \global\@belowrulesep=\belowrulesep
+  \global\@thisruleclass=\@ne
+  \@ifnextchar[{\@BTrule}{\@BTrule[\lightrulewidth]}}
+\def\bottomrule{\noalign{\ifnum0=`}\fi
+  \@aboverulesep=\aboverulesep
+  \global\@belowrulesep=\belowbottomsep
+  \global\@thisruleclass=\@ne
+  \@ifnextchar[{\@BTrule}{\@BTrule[\heavyrulewidth]}}
+\def\specialrule#1#2#3{\noalign{\ifnum0=`}\fi
+  \@aboverulesep=#2\global\@belowrulesep=#3\global\@thisruleclass=\tw@
+  \@BTrule[#1]}
+\def\addlinespace{\noalign{\ifnum0=`}\fi
+  \@ifnextchar[{\@addspace}{\@addspace[\defaultaddspace]}}
+\def\@addspace[#1]{\global\@belowrulesep=#1\global\@thisruleclass=\tw@
+  \futurelet\@tempa\@BTendrule}
+\def\@BTrule[#1]{%
+  \ifx\longtable\undefined
+    \let\@BTswitch\@BTnormal
+  \else\ifx\hline\LT@hline
+    \nobreak
+    \let\@BTswitch\@BLTrule
+  \else
+    \let\@BTswitch\@BTnormal
+  \fi\fi
+  \global\@thisrulewidth=#1\relax
+  \ifnum\@thisruleclass=\tw@\vskip\@aboverulesep\else
+  \ifnum\@lastruleclass=\z@\vskip\@aboverulesep\else
+  \ifnum\@lastruleclass=\@ne\vskip\doublerulesep\fi\fi\fi
+  \@BTswitch}
+\AtBeginDocument{%
+   \providecommand*\CT@arc@{}}%% colortbl support
+\def\@BTnormal{%
+    {\CT@arc@\hrule\@height\@thisrulewidth}%
+    \futurenonspacelet\@tempa\@BTendrule}
+\def\@BLTrule{\@ifnextchar({\@@BLTrule}{\@@BLTrule()}}
+\def\@@BLTrule(#1){\@setrulekerning{#1}%
+\global\@cmidlb\LT@cols
+\ifnum0=`{\fi}%
+\@cmidruleb
+\noalign{\ifnum0=`}\fi
+\futurenonspacelet\@tempa\@BTendrule}
+\def\@BTendrule{\ifx\@tempa\toprule\global\@lastruleclass=\@thisruleclass
+  \else\ifx\@tempa\midrule\global\@lastruleclass=\@thisruleclass
+  \else\ifx\@tempa\bottomrule\global\@lastruleclass=\@thisruleclass
+  \else\ifx\@tempa\cmidrule\global\@lastruleclass=\@thisruleclass
+  \else\ifx\@tempa\specialrule\global\@lastruleclass=\@thisruleclass
+  \else\ifx\@tempa\addlinespace\global\@lastruleclass=\@thisruleclass
+  \else\global\@lastruleclass=\z@\fi\fi\fi\fi\fi\fi
+  \ifnum\@lastruleclass=\@ne\relax\else\vskip\@belowrulesep\fi
+  \ifnum0=`{\fi}}
+\def\@setrulekerning#1{%
+   \global\let\cmrkern@l\z@
+   \global\let\cmrkern@r\z@
+   \@tfor\@tempa :=#1\do
+  {\def\@tempb{r}%
+   \ifx\@tempa\@tempb
+      \global\let\cmrkern@r\cmidrulekern
+      \def\cmrsideswitch{\cmrkern@r}%
+   \else
+      \def\@tempb{l}%
+      \ifx\@tempa\@tempb
+         \global\let\cmrkern@l\cmidrulekern
+         \def\cmrsideswitch{\cmrkern@l}%
+      \else
+         \global\expandafter\let\cmrsideswitch\@tempa
+      \fi
+   \fi}}
+\def\cmidrule{\noalign{\ifnum0=`}\fi
+    \@ifnextchar[{\@cmidrule}{\@cmidrule[\cmidrulewidth]}}
+\def\@cmidrule[#1]{\@ifnextchar({\@@cmidrule[#1]}{\@@cmidrule[#1]()}}
+\def\@@cmidrule[#1](#2)#3{\@@@cmidrule[#3]{#1}{#2}}
+\def\@@@cmidrule[#1-#2]#3#4{\global\@cmidla#1\relax
+    \global\advance\@cmidla\m@ne
+    \ifnum\@cmidla>0\global\let\@gtempa\@cmidrulea\else
+    \global\let\@gtempa\@cmidruleb\fi
+    \global\@cmidlb#2\relax
+    \global\advance\@cmidlb-\@cmidla
+    \global\@thisrulewidth=#3
+    \@setrulekerning{#4}
+    \ifnum\@lastruleclass=\z@\vskip \aboverulesep\fi
+    \ifnum0=`{\fi}\@gtempa
+    \noalign{\ifnum0=`}\fi\futurenonspacelet\@tempa\@xcmidrule}
+\def\@xcmidrule{%
+   \ifx\@tempa\cmidrule
+       \vskip-\@thisrulewidth
+       \global\@lastruleclass=\@ne
+   \else \ifx\@tempa\morecmidrules
+       \vskip \cmidrulesep
+       \global\@lastruleclass=\@ne\else
+       \vskip \belowrulesep
+       \global\@lastruleclass=\z@
+   \fi\fi
+   \ifnum0=`{\fi}}
+\def\@cmidrulea{%
+   \multispan\@cmidla&\multispan\@cmidlb
+   \unskip\hskip\cmrkern@l%
+  {\CT@arc@\leaders\hrule \@height\@thisrulewidth\hfill\kern\z@}%
+   \hskip\cmrkern@r\cr}%
+\def\@cmidruleb{%
+    \multispan\@cmidlb
+    \unskip\hskip \cmrkern@l%
+   {\CT@arc@\leaders\hrule \@height\@thisrulewidth\hfill\kern\z@}%
+    \hskip\cmrkern@r\cr}%
+\def\morecmidrules{\noalign{\relax}}
+\endinput
+%%
+%% End of file `booktabs.sty'.
