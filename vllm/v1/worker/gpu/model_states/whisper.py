@@ -85,7 +85,7 @@ class WhisperModelState(ModelState):
             encoder_outputs: list[torch.Tensor] = []
             for req_id in input_batch.req_ids:
                 req_idx = req_states.req_id_to_index[req_id]
-                num_computed_tokens = req_states.num_computed_tokens.np[req_idx]
+                num_computed_tokens = req_states.num_computed_tokens_np[req_idx]
                 if num_computed_tokens > 0:
                     continue
 
@@ -94,14 +94,11 @@ class WhisperModelState(ModelState):
                     continue
 
                 assert len(mm_features) == 1, (
-                    "Whisper requests are expected to have exactly one encoder "
-                    "input."
+                    "Whisper requests are expected to have exactly one encoder input."
                 )
                 mm_hash = mm_features[0].identifier
                 encoder_output = self.encoder_cache.encoder_outputs.get(mm_hash)
-                assert encoder_output is not None, (
-                    f"Encoder cache miss for {mm_hash}."
-                )
+                assert encoder_output is not None, f"Encoder cache miss for {mm_hash}."
                 encoder_outputs.append(encoder_output)
 
             self.encoder_outputs = encoder_outputs
