@@ -23,7 +23,6 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.linear import ColumnParallelLinear
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
     from vllm.platforms.interface import DeviceCapability
-    from vllm.v1.attention.backends.utils import KVCacheLayoutType
     from vllm.v1.kv_cache_interface import AttentionSpec, KVQuantMode
 
 from vllm.v1.kv_cache_interface import get_kv_quant_mode
@@ -82,68 +81,6 @@ class AttentionBackend(ABC):
     @staticmethod
     @abstractmethod
     def get_builder_cls():  # -> Type["AttentionMetadataBuilder"]:
-        raise NotImplementedError
-
-    @staticmethod
-    @abstractmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        raise NotImplementedError
-
-    @classmethod
-    def get_kv_cache_block_dim(
-        cls,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> int:
-        """Discover which tensor dim is the block index, since different
-        backends lay out dims differently."""
-        _S = 1234567
-        shape = cls.get_kv_cache_shape(
-            _S,
-            block_size,
-            num_kv_heads,
-            head_size,
-            cache_dtype_str=cache_dtype_str,
-        )
-        return shape.index(_S)
-
-    @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        """
-        Get the physical (memory layout) ordering of the kv cache dimensions.
-        e.g. if the KV cache shape is
-        [2, num_blocks, block_size, num_heads, head_size],
-        and get_kv_cache_stride_order returns (1, 3, 0, 2, 4) then the physical
-        ordering of dimensions is
-        [num_blocks, num_heads, 2, block_size, head_size].
-
-        If this function is unimplemented / raises NotImplementedError,
-        the physical layout of the KV cache will match the logical shape.
-
-        Args:
-            include_num_layers_dimension: if True, includes an additional
-                num_layers dimension, which is assumed to be prepended
-                to the logical KV cache shape.
-                With the above example, a return value (2, 4, 0, 1, 3, 5)
-                corresponds to
-                [num_blocks, num_heads, num_layers, 2, block_size, head_size].
-
-                If an additional dimension is NOT included in the returned
-                tuple, the physical layout will not include a layers dimension.
-
-        Returns:
-            A tuple of ints which is a permutation of range(len(shape)).
-        """
         raise NotImplementedError
 
     @classmethod
@@ -332,10 +269,6 @@ class AttentionBackend(ABC):
         if combination_reason is not None:
             invalid_reasons.append(combination_reason)
         return invalid_reasons
-
-    @classmethod
-    def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
-        return None
 
     @classmethod
     def is_ssm(cls) -> bool:

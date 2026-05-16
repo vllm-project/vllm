@@ -151,24 +151,11 @@ class MLAAttentionQuantPatternModel(torch.nn.Module):
         num_blocks = batch_size * max_blocks
 
         # MLA KV cache is 3D: (num_blocks, block_size, head_size)
-        attn_backend = self.mla_attn.attn_backend
-        kv_cache_shape = attn_backend.get_kv_cache_shape(
-            num_blocks, self.block_size, 1, self.head_size
+        kv_cache = torch.zeros(
+            (num_blocks, self.block_size, self.head_size),
+            dtype=self.kv_cache_dtype,
+            device=self.device,
         )
-        try:
-            kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
-        except (AttributeError, NotImplementedError):
-            kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
-
-        ordered_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
-        inv_order = [
-            kv_cache_stride_order.index(i) for i in range(len(kv_cache_stride_order))
-        ]
-
-        raw_tensor = torch.zeros(
-            ordered_shape, dtype=self.kv_cache_dtype, device=self.device
-        )
-        kv_cache = raw_tensor.permute(*inv_order)
 
         self.mla_attn.kv_cache = kv_cache
 

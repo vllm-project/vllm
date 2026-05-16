@@ -25,8 +25,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import
     MooncakeBootstrapServer,
 )
 from vllm.utils.network_utils import get_open_port
-from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    compute_kv_cache_shape,
+)
 from vllm.v1.request import RequestStatus
 
 from .utils import create_request, create_scheduler, create_vllm_config
@@ -604,11 +607,14 @@ def test_register_kv_caches():
         worker = connector.connector_worker
         mock_thread.return_value.is_alive.return_value = False
 
-        kv_cache_shape = FlashAttentionBackend.get_kv_cache_shape(
-            num_blocks=2, block_size=16, num_kv_heads=4, head_size=64
+        shape = compute_kv_cache_shape(
+            FullAttentionSpec(
+                block_size=16, num_kv_heads=4, head_size=64, dtype=torch.float16
+            ),
+            2,
         )
-        tensor1 = torch.zeros(*kv_cache_shape, dtype=torch.float16)
-        tensor2 = torch.zeros(*kv_cache_shape, dtype=torch.float16)
+        tensor1 = torch.zeros(*shape, dtype=torch.float16)
+        tensor2 = torch.zeros(*shape, dtype=torch.float16)
         kv_caches = {"layer0": tensor1, "layer1": tensor2}
 
         with patch.object(
@@ -618,18 +624,14 @@ def test_register_kv_caches():
 
             mock_batch_register.assert_called_once()
             registered_ptrs, registered_lens = mock_batch_register.call_args[0]
-            expected_ptrs = {
-                tensor.data_ptr()
-                for kv_pair in kv_caches.values()
-                for tensor in kv_pair
-            }
+            expected_ptrs = {tensor.data_ptr() for tensor in kv_caches.values()}
             assert set(registered_ptrs) == expected_ptrs
-            assert set(registered_lens) == {tensor1[0].nbytes}
+            assert set(registered_lens) == {tensor1.nbytes}
 
             # Verify block_len_per_layer is set correctly.
             assert len(worker.block_len_per_layer) == len(registered_ptrs)
             for bl in worker.block_len_per_layer:
-                assert bl == tensor1[0].nbytes // tensor1.shape[1]
+                assert bl == tensor1.stride(0) * tensor1.element_size()
 
 
 def test_register_kv_caches_supports_mixed_mla_and_eagle_shapes():

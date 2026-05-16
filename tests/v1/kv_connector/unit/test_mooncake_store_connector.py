@@ -184,58 +184,6 @@ def test_get_kv_connector_kv_cache_events_wraps_worker_events():
     assert kv_events.get_all_events() == [event]
 
 
-def test_prefer_cross_layer_blocks_from_config():
-    # Default: disabled
-    vllm_config = _make_vllm_config()
-    with (
-        set_current_vllm_config(vllm_config),
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
-            "connector.MooncakeStoreScheduler"
-        ),
-    ):
-        conn = connector.MooncakeStoreConnector(vllm_config, KVConnectorRole.SCHEDULER)
-    assert conn.prefer_cross_layer_blocks is False
-
-    # Enabled via config
-    vllm_config_enabled = create_vllm_config(
-        kv_connector="MooncakeStoreConnector",
-        kv_role="kv_both",
-        kv_connector_extra_config={"enable_cross_layers_blocks": "true"},
-    )
-    with (
-        set_current_vllm_config(vllm_config_enabled),
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
-            "connector.MooncakeStoreScheduler"
-        ),
-    ):
-        conn_enabled = connector.MooncakeStoreConnector(
-            vllm_config_enabled, KVConnectorRole.SCHEDULER
-        )
-    assert conn_enabled.prefer_cross_layer_blocks is True
-
-
-def test_register_cross_layers_kv_cache_delegates_to_worker():
-    vllm_config = _make_vllm_config()
-
-    with (
-        set_current_vllm_config(vllm_config),
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
-            "connector.MooncakeStoreWorker"
-        ) as mock_worker_cls,
-    ):
-        conn = connector.MooncakeStoreConnector(vllm_config, KVConnectorRole.WORKER)
-
-    fake_tensor = MagicMock()
-    fake_backend = MagicMock()
-    conn.register_cross_layers_kv_cache(fake_tensor, fake_backend)
-
-    worker_inst = mock_worker_cls.return_value
-    worker_inst.register_cross_layers_kv_caches.assert_called_once_with(fake_tensor)
-
-
 def test_update_connector_output_and_take_events():
     vllm_config = _make_vllm_config()
     event = _make_block_stored()

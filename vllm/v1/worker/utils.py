@@ -126,12 +126,8 @@ class KVBlockZeroer:
                 continue
             kernel_bs = kernel_block_sizes[group.kv_cache_group_id]
             ratio = spec.block_size // kernel_bs
-            block_dim = group.backend.get_kv_cache_block_dim(
-                kernel_bs,
-                spec.num_kv_heads,
-                spec.head_size,
-                cache_dtype_str=cache_dtype,
-            )
+            # Standardized layouts always have num_blocks at dim 0
+            block_dim = 0
 
             for layer_name in group.layer_names:
                 if layer_name in runner_only_attn_layers:

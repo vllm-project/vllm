@@ -121,18 +121,6 @@ class CacheOnlyAttentionBackend(AttentionBackend):
         return CacheOnlyAttentionImpl
 
     @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        # We set `num_kv_heads = num_hidden_layers` and `head_size = hidden_size`
-        # We also don't use a k/v (2) dim
-        return (num_blocks, block_size, num_kv_heads, head_size)
-
-    @staticmethod
     def get_builder_cls() -> type["CacheOnlyAttentionMetadataBuilder"]:
         return CacheOnlyAttentionMetadataBuilder
 

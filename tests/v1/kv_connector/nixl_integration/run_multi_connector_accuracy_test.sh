@@ -8,9 +8,7 @@
 # wrapping NixlConnector and OffloadingConnector, then runs gsm8k accuracy via
 # test_accuracy.py.
 #
-# By default runs two configurations:
-#   1. Normal KV layout (NixlConnector without cross-layer blocks)
-#   2. Cross-layer KV layout (NixlConnector with enable_cross_layers_blocks)
+# Runs the MultiConnector configuration with standard KV layout.
 #
 # Usage:
 #   bash tests/v1/kv_connector/nixl_integration/run_multi_connector_accuracy_test.sh
@@ -41,8 +39,6 @@ SMI_BIN=$(which nvidia-smi || which rocm-smi || echo "")
 
 # ── KV transfer configs ─────────────────────────────────────────────────
 
-# Normal layout: OffloadingConnector prefers cross-layer but NixlConnector
-# does not, so MultiConnector.prefer_cross_layer_blocks = False.
 KV_CONFIG_NORMAL='{
   "kv_connector":"MultiConnector",
   "kv_role":"kv_both",
@@ -56,21 +52,6 @@ KV_CONFIG_NORMAL='{
 }'
 # Remove whitespace for CLI safety
 KV_CONFIG_NORMAL=$(echo "$KV_CONFIG_NORMAL" | tr -d '[:space:]')
-
-# Cross-layer layout: both connectors prefer cross-layer blocks.
-KV_CONFIG_CROSS_LAYERS='{
-  "kv_connector":"MultiConnector",
-  "kv_role":"kv_both",
-  "kv_connector_extra_config":{
-    "connectors":[
-      {"kv_connector":"NixlConnector","kv_role":"kv_both",
-       "kv_connector_extra_config":{"enable_cross_layers_blocks":"True"}},
-      {"kv_connector":"OffloadingConnector","kv_role":"kv_both",
-       "kv_connector_extra_config":{"cpu_bytes_to_use":1000000000}}
-    ]
-  }
-}'
-KV_CONFIG_CROSS_LAYERS=$(echo "$KV_CONFIG_CROSS_LAYERS" | tr -d '[:space:]')
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -122,7 +103,7 @@ run_tests_for_model() {
   # ── Start prefill instance ──
   echo "Starting prefill instance on GPU $PREFILL_GPU, port $PREFILL_PORT"
   BASE_CMD="CUDA_VISIBLE_DEVICES=$PREFILL_GPU \
-    VLLM_KV_CACHE_LAYOUT='HND' \
+    VLLM_KV_CACHE_LAYOUT='${VLLM_KV_CACHE_LAYOUT:-HNC}' \
     UCX_NET_DEVICES=all \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_SIDE_CHANNEL_PORT \
     vllm serve $model_name \
@@ -144,7 +125,7 @@ run_tests_for_model() {
   # ── Start decode instance ──
   echo "Starting decode instance on GPU $DECODE_GPU, port $DECODE_PORT"
   BASE_CMD="CUDA_VISIBLE_DEVICES=$DECODE_GPU \
-    VLLM_KV_CACHE_LAYOUT='HND' \
+    VLLM_KV_CACHE_LAYOUT='${VLLM_KV_CACHE_LAYOUT:-HNC}' \
     UCX_NET_DEVICES=all \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_SIDE_CHANNEL_PORT \
     vllm serve $model_name \
@@ -193,13 +174,7 @@ run_tests_for_model() {
 # ── Main ─────────────────────────────────────────────────────────────────
 
 for model in "${MODELS[@]}"; do
-  if [[ -z "${SKIP_NORMAL_LAYOUT:-}" ]]; then
-    run_tests_for_model "$model" "$KV_CONFIG_NORMAL" "MultiConnector normal layout"
-  fi
-
-  if [[ -z "${SKIP_CROSS_LAYERS:-}" ]]; then
-    run_tests_for_model "$model" "$KV_CONFIG_CROSS_LAYERS" "MultiConnector cross-layer layout"
-  fi
+  run_tests_for_model "$model" "$KV_CONFIG_NORMAL" "MultiConnector layout"
 done
 
 echo "All MultiConnector accuracy tests passed!"

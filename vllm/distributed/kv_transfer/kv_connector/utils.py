@@ -32,7 +32,7 @@ BlockIds = tuple[list[int], ...] | list[list[int]]
 
 
 def get_kv_connector_cache_layout():
-    # NOTE (NickLucche) When running disaggregated PD with NIXL, HND layout is
+    # NOTE (NickLucche) When running disaggregated PD with NIXL, HNC layout is
     # used for faster transfer.
     vllm_config = get_current_vllm_config()
     kv_config = vllm_config.kv_transfer_config
@@ -42,9 +42,9 @@ def get_kv_connector_cache_layout():
         if required_kvcache_layout is not None:
             return required_kvcache_layout
         logger.info_once(
-            "Connectors do not specify a kv cache layout, defaulting to NHD."
+            "Connectors do not specify a kv cache layout, defaulting to NHC."
         )
-    return "NHD"
+    return "NHC"
 
 
 class KVOutputAggregator:
@@ -279,11 +279,11 @@ def kv_postprocess_layout_on_receive(cache, indices):
 
 def kv_postprocess_blksize_and_layout_on_receive(cache, indices, block_size_ratio):
     """
-    Transforms the layout of received KV cache to the local block_size and HND.
+    Transforms the layout of received KV cache to the local block_size and HNC.
     (Only works for local blocksize > remote blocksize)
 
-    prefill is HND, smaller block_size
-    decode(local) is NHD, larger block_size
+    prefill is HNC, smaller block_size
+    decode(local) is NHC, larger block_size
     """
     blocks_to_update = cache.index_select(0, indices)
 
@@ -408,43 +408,12 @@ class TransferTopology:
 
         self._engines: dict[EngineId, EngineTransferInfo] = {}
 
-        # Figure out whether the first dimension of the cache is K/V
-        # or num_blocks.
-        attn_backend = self.attn_backends[0]
-        if not self.is_mamba:
-            _MOCK_BLOCK_SIZE = 16
-            kv_cache_shape: tuple[int, ...] = attn_backend.get_kv_cache_shape(
-                num_blocks=1,
-                block_size=_MOCK_BLOCK_SIZE,
-                num_kv_heads=1,
-                head_size=1,
-            )
-            logger.debug("Test kv_cache_shape: %s", kv_cache_shape)
-        # Non-MLA backends caches have 5 dims [2, num_blocks, H,N,D],
-        # we just mock num_blocks to 1 for the dimension check below.
-        # Hybrid SSM models assume a single blocks_first layout
-        self._is_kv_layout_blocks_first = self.is_mamba or (
-            len(kv_cache_shape) == 5 and kv_cache_shape[0] == 1
-        )
+        # Cross-layer layouts (BLHNC) have B outermost, so all layers
+        # for a block are contiguous — transfers can coalesce multiple
+        # layers into one operation.
+        from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 
-        self._cross_layers_blocks = False
-        if self.tensor_shape is not None:
-            self._cross_layers_blocks = (
-                len(self.tensor_shape) == len(kv_cache_shape) + 1
-            )
-
-        if self._cross_layers_blocks:
-            logger.debug("Using cross-layer KV cache")
-            _MOCK_NUM_LAYERS = 80
-            kv_cache_shape = (_MOCK_NUM_LAYERS,) + kv_cache_shape
-            try:
-                kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(
-                    include_num_layers_dimension=self._cross_layers_blocks
-                )
-            except (AttributeError, NotImplementedError):
-                assert self.tensor_shape is not None
-                kv_cache_stride_order = tuple(range(len(self.tensor_shape)))
-            kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
+        self._is_kv_layout_blocks_first = not resolve_kv_cache_layout().is_layer_compact
 
     # ============================================================
     # Engine registration
@@ -479,17 +448,6 @@ class TransferTopology:
     @property
     def is_kv_layout_blocks_first(self) -> bool:
         return self._is_kv_layout_blocks_first
-
-    @property
-    def cross_layers_blocks(self) -> bool:
-        return self._cross_layers_blocks
-
-    @property
-    def split_k_and_v(self) -> bool:
-        # Whether to register regions for K and V separately (when present).
-        return not (
-            self._cross_layers_blocks or self.is_mla or self.is_kv_layout_blocks_first
-        )
 
     # ============================================================
     # Common methods
@@ -584,8 +542,7 @@ class TransferTopology:
             # Swap [2<>num_blocks] dims for hybrid SSM layout.
             cache = cache.transpose(0, 1)
 
-        # Regular case: backends like FA register K/V in separate regions
-        return cache if self.split_k_and_v else [cache]
+        return [cache]
 
     def describe(self, remote_engine_id: EngineId) -> str:
         """One-line summary of transfer config for logging."""

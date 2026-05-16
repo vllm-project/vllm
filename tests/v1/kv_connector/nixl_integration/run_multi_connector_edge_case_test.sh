@@ -92,7 +92,7 @@ run_tests_for_model() {
   # ── Start prefill instance ──
   echo "Starting prefill instance on GPU $PREFILL_GPU, port $PREFILL_PORT"
   BASE_CMD="CUDA_VISIBLE_DEVICES=$PREFILL_GPU \
-    VLLM_KV_CACHE_LAYOUT='HND' \
+    VLLM_KV_CACHE_LAYOUT='HNC' \
     UCX_NET_DEVICES=all \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_SIDE_CHANNEL_PORT \
     vllm serve \"$model_name\" \
@@ -115,7 +115,7 @@ run_tests_for_model() {
   # ── Start decode instance ──
   echo "Starting decode instance on GPU $DECODE_GPU, port $DECODE_PORT"
   BASE_CMD="CUDA_VISIBLE_DEVICES=$DECODE_GPU \
-    VLLM_KV_CACHE_LAYOUT='HND' \
+    VLLM_KV_CACHE_LAYOUT='HNC' \
     UCX_NET_DEVICES=all \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_SIDE_CHANNEL_PORT \
     vllm serve \"$model_name\" \

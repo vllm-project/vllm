@@ -109,7 +109,7 @@ def _get_tp_ratio(local_tp_size: int, remote_tp_size: int) -> int:
 def _expand_transfer_regions(
     base_addrs: list[int],
     block_lens: list[int],
-    is_kv_layout_blocks_first: bool,
+    is_kv_layout_blocks_first: bool,  # kept for API compat, unused
 ) -> list[TransferRegion]:
     """Expand registered KV tensors into the regions transferred by Mooncake."""
     assert len(base_addrs) == len(block_lens), (
@@ -118,22 +118,13 @@ def _expand_transfer_regions(
     )
     regions: list[TransferRegion] = []
     for base_addr, block_len in zip(base_addrs, block_lens):
-        kv_block_len = block_len // 2 if is_kv_layout_blocks_first else block_len
         regions.append(
             TransferRegion(
                 base_addr=base_addr,
                 block_len=block_len,
-                kv_block_len=kv_block_len,
+                kv_block_len=block_len,
             )
         )
-        if is_kv_layout_blocks_first:
-            regions.append(
-                TransferRegion(
-                    base_addr=base_addr + kv_block_len,
-                    block_len=block_len,
-                    kv_block_len=kv_block_len,
-                )
-            )
     return regions
 
 
@@ -377,10 +368,10 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         if vllm_config.model_config.use_mla:
             return None
         logger.info_once(
-            "MooncakeConnector setting KV cache layout to HND for "
+            "MooncakeConnector setting KV cache layout to HNC for "
             "heterogeneous TP-safe KV transfer."
         )
-        return "HND"
+        return "HNC"
 
     ############################################################
     # Scheduler Side Methods
@@ -1395,10 +1386,9 @@ class MooncakeConnectorWorker:
         seen_base_addresses = []
         self.block_len_per_layer = []
 
-        split_k_and_v = self.transfer_topo.split_k_and_v
         tensor_size_bytes = None
         for layer_name, cache_or_caches in kv_caches.items():
-            cache_list = cache_or_caches if split_k_and_v else [cache_or_caches]
+            cache_list = [cache_or_caches]
             logger.debug(
                 "registering layer %s with %d cache tensor(s)",
                 layer_name,

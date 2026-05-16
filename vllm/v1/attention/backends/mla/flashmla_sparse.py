@@ -132,20 +132,6 @@ class FlashMLASparseBackend(AttentionBackend):
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
         return capability.major in [9, 10]
 
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,  # assumed to be 1 for MLA
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        if cache_dtype_str == "fp8_ds_mla":
-            # V3.2 main MLA: 656-byte custom storage format. See module docstring.
-            return (num_blocks, block_size, 656)
-        else:
-            return (num_blocks, block_size, head_size)
-
 
 class DeepseekV4FlashMLASparseBackend(FlashMLASparseBackend):
     @staticmethod
@@ -155,21 +141,6 @@ class DeepseekV4FlashMLASparseBackend(FlashMLASparseBackend):
     @staticmethod
     def get_name() -> str:
         return "V4_FLASHMLA_SPARSE"
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        if cache_dtype_str == "fp8_ds_mla":
-            # DeepseekV4 main MLA: 584B per token (448 NoPE + 128 RoPE + 8 fp8 scale).
-            # head_size passed in is the semantic head_dim (512).
-            return (num_blocks, block_size, 584)
-        else:
-            return (num_blocks, block_size, head_size)
 
 
 @dataclass

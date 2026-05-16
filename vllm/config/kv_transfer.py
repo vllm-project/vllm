@@ -65,7 +65,7 @@ class KVTransferConfig:
     Only supported in V1."""
 
     enable_permute_local_kv: bool = False
-    """Experiment feature flag to enable HND to NHD KV Transfer"""
+    """Experiment feature flag to enable HNC to NHC KV Transfer"""
 
     kv_load_failure_policy: Literal["recompute", "fail"] = "fail"
     """Policy for handling KV cache load failures.

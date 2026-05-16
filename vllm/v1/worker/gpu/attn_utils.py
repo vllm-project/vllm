@@ -8,18 +8,20 @@ import torch
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
     CommonAttentionMetadata,
 )
+from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
+    KVCacheLayout,
     KVCacheSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
+    reshape_kv_cache,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup, bind_kv_cache
@@ -126,114 +128,50 @@ def init_attn_backend(
     )
 
 
-def _allocate_kv_cache(kv_cache_config: KVCacheConfig, device: torch.device):
-    kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
-    for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-        tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=device)
-        for layer_name in kv_cache_tensor.shared_by:
-            kv_cache_raw_tensors[layer_name] = tensor
-
-    layer_names = set()
-    for group in kv_cache_config.kv_cache_groups:
-        for layer_name in group.layer_names:
-            layer_names.add(layer_name)
-    assert layer_names == set(kv_cache_raw_tensors.keys()), (
-        "Some layers are not correctly initialized"
-    )
-    return kv_cache_raw_tensors
-
-
-def _reshape_kv_cache(
+def _allocate_and_reshape_kv_cache(
     kv_cache_config: KVCacheConfig,
-    kv_cache_raw_tensors: dict[str, torch.Tensor],
-    attn_backends: dict[str, type[AttentionBackend]],
-    cache_dtype: str,
+    device: torch.device,
+    layout: KVCacheLayout | None = None,
 ) -> dict[str, Any]:
+    if layout is None:
+        layout = resolve_kv_cache_layout()
+    num_blocks = kv_cache_config.num_blocks
+
+    # Build layer_name -> spec lookup.
+    spec_for_layer: dict[str, KVCacheSpec] = {}
+    for group in kv_cache_config.kv_cache_groups:
+        spec = group.kv_cache_spec
+        for layer_name in group.layer_names:
+            if isinstance(spec, UniformTypeKVCacheSpecs):
+                spec_for_layer[layer_name] = spec.kv_cache_specs[layer_name]
+            else:
+                spec_for_layer[layer_name] = spec
+
+    # Allocate, reshape by unique spec, and distribute views.
     kv_caches: dict[str, Any] = {}
     has_attn, has_mamba = False, False
-    for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
-        for layer_name in kv_cache_group_spec.layer_names:
-            kv_cache_spec = kv_cache_group_spec.kv_cache_spec
-            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-                kv_cache_spec = kv_cache_spec.kv_cache_specs[layer_name]
+    for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+        num_layer_slots = len(kv_cache_tensor.shared_by)
+        assert num_layer_slots > 0
+        buf = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=device)
 
-            kv_raw_tensor = kv_cache_raw_tensors[layer_name]
-            assert kv_raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
-            num_blocks = kv_raw_tensor.numel() // kv_cache_spec.page_size_bytes
-
-            if isinstance(kv_cache_spec, AttentionSpec):
-                has_attn = True
-                attn_backend = attn_backends[layer_name]
-                kv_cache_shape = attn_backend.get_kv_cache_shape(
-                    num_blocks,
-                    kv_cache_spec.storage_block_size,
-                    kv_cache_spec.num_kv_heads,
-                    kv_cache_spec.head_size,
-                    cache_dtype_str=cache_dtype,
-                )
-
-                # FIXME(woosuk): Add kv_cache_stride_order to all attention backends.
-                try:
-                    kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
-                    assert len(kv_cache_stride_order) == len(kv_cache_shape)
-                except (AttributeError, NotImplementedError):
-                    kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
-
-                kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
-                inv_order = [
-                    kv_cache_stride_order.index(i)
-                    for i in range(len(kv_cache_stride_order))
-                ]
-
-                dtype = kv_cache_spec.dtype
-                kv_tensor = kv_raw_tensor.view(dtype)
-                if kv_cache_spec.page_size_padded is not None:
-                    # Use strided view to handle page_size_bytes that
-                    # include padding. This follows the same pattern as
-                    # MambaSpec handling in gpu_model_runner.py.
-                    # NOTE: This assumes kv_cache_shape[0] == num_blocks
-                    # (i.e. the first physical dimension is the block
-                    # index), which holds for MLA backends but NOT for
-                    # standard attention backends whose shape starts with
-                    # a K/V dimension of size 2.
-                    dtype_size = get_dtype_size(dtype)
-                    page_stride = kv_cache_spec.page_size_bytes // dtype_size
-                    strides = list(torch.empty(kv_cache_shape).stride())
-                    strides[inv_order[0]] = page_stride
-                    kv_cache = torch.as_strided(
-                        kv_tensor,
-                        size=kv_cache_shape,
-                        stride=tuple(strides),
+        # Unique specs in this tensor (slots can mix groups/specs).
+        seen_specs: dict[int, list[torch.Tensor]] = {}
+        for slot_idx, slot_layers in enumerate(kv_cache_tensor.shared_by):
+            for layer_name in slot_layers:
+                spec = spec_for_layer[layer_name]
+                key = id(spec)
+                if key not in seen_specs:
+                    has_attn = has_attn or isinstance(spec, AttentionSpec)
+                    has_mamba = has_mamba or isinstance(spec, MambaSpec)
+                    seen_specs[key] = reshape_kv_cache(
+                        buf,
+                        spec,
+                        num_blocks,
+                        num_layer_slots=num_layer_slots,
+                        layout=layout,
                     )
-                else:
-                    # No padding — safe to use a contiguous view.
-                    kv_cache = kv_tensor.view(kv_cache_shape)
-                kv_caches[layer_name] = kv_cache.permute(*inv_order)
-
-            elif isinstance(kv_cache_spec, MambaSpec):
-                has_mamba = True
-                state_tensors = []
-                storage_offset_bytes = 0
-                for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
-                    dtype_size = get_dtype_size(dtype)
-                    num_element_per_page = kv_cache_spec.page_size_bytes // dtype_size
-                    target_shape = (num_blocks, *shape)
-                    stride = torch.empty(target_shape).stride()
-                    target_stride = (num_element_per_page, *stride[1:])
-                    assert storage_offset_bytes % dtype_size == 0
-                    tensor = torch.as_strided(
-                        kv_raw_tensor.view(dtype),
-                        size=target_shape,
-                        stride=target_stride,
-                        storage_offset=storage_offset_bytes // dtype_size,
-                    )
-                    state_tensors.append(tensor)
-                    storage_offset_bytes += stride[0] * dtype_size
-                kv_caches[layer_name] = state_tensors
-            else:
-                raise NotImplementedError(
-                    f"Unsupported KV cache spec type: {type(kv_cache_spec)}"
-                )
+                kv_caches[layer_name] = seen_specs[key][slot_idx]
 
     if has_attn and has_mamba:
         _update_hybrid_attention_layout(kv_caches, kv_cache_config)
@@ -275,11 +213,9 @@ def init_kv_cache(
     attn_backends: dict[str, type[AttentionBackend]],
     device: torch.device,
     cache_dtype: str,
+    layout: KVCacheLayout | None = None,
 ) -> dict[str, Any]:
-    kv_cache_raw_tensors = _allocate_kv_cache(kv_cache_config, device)
-    kv_caches = _reshape_kv_cache(
-        kv_cache_config, kv_cache_raw_tensors, attn_backends, cache_dtype
-    )
+    kv_caches = _allocate_and_reshape_kv_cache(kv_cache_config, device, layout=layout)
     bind_kv_cache(kv_caches, forward_context, runner_kv_caches)
     return kv_caches
 

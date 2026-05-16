@@ -974,7 +974,7 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
             vllm_config (VllmConfig): the vllm config.
 
         Returns:
-            str: the required KV cache layout. e.g. HND, or NHD.
+            str: the required KV cache layout. e.g. HNC, or NHC.
             None if the connector does not require a specific layout.
         """
 

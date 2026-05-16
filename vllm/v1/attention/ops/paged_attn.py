@@ -20,11 +20,11 @@ class PagedAttention:
         head_size: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         x = 16 // kv_cache.element_size()
-        num_blocks = kv_cache.shape[1]
+        num_blocks = kv_cache.shape[0]
 
-        key_cache = kv_cache[0]
+        key_cache = kv_cache[..., :head_size]
         key_cache = key_cache.view(num_blocks, num_kv_heads, head_size // x, -1, x)
-        value_cache = kv_cache[1]
+        value_cache = kv_cache[..., head_size:]
         value_cache = value_cache.view(num_blocks, num_kv_heads, head_size, -1)
         return key_cache, value_cache
 

@@ -68,18 +68,6 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
         return RocmAiterUnifiedAttentionImpl
 
     @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        if block_size % 16 != 0:
-            raise ValueError("Block size must be a multiple of 16.")
-        return (2, num_blocks, block_size, num_kv_heads, head_size)
-
-    @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
         return False
 
@@ -197,7 +185,9 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                 layer,
             )
 
-        key_cache, value_cache = kv_cache.unbind(0)
+        kv_cache = kv_cache.transpose(1, 2)
+        hs = self.head_size
+        key_cache, value_cache = kv_cache.split(hs, dim=-1)
 
         softmax_scale = self.scale
         if is_quantized_kv_cache(self.kv_cache_dtype):
@@ -246,7 +236,9 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             # For encoder attention,
             # we use direct Q, K, V tensors without caching
             return
-        key_cache, value_cache = kv_cache.unbind(0)
+        kv_cache = kv_cache.transpose(1, 2)
+        hs = self.head_size
+        key_cache, value_cache = kv_cache.split(hs, dim=-1)
 
         # Reshape the input keys and values and store them in the cache.
         ops.reshape_and_cache_flash(
@@ -279,7 +271,9 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             # For encoder attention,
             # we use direct Q, K, V tensors without caching
             return
-        key_cache, value_cache = kv_cache.unbind(0)
+        kv_cache = kv_cache.transpose(1, 2)
+        hs = self.head_size
+        key_cache, value_cache = kv_cache.split(hs, dim=-1)
         flash_layout = True
 
         is_fp8_kv_cache = is_quantized_kv_cache(self.kv_cache_dtype)

@@ -128,38 +128,6 @@ class TurboQuantAttentionBackend(AttentionBackend):
     def get_builder_cls() -> type["TurboQuantMetadataBuilder"]:
         return TurboQuantMetadataBuilder
 
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "turboquant_4bit_nc",
-    ) -> tuple[int, ...]:
-        """Combined K+V cache shape — no leading 2 dimension.
-
-        Standard attention backends use (2, num_blocks, block_size, num_kv_heads,
-        head_dim) with a leading 2 to separate K and V. TurboQuant packs K+V
-        into a single interleaved slot per head per position, so the cache is:
-
-            (num_blocks, block_size, num_kv_heads, slot_size_aligned)
-
-        Each slot = [key_packed | value_packed | padding].
-        This is safe because TQ has its own get_kv_cache_shape override and
-        never shares cache tensors with other backends. Layers that fall back
-        to native dtype via kv_cache_dtype_skip_layers get their own
-        standard-shaped cache allocation.
-
-        head_size is the model's real head_dim. slot_size_aligned is computed
-        from the TQ config to ensure correct cache allocation for all head dims.
-        """
-        from vllm.model_executor.layers.quantization.turboquant.config import (
-            TurboQuantConfig,
-        )
-
-        tq_config = TurboQuantConfig.from_cache_dtype(cache_dtype_str, head_size)
-        return (num_blocks, block_size, num_kv_heads, tq_config.slot_size_aligned)
-
     @classmethod
     def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
         if kv_cache_dtype is None:
@@ -383,7 +351,8 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
 
         k = key[:N].view(N, self.num_kv_heads, self.head_size)
         v = value[:N].view(N, self.num_kv_heads, self.head_size)
-        self._store_kv(k, v, kv_cache, slot_mapping, layer)
+        # (B, H, N, C) -> (B, N, H, C) for kernel compatibility.
+        self._store_kv(k, v, kv_cache.transpose(1, 2), slot_mapping, layer)
 
     def forward(
         self,
@@ -416,6 +385,8 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             return output.fill_(0)
 
         q = query[:N].view(N, self.num_heads, self.head_size)
+        # (B, H, N, C) -> (B, N, H, C) for kernel compatibility.
+        kv_cache = kv_cache.transpose(1, 2)
 
         # Get TQ buffers, ensure on device (one-time migration).
         # Use Any-typed alias for dynamic _tq_* attrs set by _ensure_on_device.

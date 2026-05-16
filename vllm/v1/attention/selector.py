@@ -8,14 +8,11 @@ import torch
 
 import vllm.envs as envs
 from vllm.config.cache import CacheDType
-from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.attention.backend import AttentionBackend, AttentionType
 from vllm.v1.attention.backends.registry import (
     MambaAttentionBackendEnum,
 )
-
-logger = init_logger(__name__)
 
 
 class AttentionSelectorConfig(NamedTuple):
@@ -120,19 +117,6 @@ def _cached_get_attn_backend(
             f"Invalid attention backend for {current_platform.device_name}"
         )
     backend = resolve_obj_by_qualname(attention_cls)
-
-    # Adjust kv cache layout if the selected backend requires a specific one
-    required_layout = backend.get_required_kv_cache_layout()
-    if required_layout is not None:
-        from vllm.v1.attention.backends.utils import set_kv_cache_layout
-
-        set_kv_cache_layout(required_layout)
-        logger.info(
-            "Using %s KV cache layout for %s backend.",
-            required_layout,
-            backend.get_name(),
-        )
-
     return backend
 
 

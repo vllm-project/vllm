@@ -37,7 +37,11 @@ from vllm.utils.network_utils import (
     get_ip,
     make_zmq_path,
 )
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    compute_kv_cache_shape,
+)
 
 from .utils import create_request, create_scheduler
 
@@ -188,7 +192,7 @@ class FakeMoRIIOConnectorWorker(MoRIIOConnectorWorker):
     REMOTE_ENGINE_ID = "remote_engine"
 
     def __init__(
-        self, *args, hand_shake_latency: float = 1.8, kv_cache_layout="HND", **kwargs
+        self, *args, hand_shake_latency: float = 1.8, kv_cache_layout="HNC", **kwargs
     ):
         super().__init__(*args, **kwargs)
 
@@ -434,16 +438,15 @@ def test_register_kv_caches(mock_parallel_groups):
     DEFAULT_PORT = 6301
     TP_RANK = 0
     DP_RANK = 0
-    from vllm.v1.attention.backends.rocm_aiter_fa import AiterFlashAttentionBackend
-
-    backend_cls = AiterFlashAttentionBackend
-
-    # Create test kv cache tensors using proper backend shape
-    kv_cache_shape = backend_cls.get_kv_cache_shape(
-        num_blocks=2, block_size=16, num_kv_heads=4, head_size=64
+    # Create test kv cache tensors using KVCacheSpec layout
+    shape = compute_kv_cache_shape(
+        FullAttentionSpec(
+            block_size=16, num_kv_heads=4, head_size=64, dtype=torch.float16
+        ),
+        2,
     )
-    shared_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
-    unique_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
+    shared_tensor = torch.zeros(*shape, dtype=torch.float16)
+    unique_tensor = torch.zeros(*shape, dtype=torch.float16)
     kv_caches = {
         "layer0": shared_tensor,
         "layer1": unique_tensor,
@@ -531,16 +534,15 @@ def test_moriio_handshake_returns_metadata(mock_parallel_groups):
 
     ROLE = "kv_consumer"
     vllm_config = create_vllm_config(role=ROLE)
-    from vllm.v1.attention.backends.rocm_aiter_fa import AiterFlashAttentionBackend
-
-    backend_cls = AiterFlashAttentionBackend
-
-    # Create test kv cache tensors using proper backend shape
-    kv_cache_shape = backend_cls.get_kv_cache_shape(
-        num_blocks=2, block_size=16, num_kv_heads=4, head_size=64
+    # Create test kv cache tensors using KVCacheSpec layout
+    shape = compute_kv_cache_shape(
+        FullAttentionSpec(
+            block_size=16, num_kv_heads=4, head_size=64, dtype=torch.float16
+        ),
+        2,
     )
-    shared_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
-    unique_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
+    shared_tensor = torch.zeros(*shape, dtype=torch.float16)
+    unique_tensor = torch.zeros(*shape, dtype=torch.float16)
     kv_caches = {
         "layer0": shared_tensor,
         "layer1": unique_tensor,

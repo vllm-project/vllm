@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import defaultdict
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -10,7 +10,6 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.v1.attention.backends.utils import set_kv_cache_layout
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -58,31 +57,26 @@ def _allocate_and_reshape_kv_caches(
     Use the real GPUModelRunner allocation and reshape methods to produce
     kv_caches, just like the model runner does during initialization.
     """
+    from vllm.v1.kv_cache_interface import KVCacheLayout
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
-    # Some backends (e.g. FlashAttention) query the KV cache layout during
-    # reshape, which ultimately calls get_current_vllm_config(). Setting
-    # the layout override avoids needing a full VllmConfig context.
-    set_kv_cache_layout("NHD")
-    try:
-        runner = object.__new__(GPUModelRunner)
-        runner.device = device
-        runner.runner_only_attn_layers = set()
-        runner.attn_groups = attn_groups
-        runner.kv_cache_config = kv_cache_config
-        runner.cache_config = MagicMock(cache_dtype="auto")
-        runner.shared_kv_cache_layers = {}
-        runner.model_config = MagicMock()
-        runner.model_config.hf_config.model_type = ""
-        runner.compilation_config = MagicMock(
-            static_forward_context=defaultdict(MagicMock)
-        )
-        runner.kv_caches = []
+    runner = object.__new__(GPUModelRunner)
+    runner.device = device
+    runner.runner_only_attn_layers = set()
+    runner.attn_groups = attn_groups
+    runner.kv_cache_config = kv_cache_config
+    runner.cache_config = MagicMock(cache_dtype="auto")
+    runner.shared_kv_cache_layers = {}
+    runner.model_config = MagicMock()
+    runner.model_config.hf_config.model_type = ""
+    runner.compilation_config = MagicMock(static_forward_context=defaultdict(MagicMock))
+    runner.kv_caches = []
 
-        kernel_block_sizes = [BLOCK_SIZE] * len(kv_cache_config.kv_cache_groups)
-        return runner.initialize_kv_cache_tensors(kv_cache_config, kernel_block_sizes)
-    finally:
-        set_kv_cache_layout(None)
+    kv_cache_raw_tensors = runner._allocate_kv_cache_tensors(kv_cache_config)
+    kernel_block_sizes = [BLOCK_SIZE] * len(kv_cache_config.kv_cache_groups)
+    return runner._reshape_kv_cache_tensors(
+        kv_cache_raw_tensors, kernel_block_sizes, layout=KVCacheLayout.NHC
+    )
 
 
 def _make_mock_layer(backend_cls: type[AttentionBackend]):
@@ -119,11 +113,7 @@ def _make_worker(kv_cache_config: KVCacheConfig):
 
 
 @pytest.mark.parametrize("backend", ATTN_BACKENDS)
-@patch(
-    "vllm.distributed.kv_transfer.kv_connector.v1.offloading"
-    ".worker.get_layers_from_vllm_config"
-)
-def test_register_kv_caches(mock_get_layers, backend):
+def test_register_kv_caches(backend):
     """Test register_kv_caches with multiple groups covering all layer types.
 
     Creates one FullAttention group, one MLA group, one Mamba group, and
@@ -222,18 +212,19 @@ def test_register_kv_caches(mock_get_layers, backend):
         aligned_mamba_layer_names,
     ]
 
-    kv_cache_tensors: list[KVCacheTensor] = []
+    shared_by: list[list[str]] = []
     for i in range(GROUP_SIZE):
-        shared_by: list[str] = []
+        slot_layers: list[str] = []
         for group_layer_names in layer_groups:
             if len(group_layer_names) > i:
-                shared_by.append(group_layer_names[i])
-        kv_cache_tensors.append(
-            KVCacheTensor(
-                size=PAGE_SIZE_BYTES * NUM_BLOCKS,
-                shared_by=shared_by,
-            )
+                slot_layers.append(group_layer_names[i])
+        shared_by.append(slot_layers)
+    kv_cache_tensors: list[KVCacheTensor] = [
+        KVCacheTensor(
+            size=PAGE_SIZE_BYTES * NUM_BLOCKS * GROUP_SIZE,
+            shared_by=shared_by,
         )
+    ]
 
     kv_cache_groups = [
         KVCacheGroupSpec(layer_names=attn_layer_names, kv_cache_spec=attn_spec),
@@ -286,13 +277,6 @@ def test_register_kv_caches(mock_get_layers, backend):
         attn_groups,
         device=torch.device("cuda:0"),
     )
-
-    mock_layers: dict[str, MagicMock] = {}
-    for layer_name in attn_layer_names:
-        mock_layers[layer_name] = _make_mock_layer(backend_cls)
-    for layer_name in mla_layer_names:
-        mock_layers[layer_name] = _make_mock_layer(DeepseekV32IndexerBackend)
-    mock_get_layers.return_value = mock_layers
 
     worker, spec = _make_worker(kv_cache_config)
     worker.register_kv_caches(kv_caches)
@@ -360,11 +344,7 @@ def test_register_kv_caches(mock_get_layers, backend):
 
 
 @pytest.mark.parametrize("backend", ATTN_BACKENDS)
-@patch(
-    "vllm.distributed.kv_transfer.kv_connector.v1.offloading"
-    ".worker.get_layers_from_vllm_config"
-)
-def test_register_kv_caches_uniform_type(mock_get_layers, backend):
+def test_register_kv_caches_uniform_type(backend):
     """Test register_kv_caches with UniformTypeKVCacheSpecs.
 
     Two attention layers use the same backend but different num_kv_heads,
@@ -403,11 +383,11 @@ def test_register_kv_caches_uniform_type(mock_get_layers, backend):
         kv_cache_tensors=[
             KVCacheTensor(
                 size=spec_a.page_size_bytes * NUM_BLOCKS,
-                shared_by=[layer_a],
+                shared_by=[[layer_a]],
             ),
             KVCacheTensor(
                 size=spec_b.page_size_bytes * NUM_BLOCKS,
-                shared_by=[layer_b],
+                shared_by=[[layer_b]],
             ),
         ],
         kv_cache_groups=[
@@ -441,19 +421,11 @@ def test_register_kv_caches_uniform_type(mock_get_layers, backend):
         device=torch.device("cuda:0"),
     )
 
-    mock_get_layers.return_value = {
-        layer_a: _make_mock_layer(backend_cls),
-        layer_b: _make_mock_layer(backend_cls),
-    }
-
     worker, spec = _make_worker(kv_cache_config)
     worker.register_kv_caches(kv_caches)
 
     canonical = spec.get_handlers.call_args[0][0]
     assert isinstance(canonical, CanonicalKVCaches)
-
-    unbinds = backend_cls.get_name() in ("FLASH_ATTN", "FLEX_ATTENTION")
-    tensors_per_layer = 2 if unbinds else 1
 
     for block_tensor in canonical.tensors:
         assert block_tensor.tensor.dtype == torch.int8
@@ -461,44 +433,17 @@ def test_register_kv_caches_uniform_type(mock_get_layers, backend):
     # Single group with refs from both layers
     assert len(canonical.group_data_refs) == 1
     group_refs = canonical.group_data_refs[0]
-    assert len(group_refs) == 2 * tensors_per_layer
+    assert len(group_refs) == 2
 
-    if unbinds:
-        half_a = spec_a.page_size_bytes // 2
-        half_b = spec_b.page_size_bytes // 2
+    assert len(canonical.tensors) == 2
+    assert canonical.tensors[0].page_size_bytes == spec_a.page_size_bytes
+    assert canonical.tensors[1].page_size_bytes == spec_b.page_size_bytes
+    assert canonical.tensors[0].tensor.shape == (NUM_BLOCKS, spec_a.page_size_bytes)
+    assert canonical.tensors[1].tensor.shape == (NUM_BLOCKS, spec_b.page_size_bytes)
 
-        assert len(canonical.tensors) == 4
-        assert canonical.tensors[0].page_size_bytes == half_a
-        assert canonical.tensors[1].page_size_bytes == half_a
-        assert canonical.tensors[2].page_size_bytes == half_b
-        assert canonical.tensors[3].page_size_bytes == half_b
-        assert canonical.tensors[0].tensor.shape == (NUM_BLOCKS, half_a)
-        assert canonical.tensors[1].tensor.shape == (NUM_BLOCKS, half_a)
-        assert canonical.tensors[2].tensor.shape == (NUM_BLOCKS, half_b)
-        assert canonical.tensors[3].tensor.shape == (NUM_BLOCKS, half_b)
-
-        assert group_refs[0] == CanonicalKVCacheRef(
-            tensor_idx=0, page_size_bytes=half_a
-        )
-        assert group_refs[1] == CanonicalKVCacheRef(
-            tensor_idx=1, page_size_bytes=half_a
-        )
-        assert group_refs[2] == CanonicalKVCacheRef(
-            tensor_idx=2, page_size_bytes=half_b
-        )
-        assert group_refs[3] == CanonicalKVCacheRef(
-            tensor_idx=3, page_size_bytes=half_b
-        )
-    else:
-        assert len(canonical.tensors) == 2
-        assert canonical.tensors[0].page_size_bytes == spec_a.page_size_bytes
-        assert canonical.tensors[1].page_size_bytes == spec_b.page_size_bytes
-        assert canonical.tensors[0].tensor.shape == (NUM_BLOCKS, spec_a.page_size_bytes)
-        assert canonical.tensors[1].tensor.shape == (NUM_BLOCKS, spec_b.page_size_bytes)
-
-        assert group_refs[0] == CanonicalKVCacheRef(
-            tensor_idx=0, page_size_bytes=spec_a.page_size_bytes
-        )
-        assert group_refs[1] == CanonicalKVCacheRef(
-            tensor_idx=1, page_size_bytes=spec_b.page_size_bytes
-        )
+    assert group_refs[0] == CanonicalKVCacheRef(
+        tensor_idx=0, page_size_bytes=spec_a.page_size_bytes
+    )
+    assert group_refs[1] == CanonicalKVCacheRef(
+        tensor_idx=1, page_size_bytes=spec_b.page_size_bytes
+    )

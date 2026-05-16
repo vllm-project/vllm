@@ -86,7 +86,7 @@ def _mock_get_per_layer_parameters(vllm_config, layer_names, impl_cls):
     }
 
 
-def _create_hnd_kv_cache(
+def _create_hnc_kv_cache(
     k_contexts,
     v_contexts,
     block_size,
@@ -97,12 +97,12 @@ def _create_hnd_kv_cache(
     num_blocks,
     common_attn_metadata,
 ):
-    """Create and populate a KV cache with HND-compatible strides.
+    """Create and populate a KV cache with HNC-compatible strides.
 
     The returned tensor has logical shape
     (num_blocks, 2, block_size, num_kv_heads, head_size) but is physically
     laid out as (num_blocks, 2, num_kv_heads, block_size, head_size) so that
-    ``kv_cache.permute(0, 1, 3, 2, 4)`` yields a contiguous HND view.
+    ``kv_cache.permute(0, 1, 3, 2, 4)`` yields a contiguous HNC view.
     """
     seq_lens = common_attn_metadata.seq_lens.cpu()
     query_lens = (
@@ -113,8 +113,8 @@ def _create_hnd_kv_cache(
     slot_mapping = common_attn_metadata.slot_mapping
     batch_size = len(k_contexts)
 
-    # Build cache in (2, num_blocks, block_size, num_kv_heads, head_size)
-    # then convert to HND format (same approach as test_attention_backends.py).
+    # Build cache with K/V outermost for flat indexing, then convert to
+    # HNC format (same approach as test_attention_backends.py).
     kv_cache_raw = torch.zeros(
         2,
         num_blocks,
@@ -164,7 +164,7 @@ def _create_hnd_kv_cache(
             i, block_indices
         ] * block_size + intra_block_offsets.to(device)
 
-    # Transpose to FlashInfer logical shape then make HND-strided.
+    # Transpose to FlashInfer logical shape then make HNC-strided.
     kv_cache = kv_cache_raw.transpose(0, 1)
     kv_cache = kv_cache.transpose(2, 3).contiguous().transpose(2, 3)
     return kv_cache
@@ -184,11 +184,11 @@ def _create_nvfp4_hnd_kv_cache(
 ):
     """Create an nvfp4 KV cache by quantizing bf16 context via
     reshape_and_cache_flash, using the same block-table layout as
-    _create_hnd_kv_cache.
+    _create_hnc_kv_cache.
 
     The returned tensor is dtype ``uint8`` with shape
     ``(num_blocks, 2, block_size, num_kv_heads, full_dim)`` in logical
-    (NHD) order, but physically permuted to HND layout via stride order
+    (NHC) order, but physically permuted to HNC layout via stride order
     ``(0, 1, 3, 2, 4)`` (i.e. ``num_kv_heads`` before ``block_size``).
 
     The last dimension ``full_dim = head_size // 2 + head_size // 16``
@@ -215,10 +215,10 @@ def _create_nvfp4_hnd_kv_cache(
             during quantization.
 
     Returns:
-        ``torch.Tensor``: The nvfp4 kv_cache tensor (uint8, HND-strided).
+        ``torch.Tensor``: The nvfp4 kv_cache tensor (uint8, HNC-strided).
     """
-    # First create a bf16 HND cache so block tables are populated.
-    bf16_cache = _create_hnd_kv_cache(
+    # First create a bf16 HNC cache so block tables are populated.
+    bf16_cache = _create_hnc_kv_cache(
         k_contexts,
         v_contexts,
         block_size,
@@ -241,7 +241,7 @@ def _create_nvfp4_hnd_kv_cache(
 
     # Flatten bf16 context into tokens and quantize via reshape_and_cache_flash.
     # bf16_cache is (num_blocks, 2, block_size, num_kv_heads, head_size) logical
-    # with HND physical strides.
+    # with HNC physical strides.
     block_table = common_attn_metadata.block_table_tensor
     seq_lens = common_attn_metadata.seq_lens.cpu()
     query_lens = (
@@ -358,7 +358,7 @@ def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL)
 
     common_attn_metadata = create_common_attn_metadata(batch_spec, BLOCK_SIZE, device)
 
-    # 2. Create HND KV cache
+    # 2. Create HNC KV cache
     is_nvfp4 = kv_cache_dtype == "nvfp4"
     if is_nvfp4:
         # Compute a global scale from the context data.
@@ -378,7 +378,7 @@ def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL)
         )
     else:
         kv_scale_val = 1.0
-        kv_cache = _create_hnd_kv_cache(
+        kv_cache = _create_hnc_kv_cache(
             k_contexts,
             v_contexts,
             BLOCK_SIZE,
@@ -391,7 +391,7 @@ def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL)
         )
 
     # 3. Run through FlashInfer with TRTLLM enabled
-    set_kv_cache_layout("HND")
+    set_kv_cache_layout("HNC")
     get_kv_cache_layout.cache_clear()
 
     try:

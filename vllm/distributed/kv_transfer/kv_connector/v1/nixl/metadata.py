@@ -72,7 +72,7 @@ class NixlHandshakePayload(KVConnectorHandshakeMetadata):
 
 
 def compute_nixl_compatibility_hash(
-    vllm_config: VllmConfig, attn_backend_name: str, cross_layers_blocks: bool
+    vllm_config: VllmConfig, attn_backend_name: str
 ) -> str:
     """
     Compute compatibility hash for NIXL KV transfer.
@@ -116,7 +116,6 @@ def compute_nixl_compatibility_hash(
         # Attention backend and KV cache dtype affect memory layout
         "attn_backend_name": attn_backend_name,
         "cache_dtype": str(cache_config.cache_dtype),
-        "cross_layers_blocks": cross_layers_blocks,
         "is_hma_enabled": is_hma_enabled,
     }
 
