@@ -7,6 +7,7 @@ import torch
 from tests.v1.attention.test_attention_backends import BATCH_SPECS
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm.v1.attention.backends.utils import (
+    make_kv_sharing_fast_prefill_common_attn_metadata,
     split_decodes_and_prefills,
     split_decodes_prefills_and_extends,
 )
@@ -312,6 +313,31 @@ def test_split_decodes_and_prefills_uniform_padded_batch_all_same():
     assert num_prefills == 0
     assert num_decode_tokens == padded_num_tokens
     assert num_prefill_tokens == 0
+
+
+def test_make_kv_sharing_fast_prefill_common_attn_metadata():
+    common_metadata = create_common_attn_metadata(
+        BatchSpec(seq_lens=[41, 31, 40], query_lens=[15, 5, 8]),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    common_metadata.logits_indices_padded = torch.tensor(
+        [14, 18, 19, 27, 99],
+        dtype=torch.int32,
+        device=torch.device("cpu"),
+    )
+    common_metadata.num_logits_indices = 4
+
+    new_metadata = make_kv_sharing_fast_prefill_common_attn_metadata(common_metadata)
+
+    assert torch.equal(new_metadata.query_start_loc, torch.tensor([0, 1, 3, 4]))
+    assert torch.equal(
+        new_metadata.query_start_loc_cpu,
+        torch.tensor([0, 1, 3, 4]),
+    )
+    assert new_metadata.num_actual_tokens == 4
+    assert new_metadata.max_query_len == 2
+    assert torch.equal(new_metadata.seq_lens, common_metadata.seq_lens)
 
 
 def test_split_decodes_prefills_and_extends_mixed_batch():

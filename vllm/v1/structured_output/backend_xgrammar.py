@@ -112,12 +112,8 @@ class XgrammarBackend(StructuredOutputBackend):
                 return self.compiler.compile_structural_tag(tags, s_tag["triggers"])
             return self.compiler.compile_structural_tag(grammar_spec)
 
-        logger.error(
-            "Validation should have already occurred. Please file an issue."
-        )
-        raise ValueError(
-            f"grammar is not of valid supported types. ({request_type!s})"
-        )
+        logger.error("Validation should have already occurred. Please file an issue.")
+        raise ValueError(f"grammar is not of valid supported types. ({request_type!s})")
 
     def compile_grammar(
         self, request_type: StructuredOutputOptions, grammar_spec: str
@@ -147,6 +143,16 @@ class XgrammarBackend(StructuredOutputBackend):
         self._compiled_grammars.clear()
 
     def destroy(self):
+        stats = self.compiled_grammar_cache_stats()
+        if stats.total > 0:
+            logger.debug(
+                "Xgrammar compiled grammar cache stats: "
+                "hits=%d total=%d hit_ratio=%.4f entries=%d",
+                stats.hits,
+                stats.total,
+                stats.hit_ratio,
+                len(self._compiled_grammars),
+            )
         self.clear_compiled_grammar_cache()
         del self.compiler
 

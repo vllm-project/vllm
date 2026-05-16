@@ -96,6 +96,9 @@ from vllm.config.utils import get_field
 from vllm.config.vllm import OptimizationLevel, PerformanceMode
 from vllm.logger import init_logger, suppress_logging
 from vllm.platforms import CpuArchEnum, current_platform
+from vllm.platforms.hardware_defaults import (
+    get_current_accelerator_scheduling_defaults,
+)
 from vllm.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
 from vllm.transformers_utils.config import (
@@ -110,7 +113,6 @@ from vllm.utils.argparse_utils import (
     human_readable_int,
     human_readable_int_or_auto,
 )
-from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.network_utils import get_ip
 from vllm.utils.torch_utils import resolve_kv_cache_dtype_string
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -2217,42 +2219,19 @@ class EngineArgs:
         # context.
         # Use different default values for different hardware.
 
-        # Try to query the device name on the current platform. If it fails,
-        # it may be because the platform that imports vLLM is not the same
-        # as the platform that vLLM is running on (e.g. the case of scaling
-        # vLLM with Ray) and has no GPUs. In this case we use the default
-        # values for non-H100/H200 GPUs.
-        try:
-            device_memory = current_platform.get_device_total_memory()
-            device_name = current_platform.get_device_name().lower()
-        except Exception:
-            # This is only used to set default_max_num_batched_tokens
-            device_memory = 0
-            device_name = ""
-
-        # NOTE(Kuntai): Setting large `max_num_batched_tokens` for A100 reduces
-        # throughput, see PR #17885 for more details.
-        # So here we do an extra device name check to prevent such regression.
-        if device_memory >= 70 * GiB_bytes and "a100" not in device_name:
-            # For GPUs like H100 and MI300x, use larger default values.
-            default_max_num_batched_tokens = {
-                UsageContext.LLM_CLASS: 16384,
-                UsageContext.OPENAI_API_SERVER: 8192,
-            }
-            default_max_num_seqs = {
-                UsageContext.LLM_CLASS: 1024,
-                UsageContext.OPENAI_API_SERVER: 1024,
-            }
-        else:
-            # TODO(woosuk): Tune the default values for other hardware.
-            default_max_num_batched_tokens = {
-                UsageContext.LLM_CLASS: 8192,
-                UsageContext.OPENAI_API_SERVER: 2048,
-            }
-            default_max_num_seqs = {
-                UsageContext.LLM_CLASS: 256,
-                UsageContext.OPENAI_API_SERVER: 256,
-            }
+        accelerator_defaults = get_current_accelerator_scheduling_defaults()
+        default_max_num_batched_tokens = {
+            UsageContext.LLM_CLASS: (
+                accelerator_defaults.llm_class_max_num_batched_tokens
+            ),
+            UsageContext.OPENAI_API_SERVER: (
+                accelerator_defaults.api_server_max_num_batched_tokens
+            ),
+        }
+        default_max_num_seqs = {
+            UsageContext.LLM_CLASS: accelerator_defaults.max_num_seqs,
+            UsageContext.OPENAI_API_SERVER: accelerator_defaults.max_num_seqs,
+        }
 
         # tpu specific default values.
         if current_platform.is_tpu():

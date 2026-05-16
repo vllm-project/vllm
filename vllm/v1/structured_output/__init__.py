@@ -11,13 +11,14 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.tokenizers import cached_tokenizer_from_config
+from vllm.utils.cache import CacheInfo
 from vllm.utils.import_utils import LazyLoader
+from vllm.v1.metrics.stats import StructuredOutputCacheStats
 from vllm.v1.structured_output.backend_guidance import GuidanceBackend
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
     StructuredOutputGrammar,
 )
-from vllm.v1.metrics.stats import StructuredOutputCacheStats
 
 if TYPE_CHECKING:
     import numpy as np
@@ -98,9 +99,7 @@ class StructuredOutputManager:
         self.enable_in_reasoning = (
             self.vllm_config.structured_outputs_config.enable_in_reasoning
         )
-        self._compiled_grammar_cache_log_interval = (
-            _COMPILED_GRAMMAR_CACHE_LOG_INTERVAL
-        )
+        self._compiled_grammar_cache_log_interval = _COMPILED_GRAMMAR_CACHE_LOG_INTERVAL
         self._next_compiled_grammar_cache_log_total = (
             self._compiled_grammar_cache_log_interval
         )
@@ -198,8 +197,10 @@ class StructuredOutputManager:
         self._maybe_log_compiled_grammar_cache_stats()
         return grammar
 
-    def compiled_grammar_cache_stats(self, *, delta: bool = False):
-        if self.backend is None or not hasattr(self.backend, "compiled_grammar_cache_stats"):
+    def compiled_grammar_cache_stats(self, *, delta: bool = False) -> CacheInfo | None:
+        if self.backend is None or not hasattr(
+            self.backend, "compiled_grammar_cache_stats"
+        ):
             return None
         return self.backend.compiled_grammar_cache_stats(delta=delta)
 
@@ -209,18 +210,27 @@ class StructuredOutputManager:
 
         with self._compiled_grammar_cache_log_lock:
             stats = self.compiled_grammar_cache_stats()
-            if stats is None or stats.total < self._next_compiled_grammar_cache_log_total:
+            if (
+                stats is None
+                or stats.total < self._next_compiled_grammar_cache_log_total
+            ):
                 return
 
+            backend_name = (
+                type(self.backend).__name__ if self.backend is not None else "None"
+            )
             logger.info(
-                "Structured output compiled grammar cache: hits=%d total=%d hit_rate=%.1f%%",
+                "Structured output compiled grammar cache stats: "
+                "backend=%s hits=%d total=%d hit_ratio=%.4f",
+                backend_name,
                 stats.hits,
                 stats.total,
-                stats.hit_ratio * 100,
+                stats.hit_ratio,
             )
-            self._next_compiled_grammar_cache_log_total = (
-                stats.total + self._compiled_grammar_cache_log_interval
-            )
+            while stats.total >= self._next_compiled_grammar_cache_log_total:
+                self._next_compiled_grammar_cache_log_total += (
+                    self._compiled_grammar_cache_log_interval
+                )
 
     def _fill_bitmasks(
         self, batch: Iterable[tuple[StructuredOutputGrammar, int, bool]]
@@ -401,15 +411,31 @@ class StructuredOutputManager:
             stats = self.compiled_grammar_cache_stats()
             if stats is not None and stats.total > 0:
                 logger.debug(
-                    "Structured output compiled grammar cache before destroy: hits=%d total=%d hit_rate=%.1f%%",
+                    "Structured output backend cache stats before destroy: "
+                    "backend=%s hits=%d total=%d hit_ratio=%.4f",
+                    type(self.backend).__name__,
                     stats.hits,
                     stats.total,
-                    stats.hit_ratio * 100,
+                    stats.hit_ratio,
                 )
             self.backend.destroy()
             self._next_compiled_grammar_cache_log_total = (
                 self._compiled_grammar_cache_log_interval
             )
+
+    def clear_compiled_grammar_cache(self) -> bool:
+        if self.backend is None:
+            return False
+
+        clear_fn = getattr(self.backend, "clear_compiled_grammar_cache", None)
+        if callable(clear_fn):
+            clear_fn()
+            with self._compiled_grammar_cache_log_lock:
+                self._next_compiled_grammar_cache_log_total = (
+                    self._compiled_grammar_cache_log_interval
+                )
+            return True
+        return False
 
     def make_cache_stats(self) -> StructuredOutputCacheStats | None:
         stats = self.compiled_grammar_cache_stats(delta=True)

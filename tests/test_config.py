@@ -33,6 +33,7 @@ from vllm.config.vllm import (
     OptimizationLevel,
 )
 from vllm.platforms import current_platform
+from vllm.platforms.hardware_defaults import BALANCED_ACCELERATOR_DEFAULTS
 
 DEVICE_TYPE = current_platform.device_type
 
@@ -1157,6 +1158,34 @@ def test_vllm_config_explicit_overrides():
     # Other fields should still use defaults
     assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
+
+
+@pytest.mark.skip_global_cleanup
+def test_vllm_config_uses_hardware_aware_cudagraph_ceiling(monkeypatch):
+    scheduler_config = SchedulerConfig(
+        max_model_len=8192,
+        max_num_batched_tokens=12288,
+        max_num_seqs=512,
+        is_encoder_decoder=False,
+    )
+    compilation_config = CompilationConfig(cudagraph_mode=CUDAGraphMode.PIECEWISE)
+
+    monkeypatch.setattr(
+        "vllm.platforms.hardware_defaults.get_current_accelerator_scheduling_defaults",
+        lambda: BALANCED_ACCELERATOR_DEFAULTS,
+    )
+
+    config = VllmConfig.__new__(VllmConfig)
+    config.model_config = type("ModelConfigStub", (), {"enforce_eager": False})()
+    config.scheduler_config = scheduler_config
+    config.compilation_config = compilation_config
+    config.speculative_config = None
+    config.parallel_config = ParallelConfig(tensor_parallel_size=1)
+
+    VllmConfig._set_cudagraph_sizes(config)
+
+    assert config.compilation_config.max_cudagraph_capture_size == 256
+    assert config.compilation_config.cudagraph_capture_sizes[-1] == 256
 
 
 def test_fusion_pass_op_priority():

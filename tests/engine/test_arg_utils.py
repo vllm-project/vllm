@@ -23,7 +23,15 @@ from vllm.engine.arg_utils import (
     optional_type,
     parse_type,
 )
+from vllm.platforms.hardware_defaults import (
+    BALANCED_ACCELERATOR_DEFAULTS,
+    COMPACT_ACCELERATOR_DEFAULTS,
+    GRAPH_LIGHT_BALANCED_ACCELERATOR_DEFAULTS,
+    LARGE_ACCELERATOR_DEFAULTS,
+    infer_accelerator_scheduling_defaults,
+)
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.mem_constants import GiB_bytes
 
 
 @pytest.mark.parametrize(
@@ -294,6 +302,155 @@ def test_compilation_config():
         args.compilation_config.mode == 3
         and args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8]
         and args.compilation_config.backend == "inductor"
+    )
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    (
+        "device_memory",
+        "device_name",
+        "is_rocm",
+        "is_xpu",
+        "is_out_of_tree",
+        "device_type",
+        "is_data_center_gpu",
+        "expected",
+    ),
+    [
+        (
+            16 * GiB_bytes,
+            "RTX 4090",
+            False,
+            False,
+            False,
+            "cuda",
+            False,
+            COMPACT_ACCELERATOR_DEFAULTS,
+        ),
+        (
+            48 * GiB_bytes,
+            "NVIDIA L40S",
+            False,
+            False,
+            False,
+            "cuda",
+            False,
+            BALANCED_ACCELERATOR_DEFAULTS,
+        ),
+        (
+            80 * GiB_bytes,
+            "NVIDIA A100-SXM4-80GB",
+            False,
+            False,
+            False,
+            "cuda",
+            False,
+            COMPACT_ACCELERATOR_DEFAULTS,
+        ),
+        (
+            80 * GiB_bytes,
+            "NVIDIA H100 SXM",
+            False,
+            False,
+            False,
+            "cuda",
+            False,
+            LARGE_ACCELERATOR_DEFAULTS,
+        ),
+        (
+            192 * GiB_bytes,
+            "AMD Instinct MI300X",
+            True,
+            False,
+            False,
+            "cuda",
+            False,
+            LARGE_ACCELERATOR_DEFAULTS,
+        ),
+        (
+            64 * GiB_bytes,
+            "AMD Instinct MI250X",
+            True,
+            False,
+            False,
+            "cuda",
+            False,
+            BALANCED_ACCELERATOR_DEFAULTS,
+        ),
+        (
+            48 * GiB_bytes,
+            "Intel Data Center GPU Max 1100",
+            False,
+            True,
+            False,
+            "xpu",
+            True,
+            GRAPH_LIGHT_BALANCED_ACCELERATOR_DEFAULTS,
+        ),
+        (
+            128 * GiB_bytes,
+            "Intel Data Center GPU Max 1550",
+            False,
+            True,
+            False,
+            "xpu",
+            True,
+            BALANCED_ACCELERATOR_DEFAULTS,
+        ),
+        (
+            16 * GiB_bytes,
+            "Intel Arc A770",
+            False,
+            True,
+            False,
+            "xpu",
+            False,
+            COMPACT_ACCELERATOR_DEFAULTS,
+        ),
+        (
+            64 * GiB_bytes,
+            "Ascend 910B",
+            False,
+            False,
+            True,
+            "npu",
+            False,
+            GRAPH_LIGHT_BALANCED_ACCELERATOR_DEFAULTS,
+        ),
+        (
+            64 * GiB_bytes,
+            "Ascend 910C",
+            False,
+            False,
+            True,
+            "npu",
+            False,
+            GRAPH_LIGHT_BALANCED_ACCELERATOR_DEFAULTS,
+        ),
+    ],
+)
+def test_infer_accelerator_scheduling_defaults(
+    device_memory,
+    device_name,
+    is_rocm,
+    is_xpu,
+    is_out_of_tree,
+    device_type,
+    is_data_center_gpu,
+    expected,
+):
+    assert (
+        infer_accelerator_scheduling_defaults(
+            device_memory,
+            device_name,
+            is_rocm=is_rocm,
+            is_xpu=is_xpu,
+            is_out_of_tree=is_out_of_tree,
+            device_type=device_type,
+            is_data_center_gpu=is_data_center_gpu,
+        )
+        == expected
     )
 
 

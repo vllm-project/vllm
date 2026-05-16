@@ -9,7 +9,6 @@ import pytest
 from vllm.utils.cache import CacheInfo
 from vllm.v1.metrics.stats import StructuredOutputCacheStats
 from vllm.v1.structured_output import StructuredOutputManager
-
 from vllm.v1.structured_output.backend_types import StructuredOutputOptions
 from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
 
