@@ -47,6 +47,7 @@ QUANT_TYPES = [
     GGMLQuantizationType.IQ1_S,
     GGMLQuantizationType.IQ2_S,
     GGMLQuantizationType.IQ2_XS,
+    GGMLQuantizationType.IQ2_XXS,
     GGMLQuantizationType.IQ3_S,
     GGMLQuantizationType.IQ3_XXS,
     GGMLQuantizationType.IQ4_NL,
@@ -125,6 +126,17 @@ def test_mmvq(hidden_size: int, dtype: torch.dtype, quant_type: GGMLQuantization
         GGMLQuantizationType.Q4_0,
         GGMLQuantizationType.Q5_0,
         GGMLQuantizationType.Q8_0,
+        # i-matrix (IQ4)
+        GGMLQuantizationType.IQ4_NL,
+        GGMLQuantizationType.IQ4_XS,
+        # i-matrix (IQ3, IQ2, IQ1)
+        GGMLQuantizationType.IQ3_S,
+        GGMLQuantizationType.IQ3_XXS,
+        GGMLQuantizationType.IQ2_XXS,
+        GGMLQuantizationType.IQ2_XS,
+        GGMLQuantizationType.IQ2_S,
+        GGMLQuantizationType.IQ1_S,
+        GGMLQuantizationType.IQ1_M,
     ],
 )
 @torch.inference_mode()
