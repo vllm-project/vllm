@@ -225,7 +225,11 @@ class SteeringModelRunnerMixin:
         # Warm the fused-apply Triton kernel so first-call JIT cost
         # happens before any captured forward pass. Without this, the
         # initial CUDA-graph capture step could trigger a Triton compile
-        # and fail capture.
+        # and fail capture, and — as observed on a 3090 with
+        # gemma-3-4b-it — every served-window also pays ~18-25 ms of
+        # ``cuLibraryLoadData`` events for shape variants that only show
+        # up at runtime. Driving the warmup over every captured batch
+        # size eliminates those compiles from the served window.
         if (
             table_device is not None
             and table_device.type == "cuda"
@@ -237,12 +241,19 @@ class SteeringModelRunnerMixin:
             )
 
             compute_dtype = getattr(self.vllm_config.model_config, "dtype", table_dtype)
+            compilation_config = getattr(self.vllm_config, "compilation_config", None)
+            capture_sizes = (
+                getattr(compilation_config, "cudagraph_capture_sizes", None)
+                if compilation_config is not None
+                else None
+            )
             warmup_apply_steering_kernel(
                 hidden_size=hidden_size,
                 table_rows=steering_config.max_steering_configs + 3,
                 table_dtype=table_dtype,
                 compute_dtype=compute_dtype,
                 device=table_device,
+                capture_sizes=list(capture_sizes) if capture_sizes else None,
             )
 
     # -----------------------------------------------------------------------
