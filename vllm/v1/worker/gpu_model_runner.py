@@ -5140,10 +5140,6 @@ class GPUModelRunner(
             and cudagraph_mode != CUDAGraphMode.NONE
             and not self.parallel_config.use_ubatching
         ):
-            # Breakable owns *all* cudagraph capture: a single wrapper at
-            # the outermost level handles both prefill (PIECEWISE) and
-            # decode (FULL) batches. The wrapper accepts any non-NONE
-            # runtime_mode at dispatch time, so no mode arg here.
             self.model = BreakableCUDAGraphWrapper(self.model, self.vllm_config)
         elif (
             cudagraph_mode.has_full_cudagraphs()
