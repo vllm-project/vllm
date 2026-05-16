@@ -303,6 +303,31 @@ def test_auto_runner(model_id, expected_runner_type, expected_convert_type):
     assert config.convert_type == expected_convert_type
 
 
+@pytest.mark.parametrize("convert_type", ["embed", "classify"])
+def test_explicit_convert_requires_pooling_runner(convert_type):
+    with pytest.raises(ValueError, match="--runner pooling"):
+        ModelConfig("distilbert/distilgpt2", runner="auto", convert=convert_type)
+
+
+@pytest.mark.parametrize("convert_type", ["embed", "classify"])
+def test_explicit_convert_with_pooling_runner_initializes_pooler_config(convert_type):
+    config = ModelConfig(
+        "distilbert/distilgpt2", runner="pooling", convert=convert_type
+    )
+
+    assert config.runner_type == "pooling"
+    assert config.convert_type == convert_type
+    assert config.pooler_config is not None
+
+
+def test_auto_convert_generate_runner_keeps_causal_lm_as_generation_model():
+    config = ModelConfig("distilbert/distilgpt2", runner="auto", convert="auto")
+
+    assert config.runner_type == "generate"
+    assert config.convert_type == "none"
+    assert config.pooler_config is None
+
+
 @pytest.mark.parametrize(
     ("model_id", "expected_runner_type", "expected_convert_type"),
     [

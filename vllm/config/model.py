@@ -551,6 +551,15 @@ class ModelConfig:
             architectures, self.runner_type, self.convert
         )
 
+        allowed_converts = _RUNNER_CONVERTS[self.runner_type]
+        if self.convert_type != "none" and self.convert_type not in allowed_converts:
+            raise ValueError(
+                f"`--convert {self.convert_type}` is not supported with "
+                f"`--runner {self.runner}`, which resolved to "
+                f"`--runner {self.runner_type}`. "
+                "Pass `--runner pooling` to adapt the model for pooling tasks."
+            )
+
         if self.runner_type == "generate" and not is_generative_model:
             generate_converts = _RUNNER_CONVERTS["generate"]
             if self.convert_type not in generate_converts:
