@@ -223,6 +223,9 @@ class OffloadingConnectorScheduler:
 
         # Job ID counter shared by loads and stores.
         self._job_counter: int = 0
+        # Threshold value for stale jobs. All job ids >= _stale_job_threshold are
+        # active jobs.
+        self._stale_job_threshold: int = 0
         self._jobs: dict[int, TransferJobStatus] = {}
 
         # block_id -> pending store job_ids. Used to track jobs that needs
@@ -802,6 +805,13 @@ class OffloadingConnectorScheduler:
             meta = OffloadingWorkerMetadata()
         for job_id, count in meta.completed_jobs.items():
             assert count > 0
+            if job_id < self._stale_job_threshold:
+                logger.debug(
+                    "Skipping stale completed job %d (pre-reset counter: %d)",
+                    job_id,
+                    self._stale_job_threshold,
+                )
+                continue
             job_status = self._jobs[job_id]
             job_status.pending_count -= count
             if job_status.pending_count > 0:
@@ -881,6 +891,34 @@ class OffloadingConnectorScheduler:
                     medium=event.medium,
                     lora_name=None,
                 )
+
+    def reset_cache(self) -> None:
+        """Reset the offloading manager cache, evicting all stored blocks."""
+
+        # reset_cache cannot be called in the middle of a schedule step
+        assert not self._current_batch_load_jobs
+        assert not self._current_batch_jobs_to_flush
+
+        # Flush all in-flight jobs
+        self._current_batch_jobs_to_flush.update(self._jobs.keys())
+
+        # Reset offloading manager cache
+        self.manager.reset_cache()
+
+        # Reset store progress so active requests re-offload from block 0
+        for status in self._req_status.values():
+            for group_state in status.group_states:
+                group_state.next_stored_block_idx = 0
+
+        # Discard jobs and save job_counter to be able to discard worker responses
+        self._stale_job_threshold = self._job_counter
+        self._jobs.clear()
+        self._block_id_to_pending_jobs.clear()
+
+        # Note: _current_batch_jobs_to_flush is intentionally NOT cleared.
+        # The load flush IDs collected above must be delivered to workers.
+        if self._blocks_being_loaded is not None:
+            self._blocks_being_loaded.clear()
 
     def shutdown(self) -> None:
         self.manager.shutdown()
