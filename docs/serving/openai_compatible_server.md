@@ -464,8 +464,38 @@ Audio must be sent as base64-encoded PCM16 audio at 16kHz sample rate, mono chan
 Our Tokenizer API is a simple wrapper over [HuggingFace-style tokenizers](https://huggingface.co/docs/transformers/en/main_classes/tokenizer).
 It consists of two endpoints:
 
-- `/tokenize` corresponds to calling `tokenizer.encode()`.
+- `/tokenize` accepts raw completion prompts, chat-completion `messages`, or
+  Responses API `input`, and returns the token IDs for the rendered model input.
 - `/detokenize` corresponds to calling `tokenizer.decode()`.
+
+For example, to tokenize a Responses-style input on a standard generate server:
+
+```bash
+curl http://localhost:8000/tokenize \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3-0.6B",
+    "input": "Hello!",
+    "return_token_strs": true
+  }'
+```
+
+Responses list-form input is also accepted:
+
+```bash
+curl http://localhost:8000/tokenize \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3-0.6B",
+    "input": [
+      {
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": "Hello!"}]
+      }
+    ]
+  }'
+```
 
 ### Generative Scoring API
 

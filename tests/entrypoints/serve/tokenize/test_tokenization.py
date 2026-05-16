@@ -130,6 +130,45 @@ async def test_tokenize_chat(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME],
+)
+async def test_tokenize_responses_matches_chat_rendering(
+    server: RemoteOpenAIServer,
+    model_name: str,
+):
+    user_input = "Can I ask a question? vllm1"
+
+    responses_tokenize = requests.post(
+        server.url_for("tokenize"),
+        json={
+            "model": model_name,
+            "input": user_input,
+            "return_token_strs": True,
+        },
+    )
+    responses_tokenize.raise_for_status()
+
+    chat_tokenize = requests.post(
+        server.url_for("tokenize"),
+        json={
+            "model": model_name,
+            "messages": [{"role": "user", "content": user_input}],
+            "add_special_tokens": True,
+            "return_token_strs": True,
+        },
+    )
+    chat_tokenize.raise_for_status()
+
+    responses_result = responses_tokenize.json()
+    chat_result = chat_tokenize.json()
+    assert responses_result["tokens"] == chat_result["tokens"]
+    assert responses_result["token_strs"] == chat_result["token_strs"]
+    assert responses_result["count"] == len(responses_result["tokens"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     "model_name,tokenizer_name",
     [(MODEL_NAME, MODEL_NAME)],
     indirect=["tokenizer_name"],
