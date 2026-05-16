@@ -245,6 +245,14 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         # post-SwiGLU/ReLU2 activations or keep them in BF16.
         self.activation_precision = envs.VLLM_FLASHINFER_B12X_ACTIVATION_PRECISION
 
+        # FlashInfer's b12x W4A16 path distinguishes "modelopt" vs
+        # "compressed_tensors" source weight format (different SF layout +
+        # scale conversion). Detect from the constructing parent class:
+        # CompressedTensorsW4A4Nvfp4MoEMethod (compressed-tensors path,
+        # including the W4A16 use_a16 sub-path) → "compressed_tensors";
+        # ModelOptNvFp4FusedMoE → "modelopt". Default "modelopt".
+        self.source_format = self._detect_source_format()
+
         # Lazily created on first apply() call.
         self._wrapper: object | None = None
         self._cutlass_registered: bool = False
@@ -258,6 +266,29 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         self._cutlass_a2_gscale: torch.Tensor | None = None
         self._cutlass_g1_alphas: torch.Tensor | None = None
         self._cutlass_g2_alphas: torch.Tensor | None = None
+
+    @staticmethod
+    def _detect_source_format() -> str:
+        """Walk the constructor's call stack to find the parent quant-method
+        class and map it to a FlashInfer ``source_format`` string.
+
+        ``make_nvfp4_moe_kernel`` instantiates the experts class from the
+        parent method's ``create_weights`` (compressed-tensors) or equivalent
+        (modelopt) — so the parent ``self`` is reachable in an outer frame.
+        Fall back to "modelopt" if no recognized parent is found.
+        """
+        import inspect
+
+        for frame_info in inspect.stack():
+            parent = frame_info.frame.f_locals.get("self")
+            if parent is None:
+                continue
+            cls_name = type(parent).__name__
+            if "CompressedTensors" in cls_name:
+                return "compressed_tensors"
+            if "ModelOpt" in cls_name:
+                return "modelopt"
+        return "modelopt"
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # When hybrid CUTLASS prefill is enabled, save copies of the
@@ -456,12 +487,13 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         """
         if self._wrapper is None:
             from flashinfer.fused_moe import B12xMoEWrapper
-            import inspect as _inspect
 
             # activation_precision: "fp4" = W4A4, "bf16" = W4A16.
             # Same NVFP4 weight bytes for both modes; the kernel
             # picks the intermediate-activation handling internally.
-            b12x_kwargs = dict(
+            # source_format distinguishes the W4A16 SF layout + scale
+            # conversion (modelopt vs compressed-tensors).
+            self._wrapper = B12xMoEWrapper(
                 num_experts=self.global_num_experts,
                 top_k=self.topk,
                 hidden_size=self.hidden_dim,
@@ -471,26 +503,9 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
                 num_local_experts=self.num_local_experts,
                 activation=self._activation_str,
                 activation_precision=self.activation_precision,
+                source_format=self.source_format,
+                cutlass_prefill_threshold=self.cutlass_prefill_threshold,
             )
-            # cutlass_prefill_threshold is gated on a FlashInfer build with
-            # PR #b12x_decode_cutlass_prefill. Skip the kwarg silently if the
-            # installed FlashInfer lacks it (and threshold is 0); error
-            # cleanly if the user is asking for the hybrid path.
-            if "cutlass_prefill_threshold" in _inspect.signature(
-                B12xMoEWrapper.__init__
-            ).parameters:
-                b12x_kwargs["cutlass_prefill_threshold"] = (
-                    self.cutlass_prefill_threshold
-                )
-            elif self.cutlass_prefill_threshold > 0:
-                raise RuntimeError(
-                    "VLLM_FLASHINFER_B12X_CUTLASS_PREFILL_THRESHOLD > 0 "
-                    "requires a FlashInfer build with PR "
-                    "#b12x_decode_cutlass_prefill (e.g. "
-                    "askliar/flashinfer:b12x_micro_kernel_merged); "
-                    "current FlashInfer does not expose the kwarg."
-                )
-            self._wrapper = B12xMoEWrapper(**b12x_kwargs)
 
         if (
             self.cutlass_prefill_threshold > 0
