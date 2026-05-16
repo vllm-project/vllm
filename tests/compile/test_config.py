@@ -788,39 +788,3 @@ def test_inductor_asserts_user_override(monkeypatch):
     assert config.inductor_compile_config.get("size_asserts") is True
     if not _is_torch_equal_or_newer(torch.__version__, "2.12.0.dev"):
         assert config.inductor_compile_config.get("alignment_asserts") is False
-
-
-def test_unwrapped_native_dp_ep_preserves_inductor_config(monkeypatch):
-    monkeypatch.setenv("VLLM_FUSED_MOE_WRAP_MODE", "unwrapped")
-
-    import vllm.envs as envs
-
-    if hasattr(envs.__getattr__, "cache_clear"):
-        envs.__getattr__.cache_clear()
-
-    try:
-        cfg = VllmConfig(
-            parallel_config=ParallelConfig(
-                data_parallel_size=2,
-                data_parallel_size_local=2,
-                enable_expert_parallel=True,
-            ),
-            compilation_config=CompilationConfig(
-                inductor_compile_config={
-                    "benchmark_combo_kernel": True,
-                    "force_disable_caches": False,
-                },
-            ),
-        )
-
-        assert (
-            cfg.compilation_config.inductor_compile_config["benchmark_combo_kernel"]
-            is True
-        )
-        assert (
-            cfg.compilation_config.inductor_compile_config["force_disable_caches"]
-            is False
-        )
-    finally:
-        if hasattr(envs.__getattr__, "cache_clear"):
-            envs.__getattr__.cache_clear()

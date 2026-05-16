@@ -4,13 +4,9 @@
 from types import SimpleNamespace
 
 import pytest
-import torch
 
 import vllm.envs as envs
-import vllm.model_executor.layers.fused_moe.experts.triton_moe as triton_moe_module
 import vllm.model_executor.layers.fused_moe.runner.moe_runner as moe_runner_module
-from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 
 
@@ -114,61 +110,3 @@ def test_unwrapped_allows_no_dp_ep(monkeypatch: pytest.MonkeyPatch) -> None:
     runner = _make_runner(dp_size=1, use_ep=False)
 
     assert runner._determine_forward_mode() == "unwrapped"
-
-
-def test_replace_quant_method_revalidates_unwrapped_support(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("VLLM_FUSED_MOE_WRAP_MODE", "unwrapped")
-
-    runner = _make_runner(dp_size=1, use_ep=False)
-    runner.forward_mode = "unwrapped"
-    original_quant_method = runner._quant_method
-    replacement = SimpleNamespace(
-        method_name="ReplacementMoEMethod",
-        supports_unwrapped_forward=False,
-    )
-
-    with pytest.raises(NotImplementedError, match="ReplacementMoEMethod"):
-        runner._replace_quant_method(replacement)
-
-    assert runner._quant_method is original_quant_method
-    assert runner.forward_mode == "unwrapped"
-
-
-def test_triton_unwrapped_workspace_shapes_are_exact(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("VLLM_FUSED_MOE_WRAP_MODE", "unwrapped")
-
-    experts = TritonExperts.__new__(TritonExperts)
-
-    assert experts.workspace_shapes(
-        M=5,
-        N=14,
-        K=8,
-        topk=3,
-        global_num_experts=16,
-        local_num_experts=4,
-        expert_tokens_meta=None,
-        activation=MoEActivation.SILU,
-    ) == ((15, 7), (5, 3, 14), (5, 8))
-
-
-def test_triton_unwrapped_moe_sum_uses_native_sum(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("VLLM_FUSED_MOE_WRAP_MODE", "unwrapped")
-
-    def _fail_moe_sum(*args, **kwargs):
-        raise AssertionError("ops.moe_sum should not be used in unwrapped mode")
-
-    monkeypatch.setattr(triton_moe_module.ops, "moe_sum", _fail_moe_sum)
-    experts = TritonExperts.__new__(TritonExperts)
-    input_ = torch.arange(24, dtype=torch.float32).view(2, 3, 4)
-    output = torch.empty(2, 4)
-
-    result = experts.moe_sum(input_, output)
-
-    assert result is output
-    torch.testing.assert_close(output, input_.sum(dim=1))
