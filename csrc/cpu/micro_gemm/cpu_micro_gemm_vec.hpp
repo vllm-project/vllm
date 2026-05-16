@@ -129,6 +129,10 @@ class MicroGemm<cpu_utils::ISA::VEC, scalar_t> {
     }
   }
 };
+
+template <typename scalar_t>
+class MicroGemm<cpu_utils::ISA::RVV, scalar_t>
+    : public MicroGemm<cpu_utils::ISA::VEC, scalar_t> {};
 }  // namespace cpu_micro_gemm
 
 #endif
