@@ -34,3 +34,16 @@ def length_from_prompt_token_ids_or_embeds(
                 f" prompt_embeds={prompt_embeds_len}"
             )
         return prompt_token_len
+
+
+def is_moe_layer(module: torch.nn.Module) -> bool:
+    # TODO(bnell): Should use isinstance but can't due to circular dependencies.
+    def _check_bases(cls):
+        if cls.__name__ == "FusedMoE":
+            return True
+
+        for b in cls.__bases__:
+            if _check_bases(b):
+                return True
+
+    return _check_bases(module.__class__)

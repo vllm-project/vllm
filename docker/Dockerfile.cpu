@@ -192,6 +192,7 @@ ADD ./tests/ ./tests/
 ADD ./examples/ ./examples/
 ADD ./benchmarks/ ./benchmarks/
 ADD ./vllm/collect_env.py .
+ADD ./docker/ ./docker/
 ADD ./.buildkite/ ./.buildkite/
 
 # install development dependencies (for testing)

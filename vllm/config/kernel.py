@@ -20,8 +20,8 @@ logger = init_logger(__name__)
 class IrOpPriorityConfig:
     """
     Configuration for vLLM IR op priority for dispatching/lowering during the
-    forward pass. Each member is a list of strings, which will be passed to
-    vllm.ir.ops.<op_name>.set_priority() for the duration of the forward pass.
+    forward pass. Each member is a list of strings, which will be installed
+    in worker init via vllm.ir.ops.<op_name>.set_default().
     A single comma-separated string is accepted as well,
 
     If specified manually, platform defaults will be appended to the lists.
@@ -30,6 +30,9 @@ class IrOpPriorityConfig:
 
     rms_norm: list[str] = Field(default_factory=list)
     """Priority list for vllm.ir.ops.rms_norm"""
+
+    fused_add_rms_norm: list[str] = Field(default_factory=list)
+    """Priority list for vllm.ir.ops.fused_add_rms_norm"""
 
     def compute_hash(self) -> str:
         """
@@ -50,7 +53,7 @@ class IrOpPriorityConfig:
             name: {
                 provider: IrOp.registry[name].impls[provider].uuid() for provider in p
             }
-            for name, p in asdict(self).items()
+            for name, p in asdict(self).items()  # type: ignore[call-overload]
         }
 
         return hash_factors(factors)
@@ -64,6 +67,31 @@ class IrOpPriorityConfig:
         assert all(isinstance(v, str) for v in value)
         return value
 
+    def _iter_op_priorities(self):
+        """
+        Yield (IrOp, priority_list) for each field, after importing platform
+        kernels and validating each entry.
+        """
+        from vllm.ir.op import IrOp
+        from vllm.platforms import current_platform
+
+        current_platform.import_ir_kernels()
+
+        for field in fields(self):  # type: ignore[arg-type]
+            op_priority = getattr(self, field.name)
+            assert op_priority is not None, (
+                f"IR op priority for {field.name} must be set"
+            )
+            logger.debug("Setting IR op priority for %s to %s", field.name, op_priority)
+            yield IrOp.registry[field.name], op_priority
+
+    def set_default(self) -> None:
+        """
+        Permanently set the IR op priority for all op members.
+        """
+        for ir_op, op_priority in self._iter_op_priorities():
+            ir_op.set_default(op_priority)
+
     @contextlib.contextmanager
     def set_priority(self):
         """
@@ -71,23 +99,9 @@ class IrOpPriorityConfig:
         It also imports IR kernel implementations for the current platform
         to ensure all implementations are made available.
         """
-        from vllm.ir.op import IrOp
-        from vllm.platforms import current_platform
-
-        current_platform.import_ir_kernels()
-
         with contextlib.ExitStack() as stack:
-            for field in fields(self):
-                op_priority = getattr(self, field.name)
-                assert op_priority is not None, (
-                    f"IR op priority for {field.name} must be set"
-                )
-                logger.debug(
-                    "Setting IR op priority for %s to %s", field.name, op_priority
-                )
-                ir_op = IrOp.registry[field.name]
+            for ir_op, op_priority in self._iter_op_priorities():
                 stack.enter_context(ir_op.set_priority(op_priority))
-
             yield
 
     @classmethod
@@ -98,7 +112,7 @@ class IrOpPriorityConfig:
         A helper to create an IrOpPriorityConfig where fields not specified in kwargs
         use the given default list.
         """
-        for field in fields(cls):
+        for field in fields(cls):  # type: ignore[arg-type]
             if field.name not in kwargs:
                 kwargs[field.name] = list(default)
 
@@ -109,12 +123,34 @@ MoEBackend = Literal[
     "auto",
     "triton",
     "deep_gemm",
+    "deep_gemm_mega_moe",
     "cutlass",
     "flashinfer_trtllm",
     "flashinfer_cutlass",
     "flashinfer_cutedsl",
     "marlin",
+    "humming",
+    "triton_unfused",
     "aiter",
+    "emulation",
+]
+
+LinearBackend = Literal[
+    "auto",
+    "cutlass",
+    "flashinfer_cutlass",
+    "flashinfer_trtllm",
+    "flashinfer_cudnn",
+    "marlin",
+    "triton",
+    "deep_gemm",
+    "torch",
+    "aiter",
+    "machete",
+    "fbgemm",
+    "conch",
+    "exllama",
+    "emulation",
 ]
 
 
@@ -137,16 +173,48 @@ class KernelConfig:
     - "auto": Automatically select the best backend based on model and hardware
     - "triton": Use Triton-based fused MoE kernels
     - "deep_gemm": Use DeepGEMM kernels (FP8 block-quantized only)
+    - "deep_gemm_mega_moe": Use DeepGEMM mega MoE kernels
     - "cutlass": Use vLLM CUTLASS kernels
     - "flashinfer_trtllm": Use FlashInfer with TRTLLM-GEN kernels
     - "flashinfer_cutlass": Use FlashInfer with CUTLASS kernels
     - "flashinfer_cutedsl": Use FlashInfer with CuteDSL kernels (FP4 only)
     - "marlin": Use Marlin kernels (weight-only quantization)
-    - "aiter": Use AMD AITer kernels (ROCm only)"""
+    - "humming": Use Humming Mixed Precision kernels
+    - "triton_unfused": Use Triton unfused MoE kernels
+    - "aiter": Use AMD AITer kernels (ROCm only)
+    - "emulation": use BF16/FP16 GEMM, dequantizing weights and
+                   running QDQ on activations.
+    """
+
+    linear_backend: LinearBackend = "auto"
+    """Backend for quantized linear layer GEMM kernels. Available options:
+
+    - "auto": Automatically select the best backend based on model and hardware
+    - "cutlass": Use CUTLASS-based kernels
+    - "flashinfer_cutlass": Use FlashInfer with CUTLASS kernels
+    - "flashinfer_trtllm": Use FlashInfer with TensorRT-LLM kernels
+    - "flashinfer_cudnn": Use FlashInfer with cuDNN kernels
+    - "marlin": Use Marlin kernels
+    - "triton": Use Triton-based kernels
+    - "deep_gemm": Use DeepGEMM kernels
+    - "torch": Use PyTorch native scaled_mm kernels
+    - "aiter": Use AMD AITer kernels (ROCm only)
+    - "machete": Use Machete kernels (mixed-precision)
+    - "fbgemm": Use FBGEMM kernels
+    - "conch": Use Conch mixed-precision kernels
+    - "exllama": Use Exllama mixed-precision kernels
+    - "emulation": Use slow dequant-to-BF16 emulation (for testing only)"""
 
     @field_validator("moe_backend", mode="before")
     @classmethod
     def _normalize_moe_backend(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.lower().replace("-", "_")
+        return value
+
+    @field_validator("linear_backend", mode="before")
+    @classmethod
+    def _normalize_linear_backend(cls, value: Any) -> Any:
         if isinstance(value, str):
             return value.lower().replace("-", "_")
         return value

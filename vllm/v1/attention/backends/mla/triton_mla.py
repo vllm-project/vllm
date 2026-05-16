@@ -55,6 +55,10 @@ class TritonMLABackend(MLACommonBackend):
     def get_name() -> str:
         return "TRITON_MLA"
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return True
+
     @staticmethod
     def get_impl_cls() -> type["TritonMLAImpl"]:
         return TritonMLAImpl
@@ -118,18 +122,6 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             self.supports_quant_query_input = False
 
         self._sm_count = current_platform.num_compute_units()
-
-    def _flash_attn_varlen_diff_headdims(
-        self, q, k, v, return_softmax_lse=False, softmax_scale=None, **kwargs
-    ):
-        return super()._flash_attn_varlen_diff_headdims(
-            q,
-            k,
-            v,
-            return_softmax_lse=return_softmax_lse,
-            softmax_scale=softmax_scale,
-            **kwargs,
-        )
 
     def forward_mqa(
         self,

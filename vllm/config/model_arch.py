@@ -53,5 +53,8 @@ class ModelArchitectureConfig:
     is_deepseek_mla: bool
     """Whether the model is a DeepSeek MLA model."""
 
+    is_mm_prefix_lm: bool
+    """Whether the model uses image bidirectional attention."""
+
     derived_max_model_len_and_key: tuple[float, str | None]
     """Derived maximum model length and key from the hf config."""
