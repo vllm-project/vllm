@@ -592,8 +592,10 @@ class TritonAttentionImpl(AttentionImpl):
         # FP8 per-tensor / auto path (original flow).
         else:
             key_cache, value_cache = kv_cache.unbind(1)
-            is_quantized = is_quantized_kv_cache(self.kv_cache_dtype)
-            if is_quantized and key_cache.dtype != self.fp8_dtype:
+            if (
+                is_quantized_kv_cache(self.kv_cache_dtype)
+                and key_cache.dtype != self.fp8_dtype
+            ):
                 key_cache = key_cache.view(self.fp8_dtype)
                 value_cache = value_cache.view(self.fp8_dtype)
             descale_shape = (
@@ -619,22 +621,20 @@ class TritonAttentionImpl(AttentionImpl):
 
         mm_prefix_range_tensor = attn_metadata.mm_prefix_range_tensor
 
-        # When Q is FP8 (quantized query) and KV cache is FP8 per-tensor,
-        # the kernel's _cast_kv_tile keeps K/V in FP8 for FP8 MMA and skips
-        # applying k_scale/v_scale.  We fold q_scale * k_scale into
-        # softmax_scale and apply v_scale to the output after the kernel,
-        # matching FlashInfer's strategy.
-        fp8_per_tensor = (
-            not self._is_per_token_head_quant
-            and is_quantized
-            and query.dtype == self.fp8_dtype
-        )
-        if fp8_per_tensor:
-            softmax_scale = self.scale * layer._q_scale_float * layer._k_scale_float
-            v_scale_float = layer._v_scale_float
-        else:
-            softmax_scale = self.scale
-            v_scale_float = 1.0
+        # When Q is FP8, the kernel does not support a separate q_descale
+        # parameter and assumes the query is already in the correct range.
+        # We fold q_scale into softmax_scale unconditionally.  Additionally,
+        # for the per-tensor FP8 path, _cast_kv_tile keeps K/V in FP8 for
+        # FP8 MMA and skips k_scale/v_scale — we fold k_scale into
+        # softmax_scale and apply v_scale post-kernel (FlashInfer strategy).
+        softmax_scale = self.scale
+        v_scale_float = 1.0
+        if query.dtype == self.fp8_dtype:
+            softmax_scale *= layer._q_scale_float
+            if not self._is_per_token_head_quant:
+                # Per-tensor path: kernel skips k/v descale for FP8 Q.
+                softmax_scale *= layer._k_scale_float
+                v_scale_float = layer._v_scale_float
 
         unified_attention(
             q=query[:num_actual_tokens],
