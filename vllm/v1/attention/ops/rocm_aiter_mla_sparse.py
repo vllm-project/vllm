@@ -591,6 +591,7 @@ def rocm_aiter_sparse_attn_indexer_fake(
 ) -> torch.Tensor:
     return topk_indices_buffer
 
+
 @eager_break_during_capture
 def rocm_aiter_sparse_attn_indexer(
     hidden_states: torch.Tensor,
