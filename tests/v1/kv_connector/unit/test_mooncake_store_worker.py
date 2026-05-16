@@ -194,7 +194,7 @@ def test_default_local_buffer_size_matches_pr40900():
 
 
 def test_get_requester_local_hostname_prefers_override(monkeypatch):
-    monkeypatch.setenv("MOONCAKE_LOCAL_HOSTNAME", "worker-a:50053")
+    monkeypatch.setenv("MOONCAKE_REQUESTER_LOCAL_HOSTNAME", "worker-a:50053")
 
     assert rdma_utils.get_requester_local_hostname("10.0.0.7") == "worker-a:50053"
 
@@ -405,42 +405,23 @@ def test_store_sending_thread_passes_replicate_config_when_preferred_segment_set
     assert call_args[3] is replicate_config
 
 
-def test_store_sending_thread_uses_default_write_path_without_preferred_segment():
+def test_store_sending_thread_passes_default_replicate_config_when_no_preferred_segment():  # noqa: E501
+    """Without a preferred_segment the SendingThread still forwards a
+    (default-constructed) ReplicateConfig so the C++ side always sees a
+    well-defined config object."""
     store = MagicMock()
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
     store.batch_put_from_multi_buffers.return_value = [256, 256]
-    thread = _make_store_sending_thread(store)
+    replicate_config = SimpleNamespace()
+    thread = _make_store_sending_thread(store, replicate_config=replicate_config)
 
     thread.add_stored_request("req-a")
     thread._handle_request(_make_store_req("req-a", [b"a0", b"a1"]))
 
     assert store.batch_put_from_multi_buffers.call_count == 1
     call_args = store.batch_put_from_multi_buffers.call_args.args
-    assert len(call_args) == 3
-
-
-def test_get_disk_offload_buffer_budget_bytes_uses_requester_budget_override(
-    monkeypatch,
-):
-    monkeypatch.setenv("MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES", "2mb")
-
-    assert (
-        worker._get_disk_offload_buffer_budget_bytes(enable_offload=True)
-        == 2 * 1024 * 1024
-    )
-
-
-def test_get_disk_offload_buffer_budget_bytes_uses_requester_default(monkeypatch):
-    monkeypatch.delenv("MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES", raising=False)
-
-    assert (
-        worker._get_disk_offload_buffer_budget_bytes(enable_offload=True)
-        == worker.DEFAULT_MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE
-    )
-
-
-def test_get_disk_offload_buffer_budget_bytes_returns_none_when_disabled():
-    assert worker._get_disk_offload_buffer_budget_bytes(enable_offload=False) is None
+    assert len(call_args) == 4
+    assert call_args[3] is replicate_config
 
 
 def test_estimate_disk_offload_staging_bytes_sums_multi_segment_sizes():
@@ -695,7 +676,7 @@ def test_requester_worker_init_prefers_local_hostname_override(
     store.setup.return_value = 0
     _install_fake_mooncake(monkeypatch, store)
     _patch_worker_runtime(monkeypatch)
-    monkeypatch.setenv("MOONCAKE_LOCAL_HOSTNAME", "worker-a:50053")
+    monkeypatch.setenv("MOONCAKE_REQUESTER_LOCAL_HOSTNAME", "worker-a:50053")
     monkeypatch.setenv(
         "MOONCAKE_CONFIG_PATH",
         _write_mooncake_config(
@@ -718,14 +699,12 @@ def test_requester_worker_init_skips_disk_budget_when_offload_disabled(
     tmp_path,
     monkeypatch,
 ):
-    """PR-36: with enable_offload=False the disk budget must be None even when
-    MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES is set, so we don't generate
+    """enable_offload=False zeroes out the disk budget so we don't generate
     redundant owner GET-RPCs."""
     store = MagicMock()
     store.setup.return_value = 0
     _install_fake_mooncake(monkeypatch, store)
     _patch_worker_runtime(monkeypatch)
-    monkeypatch.setenv("MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES", "4mb")
     monkeypatch.setenv(
         "MOONCAKE_CONFIG_PATH",
         _write_mooncake_config(
@@ -821,6 +800,7 @@ def _make_bare_worker(
     w.disk_offload_buffer_budget_bytes = None
     w.kv_send_thread = None
     w.kv_recv_thread = None
+    w.store_replicate_config = SimpleNamespace()
     return w
 
 
@@ -973,7 +953,7 @@ def test_register_kv_caches_cross_layer_single_segment():
 
 
 # ---------------------------------------------------------------------------
-# Dual-mode (real-client / owner-client) config validation tests
+# Dual-mode (embedded / standalone-store) config validation tests
 # ---------------------------------------------------------------------------
 
 
@@ -993,10 +973,10 @@ def _make_config(**overrides):
     return worker.MooncakeStoreConfig(**base)
 
 
-def test_config_defaults_to_real_client():
-    """A JSON without explicit mode parses as real-client with 4 GiB segment."""
+def test_config_defaults_to_embedded():
+    """A JSON without explicit mode parses as embedded with 4 GiB segment."""
     cfg = _make_config()
-    assert cfg.mode == "real-client"
+    assert cfg.mode == "embedded"
     assert cfg.global_segment_size == worker.DEFAULT_GLOBAL_SEGMENT_SIZE
     assert cfg.local_buffer_size == worker.DEFAULT_LOCAL_BUFFER_SIZE
     assert cfg.enable_offload is False
@@ -1004,7 +984,7 @@ def test_config_defaults_to_real_client():
 
 def test_config_pr40900_unchanged(tmp_path):
     """A literal PR-40900 config (no mode, no enable_offload, no preferred_segment)
-    parses without raising and resolves to real-client mode."""
+    parses without raising and resolves to embedded mode."""
     config_path = _write_mooncake_config(
         tmp_path,
         {
@@ -1017,29 +997,30 @@ def test_config_pr40900_unchanged(tmp_path):
         },
     )
     cfg = worker.MooncakeStoreConfig.from_file(config_path)
-    assert cfg.mode == "real-client"
+    assert cfg.mode == "embedded"
     assert cfg.global_segment_size == 4 * 1024**3
     assert cfg.local_buffer_size == 4 * 1024**3
     assert cfg.enable_offload is False
 
 
-def test_config_real_client_rejects_zero_segment():
+def test_config_embedded_rejects_zero_segment():
     with pytest.raises(
-        ValueError, match=r"real-client mode requires global_segment_size > 0"
+        ValueError, match=r"embedded mode requires global_segment_size > 0"
     ):
-        _make_config(mode="real-client", global_segment_size=0)
+        _make_config(mode="embedded", global_segment_size=0)
 
 
-def test_config_owner_client_rejects_nonzero_segment():
+def test_config_standalone_store_rejects_nonzero_segment():
     with pytest.raises(
-        ValueError, match=r"owner-client mode requires global_segment_size == 0"
+        ValueError,
+        match=r"standalone-store mode requires global_segment_size == 0",
     ):
-        _make_config(mode="owner-client", global_segment_size=4 * 1024**3)
+        _make_config(mode="standalone-store", global_segment_size=4 * 1024**3)
 
 
-def test_config_owner_client_accepts_zero_segment():
-    cfg = _make_config(mode="owner-client", global_segment_size=0)
-    assert cfg.mode == "owner-client"
+def test_config_standalone_store_accepts_zero_segment():
+    cfg = _make_config(mode="standalone-store", global_segment_size=0)
+    assert cfg.mode == "standalone-store"
     assert cfg.global_segment_size == 0
 
 
@@ -1056,15 +1037,15 @@ def test_config_zero_local_buffer():
 # ---------------------------------------------------------------------------
 # End-to-end topology tests
 # Covers the two supported recipes:
-#   (A) owner-client mode + disk offload (mode="owner-client", segment=0,
-#       enable_offload=true, preferred_segment set)
-#   (B) real-client mode + CPU only      (mode default, segment>0,
+#   (A) standalone-store mode + disk offload (mode="standalone-store",
+#       segment=0, enable_offload=true, preferred_segment set)
+#   (B) embedded mode + CPU only      (mode default, segment>0,
 #       enable_offload=false, no preferred_segment)
 # ---------------------------------------------------------------------------
 
 
-def test_topology_owner_client_with_disk_offload(tmp_path, monkeypatch):
-    """owner-client + disk: global_segment_size=0, enable_offload=True,
+def test_topology_standalone_store_with_disk_offload(tmp_path, monkeypatch):
+    """standalone-store + disk: global_segment_size=0, enable_offload=True,
     preferred_segment set. Assert setup() positional args, ReplicateConfig
     wiring, and that the disk-offload buffer budget is allocated."""
     store = MagicMock()
@@ -1076,7 +1057,7 @@ def test_topology_owner_client_with_disk_offload(tmp_path, monkeypatch):
         _write_mooncake_config(
             tmp_path,
             {
-                "mode": "owner-client",
+                "mode": "standalone-store",
                 "metadata_server": "http://metadata/endpoint",
                 "global_segment_size": 0,
                 "local_buffer_size": "1GB",
@@ -1110,13 +1091,13 @@ def test_topology_owner_client_with_disk_offload(tmp_path, monkeypatch):
     assert w.disk_offload_buffer_budget_bytes > 0
 
 
-def test_topology_real_client_cpu_only(tmp_path, monkeypatch):
-    """real-client + CPU-only: no mode key (defaults to real-client),
+def test_topology_embedded_cpu_only(tmp_path, monkeypatch):
+    """embedded + CPU-only: no mode key (defaults to embedded),
     global_segment_size>0, enable_offload absent, no preferred_segment.
     This is the PR-40900 baseline recipe."""
     store = MagicMock()
     store.setup.return_value = 0
-    _install_fake_mooncake(monkeypatch, store)
+    fake_replicate_config_cls = _install_fake_mooncake(monkeypatch, store)
     _patch_worker_runtime(monkeypatch)
     monkeypatch.setenv(
         "MOONCAKE_CONFIG_PATH",
@@ -1145,8 +1126,10 @@ def test_topology_real_client_cpu_only(tmp_path, monkeypatch):
         "mlx5_0",
         "10.0.0.7:50051",
     )
-    # No preferred_segment, no ReplicateConfig.
+    # No preferred_segment — ReplicateConfig is default-constructed (so the
+    # preferred_segment field keeps its default value).
     assert w.preferred_segment is None
-    assert w.store_replicate_config is None
+    assert isinstance(w.store_replicate_config, fake_replicate_config_cls)
+    assert w.store_replicate_config.preferred_segment == ""
     # No disk budget — enable_offload was absent (defaults to False).
     assert w.disk_offload_buffer_budget_bytes is None

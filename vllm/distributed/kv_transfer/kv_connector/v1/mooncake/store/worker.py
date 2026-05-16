@@ -16,7 +16,6 @@ import queue
 import socket
 import threading
 from collections import defaultdict
-from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -52,43 +51,48 @@ logger = init_logger(__name__)
 
 DEFAULT_GLOBAL_SEGMENT_SIZE = 4 * 1024 * 1024 * 1024  # 4 GiB
 DEFAULT_LOCAL_BUFFER_SIZE = 4 * 1024 * 1024 * 1024  # 4 GiB
+
 MOONCAKE_NO_AVAILABLE_HANDLE = -200
-DEFAULT_MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE = 1280 * 1024 * 1024
-DISK_OFFLOAD_USABLE_BUDGET_RATIO = 0.9
+
+# Mirrors FileStorageConfig::local_buffer_size in Mooncake C++.
+DEFAULT_MOONCAKE_DISK_STAGING_BUFFER_BYTES = 1280 * 1024 * 1024
+
+# Mirrors DirectIO alignment in Mooncake's AllocateBatch.
 _DIRECT_IO_ALIGNMENT = 4096
 _DIRECT_IO_PADDING_BYTES = 2 * _DIRECT_IO_ALIGNMENT
 
 
-MooncakeMode = Literal["real-client", "owner-client"]
+MooncakeMode = Literal["embedded", "standalone-store"]
 
 
 @dataclass
 class MooncakeStoreConfig:
     """Configuration for MooncakeDistributedStore.
 
-    ``mode`` selects the topology: ``real-client`` (PR-40900 baseline — each
-    rank contributes ``global_segment_size``) or ``owner-client`` (rank
-    contributes 0; an external ``mooncake_client`` owns the pool).
+    ``mode`` selects the topology: ``embedded`` (each rank contributes
+    ``global_segment_size`` in-process) or ``standalone-store`` (rank
+    contributes 0; an external ``mooncake_client`` process owns the pool
+    and the SSD tier).
     """
 
     metadata_server: str
     master_server_address: str
     protocol: str
     device_name: str
-    mode: MooncakeMode = "real-client"
+    mode: MooncakeMode = "embedded"
     global_segment_size: int = DEFAULT_GLOBAL_SEGMENT_SIZE
     local_buffer_size: int = DEFAULT_LOCAL_BUFFER_SIZE
     enable_offload: bool = False
 
     def __post_init__(self) -> None:
-        if self.mode not in ("real-client", "owner-client"):
+        if self.mode not in ("embedded", "standalone-store"):
             raise ValueError(f"unknown Mooncake mode: {self.mode!r}")
         if self.local_buffer_size <= 0:
             raise ValueError("local_buffer_size must be > 0")
-        if self.mode == "real-client" and self.global_segment_size == 0:
-            raise ValueError("real-client mode requires global_segment_size > 0")
-        if self.mode == "owner-client" and self.global_segment_size != 0:
-            raise ValueError("owner-client mode requires global_segment_size == 0")
+        if self.mode == "embedded" and self.global_segment_size == 0:
+            raise ValueError("embedded mode requires global_segment_size > 0")
+        if self.mode == "standalone-store" and self.global_segment_size != 0:
+            raise ValueError("standalone-store mode requires global_segment_size == 0")
 
     @staticmethod
     def from_file(file_path: str) -> "MooncakeStoreConfig":
@@ -99,7 +103,7 @@ class MooncakeStoreConfig:
             master_server_address=config.get("master_server_address", ""),
             protocol=config.get("protocol", "rdma"),
             device_name=config.get("device_name", ""),
-            mode=config.get("mode", "real-client"),
+            mode=config.get("mode", "embedded"),
             global_segment_size=_parse_size(
                 config.get("global_segment_size", DEFAULT_GLOBAL_SEGMENT_SIZE)
             ),
@@ -117,22 +121,6 @@ class MooncakeStoreConfig:
                 "The environment variable 'MOONCAKE_CONFIG_PATH' is not set."
             )
         return MooncakeStoreConfig.from_file(config_path)
-
-
-def _get_kv_connector_extra_config(vllm_config: VllmConfig) -> Mapping[str, Any]:
-    kv_transfer_config = vllm_config.kv_transfer_config
-    if kv_transfer_config is None:
-        return {}
-    return kv_transfer_config.kv_connector_extra_config
-
-
-def _get_disk_offload_buffer_budget_bytes(enable_offload: bool) -> int | None:
-    if not enable_offload:
-        return None
-    value = os.getenv("MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES")
-    if value is None:
-        return DEFAULT_MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE
-    return _parse_size(value)
 
 
 def _parse_size(value: Any) -> int:
@@ -180,7 +168,7 @@ def _estimate_disk_offload_staging_bytes(size_list: list[int]) -> int:
 
 
 def _get_usable_disk_offload_buffer_budget_bytes(raw_budget_bytes: int) -> int:
-    return max(1, int(raw_budget_bytes * DISK_OFFLOAD_USABLE_BUDGET_RATIO))
+    return max(1, int(raw_budget_bytes * envs.VLLM_MOONCAKE_DISK_STAGING_USABLE_RATIO))
 
 
 def _split_disk_offload_load_batches(
@@ -190,6 +178,16 @@ def _split_disk_offload_load_batches(
     usable_budget_bytes: int,
     raw_budget_bytes: int,
 ) -> tuple[list[tuple[list[str], list[list[int]], list[list[int]]]], str | None]:
+    """Split a GET into sub-batches that fit the owner's staging buffer.
+
+    ``addrs[i]`` / ``sizes[i]`` are scatter-gather lists (K/V or multi-layer
+    segments) for key ``i``. ``usable_budget_bytes`` caps a multi-key batch;
+    ``raw_budget_bytes`` is the hard per-key cap.
+
+    Returns ``(batches, oversize_key)``. Aborts with ``([], key)`` if any
+    single key exceeds ``raw_budget_bytes``; otherwise ``oversize_key`` is
+    ``None``.
+    """
     batches: list[tuple[list[str], list[list[int]], list[list[int]]]] = []
     batch_keys: list[str] = []
     batch_addrs: list[list[int]] = []
@@ -394,7 +392,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         kv_role: str,
         ready_event: threading.Event,
         enable_kv_event: bool = False,
-        replicate_config: Any | None = None,
+        replicate_config: Any = None,
     ):
         super().__init__(
             store,
@@ -408,6 +406,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.kv_role = kv_role
         self.stored_requests: defaultdict[str, int] = defaultdict(int)
         self.enable_kv_event = enable_kv_event
+        # Caller always passes a non-None ReplicateConfig — see
+        # MooncakeStoreWorker.__init__ where store_replicate_config is built.
         self.replicate_config = replicate_config
 
         # Pause store requests when CPU/disk offloading is under pressure.
@@ -546,15 +546,12 @@ class KVCacheStoreSendingThread(KVTransferThread):
             current_event.synchronize()
 
         try:
-            if self.replicate_config is None:
-                res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes)
-            else:
-                res = self.store.batch_put_from_multi_buffers(
-                    keys,
-                    addrs,
-                    sizes,
-                    self.replicate_config,
-                )
+            res = self.store.batch_put_from_multi_buffers(
+                keys,
+                addrs,
+                sizes,
+                self.replicate_config,
+            )
             failed = [i for i, v in enumerate(res) if v < 0]
             if failed:
                 # Compute total bytes attempted for this batch
@@ -813,7 +810,11 @@ class MooncakeStoreWorker:
 
         # Initialize MooncakeDistributedStore with its own TransferEngine
         store_config = MooncakeStoreConfig.load_from_env()
-        extra_config = _get_kv_connector_extra_config(vllm_config)
+        extra_config = (
+            vllm_config.kv_transfer_config.kv_connector_extra_config
+            if vllm_config.kv_transfer_config
+            else {}
+        )
         store_config.device_name = rdma_utils.get_configured_worker_rnic(
             protocol=store_config.protocol,
             configured_device=store_config.device_name,
@@ -837,9 +838,8 @@ class MooncakeStoreWorker:
 
         preferred_segment = rdma_utils.get_configured_preferred_segment(extra_config)
         self.preferred_segment = preferred_segment
-        self.store_replicate_config = None
+        self.store_replicate_config = ReplicateConfig()
         if preferred_segment is not None:
-            self.store_replicate_config = ReplicateConfig()
             self.store_replicate_config.preferred_segment = preferred_segment
 
         logger.info(
@@ -851,27 +851,31 @@ class MooncakeStoreWorker:
             preferred_segment or "<none>",
             store_config.enable_offload,
         )
-        if store_config.mode == "real-client":
+        if store_config.mode == "embedded":
             if store_config.enable_offload and preferred_segment is None:
                 logger.warning(
-                    "enable_offload is set in real-client mode without "
+                    "enable_offload is set in embedded mode without "
                     "preferred_segment; SSD tier will only see puts that "
                     "happen to land on the owner segment."
                 )
             if preferred_segment is not None:
                 logger.warning(
-                    "preferred_segment=%s with mode=real-client: rank-"
+                    "preferred_segment=%s with mode=embedded: rank-"
                     "contributed segments will be idle.",
                     preferred_segment,
                 )
-        elif store_config.mode == "owner-client" and not store_config.enable_offload:
+        elif (
+            store_config.mode == "standalone-store" and not store_config.enable_offload
+        ):
             logger.warning(
-                "owner-client mode without enable_offload: large prefills "
+                "standalone-store mode without enable_offload: large prefills "
                 "may exceed the owner DirectIO budget."
             )
 
-        self.disk_offload_buffer_budget_bytes = _get_disk_offload_buffer_budget_bytes(
-            store_config.enable_offload
+        self.disk_offload_buffer_budget_bytes = (
+            DEFAULT_MOONCAKE_DISK_STAGING_BUFFER_BYTES
+            if store_config.enable_offload
+            else None
         )
 
         # Start lookup server on rank 0 for scheduler-side prefix queries
@@ -990,7 +994,7 @@ class MooncakeStoreWorker:
                 self.kv_role,
                 ready_event_sending,
                 self.enable_kv_events,
-                getattr(self, "store_replicate_config", None),
+                self.store_replicate_config,
             )
             self.kv_send_thread.start()
 

@@ -2,17 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Mooncake requester config helpers."""
 
-import os
 from collections.abc import Mapping
 from typing import Any
 
 import torch
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
-
-_PREFERRED_SEGMENT_ENV = "MOONCAKE_PREFERRED_SEGMENT"
 
 
 def normalize_string_override(value: Any) -> str | None:
@@ -39,7 +37,7 @@ def get_current_physical_gpu_index() -> int | None:
 
 
 def get_requester_local_hostname(local_ip: str) -> str:
-    override = normalize_string_override(os.getenv("MOONCAKE_LOCAL_HOSTNAME"))
+    override = normalize_string_override(envs.MOONCAKE_REQUESTER_LOCAL_HOSTNAME)
     if override is not None:
         return override
     return local_ip
@@ -56,11 +54,10 @@ def get_configured_preferred_segment(
             "Mooncake preferred_segment override must be a non-empty string"
         )
 
-    env_value = normalize_string_override(os.getenv(_PREFERRED_SEGMENT_ENV))
+    env_value = normalize_string_override(envs.MOONCAKE_PREFERRED_SEGMENT)
     if env_value is not None:
         logger.info(
-            "Mooncake preferred_segment from %s: %s",
-            _PREFERRED_SEGMENT_ENV,
+            "Mooncake preferred_segment from MOONCAKE_PREFERRED_SEGMENT: %s",
             env_value,
         )
         return env_value
