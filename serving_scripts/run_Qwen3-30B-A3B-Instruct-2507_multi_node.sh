@@ -7,7 +7,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=512G
-#SBATCH --time=00:30:00
+#SBATCH --time=00:40:00
 #SBATCH --output=results/%x-%j.out
 #SBATCH --error=results/%x-%j.err
 #SBATCH --mail-user=jason.miller@eng.ox.ac.uk
@@ -529,7 +529,7 @@ done
 WORKER_RAY_PIDS=""
 
 echo "Waiting briefly for Ray/Nsight files to flush..."
-sleep 200
+sleep 30
 
 echo "Copying Ray worker Nsight reports..."
 mkdir -p "${TRACE_RUN_DIR}/ray_worker_nsight"
