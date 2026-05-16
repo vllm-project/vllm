@@ -125,6 +125,34 @@ class SteeringManager:
         self._cached_ordered_configs: list[tuple[tuple[int, str], int]] | None = None
         self._indices_dirty: bool = True
 
+        # Reusable pinned-CPU staging ring for ``_stack_vectors_to_device``.
+        #
+        # Allocating a fresh pinned tensor per call is a measurable wall-time
+        # cost — ``torch.Tensor.pin_memory()`` does a synchronous host-side
+        # page-locking copy, which dominates the ``register_config`` path
+        # for multi-MB stacks and defeats the purpose of ``non_blocking=True``
+        # on the H2D itself.
+        #
+        # We can't just reuse a single pinned buffer though: the H2D
+        # ``cudaMemcpyAsync`` reads from the host pointer when the GPU
+        # runs the copy (not at submission), so overwriting the buffer
+        # before the previous DMA has drained corrupts the in-flight
+        # transfer. To avoid that we maintain a small ring of pinned
+        # slots; each slot is paired with a CUDA event recorded right
+        # after its H2D is issued, and we wait on that event before
+        # reusing the slot.
+        #
+        # The ring size needs to cover the longest plausible burst of
+        # back-to-back ``_stack_vectors_to_device`` calls inside one
+        # ``register_config``: one per hook point. With a typical
+        # ``HOOK_POINT_TABLE_ATTR`` of ~3 entries plus a small safety
+        # margin, 4 slots is enough that under steady state every reuse
+        # finds the H2D already complete (event wait is a no-op).
+        self._stack_pinned_ring: list[torch.Tensor | None] = [None] * 4
+        self._stack_pinned_events: list[torch.cuda.Event | None] = [None] * 4
+        self._stack_pinned_numel: list[int] = [0] * 4
+        self._stack_pinned_next: int = 0
+
     def register_config(
         self,
         config_hash: int,
@@ -344,14 +372,32 @@ class SteeringManager:
         self, vecs: list[list[float] | np.ndarray]
     ) -> torch.Tensor:
         """Stack a list of equal-length float vectors into a (N, hidden)
-        tensor on ``self.device`` via a single batched H2D copy.
+        tensor on ``self.device``.
 
-        For CUDA targets, the array is assembled in numpy, wrapped via
-        ``torch.from_numpy``, pinned, and copied with ``non_blocking=True``
-        — one ``cudaMemcpy`` regardless of ``len(vecs)``. Per-layer
-        ``torch.tensor(list, device=cuda)`` would otherwise issue one
-        synchronous transfer per row, which dominates the
-        ``register_config`` cost when many configs enter decode at once.
+        For CUDA targets this returns the device tensor IMMEDIATELY; the
+        underlying H2D ``cudaMemcpyAsync`` is queued on the current CUDA
+        stream with ``non_blocking=True`` and has not necessarily completed
+        by the time we return. This is safe because ``populate_steering_tables``
+        — the only consumer that reads from the returned tensor — runs on
+        the same default stream, and CUDA preserves in-stream ordering: any
+        op that touches the destination on this stream observes the copy
+        as already finished.
+
+        Implementation notes:
+
+        * The copy uses a reusable pinned-CPU staging buffer
+          (``self._stack_pinned_cpu``). ``torch.Tensor.pin_memory()`` does
+          a synchronous host-side copy into a freshly page-locked region,
+          which is the dominant cost for multi-MB stacks. Reusing one
+          allocation amortizes that to one-time work.
+        * Inputs whose total byte size exceeds ``_STACK_PINNED_CAP_BYTES``
+          fall back to a non-pinned ``torch.from_numpy`` + ``non_blocking=True``
+          copy. Pinned host memory is a finite resource (locked, not
+          swappable); unbounded growth is not an option. The cap is
+          generous enough to cover Gemma-3-4B-class workloads
+          (~6 MB / hook).
+        * The signature still returns a device tensor, matching what
+          ``register_config`` expects to slice with ``stacked[i:i+1]``.
         """
         try:
             arr = np.asarray(vecs, dtype=np.float32)
@@ -366,13 +412,96 @@ class SteeringManager:
                 "register_config expected a 2D stack of steering vectors "
                 f"(N, hidden); got array with shape {arr.shape}."
             )
-        cpu_t = torch.from_numpy(arr)
+
         if self.device is None:
-            return cpu_t
-        if self.device.type == "cuda":
-            cpu_t = cpu_t.pin_memory()
+            # CPU-only path: no copy needed at all, the numpy buffer is
+            # the storage.
+            return torch.from_numpy(arr)
+
+        if self.device.type != "cuda":
+            # Non-CUDA accelerator (e.g. xpu, hpu) — there's no pinned-host
+            # concept that helps us, so do the simple copy.
+            return torch.from_numpy(arr).to(self.device)
+
+        # CUDA path: pinned-ring-backed async copy.
+        numel = arr.size
+        nbytes = arr.nbytes
+        if nbytes > self._STACK_PINNED_CAP_BYTES:
+            # Outlier: don't lock that much host memory just for this call.
+            # Still ``non_blocking=True`` so the copy enqueues without
+            # blocking the host on driver-side queue submission, but the
+            # source is pageable so the runtime does an internal staging
+            # copy that's effectively synchronous w.r.t. the host. That's
+            # acceptable for the rare-large case.
+            cpu_t = torch.from_numpy(arr)
             return cpu_t.to(self.device, non_blocking=True)
-        return cpu_t.to(self.device)
+
+        slot = self._stack_pinned_next
+        ring_size = len(self._stack_pinned_ring)
+        self._stack_pinned_next = (slot + 1) % ring_size
+
+        # If a previous H2D from this slot is still in flight, wait for it
+        # to drain on the current stream before we reuse the host buffer.
+        # In steady state this event has long since completed and the wait
+        # is a no-op (microseconds). The wait happens on the CUDA stream,
+        # not the host — host-side ``copy_`` below could still race the
+        # DMA, so we follow this with an explicit ``event.synchronize()``
+        # to make the host wait too. With a 4-slot ring this only gates
+        # on the H2D from 4 calls ago, which is essentially always done.
+        prev_event = self._stack_pinned_events[slot]
+        if prev_event is not None:
+            prev_event.synchronize()
+
+        # Grow the pinned slot if it's too small. Slots grow monotonically
+        # so a steady-state workload pays the pin cost once per slot.
+        if (
+            self._stack_pinned_ring[slot] is None
+            or self._stack_pinned_numel[slot] < numel
+        ):
+            try:
+                self._stack_pinned_ring[slot] = torch.empty(
+                    numel, dtype=torch.float32, pin_memory=True
+                )
+                self._stack_pinned_numel[slot] = numel
+            except RuntimeError:
+                # Pinned allocation failed (e.g. CPU-only test env, or
+                # pinned-memory exhausted). Fall back to non-pinned copy
+                # without poisoning the slot — a future call may succeed.
+                self._stack_pinned_ring[slot] = None
+                self._stack_pinned_numel[slot] = 0
+                self._stack_pinned_events[slot] = None
+                cpu_t = torch.from_numpy(arr)
+                return cpu_t.to(self.device, non_blocking=True)
+
+        pinned = self._stack_pinned_ring[slot]
+        assert pinned is not None
+        flat_view = pinned[:numel]
+        # ``copy_`` from a numpy-backed tensor of identical dtype is a
+        # plain host memcpy into the pinned buffer — no extra pin, no
+        # tensor allocation beyond the temporary view.
+        flat_view.copy_(torch.from_numpy(arr.reshape(-1)))
+        cpu_view = flat_view.view(arr.shape)
+        # ``non_blocking=True`` from a pinned source is a true async H2D
+        # on the current stream. The returned device tensor is a fresh
+        # allocation owned by the caller; the pinned source can be
+        # overwritten safely once the recorded event below has fired.
+        device_t = cpu_view.to(self.device, non_blocking=True)
+
+        # Record an event on the current stream right after the H2D was
+        # enqueued, so the next user of this slot knows when the DMA has
+        # drained. Re-using a stale ``cuda.Event`` would race the previous
+        # ``record()``, so we always allocate a fresh one — Event objects
+        # are cheap (just a CUDA event handle).
+        ev = torch.cuda.Event()
+        ev.record()
+        self._stack_pinned_events[slot] = ev
+        return device_t
+
+    # Soft cap on pinned-CPU staging-buffer size. Sized to hold one Gemma-3
+    # hook's worth of vectors comfortably (~5.8 MB) with headroom for larger
+    # models. Inputs above this fall back to a non-pinned copy rather than
+    # locking unbounded host memory.
+    _STACK_PINNED_CAP_BYTES: int = 32 * 1024 * 1024
 
     def populate_steering_tables(
         self, steerable_layers: dict[int, "torch.nn.Module"]
