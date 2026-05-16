@@ -59,6 +59,11 @@ try:
 except ImportError:
     gguf = PlaceholderModule("gguf")
 
+from vllm.model_executor.layers.quantization.gguf_compat import (
+    ensure_prism_gguf_compat,
+    prism_type_name,
+)
+
 try:
     from fastsafetensors import SafeTensorsFileLoader, SingleGroup
 except ImportError:
@@ -1269,9 +1274,10 @@ def get_gguf_weight_type_map(
     """
     Return GGUF mapped weight's name and its quant type
     """
+    ensure_prism_gguf_compat()
     reader = gguf.GGUFReader(gguf_file)
     return {
-        gguf_to_hf_name_map[tensor.name]: tensor.tensor_type.name
+        gguf_to_hf_name_map[tensor.name]: prism_type_name(tensor.tensor_type)
         for tensor in reader.tensors
         if tensor.name in gguf_to_hf_name_map
     }
@@ -1289,6 +1295,7 @@ def gguf_quant_weights_iterator(
     layer with different quant types.
     """
 
+    ensure_prism_gguf_compat()
     reader = gguf.GGUFReader(gguf_file)
 
     for tensor in reader.tensors:
@@ -1296,7 +1303,7 @@ def gguf_quant_weights_iterator(
             weight_type = tensor.tensor_type
             name = gguf_to_hf_name_map[tensor.name]
 
-            if weight_type.name not in ("F32", "BF16", "F16"):
+            if prism_type_name(weight_type) not in ("F32", "BF16", "F16"):
                 weight_type_name = name.replace("weight", "qweight_type")
                 weight_type = torch.tensor(weight_type)
                 yield weight_type_name, weight_type
@@ -1306,9 +1313,10 @@ def gguf_quant_weights_iterator(
             weight = tensor.data
             weight_type = tensor.tensor_type
             name = gguf_to_hf_name_map[tensor.name]
-            if weight_type.name not in ("F32", "BF16", "F16"):
+            type_name = prism_type_name(weight_type)
+            if type_name not in ("F32", "BF16", "F16"):
                 name = name.replace("weight", "qweight")
-            if weight_type.name == "BF16" and tensor.data.dtype == np.uint8:
+            if type_name == "BF16" and tensor.data.dtype == np.uint8:
                 # BF16 is currently the only "quantization" type that isn't
                 # actually quantized but is read as a raw byte tensor.
                 # Reinterpret as `torch.bfloat16` tensor.

@@ -187,6 +187,11 @@ IMATRIX_QUANT_TYPES = {
     WeightType.IQ4_XS,
     WeightType.IQ4_NL,
 }
+
+# PRISM 1-bit types — kept separate from shared sets to avoid
+# routing into MoE/MMQ paths that lack Q1_0 kernel support.
+PRISM_Q1_TYPES = {42, 43}  # Q1_0, Q1_0_G128
+
 # TODO(Isotr0py): Currently, we don't have MMQ kernel for I-Matrix quantization.
 # Consolidate DEQUANT_TYPES, MMVQ_QUANT_TYPES and MMQ_QUANT_TYPES after we add
 # MMQ kernel for I-Matrix quantization.
@@ -200,6 +205,9 @@ def _fused_mul_mat_gguf(
 ) -> torch.Tensor:
     if qweight_type in IMATRIX_QUANT_TYPES:
         mmvq_safe = 8 if qweight.shape[0] > 5120 else 16
+    elif qweight_type in PRISM_Q1_TYPES:
+        # PRISM 1-bit: MMVQ only safe for batch=1 on RDNA2
+        mmvq_safe = 1
     else:
         mmvq_safe = 2 if qweight.shape[0] > 5120 else 6
     # HACK: when doing chunked prefill we don't generate output tokens
@@ -209,6 +217,17 @@ def _fused_mul_mat_gguf(
     # there is no need to call any kernel for fp16/bf16
     if qweight_type in UNQUANTIZED_TYPES:
         return x @ qweight.T
+    # PRISM Q1: MMVQ fast path for small batches, dequant fallback for larger
+    if qweight_type in PRISM_Q1_TYPES:
+        if x.shape[0] <= mmvq_safe:
+            y = ops.ggml_mul_mat_vec_a8(qweight, x, qweight_type, qweight.shape[0])
+        else:
+            from .gguf_compat import PRISM_QUANT_SIZES
+            block_size, type_size = PRISM_QUANT_SIZES[qweight_type]
+            shape = (qweight.shape[0], qweight.shape[1] // type_size * block_size)
+            weight = ops.ggml_dequantize(qweight, qweight_type, *shape, x.dtype)
+            y = x @ weight.T
+        return y
     # enable MMVQ in contiguous batching with batch_size=1
     if x.shape[0] <= mmvq_safe and qweight_type in MMVQ_QUANT_TYPES:
         y = ops.ggml_mul_mat_vec_a8(qweight, x, qweight_type, qweight.shape[0])

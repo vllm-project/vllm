@@ -210,3 +210,23 @@ static void mul_mat_vec_iq3_s_q8_1_cuda(const void * vx, const void * vy, scalar
     mul_mat_vec_q<scalar_t, QK_K, QI3_XS, block_iq3_s, 1, vec_dot_iq3_s_q8_1>
         <<<block_nums, block_dims, 0, stream>>>(vx, vy, dst, ncols, nrows, nvecs);
 }
+
+// PRISM Q1_0 MMVQ: 1-bit quantized matrix-vector multiply (32-element blocks)
+template<typename scalar_t>
+static void mul_mat_vec_q1_0_q8_1_cuda(const void * vx, const void * vy, scalar_t * dst, const int ncols, const int nrows, const int nvecs, cudaStream_t stream) {
+    const int block_num_y = (nrows + GGML_CUDA_MMV_Y - 1) / GGML_CUDA_MMV_Y;
+    const dim3 block_nums(block_num_y, nvecs, 1);
+    const dim3 block_dims(WARP_SIZE, GGML_CUDA_MMV_Y, 1);
+    mul_mat_vec_q<scalar_t, QK1_0, QI1_0, block_q1_0, VDR_Q1_0_Q8_1_MMVQ, vec_dot_q1_0_q8_1>
+        <<<block_nums, block_dims, 0, stream>>>(vx, vy, dst, ncols, nrows, nvecs);
+}
+
+// PRISM Q1_0_G128 MMVQ: 1-bit quantized matrix-vector multiply (128-element blocks)
+template<typename scalar_t>
+static void mul_mat_vec_q1_0_g128_q8_1_cuda(const void * vx, const void * vy, scalar_t * dst, const int ncols, const int nrows, const int nvecs, cudaStream_t stream) {
+    const int block_num_y = (nrows + GGML_CUDA_MMV_Y - 1) / GGML_CUDA_MMV_Y;
+    const dim3 block_nums(block_num_y, nvecs, 1);
+    const dim3 block_dims(WARP_SIZE, GGML_CUDA_MMV_Y, 1);
+    mul_mat_vec_q<scalar_t, QK1_0_g128, QI1_0_g128, block_q1_0_g128, VDR_Q1_0_g128_Q8_1_MMVQ, vec_dot_q1_0_g128_q8_1>
+        <<<block_nums, block_dims, 0, stream>>>(vx, vy, dst, ncols, nrows, nvecs);
+}

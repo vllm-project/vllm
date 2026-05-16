@@ -199,6 +199,16 @@ torch::Tensor ggml_mul_mat_vec_a8(torch::Tensor W,  // quant weight
             (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
             (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
         break;
+      case 42:
+        mul_mat_vec_q1_0_q8_1_cuda<scalar_t>(
+            (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+            (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
+        break;
+      case 43:
+        mul_mat_vec_q1_0_g128_q8_1_cuda<scalar_t>(
+            (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+            (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
+        break;
     }
   });
   return Y;

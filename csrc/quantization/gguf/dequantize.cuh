@@ -1,5 +1,43 @@
 // copied and adapted from https://github.com/ggerganov/llama.cpp/blob/b2899/ggml-cuda/convert.cu
 // Dequant functions
+
+// PRISM Q1_0: 1-bit dequantize — each bit → +d or −d
+static __device__ __forceinline__ void dequantize_q1_0(
+    const void* vx, const int ib, const int iqs, dfloat2& v) {
+  const block_q1_0* x = (const block_q1_0*)vx;
+  const dfloat d = x[ib].d;
+
+  const int byte_idx_0 = iqs / 8;
+  const int bit_off_0  = iqs % 8;
+  const int byte_idx_1 = (iqs + 1) / 8;
+  const int bit_off_1  = (iqs + 1) % 8;
+
+  const uint8_t bit_0 = (x[ib].qs[byte_idx_0] >> bit_off_0) & 1;
+  const uint8_t bit_1 = (x[ib].qs[byte_idx_1] >> bit_off_1) & 1;
+
+  // 1 → +d, 0 → −d
+  v.x = bit_0 ? d : __hneg(d);
+  v.y = bit_1 ? d : __hneg(d);
+}
+
+// PRISM Q1_0_G128: 1-bit dequantize with group size 128
+static __device__ __forceinline__ void dequantize_q1_0_g128(
+    const void* vx, const int ib, const int iqs, dfloat2& v) {
+  const block_q1_0_g128* x = (const block_q1_0_g128*)vx;
+  const dfloat d = x[ib].d;
+
+  const int byte_idx_0 = iqs / 8;
+  const int bit_off_0  = iqs % 8;
+  const int byte_idx_1 = (iqs + 1) / 8;
+  const int bit_off_1  = (iqs + 1) % 8;
+
+  const uint8_t bit_0 = (x[ib].qs[byte_idx_0] >> bit_off_0) & 1;
+  const uint8_t bit_1 = (x[ib].qs[byte_idx_1] >> bit_off_1) & 1;
+
+  v.x = bit_0 ? d : __hneg(d);
+  v.y = bit_1 ? d : __hneg(d);
+}
+
 static __device__ __forceinline__ void dequantize_q4_0(const void * vx, const int ib, const int iqs, dfloat2 & v){
     const block_q4_0 * x = (const block_q4_0 *) vx;
 
@@ -565,6 +603,10 @@ static to_cuda_ggml_t<dst_t> ggml_get_to_cuda(int64_t type) {
             return dequantize_row_iq4_xs_cuda;
         case 29:
             return dequantize_row_iq1_m_cuda;
+        case 42:
+            return dequantize_block_cuda<QK1_0, QR1_0, dequantize_q1_0>;
+        case 43:
+            return dequantize_block_cuda<QK1_0_g128, QR1_0_g128, dequantize_q1_0_g128>;
         default:
             return nullptr;
     }

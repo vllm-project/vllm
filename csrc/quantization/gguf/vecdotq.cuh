@@ -40,6 +40,107 @@ static __device__ __forceinline__ int get_int_from_uint8_aligned(const uint8_t *
 // VDR = vec dot ratio, how many contiguous integers each thread processes when the vec dot kernel is called
 // MMVQ = mul_mat_vec_q, MMQ = mul_mat_q
 
+// PRISM Q1_0: 1-bit quantization vec_dot kernels
+#define VDR_Q1_0_Q8_1_MMVQ 1
+#define VDR_Q1_0_Q8_1_MMQ  1
+#define VDR_Q1_0_g128_Q8_1_MMVQ 1
+#define VDR_Q1_0_g128_Q8_1_MMQ  4
+
+// Core Q1→Q8 dot product: unpacks 1-bit values to ±1 signed bytes, uses dp4a
+template <int vdr>
+static __device__ __forceinline__ float vec_dot_q1_0_q8_1_impl(
+    const int* v, const int* u, const float& d1, const half2& ds8) {
+
+  int sumi = 0;
+
+#pragma unroll
+  for (int i = 0; i < vdr; ++i) {
+    const int vi = v[i];
+
+    // Unpack 32 bits into 8 packed int32s (each holding 4 signed bytes: -1 or +1)
+    int vi_bytes[8];
+
+#pragma unroll
+    for (int j = 0; j < 8; ++j) {
+      const int shift = j * 4;
+      const int bits4 = (vi >> shift) & 0x0F;
+
+      const int b0 = (bits4 & 0x01) ? 1 : -1;
+      const int b1 = (bits4 & 0x02) ? 1 : -1;
+      const int b2 = (bits4 & 0x04) ? 1 : -1;
+      const int b3 = (bits4 & 0x08) ? 1 : -1;
+
+      vi_bytes[j] = (b0 & 0xFF) | ((b1 & 0xFF) << 8) | ((b2 & 0xFF) << 16) | ((b3 & 0xFF) << 24);
+    }
+
+    // dp4a: 4-way signed int8 dot product against Q8_1 quantized activations
+#pragma unroll
+    for (int j = 0; j < 8; ++j) {
+      sumi = __dp4a(vi_bytes[j], u[8 * i + j], sumi);
+    }
+  }
+
+  const float2 ds8f = __half22float2(ds8);
+  return d1 * ds8f.x * sumi;
+}
+
+// MMVQ wrapper for Q1_0 (32 elements per block)
+static __device__ __forceinline__ float vec_dot_q1_0_q8_1(
+    const void* __restrict__ vbq, const block_q8_1* __restrict__ bq8_1,
+    const int& iqs) {
+
+  const block_q1_0* bq1_0 = (const block_q1_0*)vbq;
+
+  int v[VDR_Q1_0_Q8_1_MMVQ];
+  int u[8 * VDR_Q1_0_Q8_1_MMVQ];
+
+  v[0] = bq1_0->qs[0] | (bq1_0->qs[1] << 8) | (bq1_0->qs[2] << 16) | (bq1_0->qs[3] << 24);
+
+#pragma unroll
+  for (int j = 0; j < 8; ++j) {
+    u[j] = get_int_b4(bq8_1->qs, j);
+  }
+
+  return vec_dot_q1_0_q8_1_impl<VDR_Q1_0_Q8_1_MMVQ>(v, u, __half2float(bq1_0->d), bq8_1->ds);
+}
+
+// MMVQ wrapper for Q1_0_G128 (128 elements per block, 4 chunks of 32)
+static __device__ __forceinline__ float vec_dot_q1_0_g128_q8_1(
+    const void* __restrict__ vbq, const block_q8_1* __restrict__ bq8_1,
+    const int& iqs) {
+
+  const block_q1_0_g128* bq1_g128 = (const block_q1_0_g128*)vbq;
+
+  const float d1 = __half2float(bq1_g128->d);
+  const block_q8_1* bq8_1_chunk = bq8_1 + iqs;
+
+  const int offset = iqs * 4;
+  const int v = bq1_g128->qs[offset + 0] | (bq1_g128->qs[offset + 1] << 8) |
+                (bq1_g128->qs[offset + 2] << 16) | (bq1_g128->qs[offset + 3] << 24);
+
+  int vi_bytes[8];
+#pragma unroll
+  for (int j = 0; j < 8; ++j) {
+    const int shift = j * 4;
+    const int bits4 = (v >> shift) & 0x0F;
+    const int b0 = (bits4 & 0x01) ? 1 : -1;
+    const int b1 = (bits4 & 0x02) ? 1 : -1;
+    const int b2 = (bits4 & 0x04) ? 1 : -1;
+    const int b3 = (bits4 & 0x08) ? 1 : -1;
+    vi_bytes[j] = (b0 & 0xFF) | ((b1 & 0xFF) << 8) | ((b2 & 0xFF) << 16) | ((b3 & 0xFF) << 24);
+  }
+
+  int sumi = 0;
+#pragma unroll
+  for (int j = 0; j < 8; ++j) {
+    const int uj = get_int_b4(bq8_1_chunk->qs, j);
+    sumi = __dp4a(vi_bytes[j], uj, sumi);
+  }
+
+  const float2 ds8f = __half22float2(bq8_1_chunk->ds);
+  return d1 * ds8f.x * sumi;
+}
+
 #define VDR_Q4_0_Q8_1_MMVQ 2
 #define VDR_Q4_0_Q8_1_MMQ  4
 

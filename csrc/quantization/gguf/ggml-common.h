@@ -14,6 +14,31 @@
 // QR = QK / number of values before dequantization
 // QI = number of 32 bit integers before dequantization
 
+// PRISM Q1_0: 1-bit quantization, 32 elements per block
+// Block layout: [half d (2 bytes)] [uint8_t qs[4] (4 bytes)] = 6 bytes total
+// Each bit in qs: 1 → +d, 0 → −d (symmetric binary quantization)
+#define QK1_0 32
+#define QR1_0 1
+#define QI1_0 (QK1_0 / 32)  // = 1: one int32 holds all 32 bits of a block
+typedef struct {
+  half d;                   // scale factor
+  uint8_t qs[QK1_0 / 8];   // 1-bit quants (4 bytes = 32 bits)
+} block_q1_0;
+static_assert(sizeof(block_q1_0) == sizeof(half) + QK1_0 / 8,
+              "wrong q1_0 block size/padding");
+
+// PRISM Q1_0_G128: 1-bit quantization, 128 elements per block (group size 128)
+// Block layout: [half d (2 bytes)] [uint8_t qs[16] (16 bytes)] = 18 bytes total
+#define QK1_0_g128 128
+#define QR1_0_g128 1
+#define QI1_0_g128 (QK1_0_g128 / 32)  // = 4: four int32s hold all 128 bits
+typedef struct {
+  half d;                         // scale factor
+  uint8_t qs[QK1_0_g128 / 8];    // 1-bit quants (16 bytes = 128 bits)
+} block_q1_0_g128;
+static_assert(sizeof(block_q1_0_g128) == sizeof(half) + QK1_0_g128 / 8,
+              "wrong q1_0_g128 block size/padding");
+
 #define QK4_0 32
 #define QR4_0 2
 #define QI4_0 (QK4_0 / (4 * QR4_0))
