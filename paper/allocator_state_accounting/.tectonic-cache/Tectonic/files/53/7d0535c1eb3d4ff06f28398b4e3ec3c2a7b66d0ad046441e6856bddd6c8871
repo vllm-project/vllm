@@ -1,0 +1,296 @@
+%%
+%% This is file `t1enc.def',
+%% generated with the docstrip utility.
+%%
+%% The original source files were:
+%%
+%% ltoutenc.dtx  (with options: `T1')
+%% 
+%% This is a generated file.
+%% 
+%% The source is maintained by the LaTeX Project team and bug
+%% reports for it can be opened at https://latex-project.org/bugs.html
+%% (but please observe conditions on bug reports sent to that address!)
+%% 
+%% 
+%% Copyright (C) 1993-2021
+%% The LaTeX Project and any individual authors listed elsewhere
+%% in this file.
+%% 
+%% This file was generated from file(s) of the LaTeX base system.
+%% --------------------------------------------------------------
+%% 
+%% It may be distributed and/or modified under the
+%% conditions of the LaTeX Project Public License, either version 1.3c
+%% of this license or (at your option) any later version.
+%% The latest version of this license is in
+%%    https://www.latex-project.org/lppl.txt
+%% and version 1.3c or later is part of all distributions of LaTeX
+%% version 2008 or later.
+%% 
+%% This file has the LPPL maintenance status "maintained".
+%% 
+%% This file may only be distributed together with a copy of the LaTeX
+%% base system. You may however distribute the LaTeX base system without
+%% such generated files.
+%% 
+%% The list of all files belonging to the LaTeX base distribution is
+%% given in the file `manifest.txt'. See also `legal.txt' for additional
+%% information.
+%% 
+%% The list of derived (unpacked) files belonging to the distribution
+%% and covered by LPPL is defined by the unpacking scripts (with
+%% extension .ins) which are part of the distribution.
+%%% From File: ltoutenc.dtx
+\ProvidesFile{t1enc.def}
+ [2021/04/29 v2.0v
+      Standard LaTeX file]
+\DeclareFontEncoding{T1}{}{}
+\DeclareTextAccent{\`}{T1}{0}
+\DeclareTextAccent{\'}{T1}{1}
+\DeclareTextAccent{\^}{T1}{2}
+\DeclareTextAccent{\~}{T1}{3}
+\DeclareTextAccent{\"}{T1}{4}
+\DeclareTextAccent{\H}{T1}{5}
+\DeclareTextAccent{\r}{T1}{6}
+\DeclareTextAccent{\v}{T1}{7}
+\DeclareTextAccent{\u}{T1}{8}
+\DeclareTextAccent{\=}{T1}{9}
+\DeclareTextAccent{\.}{T1}{10}
+\DeclareTextCommand{\b}{T1}[1]
+   {\hmode@bgroup\o@lign{\relax#1\crcr\hidewidth\ltx@sh@ft{-3ex}%
+     \vbox to.2ex{\hbox{\char9}\vss}\hidewidth}\egroup}
+\DeclareTextCommand{\c}{T1}[1]
+   {\leavevmode\setbox\z@\hbox{#1}\ifdim\ht\z@=1ex\accent11 #1%
+     \else{\ooalign{\unhbox\z@\crcr
+        \hidewidth\char11\hidewidth}}\fi}
+\DeclareTextCommand{\d}{T1}[1]
+   {\hmode@bgroup
+    \o@lign{\relax#1\crcr\hidewidth\ltx@sh@ft{-1ex}.\hidewidth}\egroup}
+\DeclareTextCommand{\k}{T1}[1]
+   {\hmode@bgroup\ooalign{\null#1\crcr\hidewidth\char12}\egroup}
+\DeclareTextCommand{\textogonekcentered}{T1}[1]
+   {\hmode@bgroup\ooalign{%
+                \null#1\crcr\hidewidth\char12\hidewidth}\egroup}
+\DeclareTextCommand{\textperthousand}{T1}
+   {\%\char 24 }          % space or `relax as delimiter?
+\DeclareTextCommand{\textpertenthousand}{T1}
+   {\%\char 24\char 24 }  % space or `relax as delimiter?
+\DeclareTextCommand{\Hwithstroke}{T1}
+   {%
+    \hmode@bgroup
+    \vphantom{H}%
+    \sbox\z@{H}%
+    \ooalign{%
+      H\cr
+      \hidewidth
+      \vrule
+        height \dimexpr 0.7\ht\z@+0.1ex\relax
+        depth  -0.7\ht\z@
+        width  0.8\wd\z@
+      \hidewidth\cr
+    }%
+    \egroup
+   }
+\DeclareTextCommand{\hwithstroke}{T1}
+   {%
+    \hmode@bgroup
+    \vphantom{h}%
+    \sbox\z@{h}%
+    \ooalign{%
+      h\cr
+      \kern0.075\wd\z@
+      \vrule
+        height \dimexpr 0.7\ht\z@+0.1ex\relax
+        depth  -0.7\ht\z@
+        width  0.4\wd\z@
+      \hidewidth\cr
+    }%
+    \egroup
+   }
+\DeclareTextSymbol{\AE}{T1}{198}
+\DeclareTextSymbol{\DH}{T1}{208}
+\DeclareTextSymbol{\DJ}{T1}{208}
+\DeclareTextSymbol{\L}{T1}{138}
+\DeclareTextSymbol{\NG}{T1}{141}
+\DeclareTextSymbol{\OE}{T1}{215}
+\DeclareTextSymbol{\O}{T1}{216}
+\DeclareTextSymbol{\SS}{T1}{223}
+\DeclareTextSymbol{\TH}{T1}{222}
+\DeclareTextSymbol{\ae}{T1}{230}
+\DeclareTextSymbol{\dh}{T1}{240}
+\DeclareTextSymbol{\dj}{T1}{158}
+\DeclareTextSymbol{\guillemetleft}{T1}{19}
+\DeclareTextSymbol{\guillemetright}{T1}{20}
+\DeclareTextSymbol{\guillemotleft}{T1}{19}
+\DeclareTextSymbol{\guillemotright}{T1}{20}
+\DeclareTextSymbol{\guilsinglleft}{T1}{14}
+\DeclareTextSymbol{\guilsinglright}{T1}{15}
+\DeclareTextSymbol{\i}{T1}{25}
+\DeclareTextSymbol{\j}{T1}{26}
+\DeclareTextSymbol{\ij}{T1}{188}
+\DeclareTextSymbol{\IJ}{T1}{156}
+\DeclareTextSymbol{\l}{T1}{170}
+\DeclareTextSymbol{\ng}{T1}{173}
+\DeclareTextSymbol{\oe}{T1}{247}
+\DeclareTextSymbol{\o}{T1}{248}
+\DeclareTextSymbol{\quotedblbase}{T1}{18}
+\DeclareTextSymbol{\quotesinglbase}{T1}{13}
+\DeclareTextSymbol{\ss}{T1}{255}
+\DeclareTextSymbol{\textasciicircum}{T1}{`\^}
+\DeclareTextSymbol{\textasciitilde}{T1}{`\~}
+\DeclareTextSymbol{\textbackslash}{T1}{`\\}
+\DeclareTextSymbol{\textbar}{T1}{`\|}
+\DeclareTextSymbol{\textbraceleft}{T1}{`\{}
+\DeclareTextSymbol{\textbraceright}{T1}{`\}}
+\DeclareTextSymbol{\textcompwordmark}{T1}{23}
+\DeclareTextSymbol{\textdollar}{T1}{`\$}
+\DeclareTextSymbol{\textemdash}{T1}{22}
+\DeclareTextSymbol{\textendash}{T1}{21}
+\DeclareTextCommand{\textnonbreakinghyphen}{T1}{\mbox{-}\nobreak\hskip\z@}
+\DeclareTextCommand{\textfiguredash}       {T1}{\textendash}
+\DeclareTextCommand{\texthorizontalbar}    {T1}{\textemdash}
+\DeclareTextSymbol{\textexclamdown}{T1}{189}
+\DeclareTextSymbol{\textgreater}{T1}{`\>}
+\DeclareTextSymbol{\textless}{T1}{`\<}
+\DeclareTextSymbol{\textquestiondown}{T1}{190}
+\DeclareTextSymbol{\textquotedblleft}{T1}{16}
+\DeclareTextSymbol{\textquotedblright}{T1}{17}
+\DeclareTextSymbol{\textquotedbl}{T1}{`\"}
+\DeclareTextSymbol{\textquoteleft}{T1}{`\`}
+\DeclareTextSymbol{\textquoteright}{T1}{`\'}
+\DeclareTextSymbol{\textsection}{T1}{159}
+\DeclareTextSymbol{\textsterling}{T1}{191}
+\DeclareTextSymbol{\textunderscore}{T1}{95}
+\DeclareTextSymbol{\textvisiblespace}{T1}{32}
+\DeclareTextSymbol{\th}{T1}{254}
+\DeclareTextComposite{\.}{T1}{i}{`\i}
+\DeclareTextComposite{\.}{T1}{\i}{`\i}
+\DeclareTextComposite{\u}{T1}{A}{128}
+\DeclareTextComposite{\k}{T1}{A}{129}
+\DeclareTextComposite{\'}{T1}{C}{130}
+\DeclareTextComposite{\v}{T1}{C}{131}
+\DeclareTextComposite{\v}{T1}{D}{132}
+\DeclareTextComposite{\v}{T1}{E}{133}
+\DeclareTextComposite{\k}{T1}{E}{134}
+\DeclareTextComposite{\u}{T1}{G}{135}
+\DeclareTextComposite{\'}{T1}{L}{136}
+\DeclareTextComposite{\v}{T1}{L}{137}
+\DeclareTextComposite{\'}{T1}{N}{139}
+\DeclareTextComposite{\v}{T1}{N}{140}
+\DeclareTextComposite{\H}{T1}{O}{142}
+\DeclareTextComposite{\'}{T1}{R}{143}
+\DeclareTextComposite{\v}{T1}{R}{144}
+\DeclareTextComposite{\'}{T1}{S}{145}
+\DeclareTextComposite{\v}{T1}{S}{146}
+\DeclareTextComposite{\c}{T1}{S}{147}
+\DeclareTextComposite{\v}{T1}{T}{148}
+\DeclareTextComposite{\c}{T1}{T}{149}
+\DeclareTextComposite{\H}{T1}{U}{150}
+\DeclareTextComposite{\r}{T1}{U}{151}
+\DeclareTextComposite{\"}{T1}{Y}{152}
+\DeclareTextComposite{\'}{T1}{Z}{153}
+\DeclareTextComposite{\v}{T1}{Z}{154}
+\DeclareTextComposite{\.}{T1}{Z}{155}
+\DeclareTextComposite{\.}{T1}{I}{157}
+\DeclareTextComposite{\u}{T1}{a}{160}
+\DeclareTextComposite{\k}{T1}{a}{161}
+\DeclareTextComposite{\'}{T1}{c}{162}
+\DeclareTextComposite{\v}{T1}{c}{163}
+\DeclareTextComposite{\v}{T1}{d}{164}
+\DeclareTextComposite{\v}{T1}{e}{165}
+\DeclareTextComposite{\k}{T1}{e}{166}
+\DeclareTextComposite{\u}{T1}{g}{167}
+\DeclareTextComposite{\'}{T1}{l}{168}
+\DeclareTextComposite{\v}{T1}{l}{169}
+\DeclareTextComposite{\'}{T1}{n}{171}
+\DeclareTextComposite{\v}{T1}{n}{172}
+\DeclareTextComposite{\H}{T1}{o}{174}
+\DeclareTextComposite{\'}{T1}{r}{175}
+\DeclareTextComposite{\v}{T1}{r}{176}
+\DeclareTextComposite{\'}{T1}{s}{177}
+\DeclareTextComposite{\v}{T1}{s}{178}
+\DeclareTextComposite{\c}{T1}{s}{179}
+\DeclareTextComposite{\v}{T1}{t}{180}
+\DeclareTextComposite{\c}{T1}{t}{181}
+\DeclareTextComposite{\H}{T1}{u}{182}
+\DeclareTextComposite{\r}{T1}{u}{183}
+\DeclareTextComposite{\"}{T1}{y}{184}
+\DeclareTextComposite{\'}{T1}{z}{185}
+\DeclareTextComposite{\v}{T1}{z}{186}
+\DeclareTextComposite{\.}{T1}{z}{187}
+\DeclareTextComposite{\`}{T1}{A}{192}
+\DeclareTextComposite{\'}{T1}{A}{193}
+\DeclareTextComposite{\^}{T1}{A}{194}
+\DeclareTextComposite{\~}{T1}{A}{195}
+\DeclareTextComposite{\"}{T1}{A}{196}
+\DeclareTextComposite{\r}{T1}{A}{197}
+\DeclareTextComposite{\c}{T1}{C}{199}
+\DeclareTextComposite{\`}{T1}{E}{200}
+\DeclareTextComposite{\'}{T1}{E}{201}
+\DeclareTextComposite{\^}{T1}{E}{202}
+\DeclareTextComposite{\"}{T1}{E}{203}
+\DeclareTextComposite{\`}{T1}{I}{204}
+\DeclareTextComposite{\'}{T1}{I}{205}
+\DeclareTextComposite{\^}{T1}{I}{206}
+\DeclareTextComposite{\"}{T1}{I}{207}
+\DeclareTextComposite{\~}{T1}{N}{209}
+\DeclareTextComposite{\`}{T1}{O}{210}
+\DeclareTextComposite{\'}{T1}{O}{211}
+\DeclareTextComposite{\^}{T1}{O}{212}
+\DeclareTextComposite{\~}{T1}{O}{213}
+\DeclareTextComposite{\"}{T1}{O}{214}
+\DeclareTextComposite{\`}{T1}{U}{217}
+\DeclareTextComposite{\'}{T1}{U}{218}
+\DeclareTextComposite{\^}{T1}{U}{219}
+\DeclareTextComposite{\"}{T1}{U}{220}
+\DeclareTextComposite{\'}{T1}{Y}{221}
+\DeclareTextComposite{\`}{T1}{a}{224}
+\DeclareTextComposite{\'}{T1}{a}{225}
+\DeclareTextComposite{\^}{T1}{a}{226}
+\DeclareTextComposite{\~}{T1}{a}{227}
+\DeclareTextComposite{\"}{T1}{a}{228}
+\DeclareTextComposite{\r}{T1}{a}{229}
+\DeclareTextComposite{\c}{T1}{c}{231}
+\DeclareTextComposite{\`}{T1}{e}{232}
+\DeclareTextComposite{\'}{T1}{e}{233}
+\DeclareTextComposite{\^}{T1}{e}{234}
+\DeclareTextComposite{\"}{T1}{e}{235}
+\DeclareTextComposite{\`}{T1}{i}{236}
+\DeclareTextComposite{\`}{T1}{\i}{236}
+\DeclareTextComposite{\'}{T1}{i}{237}
+\DeclareTextComposite{\'}{T1}{\i}{237}
+\DeclareTextComposite{\^}{T1}{i}{238}
+\DeclareTextComposite{\^}{T1}{\i}{238}
+\DeclareTextComposite{\"}{T1}{i}{239}
+\DeclareTextComposite{\"}{T1}{\i}{239}
+\DeclareTextComposite{\~}{T1}{n}{241}
+\DeclareTextComposite{\`}{T1}{o}{242}
+\DeclareTextComposite{\'}{T1}{o}{243}
+\DeclareTextComposite{\^}{T1}{o}{244}
+\DeclareTextComposite{\~}{T1}{o}{245}
+\DeclareTextComposite{\"}{T1}{o}{246}
+\DeclareTextComposite{\`}{T1}{u}{249}
+\DeclareTextComposite{\'}{T1}{u}{250}
+\DeclareTextComposite{\^}{T1}{u}{251}
+\DeclareTextComposite{\"}{T1}{u}{252}
+\DeclareTextComposite{\'}{T1}{y}{253}
+\DeclareTextCompositeCommand{\k}{T1}{o}{\textogonekcentered{o}}
+\DeclareTextCompositeCommand{\k}{T1}{O}{\textogonekcentered{O}}
+\ifx\textcommaabove\@undefined\else
+\DeclareTextCompositeCommand{\c}{T1}{g}{\textcommaabove{g}}
+\fi
+\ifx\textcommabelow\@undefined\else
+\DeclareTextCompositeCommand{\c}{T1}{G}{\textcommabelow{G}}
+\DeclareTextCompositeCommand{\c}{T1}{K}{\textcommabelow{K}}
+\DeclareTextCompositeCommand{\c}{T1}{k}{\textcommabelow{k}}
+\DeclareTextCompositeCommand{\c}{T1}{L}{\textcommabelow{L}}
+\DeclareTextCompositeCommand{\c}{T1}{l}{\textcommabelow{l}}
+\DeclareTextCompositeCommand{\c}{T1}{N}{\textcommabelow{N}}
+\DeclareTextCompositeCommand{\c}{T1}{n}{\textcommabelow{n}}
+\DeclareTextCompositeCommand{\c}{T1}{R}{\textcommabelow{R}}
+\DeclareTextCompositeCommand{\c}{T1}{r}{\textcommabelow{r}}
+\fi
+\endinput
+%%
+%% End of file `t1enc.def'.

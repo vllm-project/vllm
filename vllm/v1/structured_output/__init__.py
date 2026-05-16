@@ -13,6 +13,7 @@ from vllm.reasoning import ReasoningParserManager
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.utils.cache import CacheInfo
 from vllm.utils.import_utils import LazyLoader
+from vllm.v1.metrics.stats import StructuredOutputCacheStats
 from vllm.v1.structured_output.backend_guidance import GuidanceBackend
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
@@ -40,12 +41,16 @@ class StructuredOutputManager:
 
     def __init__(self, vllm_config: VllmConfig):
         self.backend: StructuredOutputBackend | None = None
-        self.reasoner: ReasoningParser | None = None
+        # We only store the class of the reasoner in the manager.
+        # The parser instance is request-scoped because some reasoning parsers
+        # depend on per-request chat-template kwargs.
+        self.reasoner_cls: type[ReasoningParser] | None = None
         self.vllm_config = vllm_config
 
         # When in external_launcher mode, async grammar compilation causes deadlocks
         # due to external_launcher mode having a scheduler for each TP rank.
-        # Async grammar compilation causes the WAITING_FOR_FSM → WAITING transition to
+        # Async grammar compilation causes the
+        # WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR → WAITING transition to
         # happen at different times on different TP ranks,
         # breaking the determinism assumption that external_launcher relies on.
         self._use_async_grammar_compilation = (
@@ -87,21 +92,33 @@ class StructuredOutputManager:
                 self.vllm_config.structured_outputs_config.reasoning_parser
             )
             if reasoning_parser:
-                reasoner_cls = ReasoningParserManager.get_reasoning_parser(
+                self.reasoner_cls = ReasoningParserManager.get_reasoning_parser(
                     reasoning_parser
                 )
-                self.reasoner = reasoner_cls(tokenizer=self.tokenizer)
 
         self.enable_in_reasoning = (
             self.vllm_config.structured_outputs_config.enable_in_reasoning
         )
-        self._compiled_grammar_cache_log_interval = (
-            _COMPILED_GRAMMAR_CACHE_LOG_INTERVAL
-        )
+        self._compiled_grammar_cache_log_interval = _COMPILED_GRAMMAR_CACHE_LOG_INTERVAL
         self._next_compiled_grammar_cache_log_total = (
             self._compiled_grammar_cache_log_interval
         )
         self._compiled_grammar_cache_log_lock = threading.Lock()
+
+    def _get_reasoner(self, request: "Request") -> "ReasoningParser | None":
+        structured_req = request.structured_output_request
+        if structured_req is None or self.reasoner_cls is None:
+            return None
+
+        if structured_req.reasoner is None:
+            # Lazily build the request-local parser so the structured-output
+            # gate observes the same template kwargs used by the frontend.
+            parser_kwargs = structured_req.reasoning_parser_kwargs or {}
+            structured_req.reasoner = self.reasoner_cls(
+                tokenizer=self.tokenizer,
+                **parser_kwargs,
+            )
+        return structured_req.reasoner
 
     def grammar_init(self, request: "Request") -> None:
         if request.structured_output_request is None:
@@ -180,9 +197,15 @@ class StructuredOutputManager:
         self._maybe_log_compiled_grammar_cache_stats()
         return grammar
 
+    def compiled_grammar_cache_stats(self, *, delta: bool = False) -> CacheInfo | None:
+        if self.backend is None or not hasattr(
+            self.backend, "compiled_grammar_cache_stats"
+        ):
+            return None
+        return self.backend.compiled_grammar_cache_stats(delta=delta)
+
     def _maybe_log_compiled_grammar_cache_stats(self) -> None:
-        stats = self.compiled_grammar_cache_stats()
-        if stats is None or stats.total < self._next_compiled_grammar_cache_log_total:
+        if self._compiled_grammar_cache_log_interval <= 0:
             return
 
         with self._compiled_grammar_cache_log_lock:
@@ -193,9 +216,13 @@ class StructuredOutputManager:
             ):
                 return
 
+            backend_name = (
+                type(self.backend).__name__ if self.backend is not None else "None"
+            )
             logger.info(
-                "Structured output compiled grammar cache stats: backend=%s hits=%d total=%d hit_ratio=%.4f",
-                type(self.backend).__name__ if self.backend is not None else "None",
+                "Structured output compiled grammar cache stats: "
+                "backend=%s hits=%d total=%d hit_ratio=%.4f",
+                backend_name,
                 stats.hits,
                 stats.total,
                 stats.hit_ratio,
@@ -325,7 +352,8 @@ class StructuredOutputManager:
         # NOTE (Hanchen) if enable_in_reasoning is True, it means that
         # the model needs to be constrained in reasoning. So we should always
         # enable the bitmask filling.
-        if self.reasoner is not None:
+        reasoner = self._get_reasoner(request)
+        if reasoner is not None:
             if self.enable_in_reasoning:
                 return True
             assert request.structured_output_request is not None
@@ -335,7 +363,7 @@ class StructuredOutputManager:
                 # After unifying the `openai_gptoss` and non-`openai_gptoss` styles,
                 # it can be removed.
                 request.structured_output_request.reasoning_ended = (
-                    self.reasoner.is_reasoning_end(request.prompt_token_ids or [])
+                    reasoner.is_reasoning_end(request.prompt_token_ids or [])
                 )
             return request.structured_output_request.reasoning_ended
         return True
@@ -351,7 +379,8 @@ class StructuredOutputManager:
             assert request.structured_output_request.grammar is not None
         # by default, we should always advance
         # for cases that don't use thinking mode.
-        if self.reasoner is None:
+        reasoner = self._get_reasoner(request)
+        if reasoner is None:
             return True
 
         # if the model needs structured in reasoning, we should advance
@@ -368,7 +397,7 @@ class StructuredOutputManager:
         start = (
             delta_from if delta_from >= 0 else max(len(all_token_ids) + delta_from, 0)
         )
-        if self.reasoner.is_reasoning_end_streaming(
+        if reasoner.is_reasoning_end_streaming(
             all_token_ids, itertools.islice(all_token_ids, start, None)
         ):
             # Reasoning just ended, so we shouldn't advance til
@@ -382,22 +411,17 @@ class StructuredOutputManager:
             stats = self.compiled_grammar_cache_stats()
             if stats is not None and stats.total > 0:
                 logger.debug(
-                    "Structured output backend cache stats before destroy: backend=%s hits=%d total=%d hit_ratio=%.4f",
+                    "Structured output backend cache stats before destroy: "
+                    "backend=%s hits=%d total=%d hit_ratio=%.4f",
                     type(self.backend).__name__,
                     stats.hits,
                     stats.total,
                     stats.hit_ratio,
                 )
             self.backend.destroy()
-
-    def compiled_grammar_cache_stats(self, *, delta: bool = False) -> CacheInfo | None:
-        if self.backend is None:
-            return None
-
-        stats_fn = getattr(self.backend, "compiled_grammar_cache_stats", None)
-        if callable(stats_fn):
-            return stats_fn(delta=delta)
-        return None
+            self._next_compiled_grammar_cache_log_total = (
+                self._compiled_grammar_cache_log_interval
+            )
 
     def clear_compiled_grammar_cache(self) -> bool:
         if self.backend is None:
@@ -412,3 +436,13 @@ class StructuredOutputManager:
                 )
             return True
         return False
+
+    def make_cache_stats(self) -> StructuredOutputCacheStats | None:
+        stats = self.compiled_grammar_cache_stats(delta=True)
+        if stats is None:
+            return None
+
+        cache_stats = StructuredOutputCacheStats()
+        if stats.total > 0:
+            cache_stats.record(num_queries=stats.total, num_hits=stats.hits)
+        return cache_stats

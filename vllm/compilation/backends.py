@@ -35,6 +35,7 @@ from vllm.logging_utils import lazy
 from vllm.platforms import current_platform
 from vllm.tracing import instrument, instrument_manual
 from vllm.utils.import_utils import resolve_obj_by_qualname
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from .compiler_interface import (
     CompilerInterface,
@@ -49,6 +50,7 @@ from .partition_rules import (
     should_split,
 )
 from .passes.inductor_pass import InductorPass, pass_context
+from .passes.ir.inplace_functionalization import VllmIRInplaceFunctionalizationPass
 from .passes.pass_manager import PostGradPassManager
 
 logger = init_logger(__name__)
@@ -268,6 +270,7 @@ class CompilerManager:
         compile_range: Range,
         graph_index: int = 0,
         num_graphs: int = 1,
+        is_encoder: bool = False,
     ) -> Any:
         if graph_index == 0:
             # before compiling the first graph, record the start time
@@ -277,6 +280,7 @@ class CompilerManager:
         compilation_counter.num_backend_compilations += 1
 
         compiled_graph = None
+        handle = None
 
         # try to load from the cache
         compiled_graph = self.load(graph, example_inputs, graph_index, compile_range)
@@ -285,13 +289,11 @@ class CompilerManager:
                 # after loading the last graph for this shape, record the time.
                 # there can be multiple graphs due to piecewise compilation.
                 elapsed = time.perf_counter() - compilation_start_time
-                compilation_config.compilation_time += elapsed
                 logger.info_once(
                     "Directly load the compiled graph(s) for compile range %s "
                     "from the cache, took %.3f s",
                     str(compile_range),
                     elapsed,
-                    scope="local",
                 )
             return compiled_graph
 
@@ -357,7 +359,7 @@ class CompilerManager:
                     )
                 except StopCompiling:
                     assert cache_key is not None
-                    return self.loaded_artifacts[cache_key]
+                    compiled_graph = self.loaded_artifacts[cache_key]
             if cache_key is not None and compiled_graph is not None:
                 self.loaded_artifacts[cache_key] = compiled_graph
 
@@ -376,7 +378,6 @@ class CompilerManager:
                 logger.info_once(
                     "Cache the graph of compile range %s for later use",
                     str(compile_range),
-                    scope="local",
                 )
             logger.debug_once(
                 "Store the %s-th graph for compile range%s from %s via handle %s",
@@ -384,18 +385,15 @@ class CompilerManager:
                 str(compile_range),
                 self.compiler.name,
                 handle,
-                scope="local",
             )
 
         # after compiling the last graph, record the end time
         if graph_index == num_graphs - 1:
             elapsed = time.perf_counter() - compilation_start_time
-            compilation_config.compilation_time += elapsed
             logger.info_once(
                 "Compiling a graph for compile range %s takes %.2f s",
                 str(compile_range),
                 elapsed,
-                scope="local",
             )
 
         return compiled_graph
@@ -519,16 +517,31 @@ def _decompose_size_nodes(graph: fx.GraphModule) -> None:
                     )
 
         # Replace size node in each user's args.
-        # Dynamo always passes size as a direct arg: view(clone, size)
-        # → view(clone, d0, d1, ...)
         for user in list(node.users):
-            new_args = []
-            for arg in user.args:
-                if arg is node:
-                    new_args.extend(dims)
-                else:
-                    new_args.append(arg)
-            user.args = tuple(new_args)
+            if (
+                user.op == "call_function"
+                and user.target is operator.getitem
+                and len(user.args) == 2
+                and user.args[0] is node
+            ):
+                # getitem(size, idx) → replace with dims[idx] directly.
+                idx = user.args[1]
+                assert isinstance(idx, int), (
+                    f"Expected literal int index for getitem on size(), "
+                    f"got {type(idx).__name__}: {idx}"
+                )
+                user.replace_all_uses_with(dims[idx])
+                graph.graph.erase_node(user)
+            else:
+                # User consumes the full size tuple (e.g. view(clone, size))
+                # → view(clone, d0, d1, ...)
+                new_args = []
+                for arg in user.args:
+                    if arg is node:
+                        new_args.extend(dims)
+                    else:
+                        new_args.append(arg)
+                user.args = tuple(new_args)
         graph.graph.erase_node(node)
 
 
@@ -579,11 +592,14 @@ def split_graph(
     # the semantics of the graph will change when we
     # have mutations in the graph
     with _use_lazy_graph_module(True):
+        has_tuple_return = is_torch_equal_or_newer("2.12.0.dev")
+        tuple_return_kwarg = {"tuple_return": True} if has_tuple_return else {}
         split_gm = torch.fx.passes.split_module.split_module(
             graph,
             None,
             lambda node: node_to_subgraph_id[node],
             keep_original_order=True,
+            **tuple_return_kwarg,
         )
 
     outputs = []
@@ -921,6 +937,24 @@ class VllmBackend:
         return standalone_compile_artifacts, sym_shape_indices_map, returns_tuple_map
 
     def configure_post_pass(self) -> None:
+        # TODO proper PassManager?
+        pre_grad_pass_key = "pre_grad_custom_pass"
+        assert self.pass_key != pre_grad_pass_key
+        assert pre_grad_pass_key not in self.inductor_config
+        self.inductor_config[pre_grad_pass_key] = VllmIRInplaceFunctionalizationPass(
+            self.vllm_config
+        )
+
+        # Make sure pre_grad_custom_pass is not pickled
+        # as part of AOTAutograd built-in cache key
+        # TODO(luka) is there a cleaner way to do this
+        import torch._inductor.config as inductor_config
+
+        ignore = inductor_config._cache_config_ignore_prefix + [pre_grad_pass_key]
+        assert "_cache_config_ignore_prefix" not in self.inductor_config
+        self.inductor_config["_cache_config_ignore_prefix"] = ignore
+
+        # Configure the (nominally post-grad) pass manager
         self.pass_manager.configure(self.vllm_config)
 
         # Post-grad custom passes are run using the post_grad_custom_post_pass
@@ -1012,11 +1046,11 @@ class VllmBackend:
         )
         hash_content = []
         for filepath in forward_code_files:
-            hash_content.append(filepath)
             if filepath == "<string>":
                 # This means the function was dynamically generated, with
                 # e.g. exec(). We can't actually check these.
                 continue
+            hash_content.append(filepath)
             try:
                 with open(filepath) as f:
                     hash_content.append(f.read())
@@ -1060,12 +1094,11 @@ class VllmBackend:
         disable_cache = disable_cache or is_ngram_gpu_enabled
 
         if disable_cache:
-            logger.info_once("vLLM's torch.compile cache is disabled.", scope="local")
+            logger.info_once("vLLM's torch.compile cache is disabled.")
         else:
             logger.info_once(
                 "Using cache directory: %s for vLLM's torch.compile",
                 local_cache_dir,
-                scope="local",
             )
 
         self.compiler_manager.initialize_cache(
@@ -1123,9 +1156,9 @@ class VllmBackend:
 
         dynamo_time = time.perf_counter() - torch_compile_start_time
         logger.info_once(
-            "Dynamo bytecode transform time: %.2f s", dynamo_time, scope="local"
+            "Dynamo bytecode transform time: %.2f s",
+            dynamo_time,
         )
-        self.compilation_config.compilation_time += dynamo_time
 
         # Record Dynamo time in tracing if available
         start_time = int(torch_compile_start_time * 1e9)
@@ -1199,7 +1232,6 @@ class VllmBackend:
             logger.info_once(
                 "Saved compiler manager cache in %.2f seconds.",
                 elapsed,
-                scope="local",
             )
 
         from torch._guards import detect_fake_mode
@@ -1238,9 +1270,7 @@ class VllmBackend:
             with open(graph_path, "w") as f:
                 f.write(src)
 
-            logger.debug_once(
-                "Computation graph saved to %s", graph_path, scope="local"
-            )
+            logger.debug_once("Computation graph saved to %s", graph_path)
 
         self._called = True
         graph_to_serialize = (

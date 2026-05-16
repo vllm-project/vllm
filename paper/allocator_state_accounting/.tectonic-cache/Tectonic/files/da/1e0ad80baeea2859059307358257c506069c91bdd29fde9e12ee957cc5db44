@@ -1,0 +1,251 @@
+%%
+%% This is file `graphicx.sty',
+%% generated with the docstrip utility.
+%%
+%% The original source files were:
+%%
+%% graphicx.dtx  (with options: `package')
+%% 
+%% The source is maintained by the LaTeX Project team and bug
+%% reports for it can be opened at https://latex-project.org/bugs/
+%% (but please observe conditions on bug reports sent to that address!)
+%% 
+%% 
+%% graphicx.dtx Copyright (C) 1994      David Carlisle Sebastian Rahtz
+%%              Copyright (C) 1995-2021
+%% The LaTeX Project and any individual authors listed elsewhere
+%% in this file.
+%%
+%% This file is part of the Standard LaTeX `Graphics Bundle'.
+%% It may be distributed under the terms of the LaTeX Project Public
+%% License, as described in lppl.txt in the base LaTeX distribution.
+%% Either version 1.3c or, at your option, any later version.
+%%
+\NeedsTeXFormat{LaTeX2e}[1995/12/01]
+\ProvidesPackage{graphicx}
+          [2021/09/16 v1.2d  Enhanced LaTeX Graphics (DPC,SPQR)]
+\DeclareOption{unknownkeysallowed}
+  {\PassOptionsToPackage\CurrentOption{keyval}}
+\DeclareOption*{\PassOptionsToPackage\CurrentOption{graphics}}
+\ProcessOptions
+\RequirePackage{keyval,graphics}
+\define@key{Gin}{bb}
+           {\Gin@bboxtrue\Gread@parse@bb#1 \\}
+\define@key{Gin}{bbllx}
+           {\Gin@bboxtrue\Gin@defaultbp\Gin@llx{#1}}
+\define@key{Gin}{bblly}
+           {\Gin@bboxtrue\Gin@defaultbp\Gin@lly{#1}}
+\define@key{Gin}{bburx}
+           {\Gin@bboxtrue\Gin@defaultbp\Gin@urx{#1}}
+\define@key{Gin}{bbury}
+           {\Gin@bboxtrue\Gin@defaultbp\Gin@ury{#1}}
+\define@key{Gin}{hiresbb}[true]{%
+  \edef\Gread@BBox{%
+    \@percentchar\@percentchar
+    \csname if#1\endcsname HiRes\fi
+    BoundingBox}}
+\let\KV@Gin@natwidth\KV@Gin@bburx
+\let\KV@Gin@natheight\KV@Gin@bbury
+\define@key{Gin}{viewport}
+           {\let\Gin@viewport@code\Gin@viewport\Gread@parse@vp#1 \\}
+\define@key{Gin}{trim}
+           {\let\Gin@viewport@code\Gin@trim\Gread@parse@vp#1 \\}
+\def\Gread@parse@vp#1 #2 #3 #4 #5\\{%
+  \Gin@defaultbp\Gin@vllx{#1}%
+  \Gin@defaultbp\Gin@vlly{#2}%
+  \Gin@defaultbp\Gin@vurx{#3}%
+  \Gin@defaultbp\Gin@vury{#4}}%
+\define@key{Gin}{angle}
+           {\Gin@esetsize
+            \@tempswatrue
+            \edef\@tempa{\toks@{\noexpand\Gin@erotate{#1}{\the\toks@}}}%
+            \@tempa}
+\define@key{Gin}{origin}[c]{%
+  \def\Gin@erotate{\Grot@box@kv[origin=#1]}}
+\define@key{Gin}{width}{\def\Gin@ewidth{#1}}
+\define@key{Gin}{height}{\def\Gin@eheight{#1}}
+\define@key{Gin}{totalheight}{%
+  \def\Gin@eresize{\totalheight}\def\Gin@eheight{#1}}
+\define@key{Gin}{keepaspectratio}[true]{%
+  \lowercase{\Gin@boolkey{#1}}{iso}}
+\define@key{Gin}{scale}{%
+  \if@tempswa
+    \edef\@tempa{\toks@{\noexpand\Gscale@box{#1}[#1]{\the\toks@}}}%
+    \@tempa
+  \else
+    \def\Gin@req@sizes{%
+      \def\Gin@scalex{#1}\let\Gin@scaley\Gin@exclamation
+      \Gin@req@height\Gin@scalex\Gin@nat@height
+      \Gin@req@width\Gin@scalex\Gin@nat@width}%
+  \fi
+  \@tempswatrue}
+\define@key{Gin}{draft}[true]{%
+  \lowercase{\Gin@boolkey{#1}}{draft}}
+\define@key{Gin}{clip}[true]{%
+  \lowercase{\Gin@boolkey{#1}}{clip}}
+\define@key{Gin}{type}{%
+  \def\Ginclude@graphics##1{%
+    \begingroup
+    \def\Gin@base{##1}%
+    \edef\@tempa{{#1}{\Gin@eread}{\Gin@ecom{##1\Gin@eext}}}%
+    \expandafter\Gin@setfile\@tempa
+    \endgroup}}
+\define@key{Gin}{ext}{\def\Gin@eext{#1}}
+\let\Gin@eext\@empty
+\define@key{Gin}{read}{%
+ \def\Gin@eread{#1}%
+ \def\@tempa{*}\ifx\@tempa\Gin@eread\def\Gin@eread{\Gin@eext}\fi}
+\let\Gin@eread\@empty
+\define@key{Gin}{command}{\def\Gin@ecom##1{#1}}
+\let\Gin@ecom\@firstofone
+\define@key{Gin}{decodearray}{%
+  \def\Gin@decode{#1}%
+}
+\define@key{Gin}{quiet}[]{%
+  \let\Gin@log\@gobble
+}
+\define@key{Gin}{page}{%
+  \def\Gin@page{#1}%
+  \ifx\Gin@page\@empty
+  \else
+    \edef\Gin@page{\number\Gin@page}%
+  \fi
+}
+\define@key{Gin}{interpolate}[true]{%
+  \lowercase{\Gin@boolkey{#1}}{interpolate}}
+\define@key{Gin}{pagebox}{%
+        \expandafter\let\expandafter\Gin@pagebox
+            \csname Gin@pagebox@#1\endcsname
+        \ifx\Gin@pagebox\relax
+          \let\Gin@pagebox\Gin@pagebox@cropbox
+          \@warning{%
+            Unknown value `#1' for `pagebox'.\MessageBreak
+            Supported values:\MessageBreak
+            mediabox, cropbox, bleedbox, trimbox, artbox%
+          }%
+        \fi
+      }
+      \def\Gin@pagebox@mediabox{mediabox}%
+      \def\Gin@pagebox@cropbox{cropbox}%
+      \def\Gin@pagebox@bleedbox{bleedbox}%
+      \def\Gin@pagebox@trimbox{trimbox}%
+      \def\Gin@pagebox@artbox{artbox}%
+\define@key{Gin}{alt}{}
+\def\Gin@boolkey#1#2{%
+  \csname Gin@#2\ifx\relax#1\relax true\else#1\fi\endcsname}
+\def\Gin@eresize{\height}
+\def\Gin@esetsize{%
+  \let\@tempa\Gin@exclamation
+  \if@tempswa
+    \edef\@tempa{\toks@{\noexpand
+             \Gscale@@box\noexpand\Gin@eresize
+              {\Gin@ewidth}{\Gin@eheight}{\the\toks@}}}%
+    \@tempa
+  \else
+    \ifx\Gin@ewidth\@tempa
+      \ifx\Gin@eheight\@tempa
+      \else
+         \let\Gin@@eheight\Gin@eheight
+         \def\Gin@req@sizes{%
+           \Gscale@div\Gin@scaley\Gin@@eheight\Gin@nat@height
+           \let\Gin@scalex\Gin@exclamation
+           \setlength\Gin@req@height\Gin@@eheight
+           \Gin@req@width\Gin@scaley\Gin@nat@width}%
+      \fi
+    \else
+      \ifx\Gin@eheight\@tempa
+         \let\Gin@@ewidth\Gin@ewidth
+         \def\Gin@req@sizes{%
+           \Gscale@div\Gin@scalex\Gin@@ewidth\Gin@nat@width
+           \let\Gin@scaley\Gin@exclamation
+           \setlength\Gin@req@width\Gin@@ewidth
+           \Gin@req@height\Gin@scalex\Gin@nat@height}%
+      \else
+         \let\Gin@@ewidth\Gin@ewidth
+         \let\Gin@@eheight\Gin@eheight
+         \def\Gin@nosize##1{%
+           \KV@Gin@natwidth\Gin@@ewidth
+           \KV@Gin@natheight\Gin@@eheight}%
+         \def\Gin@req@sizes{%
+           \Gscale@div\Gin@scalex\Gin@@ewidth\Gin@nat@width
+           \Gscale@div\Gin@scaley\Gin@@eheight\Gin@nat@height
+           \ifGin@iso
+             \ifdim\Gin@scaley\p@>\Gin@scalex\p@
+               \let\Gin@scaley\Gin@scalex
+             \else
+               \let\Gin@scalex\Gin@scaley
+             \fi
+           \fi
+           \Gin@req@width\Gin@scalex\Gin@nat@width
+           \Gin@req@height\Gin@scaley\Gin@nat@height}%
+       \fi
+     \fi
+  \fi
+  \let\Gin@ewidth\Gin@exclamation
+  \let\Gin@eheight\Gin@ewidth}
+\newdimen\Gin@req@height
+\newdimen\Gin@req@width
+\let\Gin@outer@scalex\relax
+\let\Gin@outer@scaley\relax
+\let\Gin@angle\relax
+\let\Gin@ewidth\Gin@exclamation
+\let\Gin@eheight\Gin@ewidth
+\def\Gin@scalex{1}
+\let\Gin@scaley\Gin@exclamation
+\def\Gin@i{%
+ \def\Gin@req@sizes{%
+   \Gin@req@height\Gin@nat@height
+   \Gin@req@width\Gin@nat@width}%
+ \@ifnextchar[\Gin@ii{\Gin@ii[]}}
+\def\Gin@ii[#1]#2{%
+    \def\@tempa{[}\def\@tempb{#2}%
+    \ifx\@tempa\@tempb
+      \def\@tempa{\Gin@iii[#1][}%
+      \expandafter\@tempa
+    \else
+     \begingroup
+       \@tempswafalse
+       \toks@{\Ginclude@graphics{#2}}%
+       \setkeys{Gin}{#1}%
+       \Gin@esetsize
+       \the\toks@
+     \endgroup
+     \fi}
+\protected\def\rotatebox{%
+  \leavevmode
+  \@ifnextchar[\Grot@box@kv\Grot@box@std}
+\long\def\Grot@box@std#1#2{%
+  \Grot@setangle{#1}%
+  \setbox\z@\hbox{{#2}}%
+  \Grot@x\z@
+  \Grot@y\z@
+  \Grot@box}
+\long\def\Grot@box@kv[#1]#2#3{%
+  \@begin@tempboxa\hbox{#3}%
+    \Grot@x\width \divide\Grot@x\tw@
+    \Grot@y\height \advance\Grot@y-\depth \divide\Grot@y\tw@
+    \setkeys{Grot}{#1}%
+    \setbox\z@\box\@tempboxa
+    \Grot@setangle{#2}%
+    \Grot@box
+  \@end@tempboxa}
+\define@key{Grot}{origin}[c]{%
+ \@tfor\@tempa:=#1\do{%
+    \if l\@tempa \Grot@x\z@\else
+    \if r\@tempa \Grot@x\width\else
+    \if t\@tempa \Grot@y\height\else
+    \if b\@tempa \Grot@y-\depth\else
+    \if B\@tempa \Grot@y\z@\fi\fi\fi\fi\fi}}
+\define@key{Grot}{x}{\setlength\Grot@x{#1}}
+\define@key{Grot}{y}{\setlength\Grot@y{#1}}
+\define@key{Grot}{units}{%
+  \def\Grot@setangle##1{%
+  \dimen@##1\p@
+  \dimen@ii#1\p@
+  \divide\dimen@ii360\relax
+  \divide\dimen@\dimen@ii
+  \edef\Grot@angle{\number\dimen@}}}
+\let\Gin@erotate\Grot@box@std
+\endinput
+%%
+%% End of file `graphicx.sty'.

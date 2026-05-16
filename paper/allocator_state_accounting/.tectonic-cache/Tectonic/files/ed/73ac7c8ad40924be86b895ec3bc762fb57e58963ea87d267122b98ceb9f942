@@ -1,0 +1,85 @@
+%%
+%% This is file `ot1cmtt.fd',
+%% generated with the docstrip utility.
+%%
+%% The original source files were:
+%%
+%% cmfonts.fdd  (with options: `OT1cmtt,nowarn')
+%% 
+%% This is a generated file.
+%% 
+%% The source is maintained by the LaTeX Project team and bug
+%% reports for it can be opened at https://latex-project.org/bugs.html
+%% (but please observe conditions on bug reports sent to that address!)
+%% 
+%% 
+%% Copyright (C) 1993-2021
+%% The LaTeX Project and any individual authors listed elsewhere
+%% in this file.
+%% 
+%% This file was generated from file(s) of the LaTeX base system.
+%% --------------------------------------------------------------
+%% 
+%% It may be distributed and/or modified under the
+%% conditions of the LaTeX Project Public License, either version 1.3c
+%% of this license or (at your option) any later version.
+%% The latest version of this license is in
+%%    https://www.latex-project.org/lppl.txt
+%% and version 1.3c or later is part of all distributions of LaTeX
+%% version 2008 or later.
+%% 
+%% This file may only be distributed together with a copy of the LaTeX
+%% base system. You may however distribute the LaTeX base system without
+%% such generated files.
+%% 
+%% The list of all files belonging to the LaTeX base distribution is
+%% given in the file `manifest.txt'. See also `legal.txt' for additional
+%% information.
+%% 
+%% In particular, permission is granted to customize the declarations in
+%% this file to serve the needs of your installation.
+%% 
+%% However, a modified version of this file under its original name
+%% should not be distributed as part of a standard LaTeX distribution, as
+%% the modification will be nontransparent for the user of that
+%% distribution (and thus violating clause 6a of the LPPL license),
+%% making successful document exchange impossible.
+%% 
+\ProvidesFile{ot1cmtt.fd}
+        [2019/12/16 v2.5j Standard LaTeX font definitions]
+\DeclareFontFamily{OT1}{cmtt}{\hyphenchar \font\m@ne}
+\DeclareFontShape{OT1}{cmtt}{m}{n}
+     {%
+      <5><6><7><8>cmtt8<9>cmtt9%
+      <10><10.95>cmtt10%
+      <12><14.4><17.28><20.74><24.88>cmtt12%
+      }{}
+%%%%%% make sure subst shapes are available
+\DeclareFontShape{OT1}{cmtt}{m}{it}
+     {%
+      <5><6><7><8><9>%
+      <10><10.95><12><14.4><17.28><20.74><24.88>cmitt10%
+      }{}
+\DeclareFontShape{OT1}{cmtt}{m}{sl}
+     {%
+      <5><6><7><8><9>%
+      <10><10.95><12><14.4><17.28><20.74><24.88>cmsltt10%
+      }{}
+\DeclareFontShape{OT1}{cmtt}{m}{sc}
+     {%
+      <5><6><7><8><9>%
+      <10><10.95><12><14.4><17.28><20.74><24.88>cmtcsc10%
+      }{}
+\DeclareFontShape{OT1}{cmtt}{m}{ui}
+  {<->ssub*cmtt/m/it}{}
+\DeclareFontShape{OT1}{cmtt}{bx}{n}
+  {<->ssub*cmtt/m/n}{}
+\DeclareFontShape{OT1}{cmtt}{bx}{it}
+  {<->ssub*cmtt/m/it}{}
+\DeclareFontShape{OT1}{cmtt}{bx}{sl}
+  {<->ssub*cmtt/m/n}{}
+\DeclareFontShape{OT1}{cmtt}{bx}{ui}
+  {<->ssub*cmtt/m/it}{}
+\endinput
+%%
+%% End of file `ot1cmtt.fd'.

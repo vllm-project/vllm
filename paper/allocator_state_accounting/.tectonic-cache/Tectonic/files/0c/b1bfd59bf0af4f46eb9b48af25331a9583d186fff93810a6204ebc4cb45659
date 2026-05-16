@@ -1,0 +1,197 @@
+%%
+%% This is file `ts1enc.def',
+%% generated with the docstrip utility.
+%%
+%% The original source files were:
+%%
+%% ltoutenc.dtx  (with options: `TS1')
+%% 
+%% This is a generated file.
+%% 
+%% The source is maintained by the LaTeX Project team and bug
+%% reports for it can be opened at https://latex-project.org/bugs.html
+%% (but please observe conditions on bug reports sent to that address!)
+%% 
+%% 
+%% Copyright (C) 1993-2021
+%% The LaTeX Project and any individual authors listed elsewhere
+%% in this file.
+%% 
+%% This file was generated from file(s) of the LaTeX base system.
+%% --------------------------------------------------------------
+%% 
+%% It may be distributed and/or modified under the
+%% conditions of the LaTeX Project Public License, either version 1.3c
+%% of this license or (at your option) any later version.
+%% The latest version of this license is in
+%%    https://www.latex-project.org/lppl.txt
+%% and version 1.3c or later is part of all distributions of LaTeX
+%% version 2008 or later.
+%% 
+%% This file has the LPPL maintenance status "maintained".
+%% 
+%% This file may only be distributed together with a copy of the LaTeX
+%% base system. You may however distribute the LaTeX base system without
+%% such generated files.
+%% 
+%% The list of all files belonging to the LaTeX base distribution is
+%% given in the file `manifest.txt'. See also `legal.txt' for additional
+%% information.
+%% 
+%% The list of derived (unpacked) files belonging to the distribution
+%% and covered by LPPL is defined by the unpacking scripts (with
+%% extension .ins) which are part of the distribution.
+%%% From File: ltoutenc.dtx
+\ProvidesFile{ts1enc.def}[2001/06/05 v3.0e (jk/car/fm)
+      Standard LaTeX file]
+\DeclareFontEncoding{TS1}{}{}
+\DeclareFontSubstitution{TS1}{cmr}{m}{n}
+\DeclareTextCommand{\capitalcedilla}{TS1}[1]
+   {\hmode@bgroup
+    \ooalign{\null#1\crcr\hidewidth\char11\hidewidth}\egroup}
+\DeclareTextCommand{\capitalogonek}{TS1}[1]
+   {\hmode@bgroup
+    \ooalign{\null#1\crcr\hidewidth\char12\hidewidth}\egroup}
+\DeclareTextAccent{\capitalgrave}{TS1}{0}
+\DeclareTextAccent{\capitalacute}{TS1}{1}
+\DeclareTextAccent{\capitalcircumflex}{TS1}{2}
+\DeclareTextAccent{\capitaltilde}{TS1}{3}
+\DeclareTextAccent{\capitaldieresis}{TS1}{4}
+\DeclareTextAccent{\capitalhungarumlaut}{TS1}{5}
+\DeclareTextAccent{\capitalring}{TS1}{6}
+\DeclareTextAccent{\capitalcaron}{TS1}{7}
+\DeclareTextAccent{\capitalbreve}{TS1}{8}
+\DeclareTextAccent{\capitalmacron}{TS1}{9}
+\DeclareTextAccent{\capitaldotaccent}{TS1}{10}
+\DeclareTextAccent{\t}{TS1}{26}
+\DeclareTextAccent{\capitaltie}{TS1}{27}
+\DeclareTextAccent{\newtie}{TS1}{28}
+\DeclareTextAccent{\capitalnewtie}{TS1}{29}
+\DeclareTextSymbol{\textcapitalcompwordmark}{TS1}{23}
+\DeclareTextSymbol{\textascendercompwordmark}{TS1}{31}
+\DeclareTextSymbol{\textquotestraightbase}{TS1}{13}
+\DeclareTextSymbol{\textquotestraightdblbase}{TS1}{18}
+\DeclareTextSymbol{\texttwelveudash}{TS1}{21}
+\DeclareTextSymbol{\textthreequartersemdash}{TS1}{22}
+\DeclareTextSymbol{\textleftarrow}{TS1}{24}
+\DeclareTextSymbol{\textrightarrow}{TS1}{25}
+\DeclareTextSymbol{\textblank}{TS1}{32}
+\DeclareTextSymbol{\textdollar}{TS1}{36}
+\DeclareTextSymbol{\textquotesingle}{TS1}{39}
+\DeclareTextCommand \textasteriskcentered{TS1}{%    % and that's needed
+  \iffontchar\font 42 \char42 \else
+   \begingroup\fontencoding{T1}%
+       \fontsize
+       {\the\dimexpr1.3\dimexpr\f@size pt\relax}%
+       {\f@baselineskip}%
+      \selectfont
+      \raisebox{-0.7ex}[\dimexpr\height-0.7ex][0pt]{*}%
+    \endgroup
+    \fi
+}
+\DeclareTextSymbol{\textdblhyphen}{TS1}{45}
+\DeclareTextSymbol{\textfractionsolidus}{TS1}{47}
+\DeclareTextSymbol{\textzerooldstyle}{TS1}{48}
+\DeclareTextSymbol{\textoneoldstyle}{TS1}{49}
+\DeclareTextSymbol{\texttwooldstyle}{TS1}{50}
+\DeclareTextSymbol{\textthreeoldstyle}{TS1}{51}
+\DeclareTextSymbol{\textfouroldstyle}{TS1}{52}
+\DeclareTextSymbol{\textfiveoldstyle}{TS1}{53}
+\DeclareTextSymbol{\textsixoldstyle}{TS1}{54}
+\DeclareTextSymbol{\textsevenoldstyle}{TS1}{55}
+\DeclareTextSymbol{\texteightoldstyle}{TS1}{56}
+\DeclareTextSymbol{\textnineoldstyle}{TS1}{57}
+\DeclareTextSymbol{\textlangle}{TS1}{60}
+\DeclareTextSymbol{\textminus}{TS1}{61}
+\DeclareTextSymbol{\textrangle}{TS1}{62}
+\DeclareTextSymbol{\textmho}{TS1}{77}
+\DeclareTextSymbol{\textbigcircle}{TS1}{79}
+\DeclareTextCommand{\textcircled}{TS1}[1]{\hmode@bgroup
+   \ooalign{%
+      \hfil \raise .07ex\hbox {\upshape#1}\hfil \crcr
+      \char 79   % '117 = "4F
+   }%
+ \egroup}
+\DeclareTextSymbol{\textohm}{TS1}{87}
+\DeclareTextSymbol{\textlbrackdbl}{TS1}{91}
+\DeclareTextSymbol{\textrbrackdbl}{TS1}{93}
+\DeclareTextSymbol{\textuparrow}{TS1}{94}
+\DeclareTextSymbol{\textdownarrow}{TS1}{95}
+\DeclareTextSymbol{\textasciigrave}{TS1}{96}
+\DeclareTextSymbol{\textborn}{TS1}{98}
+\DeclareTextSymbol{\textdivorced}{TS1}{99}
+\DeclareTextSymbol{\textdied}{TS1}{100}
+\DeclareTextSymbol{\textleaf}{TS1}{108}
+\DeclareTextSymbol{\textmarried}{TS1}{109}
+\DeclareTextSymbol{\textmusicalnote}{TS1}{110}
+\DeclareTextSymbol{\texttildelow}{TS1}{126}
+\DeclareTextSymbol{\textdblhyphenchar}{TS1}{127}
+\DeclareTextSymbol{\textasciibreve}{TS1}{128}
+\DeclareTextSymbol{\textasciicaron}{TS1}{129}
+\DeclareTextSymbol{\textacutedbl}{TS1}{130}
+\DeclareTextSymbol{\textgravedbl}{TS1}{131}
+\DeclareTextSymbol{\textdagger}{TS1}{132}
+\DeclareTextSymbol{\textdaggerdbl}{TS1}{133}
+\DeclareTextSymbol{\textbardbl}{TS1}{134}
+\DeclareTextSymbol{\textperthousand}{TS1}{135}
+\DeclareTextSymbol{\textbullet}{TS1}{136}
+\DeclareTextSymbol{\textcelsius}{TS1}{137}
+\DeclareTextSymbol{\textdollaroldstyle}{TS1}{138}
+\DeclareTextSymbol{\textcentoldstyle}{TS1}{139}
+\DeclareTextSymbol{\textflorin}{TS1}{140}
+\DeclareTextSymbol{\textcolonmonetary}{TS1}{141}
+\DeclareTextSymbol{\textwon}{TS1}{142}
+\DeclareTextSymbol{\textnaira}{TS1}{143}
+\DeclareTextSymbol{\textguarani}{TS1}{144}
+\DeclareTextSymbol{\textpeso}{TS1}{145}
+\DeclareTextSymbol{\textlira}{TS1}{146}
+\DeclareTextSymbol{\textrecipe}{TS1}{147}
+\DeclareTextSymbol{\textinterrobang}{TS1}{148}
+\DeclareTextSymbol{\textinterrobangdown}{TS1}{149}
+\DeclareTextSymbol{\textdong}{TS1}{150}
+\DeclareTextSymbol{\texttrademark}{TS1}{151}
+\DeclareTextSymbol{\textpertenthousand}{TS1}{152}
+\DeclareTextSymbol{\textpilcrow}{TS1}{153}
+\DeclareTextSymbol{\textbaht}{TS1}{154}
+\DeclareTextSymbol{\textnumero}{TS1}{155}
+\DeclareTextSymbol{\textdiscount}{TS1}{156}
+\DeclareTextSymbol{\textestimated}{TS1}{157}
+\DeclareTextSymbol{\textopenbullet}{TS1}{158}
+\DeclareTextSymbol{\textservicemark}{TS1}{159}
+\DeclareTextSymbol{\textlquill}{TS1}{160}
+\DeclareTextSymbol{\textrquill}{TS1}{161}
+\DeclareTextSymbol{\textcent}{TS1}{162}
+\DeclareTextSymbol{\textsterling}{TS1}{163}
+\DeclareTextSymbol{\textcurrency}{TS1}{164}
+\DeclareTextSymbol{\textyen}{TS1}{165}
+\DeclareTextSymbol{\textbrokenbar}{TS1}{166}
+\DeclareTextSymbol{\textsection}{TS1}{167}
+\DeclareTextSymbol{\textasciidieresis}{TS1}{168}
+\DeclareTextSymbol{\textcopyright}{TS1}{169}
+\DeclareTextSymbol{\textordfeminine}{TS1}{170}
+\DeclareTextSymbol{\textcopyleft}{TS1}{171}
+\DeclareTextSymbol{\textlnot}{TS1}{172}
+\DeclareTextSymbol{\textcircledP}{TS1}{173}
+\DeclareTextSymbol{\textregistered}{TS1}{174}
+\DeclareTextSymbol{\textasciimacron}{TS1}{175}
+\DeclareTextSymbol{\textdegree}{TS1}{176}
+\DeclareTextSymbol{\textpm}{TS1}{177}
+\DeclareTextSymbol{\texttwosuperior}{TS1}{178}
+\DeclareTextSymbol{\textthreesuperior}{TS1}{179}
+\DeclareTextSymbol{\textasciiacute}{TS1}{180}
+\DeclareTextSymbol{\textmu}{TS1}{181} % micro sign
+\DeclareTextSymbol{\textparagraph}{TS1}{182}
+\DeclareTextSymbol{\textperiodcentered}{TS1}{183}
+\DeclareTextSymbol{\textreferencemark}{TS1}{184}
+\DeclareTextSymbol{\textonesuperior}{TS1}{185}
+\DeclareTextSymbol{\textordmasculine}{TS1}{186}
+\DeclareTextSymbol{\textsurd}{TS1}{187}
+\DeclareTextSymbol{\textonequarter}{TS1}{188}
+\DeclareTextSymbol{\textonehalf}{TS1}{189}
+\DeclareTextSymbol{\textthreequarters}{TS1}{190}
+\DeclareTextSymbol{\texteuro}{TS1}{191}
+\DeclareTextSymbol{\texttimes}{TS1}{214}
+\DeclareTextSymbol{\textdiv}{TS1}{246}
+\endinput
+%%
+%% End of file `ts1enc.def'.

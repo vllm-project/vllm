@@ -1,0 +1,119 @@
+%%
+%% This is file `trig.sty',
+%% generated with the docstrip utility.
+%%
+%% The original source files were:
+%%
+%% trig.dtx  (with options: `package')
+%% 
+%% The source is maintained by the LaTeX Project team and bug
+%% reports for it can be opened at https://latex-project.org/bugs/
+%% (but please observe conditions on bug reports sent to that address!)
+%% 
+%% 
+%% File: trig.dtx Copyright (C) 1993-1999 David Carlisle
+%%                Copyright (C) 2000-2021
+%% The LaTeX Project and any individual authors listed elsewhere
+%% in this file.
+%%
+%% This file is part of the Standard LaTeX `Graphics Bundle'.
+%% It may be distributed under the terms of the LaTeX Project Public
+%% License, as described in lppl.txt in the base LaTeX distribution.
+%% Either version 1.3c or, at your option, any later version.
+%%
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{trig}
+                 [2021/08/11 v1.11 sin cos tan (DPC)]
+\chardef\nin@ty=90
+\chardef\@clxxx=180
+\chardef\@lxxi=71
+\mathchardef\@mmmmlxviii=4068
+\chardef\@coeffz=72
+\chardef\@coefb=42
+\mathchardef\@coefc=840
+\mathchardef\@coefd=5040
+{\catcode`t=12\catcode`p=12\gdef\noPT#1pt{#1}}
+\def\TG@rem@pt#1{\expandafter\noPT\the#1\space}
+\def\TG@term#1{%
+ \dimen@\@tempb\dimen@
+ \advance\dimen@ #1\p@}
+\def\TG@series{%
+ \dimen@\@lxxi\dimen@
+ \divide \dimen@ \@mmmmlxviii
+ \edef\@tempa{\TG@rem@pt\dimen@}%
+ \dimen@\@tempa\dimen@
+ \edef\@tempb{\TG@rem@pt\dimen@}%
+ \divide\dimen@\@coeffz
+ \advance\dimen@\m@ne\p@
+ \TG@term\@coefb
+ \TG@term{-\@coefc}%
+ \TG@term\@coefd
+ \dimen@\@tempa\dimen@
+ \divide\dimen@ \@coefd}
+\def\CalculateSin#1{{%
+  \expandafter\ifx\csname sin(\number#1)\endcsname\relax
+    \dimen@=#1\p@\TG@@sin
+    \expandafter\xdef\csname sin(\number#1)\endcsname
+                                    {\TG@rem@pt\dimen@}%
+  \fi}}
+\def\CalculateCos#1{{%
+  \expandafter\ifx\csname cos(\number#1)\endcsname\relax
+    \dimen@=\nin@ty\p@
+    \advance\dimen@-#1\p@
+    \TG@@sin
+    \expandafter\xdef\csname cos(\number#1)\endcsname
+                                     {\TG@rem@pt\dimen@}%
+  \fi}}
+\def\TG@reduce#1#2{%
+\dimen@#1#2\nin@ty\p@
+  \advance\dimen@#2-\@clxxx\p@
+  \dimen@-\dimen@
+  \TG@@sin}
+\def\TG@@sin{%
+  \ifdim\TG@reduce>+%
+  \else\ifdim\TG@reduce<-%
+  \else\TG@series\fi\fi}%
+\def\UseSin#1{\csname sin(\number#1)\endcsname}
+\def\UseCos#1{\csname cos(\number#1)\endcsname}
+\def\z@num{0 }
+\def\@tempa{1 }
+\def\@tempb{-1 }
+\expandafter\let\csname sin(0)\endcsname\z@num
+\expandafter\let\csname cos(0)\endcsname\@tempa
+\expandafter\let\csname sin(90)\endcsname\@tempa
+\expandafter\let\csname cos(90)\endcsname\z@num
+\expandafter\let\csname sin(-90)\endcsname\@tempb
+\expandafter\let\csname cos(-90)\endcsname\z@num
+\expandafter\let\csname sin(180)\endcsname\z@num
+\expandafter\let\csname cos(180)\endcsname\@tempb
+\expandafter\let\csname sin(270)\endcsname\@tempb
+\expandafter\let\csname cos(270)\endcsname\z@num
+\expandafter\let\csname sin(360)\endcsname\z@num
+\expandafter\let\csname cos(360)\endcsname\@tempa
+\expandafter\let\csname sin(-180)\endcsname\z@num
+\expandafter\let\csname cos(-180)\endcsname\@tempb
+\expandafter\let\csname sin(-270)\endcsname\@tempa
+\expandafter\let\csname cos(-270)\endcsname\z@num
+\expandafter\let\csname sin(-360)\endcsname\z@num
+\expandafter\let\csname cos(-360)\endcsname\@tempa
+\def\CalculateTan#1{{%
+  \expandafter\ifx\csname tan(\number#1)\endcsname\relax
+    \CalculateSin{#1}%
+    \CalculateCos{#1}%
+    \@tempdima\UseCos{#1}\p@
+    \divide\@tempdima\@iv
+    \@tempdimb\UseSin{#1}\p@
+    \@tempdimb\two@fourteen\@tempdimb
+    \divide\@tempdimb\@tempdima
+    \expandafter\xdef\csname tan(\number#1)\endcsname
+                                        {\TG@rem@pt\@tempdimb}%
+  \fi}}
+\def\UseTan#1{\csname tan(\number#1)\endcsname}
+\mathchardef\two@fourteen=16384
+\chardef\@iv=4
+\expandafter\def\csname tan(90)\endcsname{\errmessage{Infinite tan !}}
+\expandafter\let\csname tan(-90)\expandafter\endcsname
+                                       \csname tan(90)\endcsname
+\endinput
+%%
+%% End of file `trig.sty'.

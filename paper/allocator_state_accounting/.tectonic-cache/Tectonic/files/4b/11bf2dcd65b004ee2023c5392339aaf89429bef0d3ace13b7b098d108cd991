@@ -1,0 +1,386 @@
+# lcdf-typetools texglyphlist.txt, Version 2.95
+# Contents: Extensions to the Adobe Glyph List for TeX fonts and
+# encodings. We also extend the second field so that it can contain
+# multiple Unicode scalar values, separated by commas, analogous to
+# otftotfm's "% UNICODING" comments.
+###############################################################################
+Delta;2206,0394
+Ifractur;2111
+FFsmall;F766 F766,0066 0066
+FFIsmall;F766 F766 F769,0066 0066 0069
+FFLsmall;F766 F766 F76C,0066 0066 006C
+FIsmall;F766 F769,0066 0069
+FLsmall;F766 F76C,0066 006C
+Germandbls;0053 0053
+Germandblssmall;F773 F773,0073 0073
+Ng;014A
+Omega;2126,03A9
+Rfractur;211C
+SS;0053 0053
+SSsmall;F773 F773,0073 0073
+# altselector: invalid Unicode
+altselector;D802
+angbracketleft;27E8,2329
+angbracketright;27E9,232A
+arrowbothv;2195
+arrowdblbothv;21D5
+arrowleftbothalf;21BD
+arrowlefttophalf;21BC
+arrownortheast;2197
+arrownorthwest;2196
+arrowrightbothalf;21C1
+arrowrighttophalf;21C0
+arrowsoutheast;2198
+arrowsouthwest;2199
+# ascendercompwordmark: taller cwm, invalid Unicode
+ascendercompwordmark;D80A
+asteriskcentered;2217
+bardbl;2225
+# capitalcompwordmark: taller cwm, invalid Unicode
+capitalcompwordmark;D809
+ceilingleft;2308
+ceilingright;2309
+circlecopyrt;20DD,25CB
+circledivide;2298
+circledot;2299
+circleminus;2296
+coproduct;2A3F
+ct;0063 0074
+# cwm: Unicode for ZWNJ, used for secondary replacement from EC.enc
+cwm;200C
+dblbracketleft;27E6
+dblbracketright;27E7
+# U+2662 is WHITE DIAMOND SUIT
+# U+25CA is LOZENGE
+# U+2666 is BLACK DIAMOND SUIT
+diamond;2662,25CA,2666
+diamondmath;22C4
+# U+0237 is the proposed allocation for dotless j as of Unicode 4.0
+# U+1D6A5 is the mathematical italic version approved in Unicode 5.0
+dotlessj;0237,F6BE,1D6A5
+emptyset;2205,F638
+# emptyslot: invalid Unicode; the user explicitly wants this slot empty
+emptyslot;D801
+epsilon1;03F5
+epsiloninv;03F6
+equivasymptotic;224D
+flat;266D
+floorleft;230A
+floorright;230B
+follows;227B
+followsequal;2AB0
+followsorcurly;227D
+greatermuch;226B
+heart;2661,2665
+interrobang;203D
+interrobangdown;2E18
+intersectionsq;2293
+latticetop;22A4
+lessmuch;226A
+longdbls;017F 017F
+longsh;017F 0068
+longsi;017F 0069
+longsl;017F 006C
+longst;FB05,017F 0074
+lscript;2113
+natural;266E
+negationslash;0338
+ng;014B
+owner;220B
+pertenthousand;2031
+# TeX encodings such as 'texmital.enc' disagree with Unicode and the Adobe
+# glyph list; in TeX, the "straight" form of phi takes the name "phi",
+# whereas the more-common "loopy" form of phi, \varphi, takes the name "phi1".
+phi;03D5,03C6
+phi1;03C6
+pi1;03D6
+precedesequal;2AAF
+precedesorcurly;227C
+prime;2032,02B9
+rho1;03F1
+# ringfitted: a ring character centered on the x-width of A, invalid Unicode
+ringfitted;D80D
+sharp;266F
+similarequal;2243
+slurabove;2322
+slurbelow;2323
+st;FB06,0073 0074
+star;22C6
+subsetsqequal;2291
+supersetsqequal;2292
+triangle;25B3
+triangleinv;25BD
+triangleleft;25C1
+triangleright;25B7
+turnstileleft;22A2
+turnstileright;22A3
+# twelveudash: 2/3-em dash; invalid Unicode
+twelveudash;D80C
+unionmulti;228E
+unionsq;2294
+vector;20D7
+# visualspace: Unicode for OPEN BOX, used for secondary replacement from EC.enc
+visualspace;2423
+wreathproduct;2240
+# -- Marco Kuhlmann reported annoying glyph neologisms in fontinst encodings
+# Dbar = Dcroat
+Dbar;0110
+# compwordmark = cwm
+compwordmark;200C
+# dbar = dcroat
+dbar;0111
+# rangedash = endash
+rangedash;2013
+# hyphenchar = hyphen
+hyphenchar;002D
+# punctdash = emdash
+punctdash;2014
+# visiblespace = visualspace
+visiblespace;2423
+# --
+# -- These character names are used in the MSAM fonts
+# --
+Yen;00A5
+# the MSAM10 glyph is more closed than U+21BA
+# the MSAM10 glyph's gap is at the top, while U+27F2 is on the left
+anticlockwise;27F2,21BA
+# XXX arrowaxisleft
+# XXX arrowaxisright
+arrowparrleftright;21C6
+arrowparrrightleft;21C4
+arrowtailleft;21A2
+arrowtailright;21A3
+arrowtripleleft;21DA
+arrowtripleright;21DB
+# XXX axisshort
+between;226C
+# U+2713 is a Zapf dingbat
+check;2713
+circleR;00AE
+# the MSAM10 glyph may be smaller than U+24C8
+circleS;24C8
+circleasterisk;229B
+circleequal;229C
+circlering;229A
+# the MSAM10 glyph is more closed than U+21BB
+# the MSAM10 glyph's gap is at the top, while U+27F3 is on the left
+clockwise;27F3,21BB
+complement;2201
+curlyleft;21AB
+curlyright;21AC
+dblarrowdwn;21CA
+dblarrowheadleft;219E
+dblarrowheadright;21A0
+dblarrowup;21C8
+defines;225C
+# U+2666 is BLACK DIAMOND SUIT
+# U+29EB is BLACK LOZENGE
+diamondsolid;2666,29EB
+difference;224F
+dotplus;2214
+downfall;22CE
+equaldotleftright;2252
+equaldotrightleft;2253
+equalorfollows;22DF
+equalorgreater;2A96
+equalorless;2A95
+equalorprecedes;22DE
+equalsdots;2251
+followsorequal;227F
+forces;22A9
+forcesbar;22AA
+fork;22D4
+frown;2322
+geomequivalent;224E
+greaterdbleqlless;2A8C
+greaterdblequal;2267
+greaterlessequal;22DB
+greaterorapproxeql;2A86
+greaterorequalslant;2A7E
+greaterorsimilar;2273
+harpoondownleft;21C3
+harpoondownright;21C2
+# MSAM probably misnamed this glyph; the right pointing harpoon is above
+# U+21CC has the right pointing harpoon above, like MSAM
+harpoonleftright;21CC
+# MSAM probably misnamed this glyph; the left pointing harpoon is above
+# U+21CB has the left pointing harpoon above, like MSAM
+harpoonrightleft;21CB
+harpoonupleft;21BF
+harpoonupright;21BE
+# U+22BA may be larger than MSAM intercal
+intercal;22BA
+intersectiondbl;22D2
+lessdbleqlgreater;2A8B
+lessdblequal;2266
+lessequalgreater;22DA
+lessorapproxeql;2A85
+lessorequalslant;2A7D
+lessorsimilar;2272
+maltesecross;2720
+measuredangle;2221
+multimap;22B8
+multiopenleft;22CB
+multiopenright;22CC
+nand;22BC
+orunderscore;22BB
+# U+2306 PERSPECTIVE is larger than the MSAM glyph
+perpcorrespond;2A5E,2306
+precedesorequal;227E
+primereverse;2035
+revasymptequal;22CD
+revsimilar;223D
+# U+231D TOP RIGHT CORNER is a quine corner,
+# U+2E23 TOP RIGHT HALF BRACKET is a half bracket.
+# MSAM rightanglene matches the shape of U+231C but the spacing of U+2E23.
+# Similar for other rightangle characters.
+rightanglene;231D,2E23
+rightanglenw;231C,2E22
+rightanglese;231F,2E25
+rightanglesw;231E,2E24
+ringinequal;2256
+# U+22A7 MODELS is shorter than U+22A8 TRUE = satisfies.
+# MSAM satisfies is in between.
+satisfies;22A8
+shiftleft;21B0
+shiftright;21B1
+smile;2323
+sphericalangle;2222
+# U+25A1 WHITE SQUARE
+square;25A1
+squaredot;22A1
+squareimage;228F
+squareminus;229F
+squaremultiply;22A0
+squareoriginal;2290
+squareplus;229E
+# XXX U+25AA BLACK SMALL SQUARE doesn't sit on the baseline
+# XXX squaresmallsolid
+squaresolid;25A0
+# U+21AD LEFT RIGHT WAVE ARROW is not actually a squiggle arrow
+squiggleleftright;21AD
+squiggleright;21DD
+subsetdbl;22D0
+subsetdblequal;2AC5
+supersetdbl;22D1
+supersetdblequal;2AC6
+triangledownsld;25BC
+# U+22B4 NORMAL SUBGROUP OF OR EQUAL TO is sharper than MSAM
+triangleleftequal;22B4,25C1 0332
+triangleleftsld;25C0
+# U+22B5 CONTAINS AS NORMAL SUBGROUP OR EQUAL TO is sharper than MSAM
+trianglerightequal;22B5,25B7 0332
+trianglerightsld;25B6
+trianglesolid;25B2
+uniondbl;22D3
+uprise;22CF
+# --
+# -- These character names are used in the MSBM fonts
+# --
+# U+1D7CB MATHEMATICAL BOLD SMALL DIGAMMA is the closest match to MSBM,
+# although MSBM Digamma's spelling indicates that a capital was intended
+# U+03DD GREEK SMALL LETTER DIGAMMA for fallback
+Digamma;1D7CB,03DD
+# U+2132 TURNED CAPITAL F is shown as seriffed, MSBM Finv is sans
+Finv;2132
+# U+2141 TURNED SANS-SERIF CAPITAL G is turned, MSBM Gmir is only reversed
+Gmir;2141
+Omegainv;2127
+approxorequal;224A
+archleftdown;21B6
+archrightdown;21B7
+# XXX barshort
+beth;2136
+daleth;2138
+dividemultiply;22C7
+# U+29F9 BIG REVERSE SOLIDUS seems the right size
+downslope;29F9
+equalorsimilar;2242
+follownotdbleqv;2ABA
+follownotslnteql;2AB6
+followornoteqvlnt;22E9
+greaterdot;22D7
+# MSBM misnamed this glyph; should be greaternotdbleqv
+greaternotdblequal;2A8A
+greaternotequal;2A88
+greaterornotdbleql;2269
+# XXX MSBM greaterornotequal has a vertical negation slash, not U+2269 diagonal
+greaterornotequal;2269
+# XXX greaterornotsimilar
+# XXX hatwide
+# XXX hatwider
+integerdivide;2216
+lessdot;22D6
+# MSBM misnamed this glyph; should be lessnotdbleqv
+lessnotdblequal;2A89
+lessnotequal;2A87
+lessornotdbleql;2268
+# XXX MSBM lessornotequal has a vertical negation slash, not U+2268 diagonal
+lessornotequal;2268
+# XXX lessornotsimilar
+multicloseleft;22C9
+multicloseright;22CA
+notapproxequal;2247
+notarrowboth;21AE
+notarrowleft;219A
+notarrowright;219B
+notbar;2224
+notdblarrowboth;21CE
+notdblarrowleft;21CD
+notdblarrowright;21CF
+notexistential;2204
+notfollows;2281
+# U+22E1 DOES NOT SUCCEED OR EQUAL has a curved equal sign, unlike MSBM
+notfollowsoreql;2AB0 0338,22E1
+notforces;22AE
+notforcesextra;22AF
+# Unicode has no precomposed negation of U+2267 GREATER THAN OVER EQUAL TO
+notgreaterdblequal;2267 0338
+notgreaterequal;2271
+notgreaterorslnteql;2A7E 0338
+notlessdblequal;2266 0338
+notlessequal;2270
+notlessorslnteql;2A7D 0338
+# U+22E0 DOES NOT PRECEDE OR EQUAL has a curved equal sign, unlike MSBM
+notprecedesoreql;2AAF 0338,22E0
+notsatisfies;22AD
+# XXX notshortbar
+# XXX notshortparallel
+notsimilar;2241
+notsubseteql;2288
+notsubsetordbleql;2AC5 0338
+# U+228A SUBSET OF WITH NOT EQUAL TO negation slash only touches bar below;
+# MSBM negation slash touches bar and lower part of subset
+notsubsetoreql;228A
+notsuperseteql;2289
+notsupersetordbleql;2AC6 0338
+# U+228A SUPERSET OF WITH NOT EQUAL TO negation slash only touches bar below;
+# MSBM negation slash touches bar and lower part of superset
+notsupersetoreql;228B
+# U+22EC NOT NORMAL SUBGROUP OF OR EQUAL TO is sharper than MSBM
+nottriangeqlleft;22EC,25C1 0332 0338
+# U+22ED DOES NOT CONTAIN AS NORMAL SUBGROUP OR EQUAL is sharper than MSBM
+nottriangeqlright;22ED,25B7 0332 0338
+# U+22EA NOT NORMAL SUBGROUP OF is sharper than MSBM
+nottriangleleft;22EA,25C1 0338
+# U+22EB DOES NOT CONTAIN AS NORMAL SUBGROUP is sharper than MSBM
+nottriangleright;22EB,25B7 0338
+notturnstile;22AC
+# XXX parallelshort
+planckover2pi;210F
+# U+210F PLANCK CONSTANT OVER TWO PI is shown with diagonal slash, which
+# corresponds to MSBM planckover2pi, but this is a font variant
+planckover2pi1;210F
+precedenotdbleqv;2AB9
+precedenotslnteql;2AB5
+precedeornoteqvlnt;22E8
+subsetnoteql;228A
+subsetornotdbleql;2ACB
+# XXX subsetornoteql
+supersetnoteql;228B
+supersetornotdbleql;2ACC
+# XXX supersetornoteql
+# XXX tildewide
+# XXX tildewider
+# U+29F8 BIG SOLIDUS seems the right size
+upslope;29F8

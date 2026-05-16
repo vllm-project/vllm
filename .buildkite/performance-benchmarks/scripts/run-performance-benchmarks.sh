@@ -27,6 +27,12 @@ check_gpus() {
     declare -g gpu_count=$(amd-smi list | grep -c 'GPU' || true)
   elif command -v hl-smi; then
     declare -g gpu_count=$(hl-smi --list | grep -ci "Module ID" || true)
+  elif command -v npu-smi; then
+    if [[ -n "${ASCEND_RT_VISIBLE_DEVICES:-}" ]]; then
+      declare -g gpu_count=$(awk -F',' '{print NF}' <<<"${ASCEND_RT_VISIBLE_DEVICES}")
+    else
+      declare -g gpu_count=$(find /dev -maxdepth 1 -name 'davinci[0-9]*' | wc -l)
+    fi
   fi
 
   if [[ $gpu_count -gt 0 ]]; then
@@ -45,6 +51,8 @@ check_gpus() {
   elif command -v hl-smi; then
     declare -g gpu_type=$(hl-smi -q | grep "Product Name" | head -n 1 | awk -F ':' '{print $2}' | sed 's/^ *//')
     arch_suffix='-hpu'
+  elif command -v npu-smi; then
+    declare -g gpu_type="ascend"
   fi
   echo "GPU type is $gpu_type"
 }

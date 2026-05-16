@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import torch
 from transformers import PreTrainedTokenizerBase
 
+from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.platform_utils import is_pin_memory_available
@@ -30,12 +31,50 @@ else:
     )
 
 
+logger = init_logger(__name__)
+
+
 @lru_cache
 def _cached_build_vllm_token_enforcer_tokenizer_data(
     tokenizer: PreTrainedTokenizerBase, vocab_size: int
 ) -> "lmfe_vllm.TokenEnforcerTokenizerData":
     return lmfe_vllm.build_vllm_token_enforcer_tokenizer_data(
         tokenizer, use_bitmask=True, vocab_size=vocab_size
+    )
+
+
+@lru_cache
+def _cached_build_transformers_token_enforcer_tokenizer_data(
+    tokenizer: PreTrainedTokenizerBase, vocab_size: int
+) -> "lmformatenforcer.TokenEnforcerTokenizerData":
+    from lmformatenforcer.integrations.transformers import (
+        build_token_enforcer_tokenizer_data,
+    )
+
+    return build_token_enforcer_tokenizer_data(
+        tokenizer, use_bitmask=True, vocab_size=vocab_size
+    )
+
+
+@lru_cache(maxsize=256)
+def _cached_compile_character_level_parser(
+    request_type: StructuredOutputOptions,
+    grammar_spec: str,
+) -> "lmformatenforcer.CharacterLevelParser":
+    if request_type == StructuredOutputOptions.JSON:
+        return lmformatenforcer.JsonSchemaParser(json.loads(grammar_spec))
+    if request_type == StructuredOutputOptions.JSON_OBJECT:
+        return lmformatenforcer.JsonSchemaParser(None)
+    if request_type == StructuredOutputOptions.REGEX:
+        return lmformatenforcer.RegexParser(grammar_spec)
+    if request_type == StructuredOutputOptions.CHOICE:
+        choices = ast.literal_eval(grammar_spec)
+        return lmformatenforcer.UnionParser(
+            [lmformatenforcer.StringParser(choice) for choice in choices]
+        )
+
+    raise ValueError(
+        f"Invalid request type for LM Format Enforcer backend({request_type!s})"
     )
 
 
@@ -93,30 +132,30 @@ class LMFormatEnforcerGrammar(StructuredOutputGrammar):
 @dataclass
 class LMFormatEnforcerBackend(StructuredOutputBackend):
     def __post_init__(self):
-        self.tokenizer_data = _cached_build_vllm_token_enforcer_tokenizer_data(
-            self.tokenizer, self.vocab_size
-        )
+        try:
+            self.tokenizer_data = _cached_build_vllm_token_enforcer_tokenizer_data(
+                self.tokenizer, self.vocab_size
+            )
+        except ImportError as exc:
+            logger.warning_once(
+                "LM Format Enforcer vllm integration is unavailable; "
+                "falling back to the generic transformers tokenizer-data "
+                "builder: %s",
+                exc,
+            )
+            self.tokenizer_data = (
+                _cached_build_transformers_token_enforcer_tokenizer_data(
+                    self.tokenizer,
+                    self.vocab_size,
+                )
+            )
 
     def compile_grammar(
         self, request_type: StructuredOutputOptions, grammar_spec: str
     ) -> StructuredOutputGrammar:
-        character_level_parser: lmformatenforcer.CharacterLevelParser
-        if request_type == StructuredOutputOptions.JSON:
-            spec_dict = json.loads(grammar_spec)
-            character_level_parser = lmformatenforcer.JsonSchemaParser(spec_dict)
-        elif request_type == StructuredOutputOptions.JSON_OBJECT:
-            character_level_parser = lmformatenforcer.JsonSchemaParser(None)
-        elif request_type == StructuredOutputOptions.REGEX:
-            character_level_parser = lmformatenforcer.RegexParser(grammar_spec)
-        elif request_type == StructuredOutputOptions.CHOICE:
-            choices = ast.literal_eval(grammar_spec)
-            character_level_parser = lmformatenforcer.UnionParser(
-                [lmformatenforcer.StringParser(choice) for choice in choices]
-            )
-        else:
-            raise ValueError(
-                f"Invalid request type for LM Format Enforcer backend({request_type!s})"
-            )
+        character_level_parser = _cached_compile_character_level_parser(
+            request_type, grammar_spec
+        )
         max_rollback_tokens = (
             self.vllm_config.speculative_config.num_speculative_tokens
             if self.vllm_config.speculative_config is not None

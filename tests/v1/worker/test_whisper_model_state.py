@@ -7,7 +7,11 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem, PlaceholderRange
+from vllm.multimodal.inputs import (
+    MultiModalFeatureSpec,
+    MultiModalKwargsItem,
+    PlaceholderRange,
+)
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states.whisper import WhisperModelState
 
@@ -54,6 +58,8 @@ def test_whisper_model_state_reuses_cached_encoder_outputs_for_prefill_requests(
         idx_mapping_np=np.array([0], dtype=np.int32),
     )
     req_states = SimpleNamespace(
+        req_id_to_index={"req0": 0},
+        num_computed_tokens_np=np.array([0], dtype=np.int32),
         prefill_len=SimpleNamespace(np=np.array([4], dtype=np.int32)),
         num_computed_prefill_tokens=np.array([0], dtype=np.int32),
     )

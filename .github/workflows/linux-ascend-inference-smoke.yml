@@ -2,6 +2,7 @@ name: Linux Ascend Inference Smoke Test
 
 on:
   pull_request:
+    types: [opened, reopened, synchronize, labeled]
   push:
     branches: [main]
   workflow_dispatch:
@@ -15,6 +16,9 @@ permissions:
 
 jobs:
   linux-ascend-inference-smoke:
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on:
       - self-hosted
       - linux-aarch64-a2b3-0
@@ -27,8 +31,10 @@ jobs:
       HUGGINGFACE_HUB_CACHE: ${{ github.workspace }}/../.hf-cache/hub
       TRANSFORMERS_CACHE: ${{ github.workspace }}/../.hf-cache/transformers
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      TARGET_REPO_URL: https://github.com/${{ github.repository }}.git
+      TARGET_REPO_URL: git@github.com:${{ github.repository }}.git
       TARGET_REPO_SHA: ${{ github.sha }}
+      VLLM_ASCEND_HUST_REPO: ${{ github.workspace }}/vllm-ascend-hust
+      HUST_ASCEND_MANAGER_REPO: ${{ github.workspace }}/ascend-runtime-manager
 
     steps:
       - name: Checkout target repo with retry
@@ -85,18 +91,80 @@ jobs:
             echo "HF token: not configured"
           fi
 
+      - name: Checkout vllm-ascend-hust repo
+        run: |
+          clone_with_retry() {
+            local repo_url=$1
+            local target_dir=$2
+            local attempts=4
+            local delay_seconds=15
+            local try=1
+
+            rm -rf "$target_dir"
+            while [[ "$try" -le "$attempts" ]]; do
+              if git clone --depth 1 "$repo_url" "$target_dir"; then
+                return 0
+              fi
+              echo "Clone failed ($try/$attempts): $repo_url" >&2
+              if [[ "$try" -lt "$attempts" ]]; then
+                sleep "$delay_seconds"
+              fi
+              try=$((try + 1))
+            done
+
+            echo "Failed to clone $repo_url after ${attempts} attempts" >&2
+            return 1
+          }
+
+          clone_with_retry "git@github.com:vLLM-HUST/vllm-ascend-hust.git" "$VLLM_ASCEND_HUST_REPO"
+
+      - name: Checkout ascend-runtime-manager repo
+        run: |
+          clone_with_retry() {
+            local repo_url=$1
+            local target_dir=$2
+            local attempts=4
+            local delay_seconds=15
+            local try=1
+
+            rm -rf "$target_dir"
+            while [[ "$try" -le "$attempts" ]]; do
+              if git clone --depth 1 "$repo_url" "$target_dir"; then
+                return 0
+              fi
+              echo "Clone failed ($try/$attempts): $repo_url" >&2
+              if [[ "$try" -lt "$attempts" ]]; then
+                sleep "$delay_seconds"
+              fi
+              try=$((try + 1))
+            done
+
+            echo "Failed to clone $repo_url after ${attempts} attempts" >&2
+            return 1
+          }
+
+          clone_with_retry "git@github.com:vLLM-HUST/ascend-runtime-manager.git" "$HUST_ASCEND_MANAGER_REPO"
+
+      - name: Resolve Ascend Python runtime
+        run: |
+          source "$VLLM_ASCEND_HUST_REPO/scripts/hust_ascend_manager_helper.sh"
+          PYTHON_BIN="$(hust_resolve_python_bin)"
+          echo "PYTHON_BIN=$PYTHON_BIN" >> "$GITHUB_ENV"
+          dirname "$PYTHON_BIN" >> "$GITHUB_PATH"
+          "$PYTHON_BIN" --version
+
       - name: Prepare Ascend runtime and install current checkout
         run: |
-          source /home/shuhao/vllm-ascend-hust/scripts/use_single_ascend_env.sh
-          bash /home/shuhao/vllm-ascend-hust/scripts/install_local_ascend_plugin.sh /home/shuhao/vllm-ascend-hust
-          python -m pip install -e . --no-build-isolation --no-deps
+          source "$VLLM_ASCEND_HUST_REPO/scripts/use_single_ascend_env.sh"
+          bash "$VLLM_ASCEND_HUST_REPO/scripts/install_local_ascend_plugin.sh" "$VLLM_ASCEND_HUST_REPO"
+          "$PYTHON_BIN" -m pip install -e . --no-build-isolation --no-deps
 
       - name: Verify installation
         run: |
-          source /home/shuhao/vllm-ascend-hust/scripts/use_single_ascend_env.sh
+          source "$VLLM_ASCEND_HUST_REPO/scripts/use_single_ascend_env.sh"
           which python
-          python --version
-          python -c "import vllm; print(f'vLLM version: {vllm.__version__}')"
+          "$PYTHON_BIN" --version
+          "$PYTHON_BIN" -c "import vllm; print(f'vLLM version: {vllm.__version__}')"
 
       - name: Run real-model serve smoke test
         env:
@@ -105,11 +173,11 @@ jobs:
           MAX_MODEL_LEN: "256"
           MAX_NUM_SEQS: "1"
         run: |
-          source /home/shuhao/vllm-ascend-hust/scripts/use_single_ascend_env.sh
+          source "$VLLM_ASCEND_HUST_REPO/scripts/use_single_ascend_env.sh"
           bash .github/workflows/scripts/run_e2e_serve_smoke.sh
 
       - name: Cleanup leftover Ascend CI processes
         if: always()
         run: |
-          source /home/shuhao/vllm-ascend-hust/scripts/use_single_ascend_env.sh
+          source "$VLLM_ASCEND_HUST_REPO/scripts/use_single_ascend_env.sh"
           bash .github/workflows/scripts/cleanup_ascend_ci_processes.sh

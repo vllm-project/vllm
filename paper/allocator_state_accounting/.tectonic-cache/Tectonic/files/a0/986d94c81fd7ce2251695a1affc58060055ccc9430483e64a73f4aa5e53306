@@ -1,0 +1,206 @@
+% \subsection{texsys.cfg}
+%
+% This file contains the site specific definitions of the four macros\\
+% |\@currdir|, |\input@path|, |\filename@parse| and |\@TeXversion|.
+%
+% As distributed it only contains comments, however this `empty'
+% file will work on many systems because of the automatic tests built
+% into |ltdirchk.dtx|. You \emph{are} allowed to edit this file to add
+% definitions of these macros appropriate to your system.
+%
+%
+% The macros that must be defined are:
+%
+% \DescribeMacro{\@currdir}
+% |\@currdir|\meta{filename}\meta{space} should expand to a form of the
+% filename that uniquely refers to the `current directory' if this is
+% possible. (The expansion should also end with a space.) on UNIX,
+% this is |\def\@currdir{./}|. For more exotic operating systems you may
+% want to make |\@currdir| a macro with arguments delimited by |.|
+% and/or \meta{space}. If the operating system has no concept of
+% directory structure, this macro should be defined to be empty.
+%
+%
+% \DescribeMacro{\input@path}
+% If the primitive |\openin| searches the same directories as the
+% primitive |\input|, then it is possible to tell (using |\ifeof|)
+% whether a file exists before trying to input it. For systems like
+% this, |\input@path| should be left undefined.
+%
+% If |\openin| does not `follow' |\input| then |\input@path| must be
+% defined to be a list of directories to search for input files. The
+% format for each directory is as for |\@currdir|, normally just a
+% prefix is required, but it may be a macro with space-delimited
+% argument. That is, if \meta{dir} is an entry in the input path,
+% \TeX will try to load the expansion of
+%
+%   \meta{dir}\meta{filename}\meta{space}
+%
+% So either \meta{dir} should be defined as a macro with argument
+% delimited by space, or it should just expand to a directory name,
+% including the final directory separator, so that it may be
+% concatenated with the \meta{filename}. This means that for UNIX-like
+% syntax, each \meta{dir} should end with a slash, |/|. One exception to
+% this rule is that the input path should \emph{always} contain the
+% empty directory |{}| as this will allow `full pathnames' to be used,
+% and the  `current directory' to be searched.
+%
+% |\input@path| should expand to a list of such directories, each in a
+% |{}| group.
+%
+%
+% \begin{sloppypar}
+% \DescribeMacro{\filename@parse}
+% After a call of the form: |\filename@parse{|\meta{filename}|}|, the
+% three macros |\filename@area|, |\filename@base|, |\filename@ext| should
+% be defined to be the `area' (or directory), basename and
+% extension respectively. If there was no extension specified in
+% \meta{filename}, |\filename@ext| should be |\let| to |\relax| (so this
+% case may be tested with |\@ifundefined{filename@ext}| and, perhaps a
+% default extension substituted).
+% \end{sloppypar}
+%
+% Normally one would not need to define this macro in |texsys.cfg| as
+% the automatic tests can supply parsers that work with UNIX and VMS
+% syntax, as well as a basic parser that will cover many other cases.
+% However some operating systems may need a `hand produced' parser
+% in which case it should be defined in this file.
+%
+% The UNIX parser also works for most MSDOS \TeX\ versions.
+% Currently if the UNIX or VMS parser is not used, |\filename@parse| is
+% defined to always return an empty area, and to split the argument into
+% basename and extension at the first `|.|' that occurs in the name.
+% Parsers for other formats may be defined in |texsys.cfg|,
+% in which case they will be used in preference to the default
+% definitions.
+%
+%
+% \DescribeMacro{\@TeXversion}
+% You should not need to set this macro in |texsys.cfg|. \LaTeX\
+% tests to set this automatically. See the comments in the opening
+% section of \texttt{ltdirchk.dtx}.
+%
+%
+% The following sections give examples of definitions which might
+% work on various systems. These are currently mainly untested as I only
+% have access to a few systems, all of which do not need this file as
+% the automatic tests work. All the code is commented out.
+%
+% \subsection{UNIX (web2c)}
+% This implementation does make |\openin| and |\input| look in the same
+% places. Acceptable settings are made by |ltdirchk.dtx|, and so this
+% file may be empty. The definitions below are therefore just for
+% information.
+%    \begin{macrocode}
+%\def\@currdir{./}
+%\let\input@path\@undefined
+%    \end{macrocode}
+%
+% \subsection{UNIX (other)}
+% Apparently some commercial UNIX implementations have different paths
+% for |\openin| and |\input|. For these one could use definitions like
+% the following (with whatever directories are used at your site):
+% note that the directory names should end with |/|.
+%    \begin{macrocode}
+% \def\@currdir{./}
+% \def\input@path{%
+%   {/usr/local/lib/tex/inputs/distrib/}%
+%   {/usr/local/lib/tex/inputs/contrib/}%
+%   {/usr/local/lib/tex/inputs/local/}%
+% }
+%    \end{macrocode}
+%
+% \subsection{MSDOS (emtex)}
+% This implementation does make |\openin| and |\input| look in the same
+% places. Acceptable settings are made by |ltdirchk.dtx|, and so this
+% file may be empty. The definitions below are therefore just for
+% information.
+%    \begin{macrocode}
+% \def\@currdir{./}
+% \let\input@path\@undefined
+%    \end{macrocode}
+%
+% \subsection{MSDOS (other)}
+% Some PC implementations have different paths
+% for |\openin| and |\input|. For these one could use definitions like
+% the following (with whatever directories are used at your site):
+% note that the directory names should end with |/|.
+% This assumes the implementation uses UNIX style |/| as the directory
+% separator.
+%    \begin{macrocode}
+% \def\@currdir{./}
+% \def\input@path{%
+%   {c:/tex/inputs/distrib/}%
+%   {c:/tex/inputs/contrib/}%
+%   {c:/tex/inputs/local/}%
+% }
+%    \end{macrocode}
+%
+% \subsection{VMS (DECUS \TeX, PD VMS 3.6)}
+% This implementation does make |\openin| and |\input| look in the same
+% places. Acceptable settings are made by |ltdirchk.dtx|, and so this
+% file may be empty. The definitions below are therefore just for
+% information.
+%    \begin{macrocode}
+% \def\@currdir{[]}
+% \let\input@path\@undefined
+%    \end{macrocode}
+%
+% \subsection{VMS (???)}
+% Some VMS implementations have different paths
+% for |\openin| and |\input|. For these one could use definitions like
+% the following:
+%    \begin{macrocode}
+% \def\@currdir{[]}
+% \def\input@path{%
+%   {tex_inputs:}%
+%   {SOMEDISK:[SOME.TEX.DIRECTORY]}%
+% }
+%    \end{macrocode}
+%
+% \subsection{MACINTOSH (OzTeX 1.6)}
+% This implementation does make |\openin| and |\input| look in the same
+% places. Acceptable settings are made by |ltdirchk.dtx|, and so this
+% file may be empty. The definitions below are therefore just for
+% information.
+%    \begin{macrocode}
+% \def\@currdir{:}
+% \let\input@path\@undefined
+%    \end{macrocode}
+%
+% \subsection{MACINTOSH (other)}
+% Some Macintosh implementations have different paths
+% for |\openin| and |\input|. For these one could use definitions like
+% the following (with whatever folders are used on your machine):
+% note that the directory names should end with |:|, and they should
+% contain {\em no\/} spaces.
+%    \begin{macrocode}
+% \def\@currdir{:}
+% \def\input@path{%
+%   {Hard-Disk:Applications:TeX:TeX-inputs:}%
+%   {Hard-Disk:Applications:TeX:My-inputs:}%
+% }
+%    \end{macrocode}
+%
+% \subsection{FAKE EXAMPLE}
+%  This example is for an operating system that has filenames of the
+%  form |<area>name|  For maximum compatibility with macro sets,
+%  you want |name.ext| to be mapped to |<ext>name|.
+%  and |<area>name.ext| to be mapped to |<area.ext>name|.
+%  |\input| does this mapping automatically, but |\openin| does not, and
+%  does not look in the same places as |\input|.
+%  |<>name| is the desired `current directory' syntax.
+%
+% the following code would possibly work:
+%    \begin{macrocode}
+% \def\@dir#1#2 {%
+%   \@d@r{#1}#2..\@nil}
+% \def\@d@r#1#2.#3.#4\@nil{%
+%   <\ifx\@dir#1\@dir\else#1\ifx\@dir#3\@dir\else.\fi\fi#3>#2 }
+%
+% \def\@currdir{\@dir{}}
+% \def\input@path{%
+%   {\@dir{area.one}}%
+%   {\@dir{area.two}}%
+% }
+%    \end{macrocode}

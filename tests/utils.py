@@ -14,9 +14,10 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import warnings
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from contextlib import ExitStack, contextmanager, suppress
 from multiprocessing import Process
 from pathlib import Path
@@ -43,12 +44,10 @@ from vllm.distributed import (
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.serve import ServeSubcommand
 from vllm.model_executor.kernels.linear import (
-    FP8ScaledMMLinearKernel,
+    _KernelT,
     init_fp8_linear_kernel,
 )
-from vllm.model_executor.layers.quantization.utils.fp8_utils import W8A8BlockFp8LinearOp
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape,
     QuantKey,
 )
 from vllm.model_executor.model_loader import get_model_loader
@@ -58,15 +57,12 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import GB_bytes
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.torch_utils import (
-    cuda_device_count_stateless,
     set_random_seed,  # noqa: F401 - re-exported for use in test files
 )
 
 FP8_DTYPE = current_platform.fp8_dtype()
 
 if current_platform.is_rocm():
-    import threading
-
     from amdsmi import (
         amdsmi_get_gpu_vram_usage,
         amdsmi_get_processor_handles,
@@ -250,6 +246,16 @@ class RemoteVLLMServer:
         (when the server fails to start). Must be safe to call even if
         the process is already dead.
         """
+        self._terminate_process_tree()
+        self._wait_for_gpu_memory_release()
+
+    def _terminate_process_tree(self) -> None:
+        """Kill the server process tree without waiting for GPU memory release.
+
+        Split out from ``_shutdown`` so that ``shutdown_many`` can run this
+        phase in parallel for sibling servers and then wait for GPU memory
+        release once at the end.
+        """
         pid = self.proc.pid
 
         # Get the process group ID. Because we used
@@ -291,9 +297,49 @@ class RemoteVLLMServer:
         # prevent VRAM from being reclaimed by the driver.
         self._kill_process_group_survivors(pgid)
 
-        # Wait for GPU memory to actually be freed, not just
-        # "stabilized at whatever level it's at".
-        self._wait_for_gpu_memory_release()
+    @classmethod
+    def shutdown_many(cls, servers: Sequence["RemoteVLLMServer"]) -> None:
+        """Shut down multiple sibling servers and wait for GPU memory once.
+
+        Test fixtures that hold several ``RemoteVLLMServer`` instances at
+        once must NOT shut them down by calling each server's ``__exit__``
+        sequentially: every server measures total GPU memory across all
+        visible devices in ``_wait_for_gpu_memory_release``, so the first
+        server's wait blocks the full timeout because later sibling
+        servers are still holding GPU memory.
+
+        Instead, this method terminates every server's process tree in
+        parallel, then runs the GPU-memory-release wait once against the
+        earliest recorded baseline (memory before any server started).
+        """
+        if not servers:
+            return
+
+        threads = [
+            threading.Thread(
+                target=s._terminate_process_tree,
+                name=f"shutdown-{s.proc.pid}",
+                daemon=True,
+            )
+            for s in servers
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # Use the smallest pre-server baseline so the wait targets memory
+        # usage before *any* of these sibling servers started, not after
+        # earlier siblings had already allocated.
+        earliest = min(
+            servers,
+            key=lambda s: (
+                float("inf")
+                if s._pre_server_gpu_memory is None
+                else s._pre_server_gpu_memory
+            ),
+        )
+        earliest._wait_for_gpu_memory_release()
 
     def _kill_process_group_survivors(
         self, pgid: int | None, timeout: float = 15.0
@@ -384,7 +430,7 @@ class RemoteVLLMServer:
             elif current_platform.is_cuda():
                 with _nvml():
                     total_used = 0
-                    device_count = cuda_device_count_stateless()
+                    device_count = current_platform.device_count()
                     for i in range(device_count):
                         handle = nvmlDeviceGetHandleByIndex(i)
                         mem_info = nvmlDeviceGetMemoryInfo(handle)
@@ -1264,9 +1310,6 @@ def fork_new_process_for_each_test(func: Callable[_P, None]) -> Callable[_P, Non
 
     @functools.wraps(func)
     def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> None:
-        # Make the process the leader of its own process group
-        # to avoid sending SIGTERM to the parent process
-        os.setpgrp()
         from _pytest.outcomes import Skipped
 
         # Create a unique temporary file to store exception info from child
@@ -1286,6 +1329,9 @@ def fork_new_process_for_each_test(func: Callable[_P, None]) -> Callable[_P, Non
             pid = os.fork()
             print(f"Fork a new process to run a test {pid}")
             if pid == 0:
+                # Make the child process the leader of its own process group
+                # to avoid sending SIGTERM to the parent process
+                os.setpgrp()
                 # Parent process responsible for deleting, don't delete
                 # in child.
                 delete_after.pop_all()
@@ -1325,14 +1371,12 @@ def fork_new_process_for_each_test(func: Callable[_P, None]) -> Callable[_P, Non
                 else:
                     os._exit(0)
             else:
-                pgid = os.getpgid(pid)
+                # After setpgrp(), the child's pgid equals its pid
+                pgid = pid
                 _pid, _exitcode = os.waitpid(pid, 0)
-                # ignore SIGTERM signal itself
-                old_signal_handler = signal.signal(signal.SIGTERM, signal.SIG_IGN)
-                # kill all child processes
-                os.killpg(pgid, signal.SIGTERM)
-                # restore the signal handler
-                signal.signal(signal.SIGTERM, old_signal_handler)
+                # kill all child processes - but they may already have exited cleanly
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(pgid, signal.SIGTERM)
                 if _exitcode != 0:
                     # Try to read the exception from the child process
                     exc_info = {}
@@ -1497,7 +1541,7 @@ def multi_gpu_marks(*, num_gpus: int):
     """Get a collection of pytest marks to apply for `@multi_gpu_test`."""
     test_selector = pytest.mark.distributed(num_gpus=num_gpus)
     test_skipif = pytest.mark.skipif(
-        cuda_device_count_stateless() < num_gpus,
+        current_platform.device_count() < num_gpus,
         reason=f"Need at least {num_gpus} GPUs to run the test.",
     )
 
@@ -1529,7 +1573,7 @@ def gpu_tier_mark(*, min_gpus: int = 1, max_gpus: int | None = None):
         @gpu_tier_mark(max_gpus=1)          # only on single-GPU
         @gpu_tier_mark(min_gpus=2, max_gpus=4)  # 2-4 GPUs only
     """
-    gpu_count = cuda_device_count_stateless()
+    gpu_count = current_platform.device_count()
     marks = []
 
     if min_gpus > 1:
@@ -1812,34 +1856,57 @@ class TestFP8Layer(torch.nn.Module):
         weight_shape: tuple[int, int],
         activation_quant_key: QuantKey,
         weight_quant_key: QuantKey,
+        input_dtype: torch.dtype,
         out_dtype: torch.dtype | None = None,
+        transpose_weights: bool = False,
         device: torch.device | None = None,
-        force_kernel: FP8ScaledMMLinearKernel | None = None,
+        force_kernel: type[_KernelT] | None = None,
     ):
         super().__init__()
-        per_tensor_weights = weight_quant_key.scale.group_shape.is_per_tensor()
-        is_static_activation_scale = activation_quant_key.scale.static
-        weight_scale_shape = (1,) if per_tensor_weights else (weight_shape[0], 1)
-
-        self.weight_scale = torch.rand(
-            weight_scale_shape, dtype=torch.float32, device=device
-        )
-        self.input_scale = (
-            torch.rand(1, dtype=torch.float32, device=device)
-            if is_static_activation_scale
-            else None
-        )
-        self.weight = torch.rand(weight_shape, device=device).to(dtype=FP8_DTYPE).t()
-        self.input_scale_ub = None
+        act_scale_desc = activation_quant_key.scale
+        weight_scale_desc = weight_quant_key.scale
+        is_block_wise = act_scale_desc.group_shape.is_per_group()
+        if is_block_wise:
+            block_size = weight_scale_desc.group_shape.col
+            weight_scale_shape = weight_shape[0] // block_size
+            self.weight_scale_inv = torch.rand(
+                (weight_scale_shape, weight_scale_shape), dtype=torch.float32
+            )
+            self.weight = torch.rand(weight_shape).to(dtype=FP8_DTYPE)
+            self.input_scale = None
+            self.weight_scale = None
+            self.weight_block_size = [block_size, block_size]
+            if transpose_weights:
+                self.weight = self.weight.t()
+        else:
+            per_tensor_weights = weight_scale_desc.group_shape.is_per_tensor()
+            is_static_activation_scale = act_scale_desc.static
+            weight_scale_shape = (1,) if per_tensor_weights else (weight_shape[0], 1)
+            self.weight_scale_inv = None
+            self.weight_scale = torch.rand(
+                weight_scale_shape, dtype=torch.float32, device=device
+            )
+            self.input_scale = (
+                torch.rand(1, dtype=torch.float32, device=device)
+                if is_static_activation_scale
+                else None
+            )
+            self.weight = (
+                torch.rand(weight_shape, device=device).to(dtype=FP8_DTYPE).t()
+            )
+            self.input_scale_ub = None
 
         out_dtype = torch.get_default_dtype() if out_dtype is None else out_dtype
 
         self.kernel = init_fp8_linear_kernel(
             activation_quant_key=activation_quant_key,
             weight_quant_key=weight_quant_key,
+            weight_shape=weight_shape,
+            input_dtype=input_dtype,
             out_dtype=out_dtype,
             force_kernel=force_kernel,
         )
+        self.kernel.process_weights_after_loading(self)
 
     def is_quant_fp8_enabled(self) -> bool:
         return self.kernel.quant_fp8.enabled()
@@ -1848,61 +1915,3 @@ class TestFP8Layer(torch.nn.Module):
         self, y: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         return self.kernel.apply_weights(self, y, bias)
-
-
-# TODO: Drop TestBlockFP8Layer in favour of a unified TestFP8Layer
-# after refactoring W8A8BlockFp8LinearOp.
-# https://github.com/vllm-project/vllm/issues/31818
-class TestBlockFP8Layer:
-    """
-    Test helper for blockwise FP8 linear operations. Creates random weights
-    and scales for W8A8BlockFp8LinearOp.
-
-    This is a workaround until W8A8BlockFp8LinearOp implements the kernel
-    abstraction (ScaledMMLinearKernel) for blockwise quantization.
-
-    Args:
-        weight_shape: Shape of the weight tensor (out_features, in_features).
-        group_shape: Blockwise quantization group shape.
-        cutlass_block_fp8_supported: Whether CUTLASS blockwise FP8 is available.
-        use_aiter_and_is_supported: Whether to use aiter quantization ops.
-        transpose_weights: Whether to transpose weights after creation.
-    """
-
-    def __init__(
-        self,
-        weight_shape: tuple[int, int],
-        group_shape: GroupShape,
-        cutlass_block_fp8_supported: bool = False,
-        use_aiter_and_is_supported: bool = False,
-        transpose_weights: bool = False,
-    ):
-        weight_scale_shape = weight_shape[0] // group_shape[1]
-        self.weight_scale = torch.rand(
-            (weight_scale_shape, weight_scale_shape), dtype=torch.float32
-        )
-        self.weight = torch.rand(weight_shape).to(dtype=FP8_DTYPE)
-        self.input_scale = None
-        if transpose_weights:
-            self.weight = self.weight.t()
-
-        self.linear_op = W8A8BlockFp8LinearOp(
-            weight_group_shape=GroupShape(group_shape[1], group_shape[1]),
-            act_quant_group_shape=group_shape,
-            cutlass_block_fp8_supported=cutlass_block_fp8_supported,
-            use_aiter_and_is_supported=use_aiter_and_is_supported,
-        )
-
-    def __call__(
-        self, y: torch.Tensor, bias: torch.Tensor | None = None
-    ) -> torch.Tensor:
-        return self.linear_op.apply(
-            input=y,
-            weight=self.weight,
-            weight_scale=self.weight_scale,
-            input_scale=self.input_scale,
-            bias=bias,
-        )
-
-    def is_quant_fp8_enabled(self) -> bool:
-        return self.linear_op.input_quant_op.enabled()

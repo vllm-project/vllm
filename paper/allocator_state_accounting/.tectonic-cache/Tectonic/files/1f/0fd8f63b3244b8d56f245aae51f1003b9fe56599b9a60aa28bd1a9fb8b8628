@@ -1,0 +1,17 @@
+% tex-ini-files 2016-04-15: xelatex.ini
+
+% Public domain.  Originally by Jonathan Kew.
+
+% Primitives in pdftex and luatex, we'll just use macros here.
+% Since we are generating a whatsit, not 100% compatible,
+% but hopefully close enough.
+% 
+\begingroup
+  \catcode`\{=1 %
+  \catcode`\}=2 %
+  \catcode`\#=6 %
+  \csname protected\endcsname\gdef\pdfmapfile#1{\special{pdf:mapfile #1}}%
+  \csname protected\endcsname\gdef\pdfmapline#1{\special{pdf:mapline #1}}%
+\endgroup
+
+\input latex.ltx

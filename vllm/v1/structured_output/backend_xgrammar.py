@@ -10,10 +10,9 @@ import torch
 import vllm.envs
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
-from vllm.utils.cache import CacheInfo
+from vllm.utils.cache import CacheInfo, LRUCache
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.mistral import is_mistral_tokenizer
-from vllm.utils.cache import LRUCache
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
     StructuredOutputGrammar,
@@ -41,9 +40,6 @@ class XgrammarBackend(StructuredOutputBackend):
     def __post_init__(self):
         self.disable_any_whitespace = (
             self.vllm_config.structured_outputs_config.disable_any_whitespace
-        )
-        self._compiled_grammars: LRUCache[StructuredOutputKey, xgr.CompiledGrammar] = (
-            LRUCache(_XGRAMMAR_COMPILED_GRAMMAR_CACHE_SIZE)
         )
 
         if is_mistral_tokenizer(self.tokenizer):
@@ -75,6 +71,9 @@ class XgrammarBackend(StructuredOutputBackend):
             cache_enabled=True,
             cache_limit_bytes=vllm.envs.VLLM_XGRAMMAR_CACHE_MB * 1024 * 1024,
         )
+        self._compiled_grammars: LRUCache[StructuredOutputKey, Any] = LRUCache(
+            _XGRAMMAR_COMPILED_GRAMMAR_CACHE_SIZE
+        )
 
         self.num_speculative_tokens = 0
         if self.vllm_config.speculative_config is not None:
@@ -82,33 +81,17 @@ class XgrammarBackend(StructuredOutputBackend):
                 self.vllm_config.speculative_config.num_speculative_tokens
             )
 
-    def compile_grammar(
-        self, request_type: StructuredOutputOptions, grammar_spec: str
-    ) -> StructuredOutputGrammar:
-        ctx = self._compiled_grammars.get((request_type, grammar_spec))
-        if ctx is None:
-            ctx = self._compile_context(request_type, grammar_spec)
-            self._compiled_grammars[(request_type, grammar_spec)] = ctx
-
-        return XgrammarGrammar(
-            matcher=xgr.GrammarMatcher(
-                ctx,
-                max_rollback_tokens=self.num_speculative_tokens,
-            ),
-            vocab_size=self.vocab_size,
-            ctx=ctx,
-        )
-
     def _compile_context(
         self, request_type: StructuredOutputOptions, grammar_spec: str
-    ) -> xgr.CompiledGrammar:
+    ) -> Any:
         if request_type == StructuredOutputOptions.JSON:
             return self.compiler.compile_json_schema(
                 grammar_spec, any_whitespace=not self.disable_any_whitespace
             )
         if request_type == StructuredOutputOptions.JSON_OBJECT:
             return self.compiler.compile_json_schema(
-                '{"type": "object"}', any_whitespace=not self.disable_any_whitespace
+                '{"type": "object"}',
+                any_whitespace=not self.disable_any_whitespace,
             )
         if request_type == StructuredOutputOptions.GRAMMAR:
             return self.compiler.compile_grammar(grammar_spec)
@@ -129,11 +112,25 @@ class XgrammarBackend(StructuredOutputBackend):
                 return self.compiler.compile_structural_tag(tags, s_tag["triggers"])
             return self.compiler.compile_structural_tag(grammar_spec)
 
-        logger.error(
-            "Validation should have already occurred. Please file an issue."
-        )
-        raise ValueError(
-            f"grammar is not of valid supported types. ({request_type!s})"
+        logger.error("Validation should have already occurred. Please file an issue.")
+        raise ValueError(f"grammar is not of valid supported types. ({request_type!s})")
+
+    def compile_grammar(
+        self, request_type: StructuredOutputOptions, grammar_spec: str
+    ) -> StructuredOutputGrammar:
+        key = (request_type, grammar_spec)
+        ctx = self._compiled_grammars.get(key)
+        if ctx is None:
+            ctx = self._compile_context(request_type, grammar_spec)
+            self._compiled_grammars.put(key, ctx)
+
+        return XgrammarGrammar(
+            matcher=xgr.GrammarMatcher(
+                ctx,
+                max_rollback_tokens=self.num_speculative_tokens,
+            ),
+            vocab_size=self.vocab_size,
+            ctx=ctx,
         )
 
     def allocate_token_bitmask(self, max_num_seqs: int):
@@ -149,7 +146,8 @@ class XgrammarBackend(StructuredOutputBackend):
         stats = self.compiled_grammar_cache_stats()
         if stats.total > 0:
             logger.debug(
-                "Xgrammar compiled grammar cache stats: hits=%d total=%d hit_ratio=%.4f entries=%d",
+                "Xgrammar compiled grammar cache stats: "
+                "hits=%d total=%d hit_ratio=%.4f entries=%d",
                 stats.hits,
                 stats.total,
                 stats.hit_ratio,
@@ -320,7 +318,7 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
             xgr.Grammar.from_ebnf(choice_grammar)
         except Exception as err:
             raise ValueError(
-                "Failed to transform choices into a grammar: {err}"
+                f"Failed to transform choices into a grammar: {err}"
             ) from err
         so_params.choice = None
         so_params.grammar = choice_grammar

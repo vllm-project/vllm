@@ -1,0 +1,194 @@
+% File load-unicode-data.tex
+%
+% Copyright 2015-2020 The LaTeX3 Project
+%
+% It may be distributed and/or modified under the conditions of
+% the LaTeX Project Public License (LPPL), either version 1.3c of
+% this license or (at your option) any later version. The latest
+% version of this license is in the file
+% http://www.latex-project.org/lppl.txt.
+%
+% Issues with this file should be reported at
+% https://github.com/latex3/unicode-data
+%
+% This file parses a number of data files provided by the Unicode Consortium
+% and when used with used Unicode-capable engine sets up a range of TeX-related
+% parameters based on the extracted information.
+%
+% From the file UnicodeData.txt the following properties are set:
+% - \catcode 11 for all letters (Unicode class "L")
+% - \catcode 11 for all combining marks (Unicode class "M")
+% - \sfcode 999 for all code points of class "Lu" (upper case letters)
+% - \lccode for all of class "Ll" (lower case letters) to the code point
+%   itself, and \uccode to the upper case mapping (or if not given
+%   to the code point itself)
+% - \uccode for all of class "Lu" (upper case letters) to the code point
+%   itself, and \lccode to the lower case mapping (or if not given
+%   to the code point itself)
+% - \lccode and \uccode for all of class "Lt" (title case letters) to the
+%   lower and upper case mappings (or if not given to the code point itself)
+% - \lccode and \uccode for all other letter code points are set to
+%   the code point itself
+% - \lccode and/or \uccode for non-letter code points for which an upper
+%   or lower case mapping is given
+% - \sfcode 0 (ignored) for code points of Unicode classes "Pe" (closing
+%   punctuation marks) and "Pf" (final quotation marks)
+% - \Umathcode for all letters as math type 7 (var)
+%
+% =============================================================================
+%
+% The data can only be loaded by Unicode engines. Currently this is limited to
+% XeTeX and LuaTeX, both of which define \Umathcode.
+\ifx\Umathcode\undefined
+  \expandafter\endinput
+\fi
+% Just in case, check for the e-TeX extensions.
+\ifx\eTeXversion\undefined
+  \expandafter\endinput
+\fi
+% This file can be loaded in IniTeX mode so the category codes of |{|, |}| and
+% |#| may not be correct. Everything is done in a group so that only the
+% settings we want to propagate are made available generally.
+\begingroup
+  \catcode`\{=1 %
+  \catcode`\}=2 %
+  \catcode`\#=6 %
+% Write some basic information to the log.
+  \catcode`\^=7 %
+  \newlinechar=`\^^J %
+  \message{^^J}%
+  \message{load-unicode-data.tex v1.15 (2021-09-15)^^J}%
+  \message{Reading Unicode data^^J}%
+% The first stage of parsing is dealing with the fact that there are lots of
+% data items separated by |;|. Of those, only a few are needed so they are
+% picked out and everything else is dropped. There is one complication: there
+% are a few cases in the data file of ranges which are marked by the descriptor
+% |First| and a matching |Last|. A separate routine is used to handle these
+% cases.
+  \def\parseunicodedataI#1;#2;#3;#4;#5;#6;#7;#8;#9;{%
+    \parseunicodedataII#1;#3;#2 First>\relax
+  }%
+  \def\parseunicodedataII#1;#2;#3 First>#4\relax{%
+    \ifx\relax#4\relax
+      \expandafter\parseunicodedataIII
+    \else
+      \expandafter\parseunicodedataVII
+    \fi
+    #1;#2;%
+  }%
+  \def\parseunicodedataIII#1;#2;#3;#4;#5;#6;#7;#8\relax{%
+    \parseunicodedataIV{#1}{#2}{#6}{#7}%
+  }%
+% At this stage we have a `normal' data line with four pieces of information:
+% the code point, the Unicode class and the (possibly empty) upper and lower
+% case mappings. A few utility macros are defined, then we branch based on the
+% Unicode class. Notice that for all letter-like code points we first set the
+% |\lccode| and |\uccode| values to the code point itself then test for the
+% classes where a different setting might be appropriate. For non-letters
+% there is a check to see if any mappings are available, and also for trailing
+% punctuation to set the appropriate |\sfcode|.
+  \def\Ll{Ll}%
+  \def\Lt{Lt}%
+  \def\Lu{Lu}%
+  \def\Pe{Pe}%
+  \def\Pf{Pf}%
+  \def\firsttoken#1#2\relax{#1}%
+  \def\parseunicodedataIV#1#2#3#4{%
+    \ifnum 0%
+      \if L\firsttoken#2?\relax 1\fi
+      \if M\firsttoken#2?\relax 1\fi
+      >0 %
+      \parseunicodedataV{"#1}%
+      \def\temp{#2}%
+      \ifx\Ll\temp
+        \parseunicodedataVI\uccode{#1}{#3}%
+      \fi
+      \ifx\Lt\temp
+        \parseunicodedataVI\uccode{#1}{#3}%
+        \parseunicodedataVI\lccode{#1}{#4}%
+      \fi
+      \ifx\Lu\temp
+        \parseunicodedataVI\lccode{#1}{#4}%
+        \global\sfcode"#1=999 %
+      \fi
+% All letters in math mode should be variables.
+      \global\Umathcode"#1="7"01"#1 %
+    \else
+      \def\temp{#2}%
+      \ifnum 0\ifx\temp\Pe 1\fi\ifx\temp\Pf 1\fi>0 %
+        \global\sfcode"#1=0 %
+      \fi
+      \ifx\relax#3\relax
+      \else
+        \global\uccode"#1="#3 %
+      \fi
+      \ifx\relax#4\relax
+      \else
+        \global\lccode"#1="#4 %
+      \fi
+    \fi
+  }%
+% A simple auxiliary for all letter-like code points: the |\lccode| and
+% |\uccode| may get reset for cased letters but this means the initial
+% setting can't be forgotten.
+  \def\parseunicodedataV#1{%
+    \global\catcode#1=11 %
+    \global\lccode#1=#1 %
+    \global\uccode#1=#1 %
+  }%
+% An auxiliary to deal with the fact that some cased letters don't actually
+% have a case mapping available.
+  \def\parseunicodedataVI#1#2#3{%
+    \ifx\relax#3\relax
+    \else
+      \global#1"#2="#3 %
+    \fi
+  }%
+% For lines that were the |First>| of a range, read the data source again for
+% last line. Lines for letters then trigger a loop over the entire range. These
+% are always non-cased letters.
+  \def\parseunicodedataVII#1;#2;#3\relax{%
+    \read0 to \unicodedataline
+    \expandafter\parseunicodedataXII\unicodedataline\relax#1;#2\relax
+  }%
+  \def\parseunicodedataXII#1;#2\relax#3;#4\relax{%
+    \if L\firsttoken#4?\relax
+      \begingroup
+        \count0="#3 %
+        \loop
+          \unless\ifnum\count0>"#1 %
+            \parseunicodedataV{\count0 }%
+            \advance\count0 by 1 %
+        \repeat
+      \endgroup
+    \fi
+  }%
+% From plain: may not be defined (yet).
+  \def\loop#1\repeat{\def\body{#1}\iterate}%
+  \def\iterate{%
+    \body
+      \let\next\iterate
+    \else
+      \let\next\relax
+    \fi
+    \next
+  }%
+  \let\repeat\fi
+% There is no version data in |UnicodeData.txt|: log that it is being used with
+% a hard-coded date (the modification date from ftp.unicode.org). This obviously
+% needs to be updated when a new download takes place!
+  \message{\string# UnicodeData-14.0.0.txt^^J}%
+  \message{\string# Modified 2021-09-15 11:00:00 GMT [JAW]^^J}%
+% Actually loading the file requires an input stream, done directly.
+% There is a blank line at the end of the data source so there is a check
+% here for a |\par|.
+  \def\storedpar{\par}%
+  \openin0=UnicodeData.txt %
+  \loop\unless\ifeof0 %
+    \read0 to \unicodedataline
+    \unless\ifx\unicodedataline\storedpar
+      \expandafter\parseunicodedataI\unicodedataline\relax
+    \fi
+  \repeat
+  \closein0 %
+\endgroup

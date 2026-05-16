@@ -54,11 +54,34 @@ struct Counter {
 };
 
 inline int64_t get_available_l2_size() {
+#if defined(__s390x__)
   static int64_t size = []() {
-    const uint32_t l2_cache_size = at::cpu::L2_cache_size();
+    uint32_t l2_cache_size = 0;
+    auto caps = at::cpu::get_cpu_capabilities();
+    auto it = caps.find("l2_cache_size");
+    if (it != caps.end()) {
+      l2_cache_size = static_cast<uint32_t>(it->second.toInt());
+    }
+    if (l2_cache_size == 0) {
+      long sys_l2 = sysconf(_SC_LEVEL2_CACHE_SIZE);
+      if (sys_l2 > 0) {
+        l2_cache_size = static_cast<uint32_t>(sys_l2);
+      }
+    }
+    if (l2_cache_size == 0) {
+      l2_cache_size = 256 * 1024;
+    }
+    return static_cast<int64_t>(l2_cache_size) >> 1;  // use 50% of L2 cache
+  }();
+  return size;
+#else
+  static int64_t size = []() {
+    auto caps = at::cpu::get_cpu_capabilities();
+    const uint32_t l2_cache_size = caps.at("l2_cache_size").toInt();
     return l2_cache_size >> 1;  // use 50% of L2 cache
   }();
   return size;
+#endif
 }
 
 template <int32_t alignment_v, typename T>

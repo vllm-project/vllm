@@ -1,0 +1,868 @@
+%%
+%% This is file `atbegshi.sty',
+%% generated with the docstrip utility.
+%%
+%% The original source files were:
+%%
+%% atbegshi.dtx  (with options: `package')
+%% 
+%% This is a generated file.
+%% 
+%% Project: atbegshi
+%% Version: 2019/12/05 v1.19
+%% 
+%% Copyright (C)
+%%    2007-2011 Heiko Oberdiek
+%%    2016-2019 Oberdiek Package Support Group
+%% 
+%% This work may be distributed and/or modified under the
+%% conditions of the LaTeX Project Public License, either
+%% version 1.3c of this license or (at your option) any later
+%% version. This version of this license is in
+%%    https://www.latex-project.org/lppl/lppl-1-3c.txt
+%% and the latest version of this license is in
+%%    https://www.latex-project.org/lppl.txt
+%% and version 1.3 or later is part of all distributions of
+%% LaTeX version 2005/12/01 or later.
+%% 
+%% This work has the LPPL maintenance status "maintained".
+%% 
+%% The Current Maintainers of this work are
+%% Heiko Oberdiek and the Oberdiek Package Support Group
+%% https://github.com/ho-tex/atbegshi/issues
+%% 
+%% 
+%% The Base Interpreter refers to any `TeX-Format',
+%% because some files are installed in TDS:tex/generic//.
+%% 
+%% This work consists of the main source file atbegshi.dtx
+%% and the derived files
+%%    atbegshi.sty, atbegshi.pdf, atbegshi.ins, atbegshi.drv,
+%%    atbegshi-example1.tex, atbegshi-example2.tex,
+%%    atbegshi-test1.tex, atbegshi-test2.tex, atbegshi-test3.tex.
+%% 
+\begingroup\catcode61\catcode48\catcode32=10\relax%
+  \catcode13=5 % ^^M
+  \endlinechar=13 %
+  \catcode35=6 % #
+  \catcode39=12 % '
+  \catcode44=12 % ,
+  \catcode45=12 % -
+  \catcode46=12 % .
+  \catcode58=12 % :
+  \catcode64=11 % @
+  \catcode123=1 % {
+  \catcode125=2 % }
+  \expandafter\let\expandafter\x\csname ver@atbegshi.sty\endcsname
+  \ifx\x\relax % plain-TeX, first loading
+  \else
+    \def\empty{}%
+    \ifx\x\empty % LaTeX, first loading,
+      % variable is initialized, but \ProvidesPackage not yet seen
+    \else
+      \expandafter\ifx\csname PackageInfo\endcsname\relax
+        \def\x#1#2{%
+          \immediate\write-1{Package #1 Info: #2.}%
+        }%
+      \else
+        \def\x#1#2{\PackageInfo{#1}{#2, stopped}}%
+      \fi
+      \x{atbegshi}{The package is already loaded}%
+      \aftergroup\endinput
+    \fi
+  \fi
+\endgroup%
+\begingroup\catcode61\catcode48\catcode32=10\relax%
+  \catcode13=5 % ^^M
+  \endlinechar=13 %
+  \catcode35=6 % #
+  \catcode39=12 % '
+  \catcode40=12 % (
+  \catcode41=12 % )
+  \catcode44=12 % ,
+  \catcode45=12 % -
+  \catcode46=12 % .
+  \catcode47=12 % /
+  \catcode58=12 % :
+  \catcode64=11 % @
+  \catcode91=12 % [
+  \catcode93=12 % ]
+  \catcode123=1 % {
+  \catcode125=2 % }
+  \expandafter\ifx\csname ProvidesPackage\endcsname\relax
+    \def\x#1#2#3[#4]{\endgroup
+      \immediate\write-1{Package: #3 #4}%
+      \xdef#1{#4}%
+    }%
+  \else
+    \def\x#1#2[#3]{\endgroup
+      #2[{#3}]%
+      \ifx#1\@undefined
+        \xdef#1{#3}%
+      \fi
+      \ifx#1\relax
+        \xdef#1{#3}%
+      \fi
+    }%
+  \fi
+\expandafter\x\csname ver@atbegshi.sty\endcsname
+\ProvidesPackage{atbegshi}%
+  [2019/12/05 v1.19 At begin shipout hook (HO)]%
+\begingroup\catcode61\catcode48\catcode32=10\relax%
+  \catcode13=5 % ^^M
+  \endlinechar=13 %
+  \catcode123=1 % {
+  \catcode125=2 % }
+  \catcode64=11 % @
+  \def\x{\endgroup
+    \expandafter\edef\csname AtBegShi@AtEnd\endcsname{%
+      \endlinechar=\the\endlinechar\relax
+      \catcode13=\the\catcode13\relax
+      \catcode32=\the\catcode32\relax
+      \catcode35=\the\catcode35\relax
+      \catcode61=\the\catcode61\relax
+      \catcode64=\the\catcode64\relax
+      \catcode123=\the\catcode123\relax
+      \catcode125=\the\catcode125\relax
+    }%
+  }%
+\x\catcode61\catcode48\catcode32=10\relax%
+\catcode13=5 % ^^M
+\endlinechar=13 %
+\catcode35=6 % #
+\catcode64=11 % @
+\catcode123=1 % {
+\catcode125=2 % }
+\def\TMP@EnsureCode#1#2{%
+  \edef\AtBegShi@AtEnd{%
+    \AtBegShi@AtEnd
+    \catcode#1=\the\catcode#1\relax
+  }%
+  \catcode#1=#2\relax
+}
+\TMP@EnsureCode{40}{12}% (
+\TMP@EnsureCode{41}{12}% )
+\TMP@EnsureCode{44}{12}% ,
+\TMP@EnsureCode{45}{12}% -
+\TMP@EnsureCode{47}{12}% /
+\TMP@EnsureCode{46}{12}% .
+\TMP@EnsureCode{58}{12}% :
+\TMP@EnsureCode{91}{12}% [
+\TMP@EnsureCode{93}{12}% ]
+\TMP@EnsureCode{94}{7}% ^(superscript)
+\TMP@EnsureCode{96}{12}% `
+\edef\AtBegShi@AtEnd{\AtBegShi@AtEnd\noexpand\endinput}
+\begingroup\expandafter\expandafter\expandafter\endgroup
+\expandafter\ifx\csname RequirePackage\endcsname\relax
+  \def\TMP@RequirePackage#1[#2]{%
+    \begingroup\expandafter\expandafter\expandafter\endgroup
+    \expandafter\ifx\csname ver@#1.sty\endcsname\relax
+      \input #1.sty\relax
+    \fi
+  }%
+  \TMP@RequirePackage{infwarerr}[2007/09/09]%
+  \TMP@RequirePackage{ltxcmds}[2010/03/01]%
+\else
+  \RequirePackage{infwarerr}[2007/09/09]%
+  \RequirePackage{ltxcmds}[2010/03/01]%
+\fi
+\begingroup\expandafter\expandafter\expandafter\endgroup
+\expandafter\ifx\csname @ifdefinable\endcsname\relax
+  \def\AtBegShi@CheckDefinable#1{%
+    \ifcase\ifx#1\relax
+             \ltx@one
+           \else
+             \ifx#1\@undefined
+               \ltx@one
+             \else
+               \ltx@zero
+             \fi
+           \fi
+      \@PackageError{atbegshi}{%
+        \string#1\space is already defined%
+      }\@ehd
+    \fi
+  }%
+\else
+  \def\AtBegShi@CheckDefinable#1{%
+    \@ifdefinable{#1}{}%
+  }%
+\fi
+\ltx@newif\ifAtBegShi@Discarded
+\AtBegShi@CheckDefinable\AtBeginShipoutDiscard
+\def\AtBeginShipoutDiscard{%
+  \deadcycles=\ltx@zero
+  \global\AtBegShi@Discardedtrue
+}
+\begingroup\expandafter\expandafter\expandafter\endgroup
+\expandafter\ifx\csname currentgrouplevel\endcsname\relax
+  \catcode`X=9  % ignore
+  \catcode`E=14 % comment
+\else
+  \catcode`X=14 % comment
+  \catcode`E=9  % ignore
+\fi
+\def\AtBegShi@Shipout{%
+X \begingroup
+X \setbox\AtBeginShipoutBox=\hbox\bgroup
+X \kern\p@
+E \edef\AtBegShi@GroupLevel{\number\currentgrouplevel}%
+  \afterassignment\AtBegShi@Test
+X \global
+  \setbox\AtBeginShipoutBox=%
+}
+\def\AtBegShi@Test{%
+X \ifdim\lastkern=0pt %
+E \ifnum\AtBegShi@GroupLevel<\currentgrouplevel
+    \expandafter\aftergroup
+  \fi
+  \AtBegShi@Output
+}
+\def\AtBegShi@Output{%
+X \egroup
+X \endgroup
+  \ifvoid\AtBeginShipoutBox
+    \@PackageWarning{atbegshi}{Ignoring void shipout box}%
+  \else
+    \let\AtBegShi@OrgProtect\protect
+    \csname set@typeset@protect\endcsname
+    \global\AtBegShi@Discardedfalse
+    \AtBegShi@Hook
+    \expandafter\gdef\expandafter\AtBegShi@HookNext
+    \expandafter{\expandafter}%
+    \AtBegShi@HookNext
+    \ifAtBegShi@Discarded
+      \@PackageInfoNoLine{atbegshi}{Shipout page discarded}%
+      \global\AtBegShi@Discardedfalse
+      \begingroup
+        \setbox\AtBeginShipoutBox\box\AtBeginShipoutBox
+      \endgroup
+      \let\protect\AtBegShi@OrgProtect
+    \else
+      \AtBegShi@First
+      \let\protect\AtBegShi@OrgProtect
+      \AtBegShi@GetBoxSize\AtBeginShipoutBox
+      \ltx@ifundefined{AtNextShipout}{%
+      }{%
+        \AtNextShipout{\AtBegShi@GetBoxSize\@cclv}%
+      }%
+      \AtBeginShipoutOriginalShipout\box\AtBeginShipoutBox
+    \fi
+  \fi
+}
+\def\AtBegShi@GetBoxSize#1{%
+  \xdef\AtBeginShipoutBoxWidth{\the\wd#1}%
+  \xdef\AtBeginShipoutBoxHeight{\the\ht#1}%
+  \xdef\AtBeginShipoutBoxDepth{\the\dp#1}%
+}
+\def\AtBeginShipoutBoxWidth{0pt}
+\def\AtBeginShipoutBoxHeight{0pt}
+\def\AtBeginShipoutBoxDepth{0pt}
+\catcode`\X=11 %
+\catcode`\E=11 %
+\def\AtBegShi@First{%
+  \ifx\AtBegShi@HookFirst\ltx@empty
+  \else
+    \AtBeginShipoutAddToBox{\AtBegShi@HookFirst}%
+  \fi
+  \global\let\AtBegShi@First\ltx@empty
+  \global\let\AtBeginShipoutFirst\AtBegShi@FirstDisabled
+}
+\gdef\AtBegShi@Hook{}
+\gdef\AtBegShi@HookNext{}
+\gdef\AtBegShi@HookFirst{}
+\AtBegShi@CheckDefinable\AtBeginShipout
+\def\AtBeginShipout{%
+  \AtBegShi@AddHook\AtBegShi@Hook
+}
+\AtBegShi@CheckDefinable\AtBeginShipoutNext
+\def\AtBeginShipoutNext{%
+  \AtBegShi@AddHook\AtBegShi@HookNext
+}
+\AtBegShi@CheckDefinable\AtBeginShipoutFirst
+\def\AtBeginShipoutFirst{%
+  \AtBegShi@AddTo\AtBegShi@HookFirst
+}
+\long\def\AtBegShi@FirstDisabled#1{%
+  \@PackageWarning{atbegshi}{%
+    First page is already shipped out, ignoring\MessageBreak
+    \string\AtBeginShipoutFirst
+  }%
+}
+\begingroup\expandafter\expandafter\expandafter\endgroup
+\expandafter\ifx\csname g@addto@macro\endcsname\relax
+  \long\def\AtBegShi@AddTo#1#2{%
+    \begingroup
+      \toks\ltx@zero\expandafter{#1#2}%
+      \xdef#1{\the\toks\ltx@zero}%
+    \endgroup
+  }%
+\else
+  \let\AtBegShi@AddTo\g@addto@macro
+\fi
+\long\def\AtBegShi@AddHook#1#2{%
+  \AtBegShi@AddTo#1{\AtBegShi@Item{#2}}%
+}
+\long\def\AtBegShi@Item#1{%
+  \ifAtBegShi@Discarded
+  \else
+    #1%
+    \ifAtBegShi@Discarded
+    \else
+      \ifvoid\AtBeginShipoutBox
+        \@PackageWarning{atbegshi}{%
+          Shipout box was voided by hook,\MessageBreak
+          ignoring shipout box%
+        }%
+        \AtBeginShipoutDiscard
+      \fi
+    \fi
+  \fi
+}
+\AtBegShi@CheckDefinable\AtBeginShipoutInit
+\def\AtBeginShipoutInit{%
+  \ltx@IfUndefined{newbox}{%
+    \@PackageError{atbegshi}{%
+      \string\AtBeginShipoutInit\space failed\MessageBreak
+       because of missing \expandafter\string\csname newbox\endcsname
+    }\@ehc
+  }{%
+    \csname newbox\endcsname\AtBeginShipoutBox
+    \AtBegShi@CheckDefinable\AtBeginShipoutOriginalShipout
+    \global\let\AtBeginShipoutOriginalShipout\shipout
+    \global\let\shipout\AtBegShi@Shipout
+  }%
+  \gdef\AtBeginShipoutInit{}%
+}
+\begingroup\expandafter\expandafter\expandafter\endgroup
+\expandafter\ifx\csname AtBeginDocument\endcsname\relax
+  \AtBeginShipoutInit
+\else
+  \AtBeginDocument{\AtBeginShipoutInit}%
+\fi
+\def\AtBeginShipoutAddToBox#1{%
+  \ifhbox\AtBeginShipoutBox
+    \edef\AtBegShi@restore{%
+      \hfuzz=\the\hfuzz\relax
+      \hbadness=\the\hbadness\relax
+    }%
+    \hfuzz=1073741823sp\relax
+    \hbadness=2147483647\relax
+    \setbox\AtBeginShipoutBox=\hbox to \wd\AtBeginShipoutBox{%
+      \setbox\ltx@zero=\hbox{%
+        \begingroup
+          \AtBegShi@restore
+          #1%
+        \endgroup
+      }%
+      \wd\ltx@zero=0pt\relax
+      \ht\ltx@zero=0pt\relax
+      \dp\ltx@zero=0pt\relax
+      \raise\ht\AtBeginShipoutBox\copy\ltx@zero
+      \unhcopy\AtBeginShipoutBox
+    }%
+    \AtBegShi@restore
+  \else
+    \ifvbox\AtBeginShipoutBox
+      \edef\AtBegShi@restore{%
+        \vfuzz=\the\vfuzz\relax
+        \vbadness=\the\vbadness\relax
+        \dimen\ltx@zero=\the\dimen\ltx@zero\relax
+      }%
+      \edef\AtBegShi@restorebox{%
+        \ht\AtBeginShipoutBox=\the\ht\AtBeginShipoutBox\relax
+        \dp\AtBeginShipoutBox=\the\dp\AtBeginShipoutBox\relax
+      }%
+      \vfuzz=1073741823sp\relax
+      \vbadness=2147483647\relax
+      \dimen\ltx@zero=\ht\AtBeginShipoutBox
+      \advance\dimen\ltx@zero by \dp\AtBeginShipoutBox
+      \setbox\AtBeginShipoutBox=\vbox to \dimen\ltx@zero{%
+        \setbox\ltx@zero=\hbox{%
+          \begingroup
+            \AtBegShi@restore
+            #1%
+          \endgroup
+        }%
+        \wd\ltx@zero=0pt\relax
+        \ht\ltx@zero=0pt\relax
+        \dp\ltx@zero=0pt\relax
+        \baselineskip=0pt\relax
+        \lineskip=0pt\relax
+        \lineskiplimit=0pt\relax
+        \copy\ltx@zero
+        \unvbox\AtBeginShipoutBox
+        \kern0pt%
+      }%
+      \AtBegShi@restore
+      \AtBegShi@restorebox
+    \fi
+  \fi
+}
+\def\AtBeginShipoutAddToBoxForeground#1{%
+  \ifhbox\AtBeginShipoutBox
+    \edef\AtBegShi@restore{%
+      \hfuzz=\the\hfuzz\relax
+      \hbadness=\the\hbadness\relax
+    }%
+    \hfuzz=1073741823sp\relax
+    \hbadness=2147483647\relax
+    \setbox\AtBeginShipoutBox=\hbox to \wd\AtBeginShipoutBox{%
+      \unhcopy\AtBeginShipoutBox
+      \kern-\wd\AtBeginShipoutBox
+      \setbox\ltx@zero=\hbox{%
+        \begingroup
+          \AtBegShi@restore
+          #1%
+        \endgroup
+      }%
+      \wd\ltx@zero=0pt\relax
+      \ht\ltx@zero=0pt\relax
+      \dp\ltx@zero=0pt\relax
+      \raise\ht\AtBeginShipoutBox\copy\ltx@zero
+      \kern\wd\AtBeginShipoutBox
+    }%
+    \AtBegShi@restore
+  \else
+    \ifvbox\AtBeginShipoutBox
+      \edef\AtBegShi@restore{%
+        \vfuzz=\the\vfuzz\relax
+        \vbadness=\the\vbadness\relax
+        \dimen\ltx@zero=\the\dimen\ltx@zero\relax
+      }%
+      \edef\AtBegShi@restorebox{%
+        \ht\AtBeginShipoutBox=\the\ht\AtBeginShipoutBox\relax
+        \dp\AtBeginShipoutBox=\the\dp\AtBeginShipoutBox\relax
+      }%
+      \vfuzz=1073741823sp\relax
+      \vbadness=2147483647\relax
+      \dimen\ltx@zero=\ht\AtBeginShipoutBox
+      \advance\dimen\ltx@zero by \dp\AtBeginShipoutBox
+      \setbox\AtBeginShipoutBox=\vbox to \dimen\ltx@zero{%
+        \setbox\ltx@zero=\hbox{%
+          \begingroup
+            \AtBegShi@restore
+            #1%
+          \endgroup
+        }%
+        \wd\ltx@zero=0pt\relax
+        \ht\ltx@zero=0pt\relax
+        \dp\ltx@zero=0pt\relax
+        \baselineskip=0pt\relax
+        \lineskip=0pt\relax
+        \lineskiplimit=0pt\relax
+        \unvbox\AtBeginShipoutBox
+        \kern-\dimen\ltx@zero
+        \copy\ltx@zero
+        \kern\dimen\ltx@zero
+      }%
+      \AtBegShi@restore
+      \AtBegShi@restorebox
+    \fi
+  \fi
+}
+\begingroup\expandafter\expandafter\expandafter\endgroup
+\expandafter\ifx\csname RequirePackage\endcsname\relax
+  \def\TMP@RequirePackage#1[#2]{%
+    \begingroup\expandafter\expandafter\expandafter\endgroup
+    \expandafter\ifx\csname ver@#1.sty\endcsname\relax
+      \input #1.sty\relax
+    \fi
+  }%
+  \TMP@RequirePackage{iftex}[2019/11/07]%
+\else
+  \RequirePackage{iftex}[2019/11/07]%
+\fi
+\ifpdf
+  \def\AtBegShi@horigin{%
+    \ifx\pdfhorigin\@undefined\pdfvariable horigin\else\pdfhorigin\fi}%
+  \def\AtBegShi@vorigin{%
+    \ifx\pdfvorigin\@undefined\pdfvariable vorigin\else\pdfvorigin\fi}%
+\else
+  \def\AtBegShi@horigin{72.27pt}%
+  \def\AtBegShi@vorigin{72.27pt}%
+\fi
+\begingroup
+\ifcase
+    \expandafter\ifx\csname picture\endcsname\relax
+      1%
+    \else
+      \expandafter\ifx\csname endpicture\endcsname\relax
+        1%
+      \else
+        0%
+      \fi
+    \fi
+  \endgroup
+  \def\AtBegShi@BeginPicture{%
+    \begingroup
+    \picture(0,0)\relax
+    \begingroup\expandafter\expandafter\expandafter\endgroup
+    \expandafter\ifx\csname unitlength\endcsname\relax
+    \else
+      \unitlength=1pt\relax
+    \fi
+    \ignorespaces
+  }%
+  \def\AtBegShi@EndPicture{%
+    \endpicture
+    \endgroup
+  }%
+\else
+  \endgroup
+  \def\AtBegShi@BeginPicture{%
+    \setbox\ltx@zero=\hbox\bgroup
+    \begingroup
+    \ignorespaces
+  }%
+  \def\AtBegShi@EndPicture{%
+    \endgroup
+    \egroup
+    \ht\ltx@zero=0pt\relax
+    \dp\ltx@zero=0pt\relax
+    \copy\ltx@zero
+  }%
+\fi
+\def\AtBeginShipoutUpperLeft#1{%
+  \AtBeginShipoutAddToBox{%
+    \kern-\AtBegShi@horigin\relax
+    \vbox to 0pt{%
+      \kern-\AtBegShi@vorigin\relax
+      \AtBegShi@BeginPicture
+      #1%
+      \AtBegShi@EndPicture
+      \vss
+    }%
+  }%
+}
+\def\AtBeginShipoutUpperLeftForeground#1{%
+  \AtBeginShipoutAddToBoxForeground{%
+    \kern-\AtBegShi@horigin\relax
+    \vbox to 0pt{%
+      \kern-\AtBegShi@vorigin\relax
+      \AtBegShi@BeginPicture
+      #1%
+      \AtBegShi@EndPicture
+      \vss
+    }%
+  }%
+}
+\def\AtBegShi@AbortIfUndefined#1{%
+  \begingroup\expandafter\expandafter\expandafter\endgroup
+  \expandafter\ifx\csname#1\endcsname\relax
+    \expandafter\AtBegShi@AtEnd
+  \fi
+}
+\AtBegShi@AbortIfUndefined{currentgrouplevel}%
+\AtBegShi@AbortIfUndefined{AtBeginDocument}%
+\AtBegShi@AbortIfUndefined{@ifpackageloaded}%
+\AtBegShi@AbortIfUndefined{@ifclassloaded}%
+\def\AtBegShi@PatchCrop{%
+  \begingroup
+    \def\AtBegShi@Crop@shipout{%
+      \afterassignment\CROP@ship
+      \setbox\@cclv=%
+    }%
+    \def\AtBegShi@Crop@ship{%
+      \ifvoid\@cclv
+        \expandafter\aftergroup
+      \fi
+      \CROP@@ship
+    }%
+    \def\AtBegShi@Crop@shiplist{%
+      \lineskip\z@
+      \lineskiplimit\z@
+      \baselineskip\z@
+      \CROP@kernel
+      \box\@cclv
+    }%
+    \def\AtBegShi@Crop@@ship{%
+      \CROP@shipout\vbox{%
+        \CROP@shiplist
+      }%
+    }%
+    \ifx\AtBegShi@Crop@ship\CROP@ship
+      \ifx\AtBegShi@Crop@shiplist\CROP@shiplist
+        \ifx\AtBegShi@Crop@@ship\CROP@@ship
+          \let\AtBegShi@found\relax
+          \ifx\shipout\AtBegShi@Crop@shipout
+            \def\AtBegShi@found{\shipout}%
+          \else\ifx\AtBeginShipoutOriginalShipout\AtBegShi@Crop@shipout
+            \def\AtBegShi@found{\AtBeginShipoutOriginalShipout}%
+          \else\ifx\@EveryShipout@Org@Shipout\AtBegShi@Crop@shipout
+            \def\AtBegShi@found{\@EveryShipout@Org@Shipout}%
+          \else\ifx\GPTorg@shipout\AtBegShi@Crop@shipout
+            \def\AtBegShi@found{\GPTorg@shipout}%
+          \else\ifx\THBorg@shipout\AtBegShi@Crop@shipout
+            \def\AtBegShi@found{\THBorg@shipout}%
+          \else\ifx\mem@oldshipout\AtBegShi@Crop@shipout
+            \def\AtBegShi@found{\mem@oldshipout}%
+          \fi\fi\fi\fi\fi\fi
+          \ifx\AtBegShi@found\relax
+          \else
+            \expandafter\endgroup
+            \expandafter\def\AtBegShi@found{%
+              \edef\AtBegShi@GroupLevel{\number\currentgrouplevel}%
+              \afterassignment\CROP@ship
+              \setbox\AtBeginShipoutBox=%
+            }%
+            \def\CROP@ship{%
+              \ifnum\AtBegShi@GroupLevel=\currentgrouplevel
+              \else
+                \expandafter\aftergroup
+              \fi
+              \CROP@@ship
+            }%
+            \def\CROP@shiplist{%
+              \lineskip 0pt\relax
+              \lineskiplimit 0pt\relax
+              \baselineskip 0pt\relax
+              \CROP@kernel
+              \box\AtBeginShipoutBox
+            }%
+            \def\CROP@@ship{%
+              \ifvoid\AtBeginShipoutBox
+              \else
+                \setbox\AtBeginShipoutBox=\vbox{%
+                  \CROP@shiplist
+                }%
+                \AtBegShi@GetBoxSize\AtBeginShipoutBox
+                \expandafter\CROP@shipout
+                \expandafter\box
+                \expandafter\AtBeginShipoutBox
+              \fi
+            }%
+            \@PackageInfoNoLine{atbegshi}{Package `crop' patched}%
+            \begingroup
+          \fi
+        \fi
+      \fi
+    \fi
+  \endgroup
+  \let\AtBegShi@PatchCrop\relax
+}
+\@ifpackageloaded{crop}{%
+  \AtBegShi@PatchCrop
+}{%
+  \AtBeginDocument{\AtBegShi@PatchCrop}%
+}
+\def\AtBegShi@PatchEveryshi{%
+  \begingroup
+    \long\def\AtBegShi@Everyshi@shipout{%
+      \afterassignment\@EveryShipout@Test
+      \global\setbox\@cclv= %
+    }%
+    \long\def\AtBegShi@Everyshi@Test{%
+      \ifvoid\@cclv\relax
+        \aftergroup\@EveryShipout@Output
+      \else
+        \@EveryShipout@Output
+      \fi
+    }%
+    \ifx\AtBegShi@Everyshi@Test\@EveryShipout@Test
+      \let\AtBegShi@found\relax
+      \ifx\shipout\AtBegShi@Everyshi@shipout
+        \def\AtBegShi@found{\shipout}%
+      \else\ifx\AtBeginShipoutOriginalShipout\AtBegShi@Everyshi@shipout
+        \def\AtBegShi@found{\AtBeginShipoutOriginalShipout}%
+      \else\ifx\CROP@shipout\AtBegShi@Everyshi@shipout
+        \def\AtBegShi@found{\CROP@shipout}%
+      \else\ifx\GPTorg@shipout\AtBegShi@Everyshi@shipout
+        \def\AtBegShi@found{\GPTorg@shipout}%
+      \else\ifx\THBorg@shipout\AtBegShi@Everyshi@shipout
+        \def\AtBegShi@found{\THBorg@shipout}%
+      \else\ifx\mem@oldshipout\AtBegShi@Everyshi@shipout
+        \def\AtBegShi@found{\mem@oldshipout}%
+      \else
+        \expandafter\ifx\csname @EveryShipout@Org@Shipout\endcsname
+                        \relax
+           \ifx\@EveryShipout@Shipout\AtBegShi@Everyshi@shipout
+             \def\AtBegShi@found{\@EveryShipout@Shipout}%
+           \fi
+        \fi
+      \fi\fi\fi\fi\fi\fi
+      \ifx\AtBegShi@found\relax
+      \else
+        \expandafter\endgroup
+        \expandafter\def\AtBegShi@found{%
+          \edef\AtBegShi@GroupLevel{\number\currentgrouplevel}%
+          \afterassignment\@EveryShipout@Test
+          \setbox\AtBeginShipoutBox=%
+        }%
+        \def\@EveryShipout@Test{%
+          \ifnum\AtBegShi@GroupLevel=\currentgrouplevel
+          \else
+            \expandafter\aftergroup
+          \fi
+          \AtBegShi@Everyshi@Output
+        }%
+        \def\AtBegShi@Everyshi@Output{%
+          \ifvoid\AtBeginShipoutBox
+          \else
+            \global\setbox\ltx@cclv\box\AtBeginShipoutBox
+            \expandafter\@EveryShipout@Output
+          \fi
+        }%
+        \@PackageInfoNoLine{atbegshi}{Package `everyshi' patched}%
+        \begingroup
+      \fi
+    \fi
+  \endgroup
+  \let\AtBegShi@PatchEveryshi\relax
+}
+\@ifpackageloaded{everyshi}{%
+  \AtBegShi@PatchEveryshi
+}{%
+  \AtBeginDocument{\AtBegShi@PatchEveryshi}%
+}
+\def\AtBegShi@PatchMemoir{%
+  \begingroup
+    \def\AtBegShi@Memoir@shipout{%
+      \afterassignment\mem@shipi
+      \setbox\@cclv=%
+    }%
+    \def\AtBegShi@Memoir@shipi{%
+      \ifvoid\@cclv
+        \expandafter\aftergroup
+      \fi
+      \mem@shipii
+    }%
+    \def\AtBegShi@Memoir@shipiiA{%
+      \mem@oldshipout\vbox{%
+        \trimmarks
+        \unvbox\@cclv
+      }%
+    }%
+    \def\AtBegShi@Memoir@shipiiB{%
+      \ifvoid\@cclv
+        \mem@oldshipout\box\@cclv
+      \else
+        \mem@oldshipout\vbox{%
+          \trimmarks
+          \unvbox\@cclv
+        }%
+      \fi
+    }%
+    \def\AtBegShi@Memoir@PatchAB{%
+      \ifvoid\AtBeginShipoutBox
+      \else
+        \setbox\AtBeginShipoutBox=\vbox{%
+          \trimmarks
+          \ifvbox\AtBeginShipoutBox
+            \unvbox\AtBeginShipoutBox
+          \else
+            \box\AtBeginShipoutBox
+          \fi
+        }%
+        \AtBegShi@GetBoxSize\AtBeginShipoutBox
+        \expandafter\mem@oldshipout
+        \expandafter\box
+        \expandafter\AtBeginShipoutBox
+      \fi
+    }%
+    \def\AtBegShi@Memoir@shipiiC{% 2008/08/07 v1.6180339a
+      \ifvoid\@cclv
+        \mem@oldshipout\box\@cclv
+      \else
+        \ifshowtrims
+          \mem@oldshipout\vbox{\trimmarks\unvbox\@cclv}%
+        \else
+          \mem@oldshipout\box\@cclv
+        \fi
+      \fi
+    }%
+    \def\AtBegShi@Memoir@shipiiD{% 2011/03/06 v3.6j
+      \ifvoid\@cclv
+        \mem@oldshipout\box\@cclv
+      \else
+        \ifshowtrims
+          \mem@oldshipout\vbox{%
+            \trimmarks
+            \nointerlineskip
+            \box\@cclv
+          }%
+        \else
+          \mem@oldshipout\box\@cclv
+        \fi
+      \fi
+    }%
+    \def\AtBegShi@Memoir@PatchCD{%
+      \ifvoid\AtBeginShipoutBox
+      \else
+        \ifshowtrims
+          \setbox\AtBeginShipoutBox=\vbox{%
+            \trimmarks
+            \nointerlineskip
+            \box\AtBeginShipoutBox
+          }%
+        \fi
+        \AtBegShi@GetBoxSize\AtBeginShipoutBox
+        \expandafter\mem@oldshipout
+        \expandafter\box
+        \expandafter\AtBeginShipoutBox
+      \fi
+    }%
+    \ifx\AtBegShi@Memoir@shipi\mem@shipi
+      \let\AtBegShi@found\ltx@one
+      \ifx\AtBegShi@Memoir@shipiiA\mem@shipii
+        \let\AtBegShi@found\ltx@zero
+        \global\let\AtBegShi@Memoir@PatchX\AtBegShi@Memoir@PatchAB
+      \else\ifx\AtBegShi@Memoir@shipiiB\mem@shipii
+        \let\AtBegShi@found\ltx@zero
+        \global\let\AtBegShi@Memoir@PatchX\AtBegShi@Memoir@PatchAB
+      \else\ifx\AtBegShi@Memoir@shipiiC\mem@shipii
+        \let\AtBegShi@found\ltx@zero
+        \global\let\AtBegShi@Memoir@PatchX\AtBegShi@Memoir@PatchCD
+      \else\ifx\AtBegShi@Memoir@shipiiD\mem@shipii
+        \let\AtBegShi@found\ltx@zero
+        \global\let\AtBegShi@Memoir@PatchX\AtBegShi@Memoir@PatchCD
+      \fi\fi\fi\fi
+      \ifcase\AtBegShi@found
+        \let\AtBegShi@found\relax
+        \ifx\shipout\AtBegShi@Memoir@shipout
+          \def\AtBegShi@found{\shipout}%
+        \else\ifx\AtBeginShipoutOriginalShipout\AtBegShi@Memoir@shipout
+          \def\AtBegShi@found{\AtBeginShipoutOriginalShipout}%
+        \else\ifx\CROP@shipout\AtBegShi@Memoir@shipout
+          \def\AtBegShi@found{\CROP@shipout}%
+        \else\ifx\GPTorg@shipout\AtBegShi@Memoir@shipout
+          \def\AtBegShi@found{\GPTorg@shipout}%
+        \else\ifx\THBorg@shipout\AtBegShi@Memoir@shipout
+          \def\AtBegShi@found{\THBorg@shipout}%
+        \else\ifx\@EveryShipout@Org@Shipout\AtBegShi@Memoir@shipout
+          \def\AtBegShi@found{\@EveryShipout@Org@Shipout}%
+        \fi\fi\fi\fi\fi\fi
+        \ifx\AtBegShi@found\relax
+        \else
+          \expandafter\endgroup
+          \expandafter\def\AtBegShi@found{%
+            \edef\AtBegShi@GroupLevel{\number\currentgrouplevel}%
+            \afterassignment\mem@shipi
+            \setbox\AtBeginShipoutBox=%
+          }%
+          \def\mem@shipi{%
+            \ifnum\AtBegShi@GroupLevel=\currentgrouplevel
+            \else
+              \expandafter\aftergroup
+            \fi
+            \mem@shipii
+          }%
+          \let\mem@shipii\AtBegShi@Memoir@PatchX
+          \@PackageInfoNoLine{atbegshi}{Class `memoir' patched}%
+          \begingroup
+        \fi
+      \fi
+    \fi
+  \endgroup
+  \let\AtBegShi@PatchMemoir\relax
+}
+\@ifclassloaded{memoir}{%
+  \AtBegShi@PatchMemoir
+}{%
+  \AtBeginDocument{\AtBegShi@PatchMemoir}%
+}
+\AtBegShi@AtEnd%
+%% \section{Installation}
+\endinput
+%%
+%% End of file `atbegshi.sty'.

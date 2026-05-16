@@ -15,7 +15,7 @@ Many classification models support both (sequence) classification and token clas
 
 !!! note
 
-    Pooling multitask support is deprecated and will be removed in v0.20. When the default pooling task (classify) is not 
+    Pooling multitask support is deprecated and will be removed in v0.20. When the default pooling task (classify) is not
     what you want, you need to manually specify it via `PoolerConfig(task="token_classify")` offline or
     `--pooler-config.task token_classify` online.
 
@@ -28,6 +28,12 @@ For implementation examples, see:
 Offline: [examples/pooling/token_classify/ner_offline.py](../../../examples/pooling/token_classify/ner_offline.py)
 
 Online: [examples/pooling/token_classify/ner_online.py](../../../examples/pooling/token_classify/ner_online.py)
+
+### Forced Alignment
+
+Forced alignment takes audio and reference text as input and produces word-level timestamps.
+
+Offline: [examples/pooling/token_classify/forced_alignment_offline.py](../../../examples/pooling/token_classify/forced_alignment_offline.py)
 
 ### Sparse retrieval (lexical matching)
 
@@ -43,13 +49,26 @@ The BAAI/bge-m3 model leverages token classification for sparse retrieval. For m
 | `Qwen3ForTokenClassification`<sup>C</sup> | Qwen3-based | `bd2lcco/Qwen3-0.6B-finetuned` | | |
 | `*Model`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | N/A | \* | \* |
 
-<sup>C</sup> Automatically converted into a classification model via `--convert classify`. ([details](./README.md#model-conversion))  
+<sup>C</sup> Automatically converted into a classification model via `--convert classify`. ([details](./README.md#model-conversion))
 \* Feature support is the same as that of the original model.
 
 If your model is not in the above list, we will try to automatically convert the model using
 [as_seq_cls_model][vllm.model_executor.models.adapters.as_seq_cls_model]. By default, the class probabilities are extracted from the softmaxed hidden state corresponding to the last token.
 
-### As Reward Models
+### Multimodal Models
+
+!!! note
+    For more information about multimodal models inputs, see [this page](../supported_models.md#list-of-multimodal-language-models).
+
+| Architecture                                  | Models              | Inputs            | Example HF Models                          | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
+| --------------------------------------------- | ------------------- | ----------------- | ------------------------------------------ | ------------------------------ | ------------------------------------------ |
+| `Qwen3ASRForcedAlignerForTokenClassification` | Qwen3-ForcedAligner | T + A<sup>+</sup> | `Qwen/Qwen3-ForcedAligner-0.6B` (see note) |                                | ✅︎                                         |
+
+!!! note
+    Forced alignment usage requires `--hf-overrides '{"architectures": ["Qwen3ASRForcedAlignerForTokenClassification"]}'`.
+    Please refer to [examples/pooling/token_classify/forced_alignment_offline.py](../../../examples/pooling/token_classify/forced_alignment_offline.py).
+
+### Reward Models
 
 Using token classification models as reward models. For details on reward models, see [Reward Models](reward.md).
 

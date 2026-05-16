@@ -1,0 +1,167 @@
+%%
+%% This is file `amsfonts.sty',
+%% generated with the docstrip utility.
+%%
+%% The original source files were:
+%%
+%% amsfonts.dtx  (with options: `sty')
+%% 
+%% This is a generated file.
+%% 
+%% Copyright 2001, 2009, 2013 American Mathematical Society.
+%% 
+%% American Mathematical Society
+%% Technical Support
+%% Publications Technical Group
+%% 201 Charles Street
+%% Providence, RI 02904
+%% USA
+%% tel: (401) 455-4080
+%%      (800) 321-4267 (USA and Canada only)
+%% fax: (401) 331-3842
+%% email: tech-support@ams.org
+%% 
+%% Unlimited copying and redistribution of this file are permitted as
+%% long as this file is not modified.  Modifications, and distribution
+%% of modified versions, are permitted, but only if the resulting file
+%% is renamed.
+%% 
+\NeedsTeXFormat{LaTeX2e}[1994/12/01]
+\ProvidesPackage{amsfonts}[2013/01/14 v3.01 Basic AMSFonts support]
+\DeclareOption{psamsfonts}{%
+    \PackageWarningNoLine{amsfonts}{The 'psamsfonts' option is
+      obsolete in AMSFonts v3}
+}
+\ProcessOptions\relax
+\DeclareFontShape{OMX}{cmex}{m}{n}{%
+       <-7.5>cmex7%
+    <7.5-8.5>cmex8%
+    <8.5-9.5>cmex9%
+    <9.5->cmex10%
+}{}%
+
+\expandafter\let\csname OMX/cmex/m/n/10\endcsname\relax
+
+\def\cmex@opt{10}
+\@ifpackageloaded{stix}{%
+    \def\ams@DeclareMathDelimiter#1#2#3#4#5#6{}%
+    \def\ams@DeclareMathSymbol#1#2#3#4{}%
+}{%
+    \let\ams@DeclareMathDelimiter\DeclareMathDelimiter
+    \def\ams@DeclareMathSymbol#1#2#3#4{%
+        \global\let#1\undefined
+        \DeclareMathSymbol{#1}{#2}{#3}{#4}%
+    }%
+}
+\providecommand*{\@mathmeasure}[3]{%
+  \setbox#1\hbox{\frozen@everymath\@emptytoks\m@th$#2#3$}}
+\@ifundefined{@emptytoks}{\csname newtoks\endcsname\@emptytoks}{}
+\DeclareSymbolFont{AMSa}{U}{msa}{m}{n}
+\DeclareSymbolFont{AMSb}{U}{msb}{m}{n}
+\@ifundefined{yen}{%
+  \edef\yen{\noexpand\mathhexbox{\hexnumber@\symAMSa}55}
+}{}
+\@ifundefined{checkmark}{%
+  \edef\checkmark{\noexpand\mathhexbox{\hexnumber@\symAMSa}58}
+}{}
+\@ifundefined{circledR}{%
+  \edef\circledR{\noexpand\mathhexbox{\hexnumber@\symAMSa}72}
+}{}
+\@ifundefined{maltese}{%
+  \edef\maltese{\noexpand\mathhexbox{\hexnumber@\symAMSa}7A}
+}{}
+\begingroup \catcode`\"=12
+\ams@DeclareMathDelimiter{\ulcorner}{\mathopen} {AMSa}{"70}{AMSa}{"70}
+\ams@DeclareMathDelimiter{\urcorner}{\mathclose}{AMSa}{"71}{AMSa}{"71}
+\ams@DeclareMathDelimiter{\llcorner}{\mathopen} {AMSa}{"78}{AMSa}{"78}
+\ams@DeclareMathDelimiter{\lrcorner}{\mathclose}{AMSa}{"79}{AMSa}{"79}
+\@ifpackageloaded{stix}{}{%
+    \xdef\widehat#1{\noexpand\@mathmeasure\z@\textstyle{#1}%
+      \noexpand\ifdim\noexpand\wd\z@>\tw@ em%
+      \mathaccent"0\hexnumber@\symAMSb 5B{#1}%
+      \noexpand\else\mathaccent"0362{#1}\noexpand\fi}
+    \xdef\widetilde#1{\noexpand\@mathmeasure\z@\textstyle{#1}%
+      \noexpand\ifdim\noexpand\wd\z@>\tw@ em%
+      \mathaccent"0\hexnumber@\symAMSb 5D{#1}%
+      \noexpand\else\mathaccent"0365{#1}\noexpand\fi}
+}
+\@ifpackageloaded{stix}{}{%
+    \DeclareMathSymbol{\dabar@}{\mathord}{AMSa}{"39}
+    \xdef\dashrightarrow{\mathrel{\dabar@\dabar@
+                              \mathchar"0\hexnumber@\symAMSa 4B}}%
+    \xdef\dashleftarrow{\mathrel{\mathchar"0\hexnumber@\symAMSa 4C\dabar@
+                              \dabar@}}%
+    \global\let\dasharrow\dashrightarrow
+}
+\ams@DeclareMathSymbol{\rightleftharpoons}{\mathrel}{AMSa}{"0A}
+\ams@DeclareMathSymbol{\angle}            {\mathord}{AMSa}{"5C}
+\ams@DeclareMathSymbol{\hbar}             {\mathord}{AMSb}{"7E}
+\ams@DeclareMathSymbol{\sqsubset}         {\mathrel}{AMSa}{"40}
+\ams@DeclareMathSymbol{\sqsupset}         {\mathrel}{AMSa}{"41}
+\ams@DeclareMathSymbol{\mho}              {\mathord}{AMSb}{"66}
+\endgroup
+\@ifundefined{mathfrak}{%
+    \DeclareMathAlphabet{\mathfrak}{U}{euf}{m}{n}
+    \SetMathAlphabet{\mathfrak}{bold}{U}{euf}{b}{n}
+}{}
+\@ifundefined{mathbb}{%
+    \DeclareSymbolFontAlphabet{\mathbb}{AMSb}%
+}{}
+\DeclareFontEncodingDefaults{\relax}{\def\accentclass@{7}}
+\DeclareRobustCommand{\frak}[1]{%
+  {\@subst@obsolete{amsfonts}\frak\mathfrak{#1}}}
+\DeclareRobustCommand{\Bbb}[1]{%
+  {\@subst@obsolete{amsfonts}\Bbb\mathbb{#1}}}
+\DeclareRobustCommand{\bold}[1]{%
+  {\@subst@obsolete{amsfonts}\bold\mathbf{#1}}}
+\begingroup \catcode`\"=12 \relax
+\gdef\newsymbol#1#2#3#4#5{%
+  \@obsolete{amsfonts}\newsymbol\DeclareMathSymbol
+  \@ifdefinable#1{%
+     \edef\next@
+       {\ifcase #2 \or
+          \hexnumber@\symAMSa\or
+          \hexnumber@\symAMSb\fi}%
+     \ifx\next@\@empty
+       \PackageError{amsfonts}{\Invalid@@\newsymbol}\@ehd%
+     \else
+      \global\mathchardef#1"#3\next@#4#5
+     \fi}}
+\endgroup
+\long\def\@gobblethree#1#2#3{}
+\if@compatibility
+  \let\@obsolete\@gobblethree
+\else
+  \def\@obsolete#1#2#3{\PackageWarning{#1}{%
+    Obsolete command \protect#2; \protect#3 should be used instead}}%
+\fi
+\def\@subst@obsolete#1#2#3{\@obsolete{#1}#2#3\gdef#2{#3}#2}
+\@ifpackageloaded{stix}{\endinput}{}
+\begingroup \catcode`\"=12
+\DeclareMathSymbol{\square}           {\mathord}{AMSa}{"03}
+\DeclareMathSymbol{\lozenge}          {\mathord}{AMSa}{"06}
+\ams@DeclareMathSymbol{\vartriangleright} {\mathrel}{AMSa}{"42}
+\ams@DeclareMathSymbol{\vartriangleleft}  {\mathrel}{AMSa}{"43}
+\ams@DeclareMathSymbol{\trianglerighteq}  {\mathrel}{AMSa}{"44}
+\ams@DeclareMathSymbol{\trianglelefteq}   {\mathrel}{AMSa}{"45}
+\ams@DeclareMathSymbol{\rightsquigarrow}  {\mathrel}{AMSa}{"20}
+\@ifpackageloaded{latexsym}{\@tempswafalse}{\@tempswatrue}
+\if@tempswa
+  \global\let\Box\square
+  \global\let\Diamond\lozenge
+  \global\let\leadsto\rightsquigarrow
+  \global\let\lhd\@@undefined
+  \global\let\unlhd\@@undefined
+  \global\let\rhd\@@undefined
+  \global\let\unrhd\@@undefined
+  \DeclareMathSymbol{\lhd}     {\mathbin}{AMSa}{"43}
+  \DeclareMathSymbol{\unlhd}   {\mathbin}{AMSa}{"45}
+  \DeclareMathSymbol{\rhd}     {\mathbin}{AMSa}{"42}
+  \DeclareMathSymbol{\unrhd}   {\mathbin}{AMSa}{"44}
+\xdef\Join{\mathrel{\mathchar"0\hexnumber@\symAMSb 6F\mkern-13.8mu%
+  \mathchar"0\hexnumber@\symAMSb 6E}}
+\fi
+\endgroup
+\endinput
+%%
+%% End of file `amsfonts.sty'.

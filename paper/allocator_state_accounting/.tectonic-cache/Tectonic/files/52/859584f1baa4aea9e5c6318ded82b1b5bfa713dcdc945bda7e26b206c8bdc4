@@ -1,0 +1,46 @@
+%% ckx.map (Chinese and Korean): CID-keyed font mapping file for dvipdfmx
+%% ======================================================================
+%%
+%% This file is read by dvipdfmx in TeX Live
+%% See the file cid-x.map for a specification of the format.
+%%
+
+%% Aleph
+%%
+%% Chinese
+%% Arphic TrueType fonts as Adobe-{CNS1,GB1} CID-keyed font.
+%ombkai UniCNS-UCS2-H bkai00mp
+%ombsmi UniCNS-UCS2-H bsmi00lp
+%omgkai UniGB-UCS2-H  gkai00mp
+%omgbsn UniGB-UCS2-H  gbsn00lp
+
+%% Korean
+%omgtm  UniKS-UCS2-H  HYGoThic-Medium
+%ombtr  UniKS-UCS2-H  batang
+
+%%
+%% CJK-LaTeX/HLaTeX Examples
+%%
+
+%% Arphic Public Licence fonts:
+%%  AR PL KaitiM, AR PL Mingti2L, AR PL SungtiL
+
+%bkai@Big5@   ETen-B5-H  bkai00mp
+%bsmi@Big5@   ETen-B5-H  bsmi00lp
+%bkaiv@Big5@  ETen-B5-V  bkai00mp
+%bsmiv@Big5@  ETen-B5-V  bsmi00lp
+
+%% Korean MS-Windows fonts with stylistic variants
+%jbtm@UKS@  UniKS-UCS2-H !batang
+%jbtmo@UKS@ UniKS-UCS2-H !batang,Italic
+%jbtb@UKS@  UniKS-UCS2-H !batang,Bold
+%jbtbo@UKS@ UniKS-UCS2-H !batang,BoldItalic
+
+%% Baekmuk fonts (used with HLaTeX package)
+%bbtm@KS-HLaTeX@   KSCms-UHC-H  batang
+%bbtmo@UKS-HLaTeX@ UniKS-UCS2-H batang -s .167
+
+%% Bitstream Cyberbit
+%% Available at:
+%% http://ftp.netscape.com/pub/communicator/extras/fonts/windows/ReadMe.htm
+%cyberb@Unicode@ unicode cyberbit

@@ -7,8 +7,8 @@ from unittest.mock import Mock
 import pytest
 
 from vllm.utils.cache import CacheInfo
+from vllm.v1.metrics.stats import StructuredOutputCacheStats
 from vllm.v1.structured_output import StructuredOutputManager
-
 from vllm.v1.structured_output.backend_types import StructuredOutputOptions
 from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
 
@@ -242,3 +242,23 @@ def test_structured_output_manager_logs_periodic_cache_stats(monkeypatch):
 
     manager._create_grammar(request)
     info_log.assert_called_once()
+
+
+def test_structured_output_manager_make_cache_stats():
+    vllm_config = Mock()
+    vllm_config.parallel_config.distributed_executor_backend = None
+    vllm_config.scheduler_config.max_num_seqs = 8
+    vllm_config.model_config.skip_tokenizer_init = True
+    vllm_config.structured_outputs_config.enable_in_reasoning = False
+
+    manager = StructuredOutputManager(vllm_config)
+    backend = Mock()
+    backend.compiled_grammar_cache_stats.return_value = CacheInfo(hits=2, total=5)
+    manager.backend = backend
+
+    assert manager.make_cache_stats() == StructuredOutputCacheStats(
+        requests=5,
+        queries=5,
+        hits=2,
+    )
+    backend.compiled_grammar_cache_stats.assert_called_once_with(delta=True)

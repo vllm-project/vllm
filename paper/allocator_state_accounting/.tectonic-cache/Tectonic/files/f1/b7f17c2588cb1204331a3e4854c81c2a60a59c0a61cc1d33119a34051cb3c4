@@ -1,0 +1,37 @@
+\ProvidesFile{t1pcr.fd}
+   [2001/06/04 font definitions for T1/pcr.]
+
+\DeclareFontFamily{T1}{pcr}{\hyphenchar \font\m@ne}
+
+\DeclareFontShape{T1}{pcr}{m}{n}{
+   <-> pcrr8t
+}{}
+
+\DeclareFontShape{T1}{pcr}{m}{sc}{
+   <-> pcrrc8t
+}{}
+
+\DeclareFontShape{T1}{pcr}{m}{sl}{
+   <-> pcrro8t
+}{}
+
+\DeclareFontShape{T1}{pcr}{b}{n}{
+   <-> pcrb8t
+}{}
+
+\DeclareFontShape{T1}{pcr}{b}{sc}{
+   <-> pcrbc8t
+}{}
+
+\DeclareFontShape{T1}{pcr}{b}{sl}{
+   <-> pcrbo8t
+}{}
+
+\DeclareFontShape{T1}{pcr}{m}{it}{<->ssub * pcr/m/sl}{}
+\DeclareFontShape{T1}{pcr}{bx}{n}{<->ssub * pcr/b/n}{}
+\DeclareFontShape{T1}{pcr}{bx}{sc}{<->ssub * pcr/b/sc}{}
+\DeclareFontShape{T1}{pcr}{bx}{sl}{<->ssub * pcr/b/sl}{}
+\DeclareFontShape{T1}{pcr}{b}{it}{<->ssub * pcr/b/sl}{}
+\DeclareFontShape{T1}{pcr}{bx}{it}{<->ssub * pcr/b/it}{}
+
+\endinput

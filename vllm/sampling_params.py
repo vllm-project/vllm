@@ -12,6 +12,7 @@ from typing import Any, ClassVar
 import msgspec
 from pydantic.dataclasses import dataclass
 
+import vllm.envs as envs
 from vllm.config import ModelConfig, SpeculativeConfig, StructuredOutputsConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
@@ -23,6 +24,10 @@ logger = init_logger(__name__)
 
 _SAMPLING_EPS = 1e-5
 _MAX_TEMP = 1e-2
+
+MAX_LOGPROB_TOKEN_IDS = 128
+"""Upper bound on `SamplingParams.logprob_token_ids` list length. Must match
+the per-request row width allocated by the sampler's `LogprobTokenIdsState`."""
 
 
 class SamplingType(IntEnum):
@@ -149,6 +154,14 @@ class RequestOutputKind(Enum):
     FINAL_ONLY = 2
 
 
+def _is_non_tekken_mistral(tokenizer: TokenizerLike) -> bool:
+    return is_mistral_tokenizer(tokenizer) and not tokenizer.is_tekken
+
+
+def _get_llg_tokenizer(tokenizer: TokenizerLike) -> Any:
+    return tokenizer.llg_tokenizer if is_mistral_tokenizer(tokenizer) else None
+
+
 class SamplingParams(
     PydanticMsgspecMixin,
     msgspec.Struct,
@@ -165,6 +178,9 @@ class SamplingParams(
 
     n: int = 1
     """Number of outputs to return for the given prompt request.
+
+    The maximum allowed value is controlled by the ``VLLM_MAX_N_SEQUENCES``
+    environment variable (default: 16384).
 
     NOTE:
         `AsyncLLM` streams outputs by default. When `n > 1`, all `n` outputs
@@ -225,6 +241,12 @@ class SamplingParams(
     prompt_logprobs: int | None = None
     """Number of log probabilities to return per prompt token.
     When set to -1, return all `vocab_size` log probabilities."""
+    logprob_token_ids: list[int] | None = None
+    """Specific token IDs to return logprobs for. More efficient than
+    logprobs=-1 when you only need logprobs for a small set of tokens.
+    When set, logprobs for exactly these token IDs will be returned,
+    in addition to the sampled token. This is useful for scoring tasks
+    where you want to compare probabilities of specific label tokens."""
     flat_logprobs: bool = False
     """Whether to return logprobs in flatten format (i.e. FlatLogprob)
     for better performance.
@@ -422,6 +444,13 @@ class SamplingParams(
             raise ValueError(f"n must be an int, but is of type {type(self.n)}")
         if self.n < 1:
             raise ValueError(f"n must be at least 1, got {self.n}.")
+        max_n = envs.VLLM_MAX_N_SEQUENCES
+        if self.n > max_n:
+            raise ValueError(
+                f"n must be at most {max_n}, got {self.n}. "
+                "To increase this limit, set the VLLM_MAX_N_SEQUENCES "
+                "environment variable."
+            )
         if not -2.0 <= self.presence_penalty <= 2.0:
             raise ValueError(
                 f"presence_penalty must be in [-2, 2], got {self.presence_penalty}."
@@ -600,6 +629,16 @@ class SamplingParams(
         # For internal use only. Backward compatibility not guaranteed
         return self._bad_words_token_ids
 
+    @property
+    def num_logprobs(self) -> int | None:
+        """Number of sample logprobs to return per output token, or `None` if
+        no sample logprobs were requested. Takes `logprob_token_ids` into
+        account: when `logprobs` is unset but `logprob_token_ids` is set,
+        returns `len(logprob_token_ids)`."""
+        if self.logprobs is not None:
+            return self.logprobs
+        return len(self.logprob_token_ids) if self.logprob_token_ids else None
+
     def clone(self) -> "SamplingParams":
         """If skip_clone is True, uses shallow copy instead of deep copy."""
         if self.skip_clone:
@@ -636,6 +675,17 @@ class SamplingParams(
                     f"which is greater than max allowed: {max_logprobs}",
                     parameter="logprobs",
                     value=num_logprobs,
+                )
+
+        # Validate logprob_token_ids.
+        if self.logprob_token_ids is not None:
+            n = len(self.logprob_token_ids)
+            if n > MAX_LOGPROB_TOKEN_IDS:
+                raise VLLMValidationError(
+                    f"Requested logprob_token_ids of length {n}, "
+                    f"which is greater than max allowed: {MAX_LOGPROB_TOKEN_IDS}",
+                    parameter="logprob_token_ids",
+                    value=n,
                 )
 
         # Validate prompt logprobs.
@@ -781,17 +831,21 @@ class SamplingParams(
             # xgrammar with no fallback
             validate_xgrammar_grammar(self)
         elif backend.startswith("guidance"):
+            if _is_non_tekken_mistral(tokenizer=tokenizer):
+                raise ValueError(
+                    "Non-tekken Mistral tokenizers are not supported for the 'guidance'"
+                    " structured output backend. Please either use a more recent "
+                    "Mistral model, the ['xgrammar', 'outlines'] "
+                    "backends or tokenizer_mode='hf' instead."
+                )
             # TODO: ideally we would have the LLTokenizer here as Lark syntax
             # allows <|special_token|> and similar, see
             # https://github.com/guidance-ai/llguidance/blob/main/docs/syntax.md#special-tokens
             # Without tokenizer these are disallowed in grammars.
-            if is_mistral_tokenizer(tokenizer):
-                raise ValueError(
-                    "Mistral tokenizer is not supported for the 'guidance' "
-                    "structured output backend. Please use ['xgrammar', 'outlines'] "
-                    "backends or tokenizer_mode='hf' instead."
-                )
-            validate_guidance_grammar(self, tokenizer=None)
+            validate_guidance_grammar(
+                self,
+                tokenizer=_get_llg_tokenizer(tokenizer),
+            )
         elif backend == "outlines":
             # outlines backend
             validate_structured_output_request_outlines(self)
@@ -819,24 +873,28 @@ class SamplingParams(
                 # or includes some jsonschema feature(s) that
                 # are not supported in xgrammar.
 
+                skip_guidance = _is_non_tekken_mistral(tokenizer)
+
                 # Check if schema has features unsupported by guidance
                 so_params = self.structured_outputs
-                skip_guidance = False
-                if so_params.json:
+                if not skip_guidance and so_params.json:
                     if isinstance(so_params.json, str):
                         schema = json_mod.loads(so_params.json)
                     else:
                         schema = so_params.json
                     skip_guidance = has_guidance_unsupported_json_features(schema)
 
-                if is_mistral_tokenizer(tokenizer) or skip_guidance:
-                    # Fall back to outlines if the tokenizer is Mistral
-                    # or if schema contains features unsupported by guidance
+                if skip_guidance:
+                    # Fall back to outlines if the tokenizer is non-tekken Mistral or
+                    # the schema contains features unsupported by guidance
                     validate_structured_output_request_outlines(self)
                     self.structured_outputs._backend = "outlines"
                 else:
                     # Fall back to guidance by default.
-                    validate_guidance_grammar(self, tokenizer=None)
+                    validate_guidance_grammar(
+                        self,
+                        tokenizer=_get_llg_tokenizer(tokenizer),
+                    )
                     self.structured_outputs._backend = "guidance"
             # Remember that this backend was set automatically
             self.structured_outputs._backend_was_auto = True

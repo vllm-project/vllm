@@ -1,0 +1,526 @@
+%% xetex.def
+%% Copyright (C) 2005-2021 LaTeX3 Project, Jin-Hwan Cho, Shunsaku Hirata
+%%                         (with contributions from many others)
+%%
+%% This work may be distributed and/or modified under the
+%% conditions of the LaTeX Project Public License, either version 1.3c
+%% of this license or (at your option) any later version.
+%% The latest version of this license is in
+%%   http://www.latex-project.org/lppl.txt
+%% and version 1.3c or later is part of all distributions of LaTeX
+%% version 2005/12/01 or later.
+%%
+%% This work has the LPPL maintenance status `maintained'.
+%%
+%% The Current Maintainer of this work is the LaTeX3 Project.
+%%
+%% https://github.com/latex3/graphics-def/issues
+%%
+\ProvidesFile{xetex.def}
+  [2021/03/18 v5.0k Graphics/color driver for xetex]
+\def\GPT@space{ }
+\def\c@lor@arg#1{%
+  \dimen@#1\p@
+  \ifdim\dimen@<\z@\dimen@\maxdimen\fi
+  \ifdim\dimen@>\p@
+    \PackageError{color}{Argument `#1' not in range [0,1]}\@ehd
+  \fi}
+\def\color@gray#1#2{%
+  \c@lor@arg{#2}%
+  \edef#1{gray #2}%
+  }
+\def\color@cmyk#1#2{\c@lor@@cmyk#2\@@#1}
+\def\c@lor@@cmyk#1,#2,#3,#4\@@#5{%
+  \c@lor@arg{#4}%
+  \c@lor@arg{#1}%
+  \c@lor@arg{#2}%
+  \c@lor@arg{#3}%
+  \edef#5{cmyk #1 #2 #3 #4}%
+  }
+\def\color@rgb#1#2{\c@lor@@rgb#2\@@#1}
+\def\c@lor@@rgb#1,#2,#3\@@#4{%
+  \c@lor@arg{#1}%
+  \c@lor@arg{#2}%
+  \c@lor@arg{#3}%
+  \edef#4{rgb #1 #2 #3}%
+  }
+\def\color@RGB#1#2{\c@lor@@RGB#2\@@#1}
+\def\c@lor@@RGB#1,#2,#3\@@#4{%
+ \c@lor@RGB@rgb{#1}\@tempa
+ \c@lor@RGB@rgb{#2}\@tempb
+ \c@lor@RGB@rgb{#3}\@tempc
+ \c@lor@@rgb\@tempa,\@tempb,\@tempc\@@#4%
+  }
+\def\c@lor@RGB@rgb#1#2{%
+  \dimen@#1\p@
+  \divide\dimen@\@cclv
+  \edef#2{\strip@pt\dimen@}}
+\def\color@hsb#1#2{\c@lor@@hsb#2\@@#1}
+\def\c@lor@@hsb#1,#2,#3\@@#4{%
+  \c@lor@arg{#1}%
+  \c@lor@arg{#2}%
+  \c@lor@arg{#3}%
+  \edef#4{hsb #1 #2 #3}%
+  }
+\def\color@named#1#2{\c@lor@@named#2,,\@@#1}
+\def\c@lor@@named#1,#2,#3\@@#4{%
+  \@ifundefined{col@#1}%
+    {\PackageError{color}{Undefined color `#1'}\@ehd}%
+  {\edef#4{ #1}}%
+  }
+\def\c@lor@to@ps#1 #2\@@{\csname c@lor@ps@#1\endcsname#2 \@@}
+\def\c@lor@ps@#1 #2\@@{TeXDict begin #1 end}
+\def\c@lor@ps@rgb#1\@@{#1 setrgbcolor}
+\def\c@lor@ps@hsb#1\@@{#1 sethsbcolor}
+\def\c@lor@ps@cmyk#1\@@{#1 setcmykcolor}
+\def\c@lor@ps@gray#1\@@{#1 setgray}
+\def\current@color{ Black}
+\def\set@color{%
+ \special{color push  \current@color
+                          }\aftergroup\reset@color}
+\def\reset@color{\special{%
+        color pop}}
+\def\set@page@color{\special{%
+        background \current@color}}
+\def\define@color@named#1#2{%
+  \expandafter\let\csname col@#1\endcsname\@nnil}
+% white is special cased as "no background color" by dvipdfmx
+\def\no@page@color{\special{background gray 1}}
+\@ifundefined{Gin@decode}
+  {\let\Gin@decode\@empty}
+  {}
+\@ifundefined{Gin@page}
+  {\let\Gin@page\@empty}
+  {}
+\@ifundefined{Gin@pagebox}
+  {\def\Gin@pagebox{cropbox}}
+  {}
+\@ifundefined{Gin@interpolate}
+  {\csname newif\endcsname\ifGin@interpolate}
+  {}
+\def\Gread@pdf#1{%
+  \let\Gin@decode\@empty
+  \Gin@interpolatefalse
+  \Gread@@xetex\XeTeXpdffile
+}
+\def\Gread@bmp#1{%
+  \let\Gin@page\@empty
+  \let\Gin@pagebox\@empty
+  \Gread@@xetex\XeTeXpicfile
+}
+\def\Gread@@xetex#1{%
+  \IfFileExists{\Gin@base.bb}%
+    {\Gread@eps{\Gin@base.bb}}%
+    {\Gread@@xetex@aux#1}%
+}
+\def\Gread@@xetex@aux#1{%
+  \edef\Gin@attr@hash{%
+    \ifx\Gin@pagebox\@empty
+    \else
+      :\Gin@pagebox
+    \fi
+    \ifx\Gin@page\@empty
+    \else
+      :P\Gin@page
+    \fi
+  }%
+  \edef\Gin@@name{\Gin@base\Gin@ext}%
+  \@ifundefined{\Gin@@name\GPT@space height\Gin@attr@hash}%
+    {%
+      \setbox\@tempboxa=\hbox{%
+        #1"\Gin@@name"\GPT@space
+        \ifx\Gin@page\@empty\else page \Gin@page\fi
+        \ifx\Gin@pagebox\@empty\else\expandafter\Gread@@xetex@box\Gin@pagebox\fi
+      }%
+      \def\Gin@llx{0}\let\Gin@lly\Gin@llx
+      \Gin@defaultbp\Gin@urx{\wd\@tempboxa}%
+      \Gin@defaultbp\Gin@ury{\ht\@tempboxa}%
+      \expandafter\xdef\csname \Gin@@name\GPT@space height\Gin@attr@hash\endcsname
+        {\the\ht\@tempboxa}%
+      \expandafter\xdef\csname \Gin@@name\GPT@space width\Gin@attr@hash\endcsname
+        {\the\wd\@tempboxa}%
+    }{%
+      \def\Gin@llx{0}\let\Gin@lly\Gin@llx
+      \Gin@defaultbp\Gin@urx
+        {\csname \Gin@@name\GPT@space width\Gin@attr@hash\endcsname}%
+      \Gin@defaultbp\Gin@ury
+        {\csname \Gin@@name\GPT@space height\Gin@attr@hash\endcsname}%
+    }%
+}
+\def\Gread@@xetex@box#1box{#1}
+\def\GPT@setup@scale{%
+  \def\@tempa{!}%
+  \ifx\Gin@scaley\@tempa
+    \let\Gin@scaley\Gin@scalex
+  \else
+    \ifx\Gin@scalex\@tempa\let\Gin@scalex\Gin@scaley\fi
+  \fi
+}
+\def\Ginclude@pdf#1{%
+  \GPT@setup@scale
+  \Gin@log{%
+    <use #1%
+    \ifx\Gin@page\@empty\else, page \Gin@page\fi
+    >%
+  }%
+  \hbox{%
+    \Gscale@box{\Gin@scalex}[\Gin@scaley]{%
+      \@ifundefined{Gin@vllx}{%
+        \GPT@viewportfalse
+        % without viewport/trim clipping does not make sense
+        % for pdfTeX
+        \Gin@clipfalse
+      }{}%
+      \ifGin@clip
+        \if!\Gin@vllx\Gin@vlly\Gin@vurx\Gin@vury!%
+        \else
+          \let\GPT@clipend\GPT@DoClipEnd
+          \setbox\@tempboxa\hbox\bgroup
+        \fi
+      \fi
+      \ifGPT@viewport
+        \ifdim\Gin@vlly\p@=\z@
+        \else
+          \lower\Gin@vlly bp\hbox\bgroup
+        \fi
+        \ifdim\Gin@vllx\p@=\z@
+        \else
+          \hskip-\Gin@vllx bp\relax
+        \fi
+      \fi
+      \XeTeXpdffile"#1" %
+        \ifx\Gin@page\@empty\else page \Gin@page\fi
+        \ifx\Gin@pagebox\@empty\else\expandafter\Gread@@xetex@box\Gin@pagebox\fi
+      \ifGPT@viewport
+        \ifdim\Gin@vlly\p@=\z@
+        \else
+          \egroup
+        \fi
+        \GPT@clipend
+      \fi
+    }%
+  }%
+}
+\newif\ifGPT@viewport
+\GPT@viewporttrue
+\let\GPT@clipend\relax
+\def\GPT@DoClipEnd{%
+  \egroup
+  \dp\@tempboxa\z@
+  % \Gin@urx and \Gin@ury already contain the correct values,
+  % so both cases viewport and trim can be handled together:
+  \dimen@\Gin@urx\p@
+  \advance\dimen@ -\Gin@llx\p@
+  \wd\@tempboxa\strip@pt\dimen@ bp\relax
+  \dimen@\Gin@ury\p@
+  \advance\dimen@ -\Gin@lly\p@
+  \ht\@tempboxa\strip@pt\dimen@ bp\relax
+  \GPT@clipbox\@tempboxa
+  \box\@tempboxa
+}
+\def\GPT@clipbox#1{%
+  \setbox#1=\hbox{%
+    \Gin@defaultbp\WIDTH{\wd#1}%
+    \Gin@defaultbp\DEPTH{\dp#1}%
+    \@tempdima\ht#1%
+    \advance\@tempdima\dp#1%
+    \Gin@defaultbp\TOTALHEIGHT{\@tempdima}%
+    \special{x:gsave}%
+    \special{%
+      pdf:literal
+      0 -\DEPTH\GPT@space \WIDTH\GPT@space \TOTALHEIGHT\GPT@space re  W n
+    }%
+    \rlap{\box#1}%
+    \special{x:grestore}%
+    \hskip\wd#1%
+  }%
+}
+\def\Ginclude@bmp#1{%
+  \Gin@log{<#1>}%
+  \bgroup
+  \def\@tempa{!}%
+    \special{pdf:image\GPT@space
+      bbox\GPT@space\Gin@llx\GPT@space\Gin@lly\GPT@space\Gin@urx\GPT@space\Gin@ury\GPT@space
+      clip\GPT@space\ifGin@clip 1\else 0\fi\GPT@space
+      \ifx\Gin@scalex\@tempa\else width\GPT@space\the\Gin@req@width\GPT@space\fi
+      \ifx\Gin@scaley\@tempa\else height\GPT@space\the\Gin@req@height\GPT@space\fi
+      (#1)\GPT@space
+      \ifnum0%
+        \ifx\Gin@decode\@empty\else 1\fi
+        \ifGin@interpolate 1\fi
+        >0 %
+        <<%
+          \ifx\Gin@decode\@empty\else /Decode[\Gin@decode]\fi
+          \ifGin@interpolate /Interpolate true\fi
+        >>%
+      \fi
+    }%
+  \egroup
+}
+\newif\if@trim@vport
+\def\Ginclude@eps#1{%
+  \Gin@log{<#1>}%
+  \bgroup
+  \ifx\Undefined\Gin@vllx\else\@trim@vporttrue\fi
+  \def\@tempa{!}%
+  \dimen@\Gin@urx\p@
+  \advance\dimen@ -\Gin@llx\p@
+  \if@trim@vport
+  \advance\dimen@ \Gin@vllx\p@
+  \fi
+  \edef\Gin@urx{\strip@pt\dimen@}%
+  \dimen@\Gin@ury\p@
+  \advance\dimen@ -\Gin@lly\p@
+  \if@trim@vport
+  \advance\dimen@ \Gin@vlly\p@
+  \fi
+  \edef\Gin@ury{\strip@pt\dimen@}%
+  \dimen@\Gin@req@width
+  \dimen@ii.1bp%
+  \divide\dimen@\dimen@ii
+  \@tempdima\Gin@req@height
+  \divide\@tempdima\dimen@ii
+    \special{PSfile="#1"\GPT@space
+      \if@trim@vport
+      llx=\Gin@vllx\GPT@space
+      lly=\Gin@vlly\GPT@space
+      \fi
+      urx=\Gin@urx\GPT@space
+      ury=\Gin@ury\GPT@space
+      \ifx\Gin@scalex\@tempa\else rwi=\number\dimen@\GPT@space\fi
+      \ifx\Gin@scaley\@tempa\else rhi=\number\@tempdima\GPT@space\fi
+      \ifGin@clip clip\fi}%
+  \egroup}
+%
+% In the above \Ginclude@eps, llx, lly, urx, and ury are translated to match
+% the -dEPSCrop option for Ghostscript to convert eps to pdf.
+% In the case of eps files created by MetaPost, the files are included
+% directly without the help of Ghostscript. That is, we have to translate
+% the origin accordingly if we use \Ginclude@eps for eps files created by
+% MetaPost. In TeX Live 2015, the translation of the origin was the default.
+% After TeX Live 2016, however, the translation of the origin is enabled only
+% if the --mvorigin option is given for xdvipdfmx
+% This may be a bit inconvenient, especially as
+% xdvipdfmx is usually called as a pipe. Therefore we introduce a new suffix
+% .mps(or .MPS) to support inclusion of eps files created by MetaPost without
+% the option --mvorigin.
+%
+\def\Ginclude@mps#1{%
+  \Gin@log{<#1>}%
+  \bgroup
+  \def\@tempa{!}%
+  \dimen@\Gin@req@width
+  \dimen@ii.1bp%
+  \divide\dimen@\dimen@ii
+  \@tempdima\Gin@req@height
+  \divide\@tempdima\dimen@ii
+    \special{PSfile="#1"\GPT@space
+      llx=\Gin@llx\GPT@space
+      lly=\Gin@lly\GPT@space
+      urx=\Gin@urx\GPT@space
+      ury=\Gin@ury\GPT@space
+      \ifx\Gin@scalex\@tempa\else rwi=\number\dimen@\GPT@space\fi
+      \ifx\Gin@scaley\@tempa\else rhi=\number\@tempdima\GPT@space\fi
+      \ifGin@clip clip\fi}%
+  \egroup}
+%
+\def\Grot@start{%
+\special{pdf:btrans rotate \Grot@angle}}
+\def\Grot@end{\special{pdf:etrans}}
+
+% 4.13 add support for ptex vertical writing mode
+% inspired by pxtatescale package (Hironobu Yamashita)
+\ifx\kanjiskip\@undefined
+\def\Gscale@start{%
+  \special{pdf:btrans}%
+  \special{x:scale \Gscale@x\GPT@space\Gscale@y}%
+}
+\else
+\edef\Gscale@start{%
+  \special{pdf:btrans}%
+  \special{x:scale
+  \expandafter\noexpand\csname iftdir\endcsname
+    \noexpand\Gscale@y\noexpand\GPT@space\noexpand\Gscale@x
+  \expandafter\noexpand\csname else\endcsname
+    \noexpand\Gscale@x\noexpand\GPT@space\noexpand\Gscale@y
+  \expandafter\noexpand\csname fi\endcsname}}
+\fi
+%
+\def\Gscale@end{\special{pdf:etrans}}
+\def\Gin@PS@raw#1{\special{ps: #1}}
+\def\Gin@PS@restored#1{\special{" #1}}
+\def\Gin@PS@literal@header#1{\AtBeginDvi{\special{! #1}}}
+\def\Gin@PS@file@header#1{\AtBeginDvi{\special{header=#1}}}
+\def\Gin@extensions{% order here is like pdftex.def, except for PS
+  .pdf,.PDF,.ai,.AI,%
+  .png,.PNG,.jpg,.JPG,.jpeg,.JPEG,.jp2,.JP2,.jpf,.JPF,.bmp,.BMP,%
+  .ps,.PS,.eps,.EPS,.mps,.MPS}
+%
+\@namedef{Gin@rule@.pdf}#1{{pdf}{.xbb}{#1}}
+\@namedef{Gin@rule@.PDF}#1{{pdf}{.xbb}{#1}}
+%
+\@namedef{Gin@rule@.ai}#1{{pdf}{.xbb}{#1}}
+\@namedef{Gin@rule@.AI}#1{{pdf}{.xbb}{#1}}
+%
+\@namedef{Gin@rule@.jp2}#1{{bmp}{.xbb}{#1}}
+\@namedef{Gin@rule@.JP2}#1{{bmp}{.xbb}{#1}}
+%
+\@namedef{Gin@rule@.jpf}#1{{bmp}{.xbb}{#1}}
+\@namedef{Gin@rule@.JPF}#1{{bmp}{.xbb}{#1}}
+%
+\@namedef{Gin@rule@.png}#1{{bmp}{.xbb}{#1}}
+\@namedef{Gin@rule@.PNG}#1{{bmp}{.xbb}{#1}}
+%
+\@namedef{Gin@rule@.jpg}#1{{bmp}{.xbb}{#1}}
+\@namedef{Gin@rule@.JPG}#1{{bmp}{.xbb}{#1}}
+%
+\@namedef{Gin@rule@.jpeg}#1{{bmp}{.xbb}{#1}}
+\@namedef{Gin@rule@.JPEG}#1{{bmp}{.xbb}{#1}}
+%
+\@namedef{Gin@rule@.jp2}#1{{bmp}{.xbb}{#1}}
+\@namedef{Gin@rule@.JP2}#1{{bmp}{.xbb}{#1}}
+%
+\@namedef{Gin@rule@.jpf}#1{{bmp}{.xbb}{#1}}
+\@namedef{Gin@rule@.JPF}#1{{bmp}{.xbb}{#1}}
+%
+\@namedef{Gin@rule@.bmp}#1{{bmp}{.xbb}{#1}}
+\@namedef{Gin@rule@.BMP}#1{{bmp}{.xbb}{#1}}
+%
+\@namedef{Gin@rule@.ps}#1{{eps}{.ps}{#1}}
+\@namedef{Gin@rule@.PS}#1{{eps}{.ps}{#1}}
+%
+\@namedef{Gin@rule@.eps}#1{{eps}{.eps}{#1}}
+\@namedef{Gin@rule@.EPS}#1{{eps}{.eps}{#1}}
+%
+\@namedef{Gin@rule@.mps}#1{{mps}{.mps}{#1}}
+\@namedef{Gin@rule@.MPS}#1{{mps}{.mps}{#1}}
+%
+\@namedef{Gin@rule@*}#1{{eps}{\Gin@ext}{#1}}
+\@ifundefined{ifGin@setpagesize}
+{\expandafter\let\csname ifGin@setpagesize\expandafter\endcsname
+\csname iftrue\endcsname}
+{}
+\ifGin@setpagesize
+\ifx\paperwidth\@undefined\else
+\AtBeginDocument{%
+% If a package has changed \mag, assume it knows what it is doing
+% and leave page size alone
+\ifnum\mag=\@m
+\@ifundefined{stockwidth}{%
+\@ifundefined{paperwidth}{%
+}{%
+\ifdim\paperwidth>0pt\relax
+\ifdim\paperheight>0pt\relax
+\pdfpagewidth=\paperwidth
+\pdfpageheight=\paperheight
+\fi
+\fi
+}%
+}{%
+\ifdim\stockwidth>0pt\relax
+\ifdim\stockheight>0pt\relax
+\pdfpagewidth=\stockwidth
+\pdfpageheight=\stockheight
+\fi
+\fi
+}%
+\fi
+}
+\fi
+\fi
+% Disable use of new multiple stacks pending further testing
+\endinput
+% Updates for newer dvipdfmx versions
+% Loaded last as we can then bail-out if not required
+\begingroup
+  \ifcsname\detokenize{c__kernel_sys_dvipdfmx_version_int}\endcsname
+    \edef\extractbbversion{%
+      \number\csname\detokenize{c__kernel_sys_dvipdfmx_version_int}\endcsname}%
+  \else
+    \immediate\openin 0 = |"extractbb --version"
+    \ifeof0 %
+      \def\extractbbversion{0}%
+    \else
+      \read0 to \extractbbversion % \par
+      \ifeof0 %
+        \def\extractbbversion{0}%
+      \else
+        \read0 to \extractbbversion
+          \long\def\getextractbbversion#1Version #2 #3\stop{%
+            \def\extractbbversion{#2}}%
+          \expandafter\getextractbbversion\extractbbversion Version 0 \stop
+      \fi
+    \fi
+  \fi
+\ifnum\extractbbversion<20201111 %
+  \endgroup
+  \expandafter\endinput
+\else
+  \endgroup
+\fi
+% Conversion functions so the internal representation stays unchanged
+\let\init@current@color\current@color
+\def\convert@color#1{%
+  \ifx#1\init@current@color
+    \expandafter\convert@color@init
+  \else
+    \expandafter\convert@@color
+  \fi
+    #1%
+}
+\def\convert@color@init#1{0 g 0 G}
+\def\convert@@color#1{%
+  \expandafter\expandafter\expandafter\convert@@@color#1\stop
+}
+\def\convert@@@color#1 #2\stop{%
+  \csname convert@color@#1\endcsname{#2}%
+}
+\def\convert@color@cmyk#1{#1 k #1 K}
+\def\convert@color@gray#1{#1 g #1 G}
+\def\convert@color@rgb#1{#1 rg #1 RG}
+\def\convert@color@#1{%
+  \expandafter\expandafter\expandafter\convert@@color
+    \expandafter\expandafter\expandafter{\csname col@#1\endcsname}%
+}
+% Deal with named colors
+\def\define@color@named#1#2{\expandafter\edef\csname col@#1\endcsname{#2}}
+% Change the specials to use the stack
+\ifdefined\main@pdfcolorstack\else
+  \chardef\main@pdfcolorstack=1 %
+  \ifx\AtBeginDvi\undefined
+    \long\def\@firstofone#1{#1}%
+    \expandafter\@firstofone
+  \else
+    \expandafter\AtBeginDvi
+  \fi
+    {\special{pdfcolorstackinit \the\main@pdfcolorstack\space page direct (0 g 0 G)}}
+\fi
+\def\@pdfcolorstack{\the\main@pdfcolorstack\space}
+\def\set@color{%
+  \special{pdfcolorstack \@pdfcolorstack push (\convert@color\current@color)}%
+  \aftergroup \reset@color
+}
+\def\reset@color{%
+  \special{pdfcolorstack \@pdfcolorstack pop}%
+}
+% Reinsert stack color to over-ride built-in reinsertion of pdf:bc color
+\def\Grot@end{\special{pdf:etrans}\special{pdfcolorstack \@pdfcolorstack current}}
+\let\Gscale@end\Grot@end
+\def\GPT@clipbox#1{%
+  \setbox#1=\hbox{%
+    \Gin@defaultbp\WIDTH{\wd#1}%
+    \Gin@defaultbp\DEPTH{\dp#1}%
+    \@tempdima\ht#1%
+    \advance\@tempdima\dp#1%
+    \Gin@defaultbp\TOTALHEIGHT{\@tempdima}%
+    \special{x:gsave}%
+    \special{%
+      pdf:literal
+      0 -\DEPTH\GPT@space \WIDTH\GPT@space \TOTALHEIGHT\GPT@space re  W n
+    }%
+    \rlap{\box#1}%
+    \special{x:grestore}%
+    \special{pdfcolorstack \@pdfcolorstack current}%
+    \hskip\wd#1%
+  }%
+}

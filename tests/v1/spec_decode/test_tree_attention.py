@@ -14,9 +14,12 @@ from tests.v1.attention.utils import (
 )
 from vllm.config import ParallelConfig, SpeculativeConfig
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.fa_utils import is_flash_attn_varlen_func_available
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+DEVICE_TYPE = current_platform.device_type
 
 if not is_flash_attn_varlen_func_available():
     pytest.skip(
@@ -170,9 +173,9 @@ def _get_available_reference_backends() -> list[AttentionBackendEnum]:
 
 
 class MockAttentionLayer(torch.nn.Module):
-    _q_scale = torch.tensor(1.0, dtype=torch.float32, device="cuda")
-    _k_scale = torch.tensor(1.0, dtype=torch.float32, device="cuda")
-    _v_scale = torch.tensor(1.0, dtype=torch.float32, device="cuda")
+    _q_scale = torch.tensor(1.0, dtype=torch.float32, device=DEVICE_TYPE)
+    _k_scale = torch.tensor(1.0, dtype=torch.float32, device=DEVICE_TYPE)
+    _v_scale = torch.tensor(1.0, dtype=torch.float32, device=DEVICE_TYPE)
     layer_name = "mock_layer"
 
     def __init__(self):
@@ -238,11 +241,13 @@ def forward_attention(
         )
     kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
     builder = builder_cls(kv_cache_spec, [], vllm_config, q.device)
+    seq_lens_cpu = seq_lens.cpu()
     common_attn_metadata = CommonAttentionMetadata(
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc.cpu(),
         seq_lens=seq_lens,
-        _seq_lens_cpu=seq_lens.cpu(),
+        seq_lens_cpu_upper_bound=seq_lens_cpu,
+        _seq_lens_cpu=seq_lens_cpu,
         _num_computed_tokens_cpu=context_lens.cpu(),
         num_reqs=batch_size,
         num_actual_tokens=num_actual_tokens,
@@ -321,8 +326,7 @@ def forward_attention(
 def test_tree_attn_correctness(
     reference_backend: AttentionBackendEnum,
 ) -> None:
-    torch.manual_seed(42)
-    torch.cuda.manual_seed_all(42)
+    set_random_seed(42)
 
     device = "cuda"
     tree_attn_masks = {

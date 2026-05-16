@@ -1,0 +1,113 @@
+%%
+%% This is file `fonttext.ltx',
+%% generated with the docstrip utility.
+%%
+%% The original source files were:
+%%
+%% fontdef.dtx  (with options: `text')
+%% 
+%% This is a generated file.
+%% 
+%% Copyright (C) 1993-2021
+%% The LaTeX Project and any individual authors listed elsewhere
+%% in this file.
+%% 
+%% This file was generated from file(s) of the LaTeX base system.
+%% --------------------------------------------------------------
+%% 
+%% It may be distributed and/or modified under the
+%% conditions of the LaTeX Project Public License, either version 1.3c
+%% of this license or (at your option) any later version.
+%% The latest version of this license is in
+%%    https://www.latex-project.org/lppl.txt
+%% and version 1.3c or later is part of all distributions of LaTeX
+%% version 2008 or later.
+%% 
+%% This file may only be distributed together with a copy of the LaTeX
+%% base system. You may however distribute the LaTeX base system without
+%% such generated files.
+%% 
+%% The list of all files belonging to the LaTeX base distribution is
+%% given in the file `manifest.txt'. See also `legal.txt' for additional
+%% information.
+%% 
+%% Details of how to use a configuration file to modify this part of
+%% the system are in the document `cfgguide.tex'.
+%% 
+%% 
+%%% From File: fontdef.dtx
+\ProvidesFile{fonttext.ltx}
+           [2021/01/15 v3.0i LaTeX Kernel
+(Text
+           font setup)]
+\typeout{=== Don't modify this file, use a .cfg file instead ===^^J}
+\input {omlenc.def}
+\input {omsenc.def}
+\input {ot1enc.def}
+\input  {t1enc.def}
+\input{ts1enc.def}
+\ifx\Umathcode\@undefined
+\fontencoding{OT1}
+\def\@fontenc@load@list{\@elt{T1,OT1}}
+\def\rmsubstdefault{cmr}
+\def\sfsubstdefault{cmss}
+\def\ttsubstdefault{cmtt}
+\LoadFontDefinitionFile{TS1}{cmr}
+\else
+\input {tuenc.def}
+\fontencoding{TU}
+\def\@fontenc@load@list{\@elt{TU}}
+\DeclareFontSubstitution{TU}{lmr}{m}{n}
+\LoadFontDefinitionFile{TU}{lmr}
+\LoadFontDefinitionFile{TU}{lmss}
+\LoadFontDefinitionFile{TU}{lmtt}
+\def\rmsubstdefault{lmr}
+\def\sfsubstdefault{lmss}
+\def\ttsubstdefault{lmtt}
+\LoadFontDefinitionFile{TS1}{lmr}
+\DeclareFontSubstitution{TU}{lmr}{m}{n}
+\fi
+\DeclareFontEncodingDefaults{}{}
+\DeclareFontSubstitution{T1}{cmr}{m}{n}
+\DeclareFontSubstitution{OT1}{cmr}{m}{n}
+\begingroup
+\nfss@catcodes
+\input  {t1cmr.fd}
+\input  {ot1cmr.fd}
+\endgroup
+\begingroup
+\nfss@catcodes
+\input {ot1cmss.fd}
+\input {ot1cmtt.fd}
+\endgroup
+\DeclareErrorFont{OT1}{cmr}{m}{n}{10}
+\ifx\Umathcode\@undefined
+\newcommand\encodingdefault{OT1}
+\newcommand\rmdefault{cmr}
+\newcommand\sfdefault{cmss}
+\newcommand\ttdefault{cmtt}
+\else
+\newcommand\encodingdefault{TU}
+\newcommand\rmdefault{lmr}
+\fontfamily{\rmdefault}
+\newcommand\sfdefault{lmss}
+\newcommand\ttdefault{lmtt}
+\fi
+\newcommand\bfdefault{b}  % overwritten below (for rollback)
+\newcommand\mddefault{m}  % overwritten below (for rollback)
+\newcommand\itdefault{it}
+\newcommand\sldefault{sl}
+\newcommand\scdefault{sc}
+\newcommand\updefault{up}  % overwritten below (for rollback)
+
+\renewcommand\updefault{up}
+\renewcommand\bfdefault{b\@empty}
+\renewcommand\mddefault{m\@empty}
+\let\bfdefault@previous\bfdefault
+\let\mddefault@previous\mddefault
+\newcommand\familydefault{\rmdefault}
+\newcommand\seriesdefault{\mddefault}
+\newcommand\shapedefault{n}
+\endinput
+%%
+%% End of file `fonttext.ltx'.

@@ -1,0 +1,559 @@
+%%
+%% This is file `tuenc.def',
+%% generated with the docstrip utility.
+%%
+%% The original source files were:
+%%
+%% ltoutenc.dtx  (with options: `TU')
+%% 
+%% This is a generated file.
+%% 
+%% The source is maintained by the LaTeX Project team and bug
+%% reports for it can be opened at https://latex-project.org/bugs.html
+%% (but please observe conditions on bug reports sent to that address!)
+%% 
+%% 
+%% Copyright (C) 1993-2021
+%% The LaTeX Project and any individual authors listed elsewhere
+%% in this file.
+%% 
+%% This file was generated from file(s) of the LaTeX base system.
+%% --------------------------------------------------------------
+%% 
+%% It may be distributed and/or modified under the
+%% conditions of the LaTeX Project Public License, either version 1.3c
+%% of this license or (at your option) any later version.
+%% The latest version of this license is in
+%%    https://www.latex-project.org/lppl.txt
+%% and version 1.3c or later is part of all distributions of LaTeX
+%% version 2008 or later.
+%% 
+%% This file has the LPPL maintenance status "maintained".
+%% 
+%% This file may only be distributed together with a copy of the LaTeX
+%% base system. You may however distribute the LaTeX base system without
+%% such generated files.
+%% 
+%% The list of all files belonging to the LaTeX base distribution is
+%% given in the file `manifest.txt'. See also `legal.txt' for additional
+%% information.
+%% 
+%% The list of derived (unpacked) files belonging to the distribution
+%% and covered by LPPL is defined by the unpacking scripts (with
+%% extension .ins) which are part of the distribution.
+%%% From File: ltoutenc.dtx
+\ProvidesFile{tuenc.def}
+ [2021/04/29 v2.0v
+      Standard LaTeX file]
+\providecommand\UnicodeEncodingName{TU}
+\begingroup\expandafter\expandafter\expandafter\endgroup
+\expandafter\ifx\csname XeTeXrevision\endcsname\relax
+  \begingroup\expandafter\expandafter\expandafter\endgroup
+  \expandafter\ifx\csname directlua\endcsname\relax
+    \PackageWarningNoLine{fontenc}
+      {\UnicodeEncodingName\space
+       encoding is only available with XeTeX and LuaTeX.\MessageBreak
+       Defaulting to T1 encoding}
+      \def\encodingdefault{T1}
+    \expandafter\expandafter\expandafter\endinput
+  \else
+    \def\UnicodeFontTeXLigatures{+tlig;}
+    \ifnum\luatexversion<110
+      \def\reserved@a#1{%
+        \def\@remove@tlig##1{\@remove@tlig@##1\@nil#1\@nil\relax}
+        \def\@remove@tlig@##1#1{\@remove@tlig@@##1}}
+      \edef\reserved@b{\detokenize{+tlig;}}
+      \expandafter\reserved@a\expandafter{\reserved@b}
+      \def\@remove@tlig@@#1\@nil#2\relax{#1}
+      \def\remove@tlig#1{%
+        \begingroup
+        \font\remove@tlig
+        \expandafter\@remove@tlig\expandafter{\fontname\font}%
+        \remove@tlig
+        \char#1\relax
+        \endgroup
+      }
+    \else
+      \newluafunction\@remove@tlig@@@@
+      \now@and@everyjob{\directlua{
+        local rawchar_func = token.create'@remove@tlig@@@@'.index
+        local forcehmode = tex.forcehmode
+        local put_next = token.put_next
+        local glyph_id = node.id'glyph'
+        local rawchar_token = token.new(rawchar_func, token.command_id'lua_call')
+        lua.get_functions_table()[rawchar_func] = function()
+          local mode = tex.nest.top.mode
+          if mode == 1 or mode == -1 then
+            put_next(rawchar_token)
+            return forcehmode(true)
+          end
+          local n = node.new(glyph_id, 256)
+          n.font = font.current()
+          n.char = token.scan_int()
+          return node.write(n)
+        end
+        token.set_lua('@remove@tlig@@@', rawchar_func, 'global', 'protected')
+      }}
+      \def\remove@tlig#1{\@remove@tlig@@@#1\relax}
+    \fi
+  \fi
+\else
+  \def\UnicodeFontTeXLigatures{mapping=tex-text;}
+  \def\remove@tlig#1{\XeTeXglyph\numexpr\XeTeXcharglyph#1\relax}
+\fi
+\def\UnicodeFontFile#1#2{"[#1]:#2"}
+\def\UnicodeFontName#1#2{"#1:#2"}
+\DeclareFontEncoding\UnicodeEncodingName{}{}
+\def\add@unicode@accent#1#2{%
+  \if\relax\detokenize{#2}\relax^^a0\else#2\fi
+  \char#1\relax}
+\def\DeclareUnicodeAccent#1#2#3{%
+  \DeclareTextCommand{#1}{#2}{\add@unicode@accent{#3}}%
+}
+{
+\catcode\z@=11\relax
+\gdef\DeclareUnicodeComposite#1#2#3{%
+   \def\reserved@a##1##2{%
+     \DeclareTextCompositeCommand#1\UnicodeEncodingName{#2}{%
+   \iffontchar\font#3 ##2%
+      \else ##1\fi}}%
+    \expandafter\expandafter\expandafter\extract@default@composite
+    \csname\UnicodeEncodingName\string#1\endcsname{#2}\@nil
+   \bgroup
+      \lccode\z@#3 %
+      \lowercase{\egroup
+      \expandafter\reserved@a\expandafter{\reserved@b}{^^@}}}%
+}
+\def\extract@default@composite#1{%
+ \ifx\@text@composite#1%
+   \expandafter\extract@default@composite@a
+ \else
+   \expandafter\extract@default@composite@b\expandafter#1%
+ \fi}
+\def\extract@default@composite@a#1\@text@composite#2\@nil{%
+  \def\reserved@b{#2}}
+\def\extract@default@composite@b#1#2\@nil{%
+  \def\reserved@b{#1#2}}
+\DeclareTextCommand\textquotesingle \UnicodeEncodingName{%
+                                                \remove@tlig{"0027}}
+\DeclareTextCommand\textasciigrave  \UnicodeEncodingName{%
+                                                \remove@tlig{"0060}}
+\DeclareTextCommand\textquotedbl    \UnicodeEncodingName{%
+                                                \remove@tlig{"0022}}
+\DeclareTextSymbol{\textdollar}          \UnicodeEncodingName{"0024}
+\DeclareTextSymbol{\textless}            \UnicodeEncodingName{"003C}
+\DeclareTextSymbol{\textgreater}         \UnicodeEncodingName{"003E}
+\DeclareTextSymbol{\textbackslash}       \UnicodeEncodingName{"005C}
+\DeclareTextSymbol{\textasciicircum}     \UnicodeEncodingName{"005E}
+\DeclareTextSymbol{\textunderscore}      \UnicodeEncodingName{"005F}
+\DeclareTextSymbol{\textbraceleft}       \UnicodeEncodingName{"007B}
+\DeclareTextSymbol{\textbar}             \UnicodeEncodingName{"007C}
+\DeclareTextSymbol{\textbraceright}      \UnicodeEncodingName{"007D}
+\DeclareTextSymbol{\textasciitilde}      \UnicodeEncodingName{"007E}
+\DeclareTextSymbol{\textexclamdown}      \UnicodeEncodingName{"00A1}
+\DeclareTextSymbol{\textcent}            \UnicodeEncodingName{"00A2}
+\DeclareTextSymbol{\textsterling}        \UnicodeEncodingName{"00A3}
+\DeclareTextSymbol{\textcurrency}        \UnicodeEncodingName{"00A4}
+\DeclareTextSymbol{\textyen}             \UnicodeEncodingName{"00A5}
+\DeclareTextSymbol{\textbrokenbar}       \UnicodeEncodingName{"00A6}
+\DeclareTextSymbol{\textsection}         \UnicodeEncodingName{"00A7}
+\DeclareTextSymbol{\textasciidieresis}   \UnicodeEncodingName{"00A8}
+\DeclareTextSymbol{\textcopyright}       \UnicodeEncodingName{"00A9}
+\DeclareTextSymbol{\textordfeminine}     \UnicodeEncodingName{"00AA}
+\DeclareTextSymbol{\guillemetleft}       \UnicodeEncodingName{"00AB}
+\DeclareTextSymbol{\guillemotleft}       \UnicodeEncodingName{"00AB}
+\DeclareTextSymbol{\textlnot}            \UnicodeEncodingName{"00AC}
+\DeclareTextSymbol{\textregistered}      \UnicodeEncodingName{"00AE}
+\DeclareTextSymbol{\textasciimacron}     \UnicodeEncodingName{"00AF}
+\DeclareTextSymbol{\textdegree}          \UnicodeEncodingName{"00B0}
+\DeclareTextSymbol{\textpm}              \UnicodeEncodingName{"00B1}
+\DeclareTextSymbol{\texttwosuperior}     \UnicodeEncodingName{"00B2}
+\DeclareTextSymbol{\textthreesuperior}   \UnicodeEncodingName{"00B3}
+\DeclareTextSymbol{\textasciiacute}      \UnicodeEncodingName{"00B4}
+\DeclareTextSymbol{\textmu}              \UnicodeEncodingName{"00B5}
+\DeclareTextSymbol{\textparagraph}       \UnicodeEncodingName{"00B6}
+\DeclareTextSymbol{\textperiodcentered}  \UnicodeEncodingName{"00B7}
+\DeclareTextSymbol{\textonesuperior}     \UnicodeEncodingName{"00B9}
+\DeclareTextSymbol{\textordmasculine}    \UnicodeEncodingName{"00BA}
+\DeclareTextSymbol{\guillemetright}      \UnicodeEncodingName{"00BB}
+\DeclareTextSymbol{\guillemotright}      \UnicodeEncodingName{"00BB}
+\DeclareTextSymbol{\textonequarter}      \UnicodeEncodingName{"00BC}
+\DeclareTextSymbol{\textonehalf}         \UnicodeEncodingName{"00BD}
+\DeclareTextSymbol{\textthreequarters}   \UnicodeEncodingName{"00BE}
+\DeclareTextSymbol{\textquestiondown}    \UnicodeEncodingName{"00BF}
+\DeclareTextSymbol{\AE}                  \UnicodeEncodingName{"00C6}
+\DeclareTextSymbol{\DH}                  \UnicodeEncodingName{"00D0}
+\DeclareTextSymbol{\texttimes}           \UnicodeEncodingName{"00D7}
+\DeclareTextSymbol{\O}                   \UnicodeEncodingName{"00D8}
+\DeclareTextSymbol{\TH}                  \UnicodeEncodingName{"00DE}
+\DeclareTextSymbol{\ss}                  \UnicodeEncodingName{"00DF}
+\DeclareTextSymbol{\ae}                  \UnicodeEncodingName{"00E6}
+\DeclareTextSymbol{\dh}                  \UnicodeEncodingName{"00F0}
+\DeclareTextSymbol{\textdiv}             \UnicodeEncodingName{"00F7}
+\DeclareTextSymbol{\o}                   \UnicodeEncodingName{"00F8}
+\DeclareTextSymbol{\th}                  \UnicodeEncodingName{"00FE}
+\DeclareTextSymbol{\DJ}                  \UnicodeEncodingName{"0110}
+\DeclareTextSymbol{\dj}                  \UnicodeEncodingName{"0111}
+\DeclareTextSymbol{\i}                   \UnicodeEncodingName{"0131}
+\DeclareTextSymbol{\IJ}                  \UnicodeEncodingName{"0132}
+\DeclareTextSymbol{\ij}                  \UnicodeEncodingName{"0133}
+\DeclareTextSymbol{\L}                   \UnicodeEncodingName{"0141}
+\DeclareTextSymbol{\l}                   \UnicodeEncodingName{"0142}
+\DeclareTextSymbol{\NG}                  \UnicodeEncodingName{"014A}
+\DeclareTextSymbol{\ng}                  \UnicodeEncodingName{"014B}
+\DeclareTextSymbol{\OE}                  \UnicodeEncodingName{"0152}
+\DeclareTextSymbol{\oe}                  \UnicodeEncodingName{"0153}
+\DeclareTextSymbol{\textflorin}          \UnicodeEncodingName{"0192}
+\DeclareTextSymbol{\j}                   \UnicodeEncodingName{"0237}
+\DeclareTextSymbol{\textasciicaron}      \UnicodeEncodingName{"02C7}
+\DeclareTextSymbol{\textasciibreve}      \UnicodeEncodingName{"02D8}
+\DeclareTextSymbol{\textacutedbl}        \UnicodeEncodingName{"02DD}
+\DeclareTextSymbol{\textgravedbl}        \UnicodeEncodingName{"02F5}
+\DeclareTextSymbol{\texttildelow}        \UnicodeEncodingName{"02F7}
+\DeclareTextSymbol{\textbaht}            \UnicodeEncodingName{"0E3F}
+\DeclareTextSymbol{\SS}                  \UnicodeEncodingName{"1E9E}
+\DeclareTextSymbol{\textcompwordmark}    \UnicodeEncodingName{"200C}
+\DeclareTextSymbol{\textendash}          \UnicodeEncodingName{"2013}
+\DeclareTextSymbol{\textemdash}          \UnicodeEncodingName{"2014}
+\DeclareTextCommand{\textnonbreakinghyphen} \UnicodeEncodingName
+     {\iffontchar\font "2011 \char "2011 \else \mbox{-}\nobreak\hskip\z@ \fi}
+\DeclareTextCommand{\textfiguredash}     \UnicodeEncodingName
+     {\iffontchar\font "2012 \char "2012 \else \char "2013 \fi}
+\DeclareTextCommand{\texthorizontalbar}     \UnicodeEncodingName
+     {\iffontchar\font "2015 \char "2015 \else \char "2014 \fi}
+\DeclareTextSymbol{\textbardbl}          \UnicodeEncodingName{"2016}
+\DeclareTextSymbol{\textquoteleft}       \UnicodeEncodingName{"2018}
+\DeclareTextSymbol{\textquoteright}      \UnicodeEncodingName{"2019}
+\DeclareTextSymbol{\quotesinglbase}      \UnicodeEncodingName{"201A}
+\DeclareTextSymbol{\textquotedblleft}    \UnicodeEncodingName{"201C}
+\DeclareTextSymbol{\textquotedblright}   \UnicodeEncodingName{"201D}
+\DeclareTextSymbol{\quotedblbase}        \UnicodeEncodingName{"201E}
+\DeclareTextSymbol{\textdagger}          \UnicodeEncodingName{"2020}
+\DeclareTextSymbol{\textdaggerdbl}       \UnicodeEncodingName{"2021}
+\DeclareTextSymbol{\textbullet}          \UnicodeEncodingName{"2022}
+\DeclareTextSymbol{\textellipsis}        \UnicodeEncodingName{"2026}
+\DeclareTextSymbol{\textperthousand}     \UnicodeEncodingName{"2030}
+\DeclareTextSymbol{\textpertenthousand}  \UnicodeEncodingName{"2031}
+\DeclareTextSymbol{\guilsinglleft}       \UnicodeEncodingName{"2039}
+\DeclareTextSymbol{\guilsinglright}      \UnicodeEncodingName{"203A}
+\DeclareTextSymbol{\textreferencemark}   \UnicodeEncodingName{"203B}
+\DeclareTextSymbol{\textinterrobang}     \UnicodeEncodingName{"203D}
+\DeclareTextSymbol{\textfractionsolidus} \UnicodeEncodingName{"2044}
+\DeclareTextSymbol{\textlquill}          \UnicodeEncodingName{"2045}
+\DeclareTextSymbol{\textrquill}          \UnicodeEncodingName{"2046}
+\DeclareTextSymbol{\textdiscount}        \UnicodeEncodingName{"2052}
+\DeclareTextSymbol{\textcolonmonetary}   \UnicodeEncodingName{"20A1}
+\DeclareTextSymbol{\textlira}            \UnicodeEncodingName{"20A4}
+\DeclareTextSymbol{\textnaira}           \UnicodeEncodingName{"20A6}
+\DeclareTextSymbol{\textwon}             \UnicodeEncodingName{"20A9}
+\DeclareTextSymbol{\textdong}            \UnicodeEncodingName{"20AB}
+\DeclareTextSymbol{\texteuro}            \UnicodeEncodingName{"20AC}
+\DeclareTextSymbol{\textpeso}            \UnicodeEncodingName{"20B1}
+\DeclareTextSymbol{\textcelsius}         \UnicodeEncodingName{"2103}
+\DeclareTextSymbol{\textnumero}          \UnicodeEncodingName{"2116}
+\DeclareTextSymbol{\textcircledP}        \UnicodeEncodingName{"2117}
+\DeclareTextSymbol{\textrecipe}          \UnicodeEncodingName{"211E}
+\DeclareTextSymbol{\textservicemark}     \UnicodeEncodingName{"2120}
+\DeclareTextSymbol{\texttrademark}       \UnicodeEncodingName{"2122}
+\DeclareTextSymbol{\textohm}             \UnicodeEncodingName{"2126}
+\DeclareTextSymbol{\textmho}             \UnicodeEncodingName{"2127}
+\DeclareTextSymbol{\textestimated}       \UnicodeEncodingName{"212E}
+\DeclareTextSymbol{\textleftarrow}       \UnicodeEncodingName{"2190}
+\DeclareTextSymbol{\textuparrow}         \UnicodeEncodingName{"2191}
+\DeclareTextSymbol{\textrightarrow}      \UnicodeEncodingName{"2192}
+\DeclareTextSymbol{\textdownarrow}       \UnicodeEncodingName{"2193}
+\DeclareTextSymbol{\textminus}           \UnicodeEncodingName{"2212}
+
+\DeclareTextSymbol{\Hwithstroke}         \UnicodeEncodingName{"0126}
+\DeclareTextSymbol{\hwithstroke}         \UnicodeEncodingName{"0127}
+\DeclareTextCommand{\textasteriskcentered}\UnicodeEncodingName{%
+  \iffontchar\font"2217 \char"2217 \else
+    \begingroup
+      \fontsize
+       {\the\dimexpr1.3\dimexpr\f@size pt\relax}%
+       {\f@baselineskip}%
+      \selectfont
+      \raisebox{-0.7ex}[\dimexpr\height-0.7ex][0pt]{*}%
+    \endgroup
+  \fi
+}
+\DeclareTextSymbol{\textsurd}            \UnicodeEncodingName{"221A}
+\DeclareTextSymbol{\textlangle}          \UnicodeEncodingName{"2329}
+\DeclareTextSymbol{\textrangle}          \UnicodeEncodingName{"232A}
+\DeclareTextSymbol{\textblank}           \UnicodeEncodingName{"2422}
+\DeclareTextSymbol{\textvisiblespace}    \UnicodeEncodingName{"2423}
+\DeclareTextSymbol{\textopenbullet}      \UnicodeEncodingName{"25E6}
+\DeclareTextSymbol{\textbigcircle}       \UnicodeEncodingName{"25EF}
+\DeclareTextSymbol{\textmusicalnote}     \UnicodeEncodingName{"266A}
+\DeclareTextSymbol{\textmarried}         \UnicodeEncodingName{"26AD}
+\DeclareTextSymbol{\textdivorced}        \UnicodeEncodingName{"26AE}
+\DeclareTextSymbol{\textinterrobangdown} \UnicodeEncodingName{"2E18}
+\DeclareUnicodeAccent{\`}                \UnicodeEncodingName{"0300}
+\DeclareUnicodeAccent{\'}                \UnicodeEncodingName{"0301}
+\DeclareUnicodeAccent{\^}                \UnicodeEncodingName{"0302}
+\DeclareUnicodeAccent{\~}                \UnicodeEncodingName{"0303}
+\DeclareUnicodeAccent{\=}                \UnicodeEncodingName{"0304}
+\DeclareUnicodeAccent{\u}                \UnicodeEncodingName{"0306}
+\DeclareUnicodeAccent{\.}                \UnicodeEncodingName{"0307}
+\DeclareUnicodeAccent{\"}                \UnicodeEncodingName{"0308}
+\DeclareUnicodeAccent{\r}                \UnicodeEncodingName{"030A}
+\DeclareUnicodeAccent{\H}                \UnicodeEncodingName{"030B}
+\DeclareUnicodeAccent{\v}                \UnicodeEncodingName{"030C}
+\DeclareUnicodeAccent{\b}                \UnicodeEncodingName{"0332}
+\DeclareUnicodeAccent{\d}                \UnicodeEncodingName{"0323}
+\DeclareUnicodeAccent{\c}                \UnicodeEncodingName{"0327}
+\DeclareUnicodeAccent{\k}                \UnicodeEncodingName{"0328}
+\DeclareTextCommand\textcommabelow       \UnicodeEncodingName[1]
+  {\hmode@bgroup\ooalign{\null#1\crcr\hidewidth\raise-.31ex
+   \hbox{\check@mathfonts\fontsize\ssf@size\z@
+   \math@fontsfalse\selectfont,}\hidewidth}\egroup}
+\DeclareUnicodeComposite{\^}              {}{"005E}
+\DeclareUnicodeComposite{\~}              {}{"007E}
+\DeclareUnicodeComposite{\`}             {A}{"00C0}
+\DeclareUnicodeComposite{\'}             {A}{"00C1}
+\DeclareUnicodeComposite{\^}             {A}{"00C2}
+\DeclareUnicodeComposite{\~}             {A}{"00C3}
+\DeclareUnicodeComposite{\"}             {A}{"00C4}
+\DeclareUnicodeComposite{\r}             {A}{"00C5}
+\DeclareUnicodeComposite{\c}             {C}{"00C7}
+\DeclareUnicodeComposite{\`}             {E}{"00C8}
+\DeclareUnicodeComposite{\'}             {E}{"00C9}
+\DeclareUnicodeComposite{\^}             {E}{"00CA}
+\DeclareUnicodeComposite{\"}             {E}{"00CB}
+\DeclareUnicodeComposite{\`}             {I}{"00CC}
+\DeclareUnicodeComposite{\'}             {I}{"00CD}
+\DeclareUnicodeComposite{\^}             {I}{"00CE}
+\DeclareUnicodeComposite{\"}             {I}{"00CF}
+\DeclareUnicodeComposite{\~}             {N}{"00D1}
+\DeclareUnicodeComposite{\`}             {O}{"00D2}
+\DeclareUnicodeComposite{\'}             {O}{"00D3}
+\DeclareUnicodeComposite{\^}             {O}{"00D4}
+\DeclareUnicodeComposite{\~}             {O}{"00D5}
+\DeclareUnicodeComposite{\"}             {O}{"00D6}
+\DeclareUnicodeComposite{\`}             {U}{"00D9}
+\DeclareUnicodeComposite{\'}             {U}{"00DA}
+\DeclareUnicodeComposite{\^}             {U}{"00DB}
+\DeclareUnicodeComposite{\"}             {U}{"00DC}
+\DeclareUnicodeComposite{\'}             {Y}{"00DD}
+\DeclareUnicodeComposite{\`}             {a}{"00E0}
+\DeclareUnicodeComposite{\'}             {a}{"00E1}
+\DeclareUnicodeComposite{\^}             {a}{"00E2}
+\DeclareUnicodeComposite{\~}             {a}{"00E3}
+\DeclareUnicodeComposite{\"}             {a}{"00E4}
+\DeclareUnicodeComposite{\r}             {a}{"00E5}
+\DeclareUnicodeComposite{\c}             {c}{"00E7}
+\DeclareUnicodeComposite{\`}             {e}{"00E8}
+\DeclareUnicodeComposite{\'}             {e}{"00E9}
+\DeclareUnicodeComposite{\^}             {e}{"00EA}
+\DeclareUnicodeComposite{\"}             {e}{"00EB}
+\DeclareUnicodeComposite{\`}             \i {"00EC}
+\DeclareUnicodeComposite{\`}             {i}{"00EC}
+\DeclareUnicodeComposite{\'}             \i {"00ED}
+\DeclareUnicodeComposite{\'}             {i}{"00ED}
+\DeclareUnicodeComposite{\^}             \i {"00EE}
+\DeclareUnicodeComposite{\^}             {i}{"00EE}
+\DeclareUnicodeComposite{\"}             \i {"00EF}
+\DeclareUnicodeComposite{\"}             {i}{"00EF}
+\DeclareUnicodeComposite{\~}             {n}{"00F1}
+\DeclareUnicodeComposite{\`}             {o}{"00F2}
+\DeclareUnicodeComposite{\'}             {o}{"00F3}
+\DeclareUnicodeComposite{\^}             {o}{"00F4}
+\DeclareUnicodeComposite{\~}             {o}{"00F5}
+\DeclareUnicodeComposite{\"}             {o}{"00F6}
+\DeclareUnicodeComposite{\`}             {u}{"00F9}
+\DeclareUnicodeComposite{\'}             {u}{"00FA}
+\DeclareUnicodeComposite{\^}             {u}{"00FB}
+\DeclareUnicodeComposite{\"}             {u}{"00FC}
+\DeclareUnicodeComposite{\'}             {y}{"00FD}
+\DeclareUnicodeComposite{\"}             {y}{"00FF}
+\DeclareUnicodeComposite{\=}             {A}{"0100}
+\DeclareUnicodeComposite{\=}             {a}{"0101}
+\DeclareUnicodeComposite{\u}             {A}{"0102}
+\DeclareUnicodeComposite{\u}             {a}{"0103}
+\DeclareUnicodeComposite{\k}             {A}{"0104}
+\DeclareUnicodeComposite{\k}             {a}{"0105}
+\DeclareUnicodeComposite{\'}             {C}{"0106}
+\DeclareUnicodeComposite{\'}             {c}{"0107}
+\DeclareUnicodeComposite{\^}             {C}{"0108}
+\DeclareUnicodeComposite{\^}             {c}{"0109}
+\DeclareUnicodeComposite{\.}             {C}{"010A}
+\DeclareUnicodeComposite{\.}             {c}{"010B}
+\DeclareUnicodeComposite{\v}             {C}{"010C}
+\DeclareUnicodeComposite{\v}             {c}{"010D}
+\DeclareUnicodeComposite{\v}             {D}{"010E}
+\DeclareUnicodeComposite{\v}             {d}{"010F}
+\DeclareUnicodeComposite{\=}             {E}{"0112}
+\DeclareUnicodeComposite{\=}             {e}{"0113}
+\DeclareUnicodeComposite{\u}             {E}{"0114}
+\DeclareUnicodeComposite{\u}             {e}{"0115}
+\DeclareUnicodeComposite{\.}             {E}{"0116}
+\DeclareUnicodeComposite{\.}             {e}{"0117}
+\DeclareUnicodeComposite{\k}             {E}{"0118}
+\DeclareUnicodeComposite{\k}             {e}{"0119}
+\DeclareUnicodeComposite{\v}             {E}{"011A}
+\DeclareUnicodeComposite{\v}             {e}{"011B}
+\DeclareUnicodeComposite{\^}             {G}{"011C}
+\DeclareUnicodeComposite{\^}             {g}{"011D}
+\DeclareUnicodeComposite{\u}             {G}{"011E}
+\DeclareUnicodeComposite{\u}             {g}{"011F}
+\DeclareUnicodeComposite{\.}             {G}{"0120}
+\DeclareUnicodeComposite{\.}             {g}{"0121}
+\DeclareUnicodeComposite{\c}             {G}{"0122}
+\DeclareUnicodeComposite{\c}             {g}{"0123}
+\DeclareUnicodeComposite{\^}             {H}{"0124}
+\DeclareUnicodeComposite{\^}             {h}{"0125}
+\DeclareUnicodeComposite{\~}             {I}{"0128}
+\DeclareUnicodeComposite{\~}             \i {"0129}
+\DeclareUnicodeComposite{\~}             {i}{"0129}
+\DeclareUnicodeComposite{\=}             {I}{"012A}
+\DeclareUnicodeComposite{\=}             \i {"012B}
+\DeclareUnicodeComposite{\=}             {i}{"012B}
+\DeclareUnicodeComposite{\u}             {I}{"012C}
+\DeclareUnicodeComposite{\u}             \i {"012D}
+\DeclareUnicodeComposite{\u}             {i}{"012D}
+\DeclareUnicodeComposite{\k}             {I}{"012E}
+\DeclareUnicodeComposite{\k}             \i {"012F}
+\DeclareUnicodeComposite{\k}             {i}{"012F}
+\DeclareUnicodeComposite{\.}             {I}{"0130}
+\DeclareUnicodeComposite{\^}             {J}{"0134}
+\DeclareUnicodeComposite{\^}             \j {"0135}
+\DeclareUnicodeComposite{\^}             {j}{"0135}
+\DeclareUnicodeComposite{\c}             {K}{"0136}
+\DeclareUnicodeComposite{\c}             {k}{"0137}
+\DeclareUnicodeComposite{\'}             {L}{"0139}
+\DeclareUnicodeComposite{\'}             {l}{"013A}
+\DeclareUnicodeComposite{\c}             {L}{"013B}
+\DeclareUnicodeComposite{\c}             {l}{"013C}
+\DeclareUnicodeComposite{\v}             {L}{"013D}
+\DeclareUnicodeComposite{\v}             {l}{"013E}
+\DeclareUnicodeComposite{\'}             {N}{"0143}
+\DeclareUnicodeComposite{\'}             {n}{"0144}
+\DeclareUnicodeComposite{\c}             {N}{"0145}
+\DeclareUnicodeComposite{\c}             {n}{"0146}
+\DeclareUnicodeComposite{\v}             {N}{"0147}
+\DeclareUnicodeComposite{\v}             {n}{"0148}
+\DeclareUnicodeComposite{\=}             {O}{"014C}
+\DeclareUnicodeComposite{\=}             {o}{"014D}
+\DeclareUnicodeComposite{\u}             {O}{"014E}
+\DeclareUnicodeComposite{\u}             {o}{"014F}
+\DeclareUnicodeComposite{\H}             {O}{"0150}
+\DeclareUnicodeComposite{\H}             {o}{"0151}
+\DeclareUnicodeComposite{\'}             {R}{"0154}
+\DeclareUnicodeComposite{\'}             {r}{"0155}
+\DeclareUnicodeComposite{\c}             {R}{"0156}
+\DeclareUnicodeComposite{\c}             {r}{"0157}
+\DeclareUnicodeComposite{\v}             {R}{"0158}
+\DeclareUnicodeComposite{\v}             {r}{"0159}
+\DeclareUnicodeComposite{\'}             {S}{"015A}
+\DeclareUnicodeComposite{\'}             {s}{"015B}
+\DeclareUnicodeComposite{\^}             {S}{"015C}
+\DeclareUnicodeComposite{\^}             {s}{"015D}
+\DeclareUnicodeComposite{\c}             {S}{"015E}
+\DeclareUnicodeComposite{\c}             {s}{"015F}
+\DeclareUnicodeComposite{\v}             {S}{"0160}
+\DeclareUnicodeComposite{\v}             {s}{"0161}
+\DeclareUnicodeComposite{\c}             {T}{"0162}
+\DeclareUnicodeComposite{\c}             {t}{"0163}
+\DeclareUnicodeComposite{\v}             {T}{"0164}
+\DeclareUnicodeComposite{\v}             {t}{"0165}
+\DeclareUnicodeComposite{\~}             {U}{"0168}
+\DeclareUnicodeComposite{\~}             {u}{"0169}
+\DeclareUnicodeComposite{\=}             {U}{"016A}
+\DeclareUnicodeComposite{\=}             {u}{"016B}
+\DeclareUnicodeComposite{\u}             {U}{"016C}
+\DeclareUnicodeComposite{\u}             {u}{"016D}
+\DeclareUnicodeComposite{\r}             {U}{"016E}
+\DeclareUnicodeComposite{\r}             {u}{"016F}
+\DeclareUnicodeComposite{\H}             {U}{"0170}
+\DeclareUnicodeComposite{\H}             {u}{"0171}
+\DeclareUnicodeComposite{\k}             {U}{"0172}
+\DeclareUnicodeComposite{\k}             {u}{"0173}
+\DeclareUnicodeComposite{\^}             {W}{"0174}
+\DeclareUnicodeComposite{\^}             {w}{"0175}
+\DeclareUnicodeComposite{\^}             {Y}{"0176}
+\DeclareUnicodeComposite{\^}             {y}{"0177}
+\DeclareUnicodeComposite{\"}             {Y}{"0178}
+\DeclareUnicodeComposite{\'}             {Z}{"0179}
+\DeclareUnicodeComposite{\'}             {z}{"017A}
+\DeclareUnicodeComposite{\.}             {Z}{"017B}
+\DeclareUnicodeComposite{\.}             {z}{"017C}
+\DeclareUnicodeComposite{\v}             {Z}{"017D}
+\DeclareUnicodeComposite{\v}             {z}{"017E}
+\DeclareUnicodeComposite{\v}             {A}{"01CD}
+\DeclareUnicodeComposite{\v}             {a}{"01CE}
+\DeclareUnicodeComposite{\v}             {I}{"01CF}
+\DeclareUnicodeComposite{\v}             \i {"01D0}
+\DeclareUnicodeComposite{\v}             {i}{"01D0}
+\DeclareUnicodeComposite{\v}             {O}{"01D1}
+\DeclareUnicodeComposite{\v}             {o}{"01D2}
+\DeclareUnicodeComposite{\v}             {U}{"01D3}
+\DeclareUnicodeComposite{\v}             {u}{"01D4}
+\DeclareUnicodeComposite{\'}             \AE{"01FC}
+\DeclareUnicodeComposite{\'}             {Æ}{"01FC}
+\DeclareUnicodeComposite{\'}             \ae{"01FD}
+\DeclareUnicodeComposite{\'}             {æ}{"01FD}
+\DeclareUnicodeComposite{\=}             \AE{"01E2}
+\DeclareUnicodeComposite{\=}             {Æ}{"01E2}
+\DeclareUnicodeComposite{\=}             \ae{"01E3}
+\DeclareUnicodeComposite{\=}             {æ}{"01E3}
+\DeclareUnicodeComposite{\v}             {G}{"01E6}
+\DeclareUnicodeComposite{\v}             {g}{"01E7}
+\DeclareUnicodeComposite{\v}             {K}{"01E8}
+\DeclareUnicodeComposite{\v}             {k}{"01E9}
+\DeclareUnicodeComposite{\k}             {O}{"01EA}
+\DeclareUnicodeComposite{\k}             {o}{"01EB}
+\DeclareUnicodeComposite{\v}             \j {"01F0}
+\DeclareUnicodeComposite{\v}             {j}{"01F0}
+\DeclareUnicodeComposite{\'}             {G}{"01F4}
+\DeclareUnicodeComposite{\'}             {g}{"01F5}
+\DeclareUnicodeComposite{\textcommabelow}{S}{"0218}
+\DeclareUnicodeComposite{\textcommabelow}{s}{"0219}
+\DeclareUnicodeComposite{\textcommabelow}{T}{"021A}
+\DeclareUnicodeComposite{\textcommabelow}{t}{"021B}
+\DeclareUnicodeComposite{\=}             {Y}{"0232}
+\DeclareUnicodeComposite{\=}             {y}{"0233}
+\DeclareUnicodeComposite{\.}             {B}{"1E02}
+\DeclareUnicodeComposite{\.}             {b}{"1E03}
+\DeclareUnicodeComposite{\d}             {B}{"1E04}
+\DeclareUnicodeComposite{\d}             {b}{"1E05}
+\DeclareUnicodeComposite{\d}             {D}{"1E0C}
+\DeclareUnicodeComposite{\d}             {d}{"1E0D}
+\DeclareUnicodeComposite{\=}             {G}{"1E20}
+\DeclareUnicodeComposite{\=}             {g}{"1E21}
+\DeclareUnicodeComposite{\d}             {H}{"1E24}
+\DeclareUnicodeComposite{\d}             {h}{"1E25}
+\DeclareUnicodeComposite{\d}             {K}{"1E32}
+\DeclareUnicodeComposite{\d}             {k}{"1E33}
+\DeclareUnicodeComposite{\d}             {L}{"1E36}
+\DeclareUnicodeComposite{\d}             {l}{"1E37}
+\DeclareUnicodeComposite{\d}             {M}{"1E42}
+\DeclareUnicodeComposite{\d}             {m}{"1E43}
+\DeclareUnicodeComposite{\d}             {N}{"1E46}
+\DeclareUnicodeComposite{\d}             {n}{"1E47}
+\DeclareUnicodeComposite{\d}             {R}{"1E5A}
+\DeclareUnicodeComposite{\d}             {r}{"1E5B}
+\DeclareUnicodeComposite{\d}             {S}{"1E62}
+\DeclareUnicodeComposite{\d}             {s}{"1E63}
+\DeclareUnicodeComposite{\d}             {T}{"1E6C}
+\DeclareUnicodeComposite{\d}             {t}{"1E6D}
+\DeclareUnicodeComposite{\d}             {V}{"1E7E}
+\DeclareUnicodeComposite{\d}             {v}{"1E7F}
+\DeclareUnicodeComposite{\d}             {W}{"1E88}
+\DeclareUnicodeComposite{\d}             {w}{"1E89}
+\DeclareUnicodeComposite{\d}             {Z}{"1E92}
+\DeclareUnicodeComposite{\d}             {z}{"1E93}
+\DeclareUnicodeComposite{\d}             {A}{"1EA0}
+\DeclareUnicodeComposite{\d}             {a}{"1EA1}
+\DeclareUnicodeComposite{\d}             {E}{"1EB8}
+\DeclareUnicodeComposite{\d}             {e}{"1EB9}
+\DeclareUnicodeComposite{\d}             {I}{"1ECA}
+\DeclareUnicodeComposite{\d}             {i}{"1ECB}
+\DeclareUnicodeComposite{\d}             {O}{"1ECC}
+\DeclareUnicodeComposite{\d}             {o}{"1ECD}
+\DeclareUnicodeComposite{\d}             {U}{"1EE4}
+\DeclareUnicodeComposite{\d}             {u}{"1EE5}
+\DeclareUnicodeComposite{\d}             {Y}{"1EF4}
+\DeclareUnicodeComposite{\d}             {y}{"1EF5}
+\endinput
+%%
+%% End of file `tuenc.def'.

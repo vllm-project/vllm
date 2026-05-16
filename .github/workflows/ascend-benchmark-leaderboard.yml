@@ -2,6 +2,7 @@ name: Ascend Benchmark Leaderboard
 
 on:
   pull_request:
+    types: [opened, reopened, synchronize, labeled]
   push:
     branches: [main]
   workflow_dispatch:
@@ -78,7 +79,9 @@ jobs:
           echo "Skipping Ascend benchmark on fork PRs because this workflow requires a self-hosted Ascend runner and trusted execution." >> "$GITHUB_STEP_SUMMARY"
 
   ascend-benchmark:
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on:
       - self-hosted
       - linux-aarch64-a2b3-0
@@ -117,6 +120,7 @@ jobs:
       PUBLISH_TO_HF: ${{ (((github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.VLLM_HUST_PUBLISH_BENCHMARK_ON_MAIN == '1') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && vars.VLLM_HUST_PUBLISH_BENCHMARK_ON_PR == '1') || (github.event_name == 'workflow_dispatch' && inputs.publish_to_hf)) && secrets.HF_TOKEN != '') && '1' || '0' }}
       TARGET_REPO_URL: https://github.com/${{ github.repository }}.git
       TARGET_REPO_SHA: ${{ github.sha }}
+      HUST_ASCEND_MANAGER_REPO: ${{ github.workspace }}/ascend-runtime-manager
 
     steps:
       - name: Checkout target repo with retry
@@ -242,11 +246,48 @@ jobs:
 
           clone_with_retry "https://github.com/vLLM-HUST/vllm-ascend-hust.git" "$GITHUB_WORKSPACE/vllm-ascend-hust"
 
+      - name: Checkout ascend-runtime-manager repo
+        run: |
+          clone_with_retry() {
+            local repo_url=$1
+            local target_dir=$2
+            local attempts=4
+            local delay_seconds=15
+            local try=1
+
+            rm -rf "$target_dir"
+            while [[ "$try" -le "$attempts" ]]; do
+              if git clone --depth 1 "$repo_url" "$target_dir"; then
+                return 0
+              fi
+              echo "Clone failed ($try/$attempts): $repo_url" >&2
+              if [[ "$try" -lt "$attempts" ]]; then
+                sleep "$delay_seconds"
+              fi
+              try=$((try + 1))
+            done
+
+            echo "Failed to clone $repo_url after ${attempts} attempts" >&2
+            return 1
+          }
+
+          clone_with_retry "https://github.com/vLLM-HUST/ascend-runtime-manager.git" "$GITHUB_WORKSPACE/ascend-runtime-manager"
+
       - name: Prepare Hugging Face cache directories
         run: |
           mkdir -p "$HF_HOME" "$HUGGINGFACE_HUB_CACHE" "$TRANSFORMERS_CACHE"
           chmod 700 "$HF_HOME"
           echo "HF endpoint: $HF_ENDPOINT"
+
+      - name: Resolve benchmark Python runtime
+        env:
+          VLLM_ASCEND_HUST_REPO: ${{ github.workspace }}/vllm-ascend-hust
+        run: |
+          source "${VLLM_ASCEND_HUST_REPO}/scripts/hust_ascend_manager_helper.sh"
+          PYTHON_BIN="$(hust_resolve_python_bin)"
+          echo "PYTHON_BIN=$PYTHON_BIN" >> "$GITHUB_ENV"
+          dirname "$PYTHON_BIN" >> "$GITHUB_PATH"
+          "$PYTHON_BIN" --version
 
       - name: Prepare Ascend runtime and install repos
         env:
@@ -255,16 +296,17 @@ jobs:
         run: |
           source "${VLLM_ASCEND_HUST_REPO}/scripts/use_single_ascend_env.sh"
           bash "${VLLM_ASCEND_HUST_REPO}/scripts/install_local_ascend_plugin.sh" "$VLLM_ASCEND_HUST_REPO"
-          python -m pip install -e . --no-build-isolation --no-deps
-          python -m pip install -e "${VLLM_HUST_BENCHMARK_REPO}[publish]" jsonschema
+          "${PYTHON_BIN}" -m pip install -e . --no-build-isolation --no-deps
+          "${PYTHON_BIN}" -m pip install -e "${VLLM_HUST_BENCHMARK_REPO}[publish]" jsonschema
 
       - name: Verify installation
         env:
           VLLM_ASCEND_HUST_REPO: ${{ github.workspace }}/vllm-ascend-hust
         run: |
           source "${VLLM_ASCEND_HUST_REPO}/scripts/use_single_ascend_env.sh"
-          python --version
-          python -c "import vllm; print(f'vLLM version: {vllm.__version__}')"
+          "${PYTHON_BIN}" --version
+          "${PYTHON_BIN}" -c "import vllm; print(f'vLLM version: {vllm.__version__}')"
+          "${PYTHON_BIN}" -c "import importlib; importlib.import_module('vllm.entrypoints.cli.main'); print('vLLM CLI module import: ok')"
 
       - name: Run benchmark CI and optional HF sync
         env:
@@ -280,16 +322,13 @@ jobs:
 
       - name: Cleanup leftover Ascend CI processes
         if: always()
-        env:
-          VLLM_ASCEND_HUST_REPO: ${{ github.workspace }}/vllm-ascend-hust
         run: |
-          source "${VLLM_ASCEND_HUST_REPO}/scripts/use_single_ascend_env.sh"
           bash .github/workflows/scripts/cleanup_ascend_ci_processes.sh
 
       - name: Build benchmark summary artifacts
         if: always()
         run: |
-          python - <<'PY'
+          "${PYTHON_BIN}" - <<'PY'
           import json
           import os
           from pathlib import Path
@@ -298,6 +337,7 @@ jobs:
           result_root = Path(os.environ['GITHUB_WORKSPACE']) / '.benchmarks' / 'ci' / run_id
           raw_result = result_root / 'raw_benchmark.json'
           leaderboard_entry = result_root / 'submissions' / run_id / 'run_leaderboard.json'
+          runner_preflight_failure = result_root / 'runner_preflight_failure.txt'
           summary_path = Path(os.environ['GITHUB_STEP_SUMMARY'])
           comment_path = result_root / 'benchmark_comment.md'
           run_url = f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
@@ -325,6 +365,13 @@ jobs:
             f'- Publish mode: `{publish_mode}`',
             f'- Workflow run: [view run]({run_url})',
           ]
+          if runner_preflight_failure.is_file():
+            skip_note = (
+              '- Runner health: `unhealthy` '
+              '(benchmark skipped before vLLM startup because torch_npu basic allocation failed)'
+            )
+            lines.append(skip_note)
+            comment_lines.append(skip_note)
           if raw_result.is_file():
             payload = json.loads(raw_result.read_text(encoding='utf-8'))
             metric_lines = [

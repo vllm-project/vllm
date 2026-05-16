@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
 from http import HTTPStatus
-from typing import Any
+from typing import Any, cast
 
 from openai_harmony import Message as OpenAIMessage
 
@@ -25,6 +25,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     render_for_completion,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.serve.disagg.mm_serde import encode_mm_kwargs_item
 from vllm.entrypoints.serve.disagg.protocol import (
     GenerateRequest,
     MultiModalFeatures,
@@ -34,10 +35,18 @@ from vllm.entrypoints.utils import (
     create_error_response,
     get_max_tokens,
 )
-from vllm.inputs.data import ProcessorInputs, PromptType, SingletonPrompt, TokensPrompt
+from vllm.inputs import (
+    EngineInput,
+    MultiModalHashes,
+    MultiModalInput,
+    MultiModalPlaceholders,
+    PromptType,
+    SingletonPrompt,
+    tokens_input,
+)
 from vllm.logger import init_logger
-from vllm.multimodal.inputs import MultiModalHashes, MultiModalPlaceholderDict
 from vllm.parser import ParserManager
+from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.renderers import BaseRenderer, merge_kwargs
 from vllm.renderers.inputs.preprocess import (
     extract_prompt_components,
@@ -47,7 +56,7 @@ from vllm.renderers.inputs.preprocess import (
 )
 from vllm.tool_parsers import ToolParser
 from vllm.utils import random_uuid
-from vllm.utils.mistral import is_mistral_tokenizer
+from vllm.utils.mistral import is_mistral_tokenizer, is_mistral_tool_parser
 from vllm.utils.mistral import mt as _mt
 
 logger = init_logger(__name__)
@@ -58,7 +67,6 @@ class OpenAIServingRender:
         self,
         model_config: ModelConfig,
         renderer: BaseRenderer,
-        io_processor: Any,
         model_registry: OpenAIModelRegistry,
         *,
         request_logger: RequestLogger | None,
@@ -68,12 +76,12 @@ class OpenAIServingRender:
         enable_auto_tools: bool = False,
         exclude_tools_when_tool_choice_none: bool = False,
         tool_parser: str | None = None,
+        reasoning_parser: str | None = None,
         default_chat_template_kwargs: dict[str, Any] | None = None,
         log_error_stack: bool = False,
     ) -> None:
         self.model_config = model_config
         self.renderer = renderer
-        self.io_processor = io_processor
         self.model_registry = model_registry
         self.request_logger = request_logger
         self.chat_template = chat_template
@@ -87,6 +95,11 @@ class OpenAIServingRender:
             tool_parser_name=tool_parser,
             enable_auto_tools=enable_auto_tools,
             model_name=model_config.model,
+        )
+        self.reasoning_parser: type[ReasoningParser] | None = (
+            ParserManager.get_reasoning_parser(
+                reasoning_parser_name=reasoning_parser,
+            )
         )
         self.default_chat_template_kwargs: dict[str, Any] = (
             default_chat_template_kwargs or {}
@@ -123,26 +136,26 @@ class OpenAIServingRender:
                 "Beam search is not supported by the render endpoint"
             )
 
-        result = await self.render_chat(request)
+        result = await self.render_chat(request, skip_mm_cache=True)
         if isinstance(result, ErrorResponse):
             return result
 
-        _, engine_prompts = result
+        _, engine_inputs = result
 
-        if len(engine_prompts) != 1:
+        if len(engine_inputs) != 1:
             return self.create_error_response(
-                f"Expected exactly 1 engine prompt, got {len(engine_prompts)}"
+                f"Expected exactly 1 engine prompt, got {len(engine_inputs)}"
             )
 
-        engine_prompt = engine_prompts[0]
+        engine_input = engine_inputs[0]
 
-        prompt_components = extract_prompt_components(self.model_config, engine_prompt)
+        prompt_components = extract_prompt_components(self.model_config, engine_input)
         token_ids = prompt_components.token_ids
         if not token_ids:
             return self.create_error_response("No token_ids rendered")
         token_ids = list(token_ids)
 
-        input_length = extract_prompt_len(self.model_config, engine_prompt)
+        input_length = extract_prompt_len(self.model_config, engine_input)
         max_tokens = get_max_tokens(
             self.model_config.max_model_len,
             request.max_completion_tokens
@@ -159,7 +172,7 @@ class OpenAIServingRender:
         return GenerateRequest(
             request_id=request_id,
             token_ids=token_ids,
-            features=self._extract_mm_features(engine_prompt),
+            features=self._extract_mm_features(engine_input),
             sampling_params=params,
             model=request.model,
             stream=bool(request.stream),
@@ -171,7 +184,9 @@ class OpenAIServingRender:
     async def render_chat(
         self,
         request: ChatCompletionRequest,
-    ) -> tuple[list[ConversationMessage], list[ProcessorInputs]] | ErrorResponse:
+        *,
+        skip_mm_cache: bool = False,
+    ) -> tuple[list[ConversationMessage], list[EngineInput]] | ErrorResponse:
         """Core preprocessing logic for chat requests (no model/engine check).
 
         Called directly by render_chat_request and delegated to by
@@ -184,7 +199,6 @@ class OpenAIServingRender:
         if is_mistral_tokenizer(tokenizer):
             # because of issues with pydantic we need to potentially
             # re-serialize the tool_calls field of the request
-            # for more info: see comment in `maybe_serialize_tool_calls`
             _mt.maybe_serialize_tool_calls(request)  # type: ignore[arg-type]
             _mt.truncate_tool_call_ids(request)  # type: ignore[arg-type]
             _mt.validate_request_params(request)
@@ -236,7 +250,7 @@ class OpenAIServingRender:
             if error_check_ret is not None:
                 return error_check_ret
 
-            conversation, engine_prompts = await self.preprocess_chat(
+            conversation, engine_inputs = await self.preprocess_chat(
                 request,
                 request.messages,
                 default_template=self.chat_template,
@@ -244,15 +258,17 @@ class OpenAIServingRender:
                 default_template_kwargs=self.default_chat_template_kwargs,
                 tool_dicts=tool_dicts,
                 tool_parser=tool_parser,
+                skip_mm_cache=skip_mm_cache,
+                reasoning_parser=self.reasoning_parser,
             )
         else:
             # For GPT-OSS.
             should_include_tools = tool_dicts is not None
-            conversation, engine_prompts = self._make_request_with_harmony(
+            conversation, engine_inputs = self._make_request_with_harmony(
                 request, should_include_tools
             )
 
-        return conversation, engine_prompts
+        return conversation, engine_inputs
 
     async def render_completion_request(
         self,
@@ -266,20 +282,20 @@ class OpenAIServingRender:
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
-        result = await self.render_completion(request)
+        result = await self.render_completion(request, skip_mm_cache=True)
         if isinstance(result, ErrorResponse):
             return result
         generate_requests: list[GenerateRequest] = []
-        for engine_prompt in result:
+        for engine_input in result:
             prompt_components = extract_prompt_components(
-                self.model_config, engine_prompt
+                self.model_config, engine_input
             )
             token_ids = prompt_components.token_ids
             if not token_ids:
                 return self.create_error_response("No token_ids rendered")
             token_ids = list(token_ids)
 
-            input_length = extract_prompt_len(self.model_config, engine_prompt)
+            input_length = extract_prompt_len(self.model_config, engine_input)
             max_tokens = get_max_tokens(
                 self.model_config.max_model_len,
                 request.max_tokens,
@@ -297,7 +313,7 @@ class OpenAIServingRender:
                 GenerateRequest(
                     request_id=request_id,
                     token_ids=token_ids,
-                    features=self._extract_mm_features(engine_prompt),
+                    features=self._extract_mm_features(engine_input),
                     sampling_params=params,
                     model=request.model,
                     stream=bool(request.stream),
@@ -312,7 +328,9 @@ class OpenAIServingRender:
     async def render_completion(
         self,
         request: CompletionRequest,
-    ) -> list[ProcessorInputs] | ErrorResponse:
+        *,
+        skip_mm_cache: bool = False,
+    ) -> list[EngineInput] | ErrorResponse:
         """Core preprocessing logic for completion requests (no model/engine check).
 
         Called directly by render_completion_request and delegated to by
@@ -330,28 +348,30 @@ class OpenAIServingRender:
                 "prompt_logprobs is not compatible with prompt embeds."
             )
 
-        engine_prompts = await self.preprocess_completion(
+        engine_inputs = await self.preprocess_completion(
             request,
             prompt_input=request.prompt,
             prompt_embeds=request.prompt_embeds,
+            skip_mm_cache=skip_mm_cache,
         )
 
-        return engine_prompts
+        return engine_inputs
 
     @staticmethod
     def _extract_mm_features(
-        engine_prompt: ProcessorInputs,
+        engine_input: EngineInput,
     ) -> MultiModalFeatures | None:
         """Extract multimodal metadata from a rendered engine prompt.
 
         Returns ``None`` for text-only prompts.
         """
-        if engine_prompt.get("type") != "multimodal":
+        if engine_input.get("type") != "multimodal":
             return None
 
-        # At this point engine_prompt is a MultiModalInputs TypedDict.
-        mm_hashes: MultiModalHashes = engine_prompt["mm_hashes"]  # type: ignore[typeddict-item]
-        raw_placeholders: MultiModalPlaceholderDict = engine_prompt["mm_placeholders"]  # type: ignore[typeddict-item]
+        # At this point engine_input is a MultiModalInput TypedDict.
+        mm_engine_input = cast(MultiModalInput, engine_input)
+        mm_hashes: MultiModalHashes = mm_engine_input["mm_hashes"]
+        raw_placeholders: MultiModalPlaceholders = mm_engine_input["mm_placeholders"]
 
         mm_placeholders = {
             modality: [
@@ -360,9 +380,20 @@ class OpenAIServingRender:
             for modality, ranges in raw_placeholders.items()
         }
 
+        # Serialize tensor data per modality.
+        kwargs_data: dict[str, list[str | None]] | None = None
+        if raw_mm_kwargs := mm_engine_input.get("mm_kwargs"):
+            kwargs_data = {}
+            for modality, items in raw_mm_kwargs.items():
+                kwargs_data[modality] = [
+                    encode_mm_kwargs_item(item) if item is not None else None
+                    for item in items
+                ]
+
         return MultiModalFeatures(
             mm_hashes=mm_hashes,
             mm_placeholders=mm_placeholders,
+            kwargs_data=kwargs_data,
         )
 
     def _make_request_with_harmony(
@@ -405,13 +436,9 @@ class OpenAIServingRender:
 
         # Render prompt token ids.
         prompt_token_ids = render_for_completion(messages)
-        engine_prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
+        engine_input = tokens_input(prompt_token_ids, cache_salt=request.cache_salt)
 
-        # Add cache_salt if provided in the request
-        if request.cache_salt is not None:
-            engine_prompt["cache_salt"] = request.cache_salt
-
-        return messages, [engine_prompt]
+        return messages, [engine_input]
 
     def create_error_response(
         self,
@@ -454,20 +481,24 @@ class OpenAIServingRender:
         request: Any,
         prompt_input: str | list[str] | list[int] | list[list[int]] | None,
         prompt_embeds: bytes | list[bytes] | None,
-    ) -> list[ProcessorInputs]:
+        *,
+        skip_mm_cache: bool = False,
+    ) -> list[EngineInput]:
         """Copied from OpenAIServing._preprocess_completion."""
         prompts = list[SingletonPrompt | bytes]()
         if prompt_embeds is not None:  # embeds take higher priority
             prompts.extend(prompt_to_seq(prompt_embeds))
         if prompt_input is not None:
             prompts.extend(prompt_to_seq(prompt_input))
-        return await self.preprocess_cmpl(request, prompts)
+        return await self.preprocess_cmpl(request, prompts, skip_mm_cache=skip_mm_cache)
 
     async def preprocess_cmpl(
         self,
         request: Any,
         prompts: Sequence[PromptType | bytes],
-    ) -> list[ProcessorInputs]:
+        *,
+        skip_mm_cache: bool = False,
+    ) -> list[EngineInput]:
         """Copied from OpenAIServing._preprocess_cmpl."""
         renderer = self.renderer
         model_config = self.model_config
@@ -490,6 +521,7 @@ class OpenAIServingRender:
                 for k in ("mm_processor_kwargs", "cache_salt")
                 if (v := getattr(request, k, None)) is not None
             },
+            skip_mm_cache=skip_mm_cache,
         )
 
     async def preprocess_chat(
@@ -501,7 +533,10 @@ class OpenAIServingRender:
         default_template_kwargs: dict[str, Any] | None,
         tool_dicts: list[dict[str, Any]] | None = None,
         tool_parser: type[ToolParser] | None = None,
-    ) -> tuple[list[ConversationMessage], list[ProcessorInputs]]:
+        reasoning_parser: type[ReasoningParser] | None = None,
+        *,
+        skip_mm_cache: bool = False,
+    ) -> tuple[list[ConversationMessage], list[EngineInput]]:
         """Copied from OpenAIServing._preprocess_chat."""
         renderer = self.renderer
         mm_config = self.model_config.multimodal_config
@@ -510,7 +545,10 @@ class OpenAIServingRender:
             default_template_kwargs,
             dict(
                 tools=tool_dicts,
-                tokenize=is_mistral_tokenizer(renderer.tokenizer),
+                tokenize=(
+                    is_mistral_tokenizer(renderer.tokenizer)
+                    or self.model_config.enable_prompt_embeds
+                ),
             ),
         )
 
@@ -523,7 +561,7 @@ class OpenAIServingRender:
             default_mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
         )
 
-        (conversation,), (engine_prompt,) = await renderer.render_chat_async(
+        (conversation,), (engine_input,) = await renderer.render_chat_async(
             [messages],
             chat_params,
             tok_params,
@@ -532,14 +570,33 @@ class OpenAIServingRender:
                 for k in ("mm_processor_kwargs", "cache_salt")
                 if (v := getattr(request, k, None)) is not None
             },
+            skip_mm_cache=skip_mm_cache,
         )
+
+        if reasoning_parser is not None:
+            tokenizer = renderer.get_tokenizer()
+            request = reasoning_parser(
+                tokenizer,
+                model_config=self.model_config,
+                chat_template_kwargs=chat_params.chat_template_kwargs,
+            ).adjust_request(request=request)
 
         # tool parsing is done only if a tool_parser has been set and if
         # tool_choice is not "none" (if tool_choice is "none" but a tool_parser
         # is set, we want to prevent parsing a tool_call hallucinated by the LLM
+        #
+        # Exception: Mistral grammar-capable tokenizers always call
+        # adjust_request — even for tool_choice="none" — so that the grammar
+        # factory can prevent special-token leakage.
         if tool_parser is not None:
             tool_choice = getattr(request, "tool_choice", "none")
-            if tool_choice != "none":
+            tokenizer = renderer.get_tokenizer()
+            is_mistral_grammar_eligible = (
+                is_mistral_tool_parser(tool_parser)
+                and is_mistral_tokenizer(tokenizer)
+                and tokenizer.supports_grammar
+            )
+            if tool_choice != "none" or is_mistral_grammar_eligible:
                 if not isinstance(request, ChatCompletionRequest | ResponsesRequest):
                     msg = (
                         "Tool usage is only supported "
@@ -547,7 +604,8 @@ class OpenAIServingRender:
                         f"but got {type(request).__name__}"
                     )
                     raise NotImplementedError(msg)
-                tokenizer = renderer.get_tokenizer()
-                request = tool_parser(tokenizer).adjust_request(request=request)  # type: ignore[arg-type]
+                request = tool_parser(tokenizer, request.tools).adjust_request(
+                    request=request
+                )
 
-        return conversation, [engine_prompt]
+        return conversation, [engine_input]

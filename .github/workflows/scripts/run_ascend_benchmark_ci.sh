@@ -13,6 +13,7 @@ SUBMISSIONS_ROOT=${SUBMISSIONS_ROOT:-$RESULT_ROOT/submissions}
 SUBMISSION_DIR=${SUBMISSION_DIR:-$SUBMISSIONS_ROOT/$RUN_ID}
 AGGREGATE_OUTPUT_DIR=${AGGREGATE_OUTPUT_DIR:-$RESULT_ROOT/leaderboard-data}
 SERVER_LOG=${SERVER_LOG:-$RESULT_ROOT/server.log}
+RUNNER_PREFLIGHT_FAILURE_FILE=${RUNNER_PREFLIGHT_FAILURE_FILE:-$RESULT_ROOT/runner_preflight_failure.txt}
 BENCH_SCENARIO=${BENCH_SCENARIO:-random-online}
 BENCH_DATASET_PATH=${BENCH_DATASET_PATH:-}
 BENCH_CONSTRAINTS_FILE=${BENCH_CONSTRAINTS_FILE:-}
@@ -40,6 +41,19 @@ CHIP_COUNT=${CHIP_COUNT:-1}
 NODE_COUNT=${NODE_COUNT:-1}
 PUBLISH_TO_HF=${PUBLISH_TO_HF:-0}
 HF_REPO_ID=${HF_REPO_ID:-}
+
+PYTHON_BIN=${PYTHON_BIN:-$(command -v python3 || command -v python || true)}
+if [[ -z "$PYTHON_BIN" ]]; then
+  echo "Could not locate a Python interpreter for benchmark CI" >&2
+  exit 127
+fi
+
+VLLM_CLI=("$PYTHON_BIN" -m vllm.entrypoints.cli.main)
+CURL_BIN=${CURL_BIN:-$(command -v curl || true)}
+if [[ -z "$CURL_BIN" ]]; then
+  echo "curl is required for benchmark CI readiness checks" >&2
+  exit 127
+fi
 
 server_pid=""
 server_group_pid=""
@@ -69,9 +83,64 @@ cleanup() {
   fi
 }
 
+run_runner_npu_preflight_once() {
+  "$PYTHON_BIN" - <<'PY'
+import importlib.util
+import os
+import sys
+
+import torch
+
+if importlib.util.find_spec("torch_npu") is None:
+    raise RuntimeError("torch_npu is not installed in the benchmark environment")
+
+import torch_npu  # noqa: F401
+
+device = os.environ.get("VLLM_ASCEND_TORCH_PREFLIGHT_DEVICE", "npu:0")
+print(f"preflight device={device}")
+print("torch_npu import ok=True")
+if not torch.npu.is_available():
+    raise RuntimeError("torch.npu.is_available() returned False")
+torch.npu.set_device(device)
+_ = torch.zeros(1, device=device)
+print("torch.zeros preflight ok")
+PY
+}
+
+ensure_runner_npu_ready() {
+  local max_attempts=${RUNNER_NPU_PREFLIGHT_ATTEMPTS:-3}
+  local delay_seconds=${RUNNER_NPU_PREFLIGHT_DELAY_SECONDS:-10}
+  local attempt=1
+  local preflight_output=""
+
+  while [[ "$attempt" -le "$max_attempts" ]]; do
+    if preflight_output=$(run_runner_npu_preflight_once 2>&1); then
+      rm -f "$RUNNER_PREFLIGHT_FAILURE_FILE"
+      return 0
+    fi
+
+    printf '%s\n' "$preflight_output" > "$RUNNER_PREFLIGHT_FAILURE_FILE"
+    echo "Runner NPU preflight failed ($attempt/$max_attempts)" >&2
+    cat "$RUNNER_PREFLIGHT_FAILURE_FILE" >&2
+
+    if [[ "$attempt" -lt "$max_attempts" ]]; then
+      sleep "$delay_seconds"
+    fi
+    attempt=$((attempt + 1))
+  done
+
+  echo "Self-hosted runner NPU runtime is unhealthy before vLLM startup." >&2
+  if [[ "${GITHUB_EVENT_NAME:-}" == "pull_request" ]]; then
+    echo "Skipping benchmark for this PR run because the failure is below vLLM and the runner cannot allocate a basic torch_npu tensor." >&2
+    return 2
+  fi
+
+  return 1
+}
+
 start_server() {
   if command -v setsid >/dev/null 2>&1; then
-    setsid vllm serve "$MODEL_NAME" \
+    setsid "${VLLM_CLI[@]}" serve "$MODEL_NAME" \
       --host "$HOST" \
       --port "$PORT" \
       --dtype "$DTYPE" \
@@ -81,7 +150,7 @@ start_server() {
     server_pid=$!
     server_group_pid=$server_pid
   else
-    vllm serve "$MODEL_NAME" \
+    "${VLLM_CLI[@]}" serve "$MODEL_NAME" \
       --host "$HOST" \
       --port "$PORT" \
       --dtype "$DTYPE" \
@@ -98,7 +167,7 @@ start_server() {
 }
 
 allocate_local_port() {
-  python - <<'PY'
+  "$PYTHON_BIN" - <<'PY'
 import socket
 
 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -196,10 +265,18 @@ if [[ ! -f "$EFFECTIVE_CONSTRAINTS_FILE" ]]; then
   exit 2
 fi
 
+if ! ensure_runner_npu_ready; then
+  status=$?
+  if [[ "$status" -eq 2 ]]; then
+    exit 0
+  fi
+  exit "$status"
+fi
+
 start_server
 
 for attempt in $(seq 1 120); do
-  if curl -fsS "http://$HOST:$PORT/v1/models" >/dev/null; then
+  if "$CURL_BIN" -fsS "http://$HOST:$PORT/v1/models" >/dev/null; then
     break
   fi
 
@@ -218,7 +295,7 @@ for attempt in $(seq 1 120); do
   sleep 2
 done
 
-vllm bench serve \
+"${VLLM_CLI[@]}" bench serve \
   --model "$MODEL_NAME" \
   --host "$HOST" \
   --port "$PORT" \
@@ -227,7 +304,7 @@ vllm bench serve \
   --result-dir "$RESULT_ROOT" \
   --result-filename "$(basename "$RAW_RESULT_FILE")"
 
-CORE_VERSION=$(python - <<'PY'
+CORE_VERSION=$("$PYTHON_BIN" - <<'PY'
 import vllm
 print(vllm.__version__)
 PY
@@ -235,7 +312,7 @@ PY
 
 DISPLAY_VERSION=$(printf '%s' "${GITHUB_SHA:-local}" | cut -c1-8)
 
-python -m vllm_hust_benchmark.cli submit \
+"$PYTHON_BIN" -m vllm_hust_benchmark.cli submit \
   "$BENCH_SCENARIO" \
   --benchmark-result-file "$RAW_RESULT_FILE" \
   --constraints-file "$EFFECTIVE_CONSTRAINTS_FILE" \
@@ -263,7 +340,7 @@ if [[ "$PUBLISH_TO_HF" == "1" ]]; then
     exit 2
   fi
 
-  python -m vllm_hust_benchmark.cli sync-submission-to-hf \
+  "$PYTHON_BIN" -m vllm_hust_benchmark.cli sync-submission-to-hf \
     --submission-dir "$SUBMISSION_DIR" \
     --aggregate-output-dir "$AGGREGATE_OUTPUT_DIR" \
     --repo-id "$HF_REPO_ID" \
@@ -271,7 +348,7 @@ if [[ "$PUBLISH_TO_HF" == "1" ]]; then
     --commit-message "chore: sync vllm-hust benchmark $RUN_ID (${GITHUB_REF_NAME:-detached}@$(printf '%s' "${GITHUB_SHA:-local}" | cut -c1-8))" \
     --execute
 else
-  python -m vllm_hust_benchmark.cli publish-website \
+  "$PYTHON_BIN" -m vllm_hust_benchmark.cli publish-website \
     --source-dir "$SUBMISSIONS_ROOT" \
     --output-dir "$AGGREGATE_OUTPUT_DIR" \
     --execute

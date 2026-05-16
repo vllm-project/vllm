@@ -1,0 +1,89 @@
+%%
+%% This is file `keyval.sty',
+%% generated with the docstrip utility.
+%%
+%% The original source files were:
+%%
+%% keyval.dtx  (with options: `package')
+%% 
+%% The source is maintained by the LaTeX Project team and bug
+%% reports for it can be opened at https://latex-project.org/bugs/
+%% (but please observe conditions on bug reports sent to that address!)
+%% 
+%% 
+%% keyval.dtx Copyright (C) 1993 1994 1995 1997 1998 1999 David Carlisle
+%%            Copyright (C) 2000-2021 David Carlisle, LaTeX Project
+%% The LaTeX Project and any individual authors listed elsewhere
+%% in this file.
+%%
+%% This file is part of the Standard LaTeX `Graphics Bundle'.
+%% It may be distributed under the terms of the LaTeX Project Public
+%% License, as described in lppl.txt in the base LaTeX distribution.
+%% Either version 1.3c or, at your option, any later version.
+%%
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{keyval}
+                 [2014/10/28 v1.15 key=value parser (DPC)]
+\long\def\setkeys#1#2{%
+  \def\KV@prefix{KV@#1@}%
+  \let\@tempc\relax
+  \KV@do#2,\relax,}
+\long\def\KV@do#1,{%
+ \ifx\relax#1\@empty\else
+  \KV@split#1==\relax
+  \expandafter\KV@do\fi}
+\long\def\KV@split#1=#2=#3\relax{%
+  \KV@@sp@def\@tempa{#1}%
+  \ifx\@tempa\@empty\else
+    \expandafter\let\expandafter\@tempc
+      \csname\KV@prefix\@tempa\endcsname
+    \ifx\@tempc\relax
+      \KV@errx
+       {\@tempa\space undefined}%
+    \else
+      \ifx\@empty#3\@empty
+        \KV@default
+      \else
+        \KV@@sp@def\@tempb{#2}%
+        \expandafter\@tempc\expandafter{\@tempb}\relax
+      \fi
+    \fi
+  \fi}
+\def\KV@default{%
+  \expandafter\let\expandafter\@tempb
+    \csname\KV@prefix\@tempa @default\endcsname
+  \ifx\@tempb\relax
+    \KV@err{No value specified for \@tempa}%
+  \else
+    \@tempb\relax
+  \fi}
+\DeclareOption{unknownkeysallowed}{%
+  \def\KV@errx#1{\PackageInfo{keyval}{#1}}}
+\DeclareOption{unknownkeyserror}{%
+  \def\KV@errx#1{\PackageError{keyval}{#1}\@ehc}}
+\ExecuteOptions{unknownkeyserror}
+\let\KV@err\KV@errx
+\ProcessOptions
+\def\@tempa#1{%
+\long\def\KV@@sp@def##1##2{%
+  \futurelet\KV@tempa\KV@@sp@d##2\@nil\@nil#1\@nil\relax##1}%
+\def\KV@@sp@d{%
+  \ifx\KV@tempa\@sptoken
+    \expandafter\KV@@sp@b
+  \else
+    \expandafter\KV@@sp@b\expandafter#1%
+  \fi}%
+\long\def\KV@@sp@b#1##1 \@nil{\KV@@sp@c##1}%
+  }
+\@tempa{ }
+\long\def\KV@@sp@c#1\@nil#2\relax#3{\KV@toks@{#1}\edef#3{\the\KV@toks@}}
+\newtoks\KV@toks@
+\def\define@key#1#2{%
+  \@ifnextchar[{\KV@def{#1}{#2}}{\long\@namedef{KV@#1@#2}####1}}
+\def\KV@def#1#2[#3]{%
+  \long\@namedef{KV@#1@#2@default\expandafter}\expandafter
+    {\csname KV@#1@#2\endcsname{#3}}%
+  \long\@namedef{KV@#1@#2}##1}
+\endinput
+%%
+%% End of file `keyval.sty'.

@@ -1,0 +1,613 @@
+%%
+%% This is file `graphics.sty',
+%% generated with the docstrip utility.
+%%
+%% The original source files were:
+%%
+%% graphics.dtx  (with options: `package')
+%% 
+%% The source is maintained by the LaTeX Project team and bug
+%% reports for it can be opened at https://latex-project.org/bugs/
+%% (but please observe conditions on bug reports sent to that address!)
+%% 
+%% 
+%% graphics.dtx Copyright (C) 1994      David Carlisle Sebastian Rahtz
+%%              Copyright (C) 1995-2021
+%% The LaTeX Project and any individual authors listed elsewhere
+%% in this file.
+%%
+%% This file is part of the Standard LaTeX `Graphics Bundle'.
+%% It may be distributed under the terms of the LaTeX Project Public
+%% License, as described in lppl.txt in the base LaTeX distribution.
+%% Either version 1.3c or, at your option, any later version.
+%%
+%% This file has the LPPL maintenance status "maintained".
+%%
+\NeedsTeXFormat{LaTeX2e}[1995/12/01]
+\providecommand\DeclareRelease[3]{}
+\providecommand\DeclareCurrentRelease[2]{}
+
+\DeclareRelease{}{2017-06-25}{graphics-2017-06-25.sty}
+\DeclareCurrentRelease{}{2019-10-01}
+
+\ProvidesPackage{graphics}
+          [2021/03/04 v1.4d  Standard LaTeX Graphics (DPC,SPQR)]
+\edef\Gin@codes{%
+ \catcode`\noexpand\^^A\the\catcode`\^^A\relax
+ \catcode`\noexpand\"\the\catcode`\"\relax
+ \catcode`\noexpand\*\the\catcode`\*\relax
+ \catcode`\noexpand\!\the\catcode`\!\relax
+ \catcode`\noexpand\:\the\catcode`\:\relax}
+\catcode`\^^A=\catcode`\%
+\@makeother\"%
+\catcode`\*=11
+\@makeother\!%
+\@makeother\:%
+\RequirePackage{trig}
+\providecommand\Grot@start{\@latex@error{Rotation not supported}\@ehc
+            \global\let\Grot@start\relax}
+\providecommand\Grot@end{}
+\providecommand\Gscale@start{\@latex@error{Scaling not supported}\@ehc
+            \global\let\Gscale@start\relax}
+\providecommand\Gscale@end{}
+\edef\Gread@BBox{\@percentchar\@percentchar BoundingBox}
+\DeclareOption{draft}{\Gin@drafttrue}
+\DeclareOption{final}{\Gin@draftfalse}
+\newif\ifGin@draft
+\DeclareOption{hiresbb}{%
+  \edef\Gread@BBox{\@percentchar\@percentchar HiResBoundingBox}}
+\DeclareOption{demo}{%
+  \AtBeginDocument{%
+    \def\Ginclude@graphics#1{%
+      \rule{\@ifundefined{Gin@@ewidth}{150pt}{\Gin@@ewidth}}%
+      {\@ifundefined{Gin@@eheight}{100pt}{\Gin@@eheight}}}}}
+\newif\ifGin@setpagesize\Gin@setpagesizetrue
+\DeclareOption{setpagesize}{\Gin@setpagesizetrue}
+\DeclareOption{nosetpagesize}{\Gin@setpagesizefalse}
+\providecommand\Gin@driver{}
+\DeclareOption{dvips}{\def\Gin@driver{dvips.def}}
+\DeclareOption{xdvi}{\ExecuteOptions{dvips}}
+\DeclareOption{dvipdf}{\def\Gin@driver{dvipdf.def}}
+\DeclareOption{dvipdfm}{\def\Gin@driver{dvipdfmx.def}}
+\DeclareOption{dvipdfmx}{\def\Gin@driver{dvipdfmx.def}}
+\DeclareOption{xetex}{\def\Gin@driver{xetex.def}}
+\DeclareOption{pdftex}{\def\Gin@driver{pdftex.def}}
+\DeclareOption{luatex}{\def\Gin@driver{luatex.def}}
+\DeclareOption{dvisvgm}{\def\Gin@driver{dvisvgm.def}}
+\DeclareOption{dvipsone}{\def\Gin@driver{dvipsone.def}}
+\DeclareOption{dviwindo}{\ExecuteOptions{dvipsone}}
+\DeclareOption{emtex}{\def\Gin@driver{emtex.def}}
+\DeclareOption{dviwin}{\def\Gin@driver{dviwin.def}}
+\DeclareOption{oztex}{\ExecuteOptions{dvips}}
+\DeclareOption{textures}{\def\Gin@driver{textures.def}}
+\DeclareOption{pctexps}{\def\Gin@driver{pctexps.def}}
+\DeclareOption{pctexwin}{\def\Gin@driver{pctexwin.def}}
+\DeclareOption{pctexhp}{\def\Gin@driver{pctexhp.def}}
+\DeclareOption{pctex32}{\def\Gin@driver{pctex32.def}}
+\DeclareOption{truetex}{\def\Gin@driver{truetex.def}}
+\DeclareOption{tcidvi}{\def\Gin@driver{tcidvi.def}}
+\DeclareOption{vtex}{\def\Gin@driver{vtex.def}}
+\DeclareOption{debugshow}{\catcode`\^^A=9 \let\GDebug\typeout}
+\InputIfFileExists{graphics.cfg}{}{}
+\DeclareOption{hiderotate}{%
+  \def\Grot@start{\begingroup\setbox\z@\hbox\bgroup}
+  \def\Grot@end{\egroup\endgroup}}
+\DeclareOption{hidescale}{%
+  \def\Gscale@start{\begingroup\setbox\z@\hbox\bgroup}
+  \def\Gscale@end{\egroup\endgroup}}
+\ProcessOptions
+\if!\Gin@driver!
+  \PackageError{graphics}
+    {No driver specified}
+    {You should make a default driver option in a file \MessageBreak
+     graphics.cfg\MessageBreak
+     eg: \protect\ExecuteOptions{textures}%
+     }
+\else
+  \PackageInfo{graphics}{Driver file: \Gin@driver}
+  \@ifundefined{ver@\Gin@driver}{\input{\Gin@driver}}{}
+\fi
+\def\Gin@llx{0}
+\let\Gin@lly\Gin@llx
+\let\Gin@urx\Gin@llx
+\let\Gin@ury\Gin@llx
+\let\Gin@nat@width\leftmarginv
+\let\Gin@nat@height\leftmarginvi
+\newif\ifGin@clip
+\newcommand\DeclareGraphicsExtensions[1]{%
+  \edef\Gin@extensions{\zap@space#1 \@empty}}
+\providecommand\Gin@extensions{}
+\protected\def\includegraphics{%
+  \leavevmode
+  \@ifstar
+    {\Gin@cliptrue\Gin@i}%
+    {\Gin@clipfalse\Gin@i}}
+\def\Gin@i{%
+  \@ifnextchar[%]
+    \Gin@ii
+    {\Gin@bboxfalse\Ginclude@graphics}}
+\def\Gin@ii[#1]{%
+  \@ifnextchar[%]
+    {\Gin@iii[#1]}
+    {\Gin@iii[0,0][#1]}}
+\def\Gin@iii[#1,#2][#3,#4]#5{%
+  \begingroup
+  \Gin@bboxtrue
+  \Gin@defaultbp\Gin@llx{#1}%
+  \Gin@defaultbp\Gin@lly{#2}%
+  \Gin@defaultbp\Gin@urx{#3}%
+  \Gin@defaultbp\Gin@ury{#4}%
+  \Ginclude@graphics{#5}%
+  \endgroup}
+\def\Gin@defaultbp#1#2{%
+  \afterassignment\Gin@def@bp\dimen@#2bp\relax{#1}{#2}}
+\def\Gin@def@bp#1\relax#2#3{%
+   \if!#1!%
+     \def#2{#3}%
+    \else
+      \dimen@.99626\dimen@
+      \edef#2{\strip@pt\dimen@}%
+    \fi}
+\def\DeclareGraphicsRule#1#2#3#4{%
+  \edef\@tempa{\string *}\def\@tempb{#3}%
+  \expandafter\edef\csname Gin@rule@#1\endcsname##1%
+       {{#2}%
+        {\ifx\@tempa\@tempb\noexpand\Gin@ext\else#3\fi}%
+        {\ifx\indent#4\indent##1\else#4\fi}}}
+\def\graphicspath#1{\def\Ginput@path{#1}}
+\ifx\Ginput@path\@undefined
+  \let\Ginput@path\input@path
+\fi
+\def\Gin@getbase#1{%
+  \edef\Gin@tempa{%
+    \def\noexpand\@tempa####1#1\space{%
+      \def\noexpand\Gin@base{####1}}}%
+  \IfFileExists{\filename@area\filename@base#1}%
+    {\Gin@tempa
+     \edef\uq@filef@und{\expandafter\unquote@name
+                        \expandafter{\@filef@und}}%
+     \expandafter\@tempa\uq@filef@und
+     \edef\Gin@ext{#1}}{}}%
+\let\Gin@ext\relax
+\def\Gin@sepdefault{.}
+\edef\Gin@gzext{\detokenize{gz}}
+\def\Gin@temp#1{%
+  \begingroup
+    \escapechar\m@ne
+    \xdef\@curr@file{\expandafter\string\csname #1\endcsname}%
+  \endgroup
+}
+\ifx\set@curr@file\@Gin@temp
+  \let\set@curr@file\@undefined
+\fi
+\ifx\set@curr@file\@undefined
+\def\set@curr@file#1{%
+  \begingroup
+    \escapechar\m@ne
+    \xdef\@curr@file{\expandafter\string\csname\@firstofone#1\@empty\endcsname}%
+  \endgroup
+}
+\def\quote@name#1{"\quote@@name#1\@gobble""}
+\def\quote@@name#1"{#1\quote@@name}
+\def\unquote@name#1{\quote@@name#1\@gobble"}
+\fi
+\def\Ginclude@graphics#1{%
+  \ifx\detokenize\@undefined\else
+    \edef\Gin@extensions{\detokenize\expandafter{\Gin@extensions}}%
+  \fi
+  \begingroup
+  \let\input@path\Ginput@path
+  \set@curr@file{#1}%
+  \expandafter\filename@parse\expandafter{\@curr@file}%
+  \ifx\filename@ext\Gin@gzext
+    \expandafter\filename@parse\expandafter{\filename@base}%
+    \ifx\filename@ext\relax
+      \let\filename@ext\Gin@gzext
+    \else
+      \edef\filename@ext{\filename@ext\Gin@sepdefault\Gin@gzext}%
+    \fi
+  \fi
+  \ifx\filename@ext\relax
+    \@for\Gin@temp:=\Gin@extensions\do{%
+      \ifx\Gin@ext\relax
+        \Gin@getbase\Gin@temp
+      \fi}%
+  \else
+    \Gin@getbase{\Gin@sepdefault\filename@ext}%
+    \ifnum0%
+        \ifx\Gin@ext\relax 1%
+        \else \@ifundefined{Gin@rule@\Gin@ext}{1}{0}%
+        \fi >0
+      \let\Gin@extsaved\Gin@ext
+      \let\Gin@savedbase\filename@base
+      \let\Gin@savedext\filename@ext
+      \let\Gin@ext\relax
+      \edef\filename@base{\filename@base\Gin@sepdefault\filename@ext}%
+      \let\filename@ext\relax
+      \@for\Gin@temp:=\Gin@extensions\do{%
+          \ifx\Gin@ext\relax
+            \Gin@getbase\Gin@temp
+          \fi}%
+      \ifx\Gin@ext\relax
+        \let\Gin@ext\Gin@extsaved
+        \let\filename@base\Gin@savedbase
+        \let\filename@ext\Gin@savedext
+      \fi
+    \fi
+    \ifx\Gin@ext\relax
+       \@warning{File `#1' not found}%
+       \def\Gin@base{\filename@area\filename@base}%
+       \edef\Gin@ext{\Gin@sepdefault\filename@ext}%
+    \fi
+  \fi
+    \ifx\Gin@ext\relax
+         \@latex@error{File `#1' not found}%
+         {I could not locate the file with any of these extensions:^^J%
+          \Gin@extensions^^J\@ehc}%
+    \else
+       \@ifundefined{Gin@rule@\Gin@ext}%
+         {\ifx\Gin@rule@*\@undefined
+            \@latex@error{Unknown graphics extension: \Gin@ext}\@ehc
+          \else
+            \expandafter\Gin@setfile\Gin@rule@*{\Gin@base\Gin@ext}%
+           \fi}%
+         {\expandafter\expandafter\expandafter\Gin@setfile
+             \csname Gin@rule@\Gin@ext\endcsname{\Gin@base\Gin@ext}}%
+    \fi
+  \endgroup}
+\newif\ifGread@\Gread@true
+\def\Gin@setfile#1#2#3{%
+  \ifx\\#2\\\Gread@false\fi
+  \ifGin@bbox\else
+    \ifGread@
+      \csname Gread@%
+         \expandafter\ifx\csname Gread@#1\endcsname\relax
+           eps%
+         \else
+           #1%
+         \fi
+      \endcsname{\Gin@base#2}%
+    \else
+      \Gin@nosize{#3}%
+    \fi
+  \fi
+  \Gin@viewport@code
+  \Gin@nat@height\Gin@ury bp%
+  \advance\Gin@nat@height-\Gin@lly bp%
+  \Gin@nat@width\Gin@urx bp%
+  \advance\Gin@nat@width-\Gin@llx bp%
+  \Gin@req@sizes
+  \expandafter\ifx\csname Ginclude@#1\endcsname\relax
+    \Gin@drafttrue
+    \expandafter\ifx\csname Gread@#1\endcsname\relax
+      \@latex@error{Can not include graphics of type: #1}\@ehc
+      \global\expandafter\let\csname Gread@#1\endcsname\@empty
+    \fi
+  \fi
+  \leavevmode
+  \ifGin@draft
+      \hb@xt@\Gin@req@width{%
+        \vrule\hss
+        \vbox to \Gin@req@height{%
+           \hrule \@width \Gin@req@width
+           \vss
+           \edef\@tempa{#3}%
+           \rlap{ \ttfamily\expandafter\strip@prefix\meaning\@tempa}%
+           \vss
+           \hrule}%
+        \hss\vrule}%
+  \else
+    \@addtofilelist{#3}%
+    \ProvidesFile{#3}[Graphic file (type #1)]%
+    \setbox\z@\hbox{\csname Ginclude@#1\endcsname{#3}}%
+    \dp\z@\z@
+    \ht\z@\Gin@req@height
+    \wd\z@\Gin@req@width
+  \box\z@
+  \fi}
+\let\Gin@decode\@empty
+\def\Gin@exclamation{!}
+\let\Gin@page\@empty
+\def\Gin@pagebox{cropbox}
+\newif\ifGin@interpolate
+\let\Gin@log\wlog
+\let\Gin@req@sizes\relax
+\def\Gin@scalex{1}%
+\let\Gin@scaley\Gin@exclamation
+\let\Gin@req@height\Gin@nat@height
+\let\Gin@req@width\Gin@nat@width
+\let\Gin@viewport@code\relax
+\def\Gin@nosize#1{%
+  \@latex@error
+      {Cannot determine size of graphic in #1 (no size specified)}%
+      \@ehc}
+\newif\ifGin@bbox
+\def\Gread@generic#1#2{%
+  \edef\Gread@attr@hash{%
+    \ifx\Gin@pagebox\@empty\else
+      :\Gin@pagebox
+    \fi
+    \ifx\Gin@page\@empty\else
+      :P\Gin@page
+    \fi
+  }%
+  \@ifundefined{#1 bbox\Gread@attr@hash}%
+    {\Gread@generic@aux{#1}{#2}}
+    {%
+      \expandafter\global\expandafter\let\expandafter\@gtempa
+        \csname #1 bbox\Gread@attr@hash\endcsname
+    }%
+  \expandafter\Gread@parse@bb\@gtempa\\%
+}
+\def\Gread@generic@aux#1#2{%
+  \begingroup
+  \@tempcnta\z@
+  \loop\ifnum\@tempcnta<\@xxxii
+     \catcode\@tempcnta14 %
+     \advance\@tempcnta\@ne
+  \repeat
+  \catcode`\^^?14 %
+  \let\do\@makeother
+  \dospecials
+  \catcode`\ 10 %
+  \catcode`\^^I10 %
+  \endlinechar13 %
+  \catcode\endlinechar5 %
+  \@makeother\:%
+  \@makeother\-%
+  \immediate\openin\@inputcheck\quote@name{#1} %
+  #2{#1}%
+  \ifGin@bbox
+    \expandafter\xdef\csname #1 bbox\Gread@attr@hash\endcsname{\@gtempa}%
+  \else
+    \@latex@error
+      {Cannot determine size of graphic in #1 (no BoundingBox)}%
+      \@ehc
+    \gdef\@gtempa{0 0 72 72 }%
+  \fi
+  \endgroup
+}
+\def\Gread@eps#1{%
+  \Gread@generic{#1}\Gread@eps@aux
+}
+\def\Gread@eps@aux#1{%
+  \ifeof\@inputcheck
+    \@latex@error{File `#1' not found}\@ehc
+  \else
+     \Gread@true
+     \let\@tempb\Gread@false
+     \loop
+       \read\@inputcheck to\@tempa
+       \ifeof\@inputcheck
+         \Gread@false
+       \else
+         \expandafter\Gread@find@bb\@tempa:.\\%
+       \fi
+     \ifGread@
+     \repeat
+    \immediate\closein\@inputcheck
+  \fi
+}
+\long\def\Gread@find@bb#1:#2#3\\{%
+  \def\@tempa{#1}%
+  \ifx\@tempa\Gread@BBox
+    \Gread@test@atend#2#3()\\%
+  \fi}
+\def\Gread@test@atend#1(#2)#3\\{%
+  \def\@tempa{#2}%
+  \ifx\@tempa\Gread@atend
+    \Gread@true
+    \let\@tempb\relax
+  \else
+    \gdef\@gtempa{#1}%
+    \@tempb
+    \Gin@bboxtrue
+  \fi}
+\def\Gread@parse@bb#1 #2 #3 #4 #5\\{%
+  \Gin@defaultbp\Gin@llx{#1}%
+  \Gin@defaultbp\Gin@lly{#2}%
+  \Gin@defaultbp\Gin@urx{#3}%
+  \Gin@defaultbp\Gin@ury{#4}}%
+\def\Gread@atend{atend}
+\def\Gin@viewport{%
+  \let\Gin@ollx\Gin@llx
+  \let\Gin@olly\Gin@lly
+  \let\Gin@ourx\Gin@urx
+  \let\Gin@oury\Gin@ury
+  \dimen@\Gin@llx\p@\advance\dimen@ \Gin@vurx\p@
+                      \edef\Gin@urx{\strip@pt\dimen@}%
+  \dimen@\Gin@lly\p@\advance\dimen@ \Gin@vury\p@
+                      \edef\Gin@ury{\strip@pt\dimen@}%
+  \dimen@\Gin@llx\p@\advance\dimen@ \Gin@vllx\p@
+                      \edef\Gin@llx{\strip@pt\dimen@}%
+  \dimen@\Gin@lly\p@\advance\dimen@ \Gin@vlly\p@
+                      \edef\Gin@lly{\strip@pt\dimen@}}
+\def\Gin@trim{%
+  \let\Gin@ollx\Gin@llx
+  \let\Gin@olly\Gin@lly
+  \let\Gin@ourx\Gin@urx
+  \let\Gin@oury\Gin@ury
+  \dimen@\Gin@llx\p@\advance\dimen@ \Gin@vllx\p@
+                      \edef\Gin@llx{\strip@pt\dimen@}%
+  \dimen@\Gin@lly\p@\advance\dimen@ \Gin@vlly\p@
+                      \edef\Gin@lly{\strip@pt\dimen@}%
+  \dimen@\Gin@urx\p@\advance\dimen@ -\Gin@vurx\p@
+                      \edef\Gin@urx{\strip@pt\dimen@}%
+  \dimen@\Gin@ury\p@\advance\dimen@ -\Gin@vury\p@
+                      \edef\Gin@ury{\strip@pt\dimen@}}
+\let\Gin@vllx\Gin@llx\let\Gin@vlly\Gin@llx
+\let\Gin@vurx\Gin@llx\let\Gin@vury\Gin@llx
+\let\Grot@height\@ovxx
+\let\Grot@left\@ovyy
+\let\Grot@right\@ovdx
+\let\Grot@depth\@ovdy
+\let\Grot@l\@ovro
+\let\Grot@r\@ovri
+\let\Grot@h\@xdim
+\let\Grot@d\@ydim
+\let\Grot@x\@linelen
+\let\Grot@y\@dashdim
+\protected\long\def\rotatebox#1#2{%
+  \leavevmode
+  \Grot@setangle{#1}%
+  \setbox\z@\hbox{{#2}}%
+  \Grot@x\z@
+  \Grot@y\z@
+  \Grot@box}
+\def\Grot@setangle#1{\edef\Grot@angle{#1}}
+\def\Grot@Px#1#2#3{%
+        #1\Grot@cos#2%
+        \advance#1-\Grot@sin#3}
+\def\Grot@Py#1#2#3{%
+        #1\Grot@sin#2%
+        \advance#1\Grot@cos#3}
+\def\Grot@box{%
+  \begingroup
+  \CalculateSin\Grot@angle
+  \CalculateCos\Grot@angle
+  \edef\Grot@sin{\UseSin\Grot@angle}%
+  \edef\Grot@cos{\UseCos\Grot@angle}%
+^^A   \GDebug{Rotate: angle \Grot@angle, sine is \Grot@sin,
+^^A             cosine is \Grot@cos}%
+  \Grot@r\wd\z@  \advance\Grot@r-\Grot@x
+  \Grot@l\z@     \advance\Grot@l-\Grot@x
+  \Grot@h\ht\z@  \advance\Grot@h-\Grot@y
+  \Grot@d-\dp\z@ \advance\Grot@d-\Grot@y
+  \ifdim\Grot@sin\p@>\z@
+    \ifdim\Grot@cos\p@>\z@
+      \Grot@Py\Grot@height \Grot@r\Grot@h%B
+      \Grot@Px\Grot@right  \Grot@r\Grot@d%E
+      \Grot@Px\Grot@left   \Grot@l\Grot@h%C
+      \Grot@Py\Grot@depth  \Grot@l\Grot@d%D
+    \else
+      \Grot@Py\Grot@height \Grot@r\Grot@d%E
+      \Grot@Px\Grot@right  \Grot@l\Grot@d%D
+      \Grot@Px\Grot@left   \Grot@r\Grot@h%B
+      \Grot@Py\Grot@depth  \Grot@l\Grot@h%C
+    \fi
+  \else
+    \ifdim\Grot@cos\p@<\z@
+      \Grot@Py\Grot@height \Grot@l\Grot@d%D
+      \Grot@Px\Grot@right  \Grot@l\Grot@h%C
+      \Grot@Px\Grot@left   \Grot@r\Grot@d%E
+      \Grot@Py\Grot@depth  \Grot@r\Grot@h%B
+    \else
+      \Grot@Py\Grot@height \Grot@l\Grot@h%C
+      \Grot@Px\Grot@right  \Grot@r\Grot@h%B
+      \Grot@Px\Grot@left   \Grot@l\Grot@d%D
+      \Grot@Py\Grot@depth  \Grot@r\Grot@d%E
+    \fi
+  \fi
+  \advance\Grot@height\Grot@y
+  \advance\Grot@depth\Grot@y
+  \Grot@Px\dimen@  \Grot@x\Grot@y
+  \Grot@Py\dimen@ii \Grot@x\Grot@y
+  \dimen@-\dimen@     \advance\dimen@-\Grot@left
+  \dimen@ii-\dimen@ii \advance\dimen@ii\Grot@y
+^^A   \GDebug{Rotate: (l,r,h,d)^^J%
+^^A Original \the\Grot@l,\the\Grot@r,\the\Grot@h,\the\Grot@d,^^J%
+^^A New..... \the\Grot@left,\the\Grot@right,%
+^^A          \the\Grot@height,\the\Grot@depth}%
+  \setbox\z@\hbox{%
+    \kern\dimen@
+    \raise\dimen@ii\hbox{\Grot@start\box\z@\Grot@end}}%
+  \ht\z@\Grot@height
+  \dp\z@-\Grot@depth
+  \advance\Grot@right-\Grot@left\wd\z@\Grot@right
+  \leavevmode\box\z@
+  \endgroup}
+\protected\def\scalebox#1{%
+  \@ifnextchar[{\Gscale@box{#1}}{\Gscale@box{#1}[#1]}}
+\long\def\Gscale@box#1[#2]#3{%
+  \leavevmode
+  \def\Gscale@x{#1}\def\Gscale@y{#2}%
+  \setbox\z@\hbox{{#3}}%
+  \setbox\tw@\hbox{\Gscale@start\rlap{\copy\z@}\Gscale@end}%
+  \ifdim#2\p@<\z@
+    \ht\tw@-#2\dp\z@
+    \dp\tw@-#2\ht\z@
+  \else
+    \ht\tw@#2\ht\z@
+    \dp\tw@#2\dp\z@
+  \fi
+  \ifdim#1\p@<\z@
+    \hb@xt@-#1\wd\z@{\kern-#1\wd\z@\box\tw@\hss}%
+  \else
+    \hb@xt@#1\wd\z@{\box\tw@\kern#1\wd\z@\hss}%
+  \fi}
+\protected\def\reflectbox{\Gscale@box-1[1]}
+\protected\def\resizebox{%
+  \leavevmode
+  \@ifstar{\Gscale@@box\totalheight}{\Gscale@@box\height}}
+\def\Gscale@@box#1#2#3{%
+  \let\@tempa\Gin@exclamation
+  \expandafter\def\expandafter\@tempb\expandafter{\string#2}%
+  \expandafter\def\expandafter\@tempc\expandafter{\string#3}%
+  \ifx\@tempb\@tempa
+    \ifx\@tempc\@tempa
+      \toks@{\mbox}%
+    \else
+      \toks@{\Gscale@box@dd{#3}#1}%
+    \fi
+  \else
+    \ifx\@tempc\@tempa
+      \toks@{\Gscale@box@dd{#2}\width}%
+    \else
+      \toks@{\Gscale@box@dddd{#2}\width{#3}#1}%
+    \fi
+  \fi
+  \the\toks@}
+\long\def\Gscale@box@dd#1#2#3{%
+  \@begin@tempboxa\hbox{#3}%
+    \setlength\@tempdima{#1}%
+    \setlength\@tempdimb{#2}%
+    \Gscale@div\@tempa\@tempdima\@tempdimb
+    \Gscale@box\@tempa[\@tempa]{\box\@tempboxa}%
+  \@end@tempboxa}
+\long\def\Gscale@box@dddd#1#2#3#4#5{%
+  \@begin@tempboxa\hbox{#5}%
+    \setlength\@tempdima{#1}%
+    \setlength\@tempdimb{#2}%
+    \Gscale@div\@tempa\@tempdima\@tempdimb
+    \setlength\@tempdima{#3}%
+    \setlength\@tempdimb{#4}%
+    \Gscale@div\@tempb\@tempdima\@tempdimb
+    \ifGin@iso
+      \ifdim\@tempa\p@>\@tempb\p@
+        \let\@tempa\@tempb
+      \else
+        \let\@tempb\@tempa
+      \fi
+    \fi
+    \Gscale@box\@tempa[\@tempb]{\box\@tempboxa}%
+  \@end@tempboxa}
+\newif\ifGin@iso
+\def\Gscale@div#1#2#3{%
+  \setlength\dimen@{#3}%
+  \ifdim\dimen@=\z@
+    \PackageError{graphics}{Division by 0}\@eha
+    \dimen@#2%
+  \fi
+  \edef\@tempd{\the\dimen@}%
+  \setlength\dimen@{#2}%
+  \count@65536\relax
+  \ifdim\dimen@<\z@
+    \dimen@-\dimen@
+    \count@-\count@
+  \fi
+  \ifdim\dimen@>\z@
+    \loop
+      \ifdim\ifnum\count@<\tw@\maxdimen\else\dimen@\fi<8192\p@
+        \dimen@\tw@\dimen@
+        \divide\count@\tw@
+    \repeat
+    \dimen@ii\@tempd\relax
+    \divide\dimen@ii\count@
+    \divide\dimen@\dimen@ii
+  \fi
+  \edef#1{\strip@pt\dimen@}}
+\Gin@codes
+\let\Gin@codes\relax
+\endinput
+%%
+%% End of file `graphics.sty'.

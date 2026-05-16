@@ -1,0 +1,124 @@
+%%
+%% This is file `tulmtt.fd',
+%% generated with the docstrip utility.
+%%
+%% The original source files were:
+%%
+%% tulm.fdd  (with options: `TUlmtt')
+%% 
+%% This is a generated file.
+%% 
+%% The source is maintained by the LaTeX Project team and bug
+%% reports for it can be opened at https://latex-project.org/bugs.html
+%% (but please observe conditions on bug reports sent to that address!)
+%% 
+%% 
+%% Copyright (C) 2016-2021
+%% The LaTeX Project and any individual authors listed elsewhere
+%% in this file.
+%% 
+%% This file was generated from file(s) of the LaTeX base system.
+%% --------------------------------------------------------------
+%% 
+%% It may be distributed and/or modified under the
+%% conditions of the LaTeX Project Public License, either version 1.3c
+%% of this license or (at your option) any later version.
+%% The latest version of this license is in
+%%    https://www.latex-project.org/lppl.txt
+%% and version 1.3c or later is part of all distributions of LaTeX
+%% version 2008 or later.
+%% 
+%% This file may only be distributed together with a copy of the LaTeX
+%% base system. You may however distribute the LaTeX base system without
+%% such generated files.
+%% 
+%% The list of all files belonging to the LaTeX base distribution is
+%% given in the file `manifest.txt'. See also `legal.txt' for additional
+%% information.
+%% 
+%% In particular, permission is granted to customize the declarations in
+%% this file to serve the needs of your installation.
+%% 
+%% However, a modified version of this file under its original name
+%% should not be distributed as part of a standard LaTeX distribution, as
+%% the modification will be nontransparent for the user of that
+%% distribution (and thus violating clause 6a of the LPPL license),
+%% making successful document exchange impossible.
+%% 
+\ProvidesFile{tulmtt.fd}
+        [2021/07/23 v1.8a Standard LaTeX font definitions for Latin Modern]
+\DeclareFontFamily{TU}{lmtt}{%
+\hyphenchar \font\m@ne
+\fontdimen3\font\z@
+\fontdimen4\font\z@
+}
+\ifx\lmtt@use@light@as@normal\@empty
+\DeclareFontShape{TU}{lmtt}{sb}{n}
+  {<-8.5>   \UnicodeFontFile{lmmono8-regular}{}
+   <8.5-9.5> \UnicodeFontFile{lmmono9-regular}{}
+   <9.5-11> \UnicodeFontFile{lmmono10-regular}{}
+   <11->  \UnicodeFontFile{lmmono12-regular}{}
+   }{}
+\DeclareFontShape{TU}{lmtt}{sb}{it}
+  {<-> \UnicodeFontFile{lmmono10-italic}{}}{}
+\DeclareFontShape{TU}{lmtt}{sb}{sl}
+  {<-> \UnicodeFontFile{lmmonoslant10-regular}{}}{}
+\DeclareFontShape{TU}{lmtt}{sb}{sc}
+  {<-> \UnicodeFontFile{lmmonocaps10-regular}{}}{}
+\DeclareFontShape{TU}{lmtt}{sb}{scsl}
+  {<-> \UnicodeFontFile{lmmonocaps10-oblique}{}}{}
+\DeclareFontShape{TU}{lmtt}{m}{n}
+  {<-> \UnicodeFontFile{lmmonolt10-regular}{}}{}
+\DeclareFontShape{TU}{lmtt}{m}{it}
+  {<->sub*lmtt/l/sl}{}
+\DeclareFontShape{TU}{lmtt}{m}{sl}
+  {<-> \UnicodeFontFile{lmmonolt10-oblique}{}}{}
+\DeclareFontShape{TU}{lmtt}{c}{n}
+  {<-> \UnicodeFontFile{lmmonoltcond10-regular}{}}{}
+\DeclareFontShape{TU}{lmtt}{c}{it}
+  {<->sub*lmtt/lc/sl}{}
+\DeclareFontShape{TU}{lmtt}{c}{sl}
+  {<-> \UnicodeFontFile{lmmonoltcond10-oblique}{}}{}
+\else
+\DeclareFontShape{TU}{lmtt}{m}{n}
+  {<-8.5>   \UnicodeFontFile{lmmono8-regular}{}
+  <8.5-9.5> \UnicodeFontFile{lmmono9-regular}{}
+   <9.5-11> \UnicodeFontFile{lmmono10-regular}{}
+   <11->  \UnicodeFontFile{lmmono12-regular}{}
+   }{}
+\DeclareFontShape{TU}{lmtt}{m}{it}
+  {<-> \UnicodeFontFile{lmmono10-italic}{}}{}
+\DeclareFontShape{TU}{lmtt}{m}{sl}
+  {<-> \UnicodeFontFile{lmmonoslant10-regular}{}}{}
+\DeclareFontShape{TU}{lmtt}{m}{sc}
+  {<-> \UnicodeFontFile{lmmonocaps10-regular}{}}{}
+\DeclareFontShape{TU}{lmtt}{m}{scsl}
+  {<-> \UnicodeFontFile{lmmonocaps10-oblique}{}}{}
+\DeclareFontShape{TU}{lmtt}{l}{n}
+  {<-> \UnicodeFontFile{lmmonolt10-regular}{}}{}
+\DeclareFontShape{TU}{lmtt}{l}{it}
+  {<->sub*lmtt/l/sl}{}
+\DeclareFontShape{TU}{lmtt}{l}{sl}
+  {<-> \UnicodeFontFile{lmmonolt10-oblique}{}}{}
+\DeclareFontShape{TU}{lmtt}{lc}{n}
+  {<-> \UnicodeFontFile{lmmonoltcond10-regular}{}}{}
+\DeclareFontShape{TU}{lmtt}{lc}{it}
+  {<->sub*lmtt/lc/sl}{}
+\DeclareFontShape{TU}{lmtt}{lc}{sl}
+  {<-> \UnicodeFontFile{lmmonoltcond10-oblique}{}}{}
+\fi
+\DeclareFontShape{TU}{lmtt}{b}{n}
+  {<-> \UnicodeFontFile{lmmonolt10-bold}{}}{}
+\DeclareFontShape{TU}{lmtt}{b}{it}
+  {<->sub*lmtt/b/sl}{}
+\DeclareFontShape{TU}{lmtt}{b}{sl}
+{<-> \UnicodeFontFile{lmmonolt10-boldoblique}{}}{}
+\DeclareFontShape{TU}{lmtt}{bx}{it}
+  {<->sub*lmtt/b/sl}{}
+\DeclareFontShape{TU}{lmtt}{bx}{n}
+  {<->ssub*lmtt/b/n}{}
+\DeclareFontShape{TU}{lmtt}{bx}{sl}
+  {<->ssub*lmtt/b/sl}{}
+\endinput
+%%
+%% End of file `tulmtt.fd'.

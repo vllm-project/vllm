@@ -1,0 +1,183 @@
+%%
+%% This is file `expl3.ltx',
+%% generated with the docstrip utility.
+%%
+%% The original source files were:
+%%
+%% expl3.dtx  (with options: `2ekernel,loader')
+%% 
+%% Copyright (C) 1990-2022 The LaTeX Project
+%% 
+%% It may be distributed and/or modified under the conditions of
+%% the LaTeX Project Public License (LPPL), either version 1.3c of
+%% this license or (at your option) any later version.  The latest
+%% version of this license is in the file:
+%% 
+%%    https://www.latex-project.org/lppl.txt
+%% 
+%% This file is part of the "l3kernel bundle" (The Work in LPPL)
+%% and all files in that bundle must be distributed together.
+%% 
+%% File: expl3.dtx
+\def\ExplFileDate{2022-02-24}%
+\let\ExplLoaderFileDate\ExplFileDate
+\begingroup
+  \catcode`\_=11
+  \expandafter
+  \ifx\csname c__kernel_expl_date_tl\endcsname\relax
+    \global\let\c__kernel_expl_date_tl\ExplFileDate
+  \fi
+\endgroup
+\everyjob\expandafter{\the\everyjob
+  \message{L3 programming layer <\ExplFileDate>}%
+}
+\protected\def\ProvidesExplPackage
+  {\@expl@provides@file@@Nnnnnn\ProvidesPackage{Package}}
+\protected\def\ProvidesExplClass
+  {\@expl@provides@file@@Nnnnnn\ProvidesClass{Document Class}}
+\protected\def\ProvidesExplFile
+  {\@expl@provides@file@@Nnnnnn\ProvidesFile{File}}
+\protected\long\def\@expl@provides@file@@Nnnnnn#1#2#3#4#5#6%
+  {%
+    \ifnum0%
+        \ifdefined#11\fi
+        \ifx\relax#1\else1\fi
+        =11
+      \expandafter#1%
+    \else
+      \@expl@provides@generic@@wnnw{#2}%
+    \fi
+      {#3}[{#4 \ifx\relax#5\relax\else v#5\space\fi #6}]%
+    \ExplSyntaxOn
+  }
+\protected\long\def\@expl@provides@generic@@wnnw#1\fi#2[#3]%
+  {%
+    \immediate\write-1{#1: #2 #3}%
+  }
+\begingroup\expandafter\expandafter\expandafter\endgroup
+\expandafter\ifx\csname tex\string _let:D\endcsname\relax
+  \expandafter\@firstofone
+\else
+  \expandafter\@gobble
+\fi
+  {\input expl3-code.tex }%
+\begingroup\expandafter\expandafter\expandafter\endgroup
+\expandafter\ifx\csname tex\string _let:D\endcsname\relax
+  \expandafter\endinput
+\fi
+\ifcsname\detokenize{g__expl_reload_bool}\endcsname
+  \ExplSyntaxOn
+  \bool_gset_true:N \g__expl_reload_bool
+\else
+  \bool_new:N \g__expl_reload_bool
+\fi
+\tl_if_exist:NF \c__expl_def_ext_tl
+  { \tl_const:Nn \c__expl_def_ext_tl { def } }
+\cs_gset_protected:Npn \__kernel_sys_configuration_load:n #1
+  {
+    \cs_undefine:c { ver@ #1 .def }
+    \@onefilewithoptions {#1} [ ] [ ]
+      \c__expl_def_ext_tl
+  }
+\keys_define:nn { sys }
+  {
+    backend .choices:nn =
+      { dvipdfmx , dvips , dvisvgm , luatex , pdftex , pdfmode , xdvipdfmx , xetex }
+      { \sys_load_backend:n {#1} } ,
+    check-declarations .code:n =
+      {
+        \sys_load_debug:
+        \debug_on:n { check-declarations }
+      } ,
+    driver .meta:n = { backend = #1 } ,
+    enable-debug .code:n =
+      \sys_load_debug: ,
+    log-functions .code:n =
+      {
+        \sys_load_debug:
+        \debug_on:n { log-functions }
+      } ,
+    suppress-backend-headers .bool_gset_inverse:N
+      = \g__kernel_backend_header_bool ,
+    suppress-backend-headers .initial:n = false ,
+    undo-recent-deprecations .code:n = {} % A stub
+  }
+\cs_if_exist:NF \@expl@sys@load@backend@@
+  {
+    \tl_put_left:Nn \document
+      {
+        \endgroup
+        \@expl@sys@load@backend@@
+        \begingroup
+      }
+  }
+\cs_gset_protected:Npn \@expl@sys@load@backend@@
+  {
+    \str_if_exist:NF \c_sys_backend_str
+      { \sys_load_backend:n { } }
+  }
+\cs_if_free:cTF { ver@expl3.sty }
+  {
+    \tex_everyjob:D \exp_after:wN
+      {
+        \tex_the:D \tex_everyjob:D
+        \sys_everyjob:
+      }
+  }
+  { \sys_everyjob: }
+\reverse_if:N \if_cs_exist:N \s__expl_stop
+  \scan_new:N \s__expl_stop
+\fi:
+\cs_if_exist:NF \@expl@push@filename@@
+  {
+    \tl_put_left:Nn  \@pushfilename { \@expl@push@filename@@ }
+    \tl_put_right:Nn \@pushfilename { \@expl@push@filename@aux@@ }
+  }
+\cs_gset_protected:Npn \@expl@push@filename@@
+  {
+    \exp_args:Nx \__kernel_file_input_push:n
+      {
+        \tl_to_str:N \@currname .
+        \tl_to_str:N \@currext
+      }
+    \tl_put_left:Nx \l__expl_status_stack_tl
+      {
+        \bool_if:NTF \l__kernel_expl_bool
+          { 1 }
+          { 0 }
+      }
+    \ExplSyntaxOff
+  }
+\cs_gset_protected:Npn \@expl@push@filename@aux@@ #1#2#3
+  {
+    \str_gset:Nn \g_file_curr_name_str {#3}
+    #1 #2 {#3}
+  }
+\cs_if_exist:NF \@expl@pop@filename@@
+  {
+    \tl_put_right:Nn \@popfilename
+      { \@expl@pop@filename@@ }
+  }
+\cs_gset_protected:Npn \@expl@pop@filename@@
+  {
+    \__kernel_file_input_pop:
+    \tl_if_empty:NTF \l__expl_status_stack_tl
+      { \ExplSyntaxOff }
+      { \exp_after:wN \__expl_status_pop:w \l__expl_status_stack_tl \s__expl_stop }
+  }
+\cs_gset_protected:Npn \__expl_status_pop:w #1#2 \s__expl_stop
+  {
+    \tl_set:Nn \l__expl_status_stack_tl {#2}
+    \int_if_odd:nTF {#1}
+      { \ExplSyntaxOn }
+      { \ExplSyntaxOff }
+  }
+\tl_if_exist:NF \l__expl_status_stack_tl
+  {
+    \tl_new:N \l__expl_status_stack_tl
+    \tl_set:Nn \l__expl_status_stack_tl { 0 }
+  }
+\ExplSyntaxOff
+%% 
+%%
+%% End of file `expl3.ltx'.

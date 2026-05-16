@@ -1,0 +1,43 @@
+\ProvidesFile{t1ptm.fd}
+   [2001/06/04 font definitions for T1/ptm.]
+
+\DeclareFontFamily{T1}{ptm}{}
+
+\DeclareFontShape{T1}{ptm}{m}{n}{
+   <-> ptmr8t
+}{}
+
+\DeclareFontShape{T1}{ptm}{m}{sc}{
+   <-> ptmrc8t
+}{}
+
+\DeclareFontShape{T1}{ptm}{m}{sl}{
+   <-> ptmro8t
+}{}
+
+\DeclareFontShape{T1}{ptm}{m}{it}{
+   <-> ptmri8t
+}{}
+
+\DeclareFontShape{T1}{ptm}{b}{n}{
+   <-> ptmb8t
+}{}
+
+\DeclareFontShape{T1}{ptm}{b}{sc}{
+   <-> ptmbc8t
+}{}
+
+\DeclareFontShape{T1}{ptm}{b}{sl}{
+   <-> ptmbo8t
+}{}
+
+\DeclareFontShape{T1}{ptm}{b}{it}{
+   <-> ptmbi8t
+}{}
+
+\DeclareFontShape{T1}{ptm}{bx}{n}{<->ssub * ptm/b/n}{}
+\DeclareFontShape{T1}{ptm}{bx}{sc}{<->ssub * ptm/b/sc}{}
+\DeclareFontShape{T1}{ptm}{bx}{sl}{<->ssub * ptm/b/sl}{}
+\DeclareFontShape{T1}{ptm}{bx}{it}{<->ssub * ptm/b/it}{}
+
+\endinput

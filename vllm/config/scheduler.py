@@ -40,6 +40,7 @@ class SchedulerConfig:
     """
 
     DEFAULT_MAX_NUM_BATCHED_TOKENS: ClassVar[int] = 2048
+    DEFAULT_MAX_NUM_BATCHED_TOKENS_FOR_BATCHED_DP: ClassVar[int] = 256
     DEFAULT_MAX_NUM_SEQS: ClassVar[int] = 128
 
     runner_type: RunnerType = "generate"
@@ -106,11 +107,12 @@ class SchedulerConfig:
     max_num_batched_tokens in case max multimodal embedding size is larger."""
 
     policy: SchedulerPolicy = "fcfs"
-    """The scheduling policy to use:\n
-    - "fcfs" means first come first served, i.e. requests are handled in order
-    of arrival.\n
+    """The scheduling policy to use:
+
+    - "fcfs" means first come first served, i.e. requests are handled in order 
+      of arrival.
     - "priority" means requests are handled based on given priority (lower
-    value means earlier handling) and time of arrival deciding any ties)."""
+      value means earlier handling) and time of arrival deciding any ties)."""
 
     disable_chunked_mm_input: bool = False
     """If set to true and chunked prefill is enabled, we do not want to
@@ -237,7 +239,6 @@ class SchedulerConfig:
             logger.info_once(
                 "Chunked prefill is enabled with max_num_batched_tokens=%d.",
                 self.max_num_batched_tokens,
-                scope="local",
             )
 
         if self.max_num_partial_prefills > 1:

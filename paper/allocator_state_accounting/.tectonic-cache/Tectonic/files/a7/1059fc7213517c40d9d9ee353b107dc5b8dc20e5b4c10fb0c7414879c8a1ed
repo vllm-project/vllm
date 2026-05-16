@@ -1,0 +1,235 @@
+% /state/installs/tlextras-2022.0r0/texmf-dist/fonts/map/dvipdfmx/updmap/kanjix.map:
+% maintained by updmap[-sys] (multi).
+% Don't change this file directly. Use updmap[-sys] instead.
+% See the updmap documentation.
+% A log of the run that created this file is available here:
+% /state/installs/tlextras-2022.0r0/texmf-dist/web2c/updmap.log
+% morisawa5.map
+futogo-b H FutoGoB101-Bold
+futogo-b-v V FutoGoB101-Bold
+futomin-b H FutoMinA101-Bold
+futomin-b-v V FutoMinA101-Bold
+gtbbb-m H GothicBBB-Medium
+gtbbb-m-v V GothicBBB-Medium
+jun101-l H Jun101-Light
+jun101-l-v V Jun101-Light
+ryumin-l H Ryumin-Light
+ryumin-l-v V Ryumin-Light
+% otf-haranoaji.map
+hgothb-h H HaranoAjiGothic-Bold.otf
+hgothb-v V HaranoAjiGothic-Bold.otf
+hgothbn-h H HaranoAjiGothic-Bold.otf
+hgothbn-v V HaranoAjiGothic-Bold.otf
+hgotheb-h H HaranoAjiGothic-Heavy.otf
+hgotheb-v V HaranoAjiGothic-Heavy.otf
+hgothebn-h H HaranoAjiGothic-Heavy.otf
+hgothebn-v V HaranoAjiGothic-Heavy.otf
+hgothr-h H HaranoAjiGothic-Regular.otf
+hgothr-v V HaranoAjiGothic-Regular.otf
+hgothrn-h H HaranoAjiGothic-Regular.otf
+hgothrn-v V HaranoAjiGothic-Regular.otf
+hmgothr-h H HaranoAjiGothic-Medium.otf
+hmgothr-v V HaranoAjiGothic-Medium.otf
+hmgothrn-h H HaranoAjiGothic-Medium.otf
+hmgothrn-v V HaranoAjiGothic-Medium.otf
+hminb-h H HaranoAjiMincho-Bold.otf
+hminb-v V HaranoAjiMincho-Bold.otf
+hminbn-h H HaranoAjiMincho-Bold.otf
+hminbn-v V HaranoAjiMincho-Bold.otf
+hminl-h H HaranoAjiMincho-Light.otf
+hminl-v V HaranoAjiMincho-Light.otf
+hminln-h H HaranoAjiMincho-Light.otf
+hminln-v V HaranoAjiMincho-Light.otf
+hminr-h H HaranoAjiMincho-Regular.otf
+hminr-v V HaranoAjiMincho-Regular.otf
+hminrn-h H HaranoAjiMincho-Regular.otf
+hminrn-v V HaranoAjiMincho-Regular.otf
+otf-cjgb-h Identity-H HaranoAjiGothic-Bold.otf
+otf-cjgb-v Identity-V HaranoAjiGothic-Bold.otf
+otf-cjge-h Identity-H HaranoAjiGothic-Heavy.otf
+otf-cjge-v Identity-V HaranoAjiGothic-Heavy.otf
+otf-cjgr-h Identity-H HaranoAjiGothic-Regular.otf
+otf-cjgr-v Identity-V HaranoAjiGothic-Regular.otf
+otf-cjmb-h Identity-H HaranoAjiMincho-Bold.otf
+otf-cjmb-v Identity-V HaranoAjiMincho-Bold.otf
+otf-cjmgr-h Identity-H HaranoAjiGothic-Medium.otf
+otf-cjmgr-v Identity-V HaranoAjiGothic-Medium.otf
+otf-cjml-h Identity-H HaranoAjiMincho-Light.otf
+otf-cjml-v Identity-V HaranoAjiMincho-Light.otf
+otf-cjmr-h Identity-H HaranoAjiMincho-Regular.otf
+otf-cjmr-v Identity-V HaranoAjiMincho-Regular.otf
+otf-ujgb-h UniJIS-UTF16-H HaranoAjiGothic-Bold.otf
+otf-ujgb-v UniJIS-UTF16-V HaranoAjiGothic-Bold.otf
+otf-ujgbn-h UniJIS2004-UTF16-H HaranoAjiGothic-Bold.otf
+otf-ujgbn-v UniJIS2004-UTF16-V HaranoAjiGothic-Bold.otf
+otf-ujge-h UniJIS-UTF16-H HaranoAjiGothic-Heavy.otf
+otf-ujge-v UniJIS-UTF16-V HaranoAjiGothic-Heavy.otf
+otf-ujgen-h UniJIS2004-UTF16-H HaranoAjiGothic-Heavy.otf
+otf-ujgen-v UniJIS2004-UTF16-V HaranoAjiGothic-Heavy.otf
+otf-ujgr-h UniJIS-UTF16-H HaranoAjiGothic-Regular.otf
+otf-ujgr-v UniJIS-UTF16-V HaranoAjiGothic-Regular.otf
+otf-ujgrn-h UniJIS2004-UTF16-H HaranoAjiGothic-Regular.otf
+otf-ujgrn-v UniJIS2004-UTF16-V HaranoAjiGothic-Regular.otf
+otf-ujmb-h UniJIS-UTF16-H HaranoAjiMincho-Bold.otf
+otf-ujmb-v UniJIS-UTF16-V HaranoAjiMincho-Bold.otf
+otf-ujmbn-h UniJIS2004-UTF16-H HaranoAjiMincho-Bold.otf
+otf-ujmbn-v UniJIS2004-UTF16-V HaranoAjiMincho-Bold.otf
+otf-ujmgr-h UniJIS-UTF16-H HaranoAjiGothic-Medium.otf
+otf-ujmgr-v UniJIS-UTF16-V HaranoAjiGothic-Medium.otf
+otf-ujmgrn-h UniJIS2004-UTF16-H HaranoAjiGothic-Medium.otf
+otf-ujmgrn-v UniJIS2004-UTF16-V HaranoAjiGothic-Medium.otf
+otf-ujml-h UniJIS-UTF16-H HaranoAjiMincho-Light.otf
+otf-ujml-v UniJIS-UTF16-V HaranoAjiMincho-Light.otf
+otf-ujmln-h UniJIS2004-UTF16-H HaranoAjiMincho-Light.otf
+otf-ujmln-v UniJIS2004-UTF16-V HaranoAjiMincho-Light.otf
+otf-ujmr-h UniJIS-UTF16-H HaranoAjiMincho-Regular.otf
+otf-ujmr-v UniJIS-UTF16-V HaranoAjiMincho-Regular.otf
+otf-ujmrn-h UniJIS2004-UTF16-H HaranoAjiMincho-Regular.otf
+otf-ujmrn-v UniJIS2004-UTF16-V HaranoAjiMincho-Regular.otf
+% otf-ko-baekmuk.map
+otf-ckgb-h Identity-H dotum.ttf/AK12 %!PS Baekmuk-Dotum
+otf-ckgb-v Identity-V dotum.ttf/AK12 %!PS Baekmuk-Dotum
+otf-ckge-h Identity-H dotum.ttf/AK12 %!PS Baekmuk-Dotum
+otf-ckge-v Identity-V dotum.ttf/AK12 %!PS Baekmuk-Dotum
+otf-ckgr-h Identity-H dotum.ttf/AK12 %!PS Baekmuk-Dotum
+otf-ckgr-v Identity-V dotum.ttf/AK12 %!PS Baekmuk-Dotum
+otf-ckmb-h Identity-H batang.ttf/AK12 %!PS Baekmuk-Batang
+otf-ckmb-v Identity-V batang.ttf/AK12 %!PS Baekmuk-Batang
+otf-ckmgr-h Identity-H gulim.ttf/AK12 %!PS Baekmuk-Gulim
+otf-ckmgr-v Identity-V gulim.ttf/AK12 %!PS Baekmuk-Gulim
+otf-ckml-h Identity-H batang.ttf/AK12 %!PS Baekmuk-Batang
+otf-ckml-v Identity-V batang.ttf/AK12 %!PS Baekmuk-Batang
+otf-ckmr-h Identity-H batang.ttf/AK12 %!PS Baekmuk-Batang
+otf-ckmr-v Identity-V batang.ttf/AK12 %!PS Baekmuk-Batang
+otf-ukgb-h UniKS-UCS2-H dotum.ttf %!PS Baekmuk-Dotum
+otf-ukgb-v UniKS-UCS2-V dotum.ttf %!PS Baekmuk-Dotum
+otf-ukge-h UniKS-UCS2-H dotum.ttf %!PS Baekmuk-Dotum
+otf-ukge-v UniKS-UCS2-V dotum.ttf %!PS Baekmuk-Dotum
+otf-ukgr-h UniKS-UCS2-H dotum.ttf %!PS Baekmuk-Dotum
+otf-ukgr-v UniKS-UCS2-V dotum.ttf %!PS Baekmuk-Dotum
+otf-ukmb-h UniKS-UCS2-H batang.ttf %!PS Baekmuk-Batang
+otf-ukmb-v UniKS-UCS2-V batang.ttf %!PS Baekmuk-Batang
+otf-ukmgr-h UniKS-UCS2-H gulim.ttf %!PS Baekmuk-Gulim
+otf-ukmgr-v UniKS-UCS2-V gulim.ttf %!PS Baekmuk-Gulim
+otf-ukml-h UniKS-UCS2-H batang.ttf %!PS Baekmuk-Batang
+otf-ukml-v UniKS-UCS2-V batang.ttf %!PS Baekmuk-Batang
+otf-ukmr-h UniKS-UCS2-H batang.ttf %!PS Baekmuk-Batang
+otf-ukmr-v UniKS-UCS2-V batang.ttf %!PS Baekmuk-Batang
+% otf-sc-arphic.map
+otf-ccgb-h Identity-H gkai00mp.ttf/AG14 %!PS GBZenKai-Medium
+otf-ccgb-v Identity-V gkai00mp.ttf/AG14 %!PS GBZenKai-Medium
+otf-ccge-h Identity-H gkai00mp.ttf/AG14 %!PS GBZenKai-Medium
+otf-ccge-v Identity-V gkai00mp.ttf/AG14 %!PS GBZenKai-Medium
+otf-ccgr-h Identity-H gkai00mp.ttf/AG14 %!PS GBZenKai-Medium
+otf-ccgr-v Identity-V gkai00mp.ttf/AG14 %!PS GBZenKai-Medium
+otf-ccmb-h Identity-H gbsn00lp.ttf/AG14 %!PS BousungEG-Light-GB
+otf-ccmb-v Identity-V gbsn00lp.ttf/AG14 %!PS BousungEG-Light-GB
+otf-ccmgr-h Identity-H gkai00mp.ttf/AG14 %!PS GBZenKai-Medium
+otf-ccmgr-v Identity-V gkai00mp.ttf/AG14 %!PS GBZenKai-Medium
+otf-ccml-h Identity-H gbsn00lp.ttf/AG14 %!PS BousungEG-Light-GB
+otf-ccml-v Identity-V gbsn00lp.ttf/AG14 %!PS BousungEG-Light-GB
+otf-ccmr-h Identity-H gbsn00lp.ttf/AG14 %!PS BousungEG-Light-GB
+otf-ccmr-v Identity-V gbsn00lp.ttf/AG14 %!PS BousungEG-Light-GB
+otf-ucgb-h UniGB-UCS2-H gkai00mp.ttf %!PS GBZenKai-Medium
+otf-ucgb-v UniGB-UCS2-V gkai00mp.ttf %!PS GBZenKai-Medium
+otf-ucge-h UniGB-UCS2-H gkai00mp.ttf %!PS GBZenKai-Medium
+otf-ucge-v UniGB-UCS2-V gkai00mp.ttf %!PS GBZenKai-Medium
+otf-ucgr-h UniGB-UCS2-H gkai00mp.ttf %!PS GBZenKai-Medium
+otf-ucgr-v UniGB-UCS2-V gkai00mp.ttf %!PS GBZenKai-Medium
+otf-ucmb-h UniGB-UCS2-H gbsn00lp.ttf %!PS BousungEG-Light-GB
+otf-ucmb-v UniGB-UCS2-V gbsn00lp.ttf %!PS BousungEG-Light-GB
+otf-ucmgr-h UniGB-UCS2-H gkai00mp.ttf %!PS GBZenKai-Medium
+otf-ucmgr-v UniGB-UCS2-V gkai00mp.ttf %!PS GBZenKai-Medium
+otf-ucml-h UniGB-UCS2-H gbsn00lp.ttf %!PS BousungEG-Light-GB
+otf-ucml-v UniGB-UCS2-V gbsn00lp.ttf %!PS BousungEG-Light-GB
+otf-ucmr-h UniGB-UCS2-H gbsn00lp.ttf %!PS BousungEG-Light-GB
+otf-ucmr-v UniGB-UCS2-V gbsn00lp.ttf %!PS BousungEG-Light-GB
+% otf-tc-arphic.map
+otf-ctgb-h Identity-H bkai00mp.ttf/AC14 %!PS ZenKai-Medium
+otf-ctgb-v Identity-V bkai00mp.ttf/AC14 %!PS ZenKai-Medium
+otf-ctge-h Identity-H bkai00mp.ttf/AC14 %!PS ZenKai-Medium
+otf-ctge-v Identity-V bkai00mp.ttf/AC14 %!PS ZenKai-Medium
+otf-ctgr-h Identity-H bkai00mp.ttf/AC14 %!PS ZenKai-Medium
+otf-ctgr-v Identity-V bkai00mp.ttf/AC14 %!PS ZenKai-Medium
+otf-ctmb-h Identity-H bsmi00lp.ttf/AC14 %!PS ShanHeiSun-Light
+otf-ctmb-v Identity-V bsmi00lp.ttf/AC14 %!PS ShanHeiSun-Light
+otf-ctmgr-h Identity-H bkai00mp.ttf/AC14 %!PS ZenKai-Medium
+otf-ctmgr-v Identity-V bkai00mp.ttf/AC14 %!PS ZenKai-Medium
+otf-ctml-h Identity-H bsmi00lp.ttf/AC14 %!PS ShanHeiSun-Light
+otf-ctml-v Identity-V bsmi00lp.ttf/AC14 %!PS ShanHeiSun-Light
+otf-ctmr-h Identity-H bsmi00lp.ttf/AC14 %!PS ShanHeiSun-Light
+otf-ctmr-v Identity-V bsmi00lp.ttf/AC14 %!PS ShanHeiSun-Light
+otf-utgb-h UniCNS-UCS2-H bkai00mp.ttf %!PS ZenKai-Medium
+otf-utgb-v UniCNS-UCS2-V bkai00mp.ttf %!PS ZenKai-Medium
+otf-utge-h UniCNS-UCS2-H bkai00mp.ttf %!PS ZenKai-Medium
+otf-utge-v UniCNS-UCS2-V bkai00mp.ttf %!PS ZenKai-Medium
+otf-utgr-h UniCNS-UCS2-H bkai00mp.ttf %!PS ZenKai-Medium
+otf-utgr-v UniCNS-UCS2-V bkai00mp.ttf %!PS ZenKai-Medium
+otf-utmb-h UniCNS-UCS2-H bsmi00lp.ttf %!PS ShanHeiSun-Light
+otf-utmb-v UniCNS-UCS2-V bsmi00lp.ttf %!PS ShanHeiSun-Light
+otf-utmgr-h UniCNS-UCS2-H bkai00mp.ttf %!PS ZenKai-Medium
+otf-utmgr-v UniCNS-UCS2-V bkai00mp.ttf %!PS ZenKai-Medium
+otf-utml-h UniCNS-UCS2-H bsmi00lp.ttf %!PS ShanHeiSun-Light
+otf-utml-v UniCNS-UCS2-V bsmi00lp.ttf %!PS ShanHeiSun-Light
+otf-utmr-h UniCNS-UCS2-H bsmi00lp.ttf %!PS ShanHeiSun-Light
+otf-utmr-v UniCNS-UCS2-V bsmi00lp.ttf %!PS ShanHeiSun-Light
+% otf-up-haranoaji.map
+uphgothb-h UniJIS-UTF16-H HaranoAjiGothic-Bold.otf
+uphgothb-v UniJIS-UTF16-V HaranoAjiGothic-Bold.otf
+uphgothbn-h UniJIS2004-UTF16-H HaranoAjiGothic-Bold.otf
+uphgothbn-v UniJIS2004-UTF16-V HaranoAjiGothic-Bold.otf
+uphgotheb-h UniJIS-UTF16-H HaranoAjiGothic-Heavy.otf
+uphgotheb-v UniJIS-UTF16-V HaranoAjiGothic-Heavy.otf
+uphgothebn-h UniJIS2004-UTF16-H HaranoAjiGothic-Heavy.otf
+uphgothebn-v UniJIS2004-UTF16-V HaranoAjiGothic-Heavy.otf
+uphgothr-h UniJIS-UTF16-H HaranoAjiGothic-Regular.otf
+uphgothr-v UniJIS-UTF16-V HaranoAjiGothic-Regular.otf
+uphgothrn-h UniJIS2004-UTF16-H HaranoAjiGothic-Regular.otf
+uphgothrn-v UniJIS2004-UTF16-V HaranoAjiGothic-Regular.otf
+uphmgothr-h UniJIS-UTF16-H HaranoAjiGothic-Medium.otf
+uphmgothr-v UniJIS-UTF16-V HaranoAjiGothic-Medium.otf
+uphmgothrn-h UniJIS2004-UTF16-H HaranoAjiGothic-Medium.otf
+uphmgothrn-v UniJIS2004-UTF16-V HaranoAjiGothic-Medium.otf
+uphminb-h UniJIS-UTF16-H HaranoAjiMincho-Bold.otf
+uphminb-v UniJIS-UTF16-V HaranoAjiMincho-Bold.otf
+uphminbn-h UniJIS2004-UTF16-H HaranoAjiMincho-Bold.otf
+uphminbn-v UniJIS2004-UTF16-V HaranoAjiMincho-Bold.otf
+uphminl-h UniJIS-UTF16-H HaranoAjiMincho-Light.otf
+uphminl-v UniJIS-UTF16-V HaranoAjiMincho-Light.otf
+uphminln-h UniJIS2004-UTF16-H HaranoAjiMincho-Light.otf
+uphminln-v UniJIS2004-UTF16-V HaranoAjiMincho-Light.otf
+uphminr-h UniJIS-UTF16-H HaranoAjiMincho-Regular.otf
+uphminr-v UniJIS-UTF16-V HaranoAjiMincho-Regular.otf
+uphminrn-h UniJIS2004-UTF16-H HaranoAjiMincho-Regular.otf
+uphminrn-v UniJIS2004-UTF16-V HaranoAjiMincho-Regular.otf
+% ptex-haranoaji-04.map
+gbm 2004-H HaranoAjiGothic-Medium.otf
+gbmv 2004-V HaranoAjiGothic-Medium.otf
+rml 2004-H HaranoAjiMincho-Regular.otf
+rmlv 2004-V HaranoAjiMincho-Regular.otf
+% uptex-haranoaji-04.map
+ugbm UniJIS2004-UTF16-H HaranoAjiGothic-Medium.otf
+ugbmv UniJIS2004-UTF16-V HaranoAjiGothic-Medium.otf
+upgbm-h UniJIS2004-UTF16-H HaranoAjiGothic-Medium.otf
+upgbm-hq UniJIS-UCS2-H HaranoAjiGothic-Medium.otf
+upgbm-v UniJIS2004-UTF16-V HaranoAjiGothic-Medium.otf
+uprml-h UniJIS2004-UTF16-H HaranoAjiMincho-Regular.otf
+uprml-hq UniJIS-UCS2-H HaranoAjiMincho-Regular.otf
+uprml-v UniJIS2004-UTF16-V HaranoAjiMincho-Regular.otf
+urml UniJIS2004-UTF16-H HaranoAjiMincho-Regular.otf
+urmlv UniJIS2004-UTF16-V HaranoAjiMincho-Regular.otf
+% uptex-ko-baekmuk.map
+uphygt-h UniKS-UTF16-H dotum.ttf %!PS Baekmuk-Dotum
+uphygt-v UniKS-UTF16-V dotum.ttf %!PS Baekmuk-Dotum
+uphysmjm-h UniKS-UTF16-H batang.ttf %!PS Baekmuk-Batang
+uphysmjm-v UniKS-UTF16-V batang.ttf %!PS Baekmuk-Batang
+% uptex-sc-arphic.map
+upstht-h UniGB-UTF16-H gkai00mp.ttf %!PS GBZenKai-Medium
+upstht-v UniGB-UTF16-V gkai00mp.ttf %!PS GBZenKai-Medium
+upstsl-h UniGB-UTF16-H gbsn00lp.ttf %!PS BousungEG-Light-GB
+upstsl-v UniGB-UTF16-V gbsn00lp.ttf %!PS BousungEG-Light-GB
+% uptex-tc-arphic.map
+upmhm-h UniCNS-UTF16-H bkai00mp.ttf %!PS ZenKai-Medium
+upmhm-v UniCNS-UTF16-V bkai00mp.ttf %!PS ZenKai-Medium
+upmsl-h UniCNS-UTF16-H bsmi00lp.ttf %!PS ShanHeiSun-Light
+upmsl-v UniCNS-UTF16-V bsmi00lp.ttf %!PS ShanHeiSun-Light
