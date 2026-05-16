@@ -127,8 +127,7 @@ class MatcherRotaryEmbedding(MatcherCustomOp):
         key: torch.Tensor | None,
         cos_sin_cache: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        result = auto_functionalized(
-            self.rotary_op,
+        kwargs: dict[str, Any] = dict(
             positions=positions,
             query=query,
             key=key,
@@ -136,6 +135,10 @@ class MatcherRotaryEmbedding(MatcherCustomOp):
             cos_sin_cache=cos_sin_cache,
             is_neox=self.is_neox,
         )
+        if self.rotary_op == rocm_aiter_ops.get_triton_rotary_embedding_op():
+            kwargs["offsets"] = None
+
+        result = auto_functionalized(self.rotary_op, **kwargs)
         query_out = result[1]
         key_out = result[2] if len(result) > 2 else None
         return query_out, key_out
