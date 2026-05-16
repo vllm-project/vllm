@@ -661,7 +661,7 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def is_supported_config(
-        cls: type["mk.FusedMoEExpertsModular"],
+        cls: type["mk.FusedMoEExperts"],
         moe_config: FusedMoEConfig,
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
@@ -676,10 +676,14 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
         # The intermediate_size appears as N in the gate/up GEMM and as K
         # in the down GEMM, so it has the same alignment requirements.
         inter = moe_config.intermediate_size_per_partition
-        if inter % GPTQ_MARLIN_MIN_THREAD_K != 0:
+        if (
+            inter % GPTQ_MARLIN_MIN_THREAD_K != 0
+            or inter % GPTQ_MARLIN_MIN_THREAD_N != 0
+        ):
             return False, (
                 f"kernel does not support intermediate_size_per_partition"
-                f"={inter} (not divisible by {GPTQ_MARLIN_MIN_THREAD_K})"
+                f"={inter} (not divisible by {GPTQ_MARLIN_MIN_THREAD_K} "
+                f"and {GPTQ_MARLIN_MIN_THREAD_N})"
             )
         return True, None
 
