@@ -723,7 +723,7 @@ class Step3VLForConditionalGeneration(
         vllm_config: "VllmConfig",
     ) -> tuple[int, int]:
         # An image without patches
-        min_budget = Step3VLForConditionalGeneration._compute_spatial_tokens(
+        min_budget = self._compute_spatial_tokens(
             self.config.vision_config.image_size,
             self.config.vision_config.patch_size,
             self.config.understand_projector_stride,
@@ -745,12 +745,12 @@ class Step3VLForConditionalGeneration(
         mm_kwargs: dict[str, Any],
     ) -> list[int]:
         num_patches = mm_kwargs.get("num_patches")
-        img_output_tokens = Step3VLForConditionalGeneration._compute_spatial_tokens(
+        img_output_tokens = self._compute_spatial_tokens(
             self.config.vision_config.image_size,
             self.config.vision_config.patch_size,
             self.config.understand_projector_stride,
         )
-        patch_output_tokens = Step3VLForConditionalGeneration._compute_spatial_tokens(
+        patch_output_tokens = self._compute_spatial_tokens(
             504,
             self.config.vision_config.patch_size,
             self.config.understand_projector_stride,
@@ -829,12 +829,12 @@ class Step3VLForConditionalGeneration(
         )
 
         # For pixel_value, the max input size is max_batch_size
-        img_output_tokens = Step3VLForConditionalGeneration._compute_spatial_tokens(
+        img_output_tokens = self._compute_spatial_tokens(
             self.config.vision_config.image_size,
             self.config.vision_config.patch_size,
             self.config.understand_projector_stride,
         )
-        patch_output_tokens = Step3VLForConditionalGeneration._compute_spatial_tokens(
+        patch_output_tokens = self._compute_spatial_tokens(
             504,
             self.config.vision_config.patch_size,
             self.config.understand_projector_stride,
@@ -939,12 +939,12 @@ class Step3VLForConditionalGeneration(
         hidden = output.shape[-1]
         bsz = len(indices)
 
-        img_out = Step3VLForConditionalGeneration._compute_spatial_tokens(
+        img_out = self._compute_spatial_tokens(
             self.config.vision_config.image_size,
             self.config.vision_config.patch_size,
             self.config.understand_projector_stride,
         )
-        patch_out = Step3VLForConditionalGeneration._compute_spatial_tokens(
+        patch_out = self._compute_spatial_tokens(
             504,
             self.config.vision_config.patch_size,
             self.config.understand_projector_stride,

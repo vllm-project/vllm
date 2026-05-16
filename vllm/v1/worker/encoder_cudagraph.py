@@ -16,8 +16,8 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     SupportsEncoderCudaGraph,
-    scatter_output_slices,
 )
+from vllm.model_executor.models.utils import scatter_output_slices
 from vllm.model_executor.models.vision import get_load_balance_assignment
 from vllm.v1.worker.encoder_cudagraph_defs import (
     EncoderCudaGraphConfig,
