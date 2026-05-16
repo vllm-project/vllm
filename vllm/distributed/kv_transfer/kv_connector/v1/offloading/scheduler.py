@@ -788,7 +788,9 @@ class OffloadingConnectorScheduler:
         if self._req_status and all(
             rs.req.is_finished() for rs in self._req_status.values()
         ):
-            self._current_batch_jobs_to_flush.update(self._jobs.keys())
+            self._current_batch_jobs_to_flush.update(
+                jid for jid, js in self._jobs.items() if js.is_store
+            )
 
         meta = OffloadingConnectorMetadata(
             load_jobs=self._current_batch_load_jobs,

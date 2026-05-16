@@ -982,7 +982,11 @@ def test_reset_cache(request_runner, async_scheduling: bool):
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output(keys)
     )
-    runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_stored=(0, 1, 2))
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored=(0, 1, 2),
+        expected_flushed=(0, 1, 2) if not async_scheduling else (),
+    )
 
     # Reset GPU prefix cache then start a request that loads from CPU.
     # Leave the load in-flight so that reset_cache must flush it.
