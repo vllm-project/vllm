@@ -957,7 +957,12 @@ class DeepseekV4Attention(nn.Module):
         # we do this for because MTP layer is not included
         # in the compress ratio list
         if layer_id < config.num_hidden_layers:
-            self.compress_ratio = max(1, config.compress_ratios[layer_id])
+            if hasattr(config, "compress_ratios") and config.compress_ratios is not None:
+                self.compress_ratio = max(1, config.compress_ratios[layer_id])
+            else:
+                _rates = getattr(config, "compress_rates", {}) or {}
+                _types = getattr(config, "layer_types", [])
+                self.compress_ratio = max(1, _rates.get(_types[layer_id], 0))
         else:
             self.compress_ratio = 1
         self.eps = config.rms_norm_eps
