@@ -61,7 +61,7 @@ steps:
   source_file_dependencies:
   - csrc/cpu/
   - vllm/model_executor/layers/quantization/cpu_wna16.py
-  - vllm/model_executor/layers/quantization/gptq_marlin.py
+  - vllm/model_executor/layers/quantization/auto_gptq.py
   - vllm/model_executor/layers/quantization/compressed_tensors/schemes/compressed_tensors_w8a8_int8.py
   - vllm/model_executor/layers/quantization/kernels/scaled_mm/cpu.py
   - vllm/model_executor/layers/quantization/kernels/mixed_precision/cpu.py
