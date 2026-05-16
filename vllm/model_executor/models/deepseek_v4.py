@@ -957,7 +957,26 @@ class DeepseekV4Attention(nn.Module):
         # we do this for because MTP layer is not included
         # in the compress ratio list
         if layer_id < config.num_hidden_layers:
-            self.compress_ratio = max(1, config.compress_ratios[layer_id])
+            if hasattr(config, "compress_ratios"):
+                # Legacy form: pre-normalization, the config exposes a list
+                # of per-layer compression ratios directly.
+                raw = config.compress_ratios[layer_id]
+            else:
+                # transformers >= 4.57 normalizes the same JSON field into
+                # ``layer_types`` (list[str]) + ``compress_rates`` (dict
+                # keyed by layer type). Reading ``compress_ratios`` on the
+                # newer config raises AttributeError. Reconstruct the
+                # per-layer ratio from the normalized fields with defensive
+                # getattr fallbacks so a partially-populated config still
+                # loads (``0`` is promoted to ``1`` by ``max(1, ...)`` below).
+                rates = getattr(config, "compress_rates", None) or {}
+                layer_types = getattr(config, "layer_types", None) or []
+                raw = (
+                    rates.get(layer_types[layer_id], 0)
+                    if layer_id < len(layer_types)
+                    else 0
+                )
+            self.compress_ratio = max(1, raw)
         else:
             self.compress_ratio = 1
         self.eps = config.rms_norm_eps
