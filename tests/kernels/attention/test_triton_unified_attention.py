@@ -224,6 +224,140 @@ def test_triton_unified_attn(
 
 
 @pytest.mark.parametrize(
+    "seq_lens", [[(1, 1328), (5, 18), (129, 463)], [(1, 523), (1, 37), (1, 2011)]]
+)
+@pytest.mark.parametrize("num_heads", [(4, 4), (8, 2)])
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("num_blocks", [2048])
+@pytest.mark.parametrize("seq_threshold_3D", [0])
+@torch.inference_mode()
+def test_triton_unified_attn_fp8_q_scale_folding(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    block_size: int,
+    num_blocks: int,
+    seq_threshold_3D: int,
+) -> None:
+    """Verify that folding q_scale * k_scale into softmax_scale and applying
+    v_scale post-kernel produces correct results for FP8 per-tensor quant.
+
+    This mirrors the approach used in TritonAttentionImpl when Q is FP8 and
+    KV cache uses per-tensor FP8 quantization.
+    """
+    torch.set_default_device(DEVICE_TYPE)
+    set_random_seed(42)
+
+    num_seqs = len(seq_lens)
+    query_lens = [x[0] for x in seq_lens]
+    kv_lens = [x[1] for x in seq_lens]
+    num_query_heads, num_kv_heads = num_heads
+    max_query_len = max(query_lens)
+    max_kv_len = max(kv_lens)
+    window_size = (-1, -1)
+    base_scale = head_size**-0.5
+
+    # Non-trivial per-tensor scales.
+    q_scale = 0.73
+    k_scale = 1.42
+    v_scale = 0.91
+
+    # Generate bf16 reference tensors.
+    query_bf16 = torch.randn(
+        sum(query_lens), num_query_heads, head_size, dtype=torch.bfloat16
+    )
+    key_cache_bf16 = torch.randn(
+        num_blocks, block_size, num_kv_heads, head_size, dtype=torch.bfloat16
+    )
+    value_cache_bf16 = torch.randn_like(key_cache_bf16)
+
+    cu_query_lens = torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(
+        dim=0, dtype=torch.int32
+    )
+    kv_lens_t = torch.tensor(kv_lens, dtype=torch.int32)
+    max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
+    block_tables = torch.randint(
+        0, num_blocks, (num_seqs, max_num_blocks_per_seq), dtype=torch.int32
+    )
+
+    # Quantize Q, K, V to FP8 (simulating what QuantFP8 + KV cache store do).
+    query_fp8 = (
+        (query_bf16.float() / q_scale)
+        .clamp(torch.finfo(FP8_DTYPE).min, torch.finfo(FP8_DTYPE).max)
+        .to(FP8_DTYPE)
+    )
+    key_cache_fp8 = (
+        (key_cache_bf16.float() / k_scale)
+        .clamp(torch.finfo(FP8_DTYPE).min, torch.finfo(FP8_DTYPE).max)
+        .to(FP8_DTYPE)
+    )
+    value_cache_fp8 = (
+        (value_cache_bf16.float() / v_scale)
+        .clamp(torch.finfo(FP8_DTYPE).min, torch.finfo(FP8_DTYPE).max)
+        .to(FP8_DTYPE)
+    )
+
+    # Fold q_scale * k_scale into softmax_scale (the TritonAttentionImpl approach).
+    effective_scale = base_scale * q_scale * k_scale
+
+    num_par_softmax_segments = 16
+    head_size_padded = next_power_of_2(head_size)
+    softmax_segm_output = torch.empty(
+        (seq_threshold_3D, num_query_heads, num_par_softmax_segments, head_size_padded),
+        dtype=torch.float32,
+    )
+    softmax_segm_max = torch.empty(
+        (seq_threshold_3D, num_query_heads, num_par_softmax_segments),
+        dtype=torch.float32,
+    )
+    softmax_segm_expsum = torch.empty(
+        (seq_threshold_3D, num_query_heads, num_par_softmax_segments),
+        dtype=torch.float32,
+    )
+
+    output = torch.empty_like(query_bf16)
+    unified_attention(
+        q=query_fp8,
+        k=key_cache_fp8,
+        v=value_cache_fp8,
+        out=output,
+        cu_seqlens_q=cu_query_lens,
+        seqused_k=kv_lens_t,
+        max_seqlen_q=max_query_len,
+        max_seqlen_k=max_kv_len,
+        softmax_scale=effective_scale,
+        causal=True,
+        window_size=window_size,
+        block_table=block_tables,
+        softcap=0,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
+        seq_threshold_3D=seq_threshold_3D,
+        num_par_softmax_segments=num_par_softmax_segments,
+        softmax_segm_output=softmax_segm_output,
+        softmax_segm_max=softmax_segm_max,
+        softmax_segm_expsum=softmax_segm_expsum,
+    )
+    # Apply v_scale post-kernel.
+    output.mul_(v_scale)
+
+    # Reference: use original bf16 data with standard scale.
+    ref_output = ref_paged_attn(
+        query=query_bf16,
+        key_cache=key_cache_bf16,
+        value_cache=value_cache_bf16,
+        query_lens=query_lens,
+        kv_lens=kv_lens,
+        block_tables=block_tables,
+        scale=base_scale,
+    )
+    # FP8 quantization introduces noise; use relaxed tolerances.
+    torch.testing.assert_close(output, ref_output, atol=1.5e-1, rtol=1.5e-1)
+
+
+@pytest.mark.parametrize(
     "seq_lens",
     [
         [(1, 1328), (5, 18), (129, 463)],

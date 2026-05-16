@@ -592,13 +592,10 @@ class TritonAttentionImpl(AttentionImpl):
         # FP8 per-tensor / auto path (original flow).
         else:
             key_cache, value_cache = kv_cache.unbind(1)
-            if is_quantized_kv_cache(self.kv_cache_dtype):
-                if key_cache.dtype != self.fp8_dtype:
-                    key_cache = key_cache.view(self.fp8_dtype)
-                    value_cache = value_cache.view(self.fp8_dtype)
-                assert layer._q_scale_float == 1.0, (
-                    "A non 1.0 q_scale is not currently supported."
-                )
+            is_quantized = is_quantized_kv_cache(self.kv_cache_dtype)
+            if is_quantized and key_cache.dtype != self.fp8_dtype:
+                key_cache = key_cache.view(self.fp8_dtype)
+                value_cache = value_cache.view(self.fp8_dtype)
             descale_shape = (
                 attn_metadata.query_start_loc.shape[0] - 1,
                 key_cache.shape[2],
@@ -622,6 +619,23 @@ class TritonAttentionImpl(AttentionImpl):
 
         mm_prefix_range_tensor = attn_metadata.mm_prefix_range_tensor
 
+        # When Q is FP8 (quantized query) and KV cache is FP8 per-tensor,
+        # the kernel's _cast_kv_tile keeps K/V in FP8 for FP8 MMA and skips
+        # applying k_scale/v_scale.  We fold q_scale * k_scale into
+        # softmax_scale and apply v_scale to the output after the kernel,
+        # matching FlashInfer's strategy.
+        fp8_per_tensor = (
+            not self._is_per_token_head_quant
+            and is_quantized
+            and query.dtype == self.fp8_dtype
+        )
+        if fp8_per_tensor:
+            softmax_scale = self.scale * layer._q_scale_float * layer._k_scale_float
+            v_scale_float = layer._v_scale_float
+        else:
+            softmax_scale = self.scale
+            v_scale_float = 1.0
+
         unified_attention(
             q=query[:num_actual_tokens],
             k=key_cache,
@@ -631,14 +645,14 @@ class TritonAttentionImpl(AttentionImpl):
             max_seqlen_q=max_seqlen_q,
             seqused_k=seqused_k,
             max_seqlen_k=max_seqlen_k,
-            softmax_scale=self.scale,
+            softmax_scale=softmax_scale,
             causal=True,
             alibi_slopes=self.alibi_slopes,
             use_alibi_sqrt=self.use_alibi_sqrt,
             window_size=self.sliding_window,
             block_table=block_table,
             softcap=self.logits_soft_cap,
-            q_descale=None,  # Not supported
+            q_descale=None,
             k_descale=k_descale,
             v_descale=v_descale,
             seq_threshold_3D=seq_threshold_3D,
@@ -655,6 +669,10 @@ class TritonAttentionImpl(AttentionImpl):
             chunk_lookback=self.chunk_lookback,
             use_td=self.use_td,
         )
+
+        # Apply v_scale post-kernel for FP8 per-tensor path (see comment above).
+        if v_scale_float != 1.0:
+            output[:num_actual_tokens].mul_(v_scale_float)
 
         return output
 
