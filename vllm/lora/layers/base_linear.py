@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from __future__ import annotations
+
 import torch
 from transformers import PretrainedConfig
 
@@ -14,6 +16,7 @@ from vllm.forward_context import (
     get_forward_context,
     is_forward_context_available,
 )
+from vllm.lora.fp8_quant_helper import FP8LoRAQuantizer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     LinearBase,
@@ -110,6 +113,8 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         model_config: PretrainedConfig | None = None,
     ) -> None:
         self.lora_config = lora_config
+        self.enable_fp8_lora = lora_config.enable_fp8_lora
+
         if isinstance(self.base_layer, ReplicatedLinear):
             lora_a_out_size = lora_config.max_lora_rank
             lora_b_out_size = self.output_size
@@ -132,13 +137,17 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         else:
             raise NotImplementedError
 
+        weight_dtype = (
+            torch.float8_e4m3fn if self.enable_fp8_lora else lora_config.lora_dtype
+        )
+
         self.lora_a_stacked = tuple(
             torch.zeros(
                 max_loras,
                 1,
                 lora_a_out_size,
                 self.input_size,
-                dtype=lora_config.lora_dtype,
+                dtype=weight_dtype,
                 device=self.device,
             )
             for _ in range(self.n_slices)
@@ -149,17 +158,41 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
                 1,
                 lora_b_out_size,
                 lora_config.max_lora_rank,
-                dtype=lora_config.lora_dtype,
+                dtype=weight_dtype,
                 device=self.device,
             )
             for _ in range(self.n_slices)
         )
         self.output_slices = (self.lora_b_stacked[0].shape[2],)
+        # Init FP8 LoRA weights
+        if self.enable_fp8_lora:
+            self._fp8_quantizer = FP8LoRAQuantizer(max_rank=lora_config.max_lora_rank)
+            a_sh = self._fp8_quantizer.lora_a_scale_shape(
+                lora_a_out_size, self.input_size
+            )
+            b_sh = self._fp8_quantizer.lora_b_scale_shape(
+                lora_b_out_size, lora_config.max_lora_rank
+            )
+            self.lora_a_scale_stacked = tuple(
+                torch.zeros(
+                    max_loras, 1, *a_sh, dtype=torch.float32, device=self.device
+                )
+                for _ in range(self.n_slices)
+            )
+            self.lora_b_scale_stacked = tuple(
+                torch.zeros(
+                    max_loras, 1, *b_sh, dtype=torch.float32, device=self.device
+                )
+                for _ in range(self.n_slices)
+            )
 
     def reset_lora(self, index: int):
         for s_index in range(self.n_slices):
             self.lora_a_stacked[s_index][index] = 0
             self.lora_b_stacked[s_index][index] = 0
+            if self.enable_fp8_lora:
+                self.lora_a_scale_stacked[s_index][index] = 0
+                self.lora_b_scale_stacked[s_index][index] = 0
 
     def set_lora(
         self,
@@ -182,12 +215,20 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             lora_a = self.slice_lora_a(lora_a)
             lora_b = self.slice_lora_b(lora_b)
 
-        self.lora_a_stacked[0][index, 0, : lora_a.shape[0], : lora_a.shape[1]].copy_(
-            lora_a, non_blocking=True
-        )
-        self.lora_b_stacked[0][index, 0, : lora_b.shape[0], : lora_b.shape[1]].copy_(
-            lora_b, non_blocking=True
-        )
+        if self.enable_fp8_lora:
+            self._fp8_quantizer.quantize_and_set_lora_a(
+                self.lora_a_stacked[0], self.lora_a_scale_stacked[0], index, lora_a
+            )
+            self._fp8_quantizer.quantize_and_set_lora_b(
+                self.lora_b_stacked[0], self.lora_b_scale_stacked[0], index, lora_b
+            )
+        else:
+            self.lora_a_stacked[0][
+                index, 0, : lora_a.shape[0], : lora_a.shape[1]
+            ].copy_(lora_a, non_blocking=True)
+            self.lora_b_stacked[0][
+                index, 0, : lora_b.shape[0], : lora_b.shape[1]
+            ].copy_(lora_b, non_blocking=True)
 
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         # is_forward_context_available for tower modules
@@ -222,8 +263,19 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             output = output.flatten(0, 1)
             x = x.flatten(0, 1)
 
+        fp8_kwargs = {}
+        if self.enable_fp8_lora:
+            fp8_kwargs["lora_a_scale"] = self.lora_a_scale_stacked
+            fp8_kwargs["lora_b_scale"] = self.lora_b_scale_stacked
+
         lora_output: torch.Tensor | None = self.punica_wrapper.add_lora_linear(
-            output, x, self.lora_a_stacked, self.lora_b_stacked, 1.0, self.output_slices
+            output,
+            x,
+            self.lora_a_stacked,
+            self.lora_b_stacked,
+            1.0,
+            self.output_slices,
+            **fp8_kwargs,
         )
         if not current_platform.can_update_inplace():
             output = lora_output
@@ -261,6 +313,11 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
                 dtype=x.dtype,
             )
 
+            fp8_kwargs: dict = {}
+            if self.enable_fp8_lora:
+                fp8_kwargs["lora_a_scale"] = self.lora_a_scale_stacked
+                fp8_kwargs["lora_b_scale"] = self.lora_b_scale_stacked
+
             # Flatten the batch dimension for the transformers backend
             # (which uses shape (1, seq_len, hidden)), matching _apply_sync.
             x_2d = x.flatten(0, 1) if x.ndim == 3 else x
@@ -272,6 +329,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
                 1.0,
                 self.output_slices,
                 add_inputs=False,
+                **fp8_kwargs,
             )
             return lora_output
 

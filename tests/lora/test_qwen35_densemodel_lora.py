@@ -330,6 +330,7 @@ def test_qwen35_text_lora(
         enforce_eager=True,
         trust_remote_code=True,
         enable_tower_connector_lora=True,
+        enable_fp8_lora=True,
         mm_processor_cache_gb=0,
         limit_mm_per_prompt={"image": 1},
     )
@@ -354,6 +355,7 @@ def test_qwen35_text_lora_tp4(
         max_num_seqs=4,
         enforce_eager=True,
         tensor_parallel_size=4,
+        enable_fp8_lora=True,
         trust_remote_code=True,
         enable_tower_connector_lora=True,
         mm_processor_cache_gb=0,
