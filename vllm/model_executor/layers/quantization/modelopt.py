@@ -2345,13 +2345,11 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
 
         if prefix.startswith("language_model.model."):
             candidates.append(
-                "model.language_model."
-                + prefix[len("language_model.model.") :]
+                "model.language_model." + prefix[len("language_model.model.") :]
             )
         elif prefix.startswith("model.language_model."):
             candidates.append(
-                "language_model.model."
-                + prefix[len("model.language_model.") :]
+                "language_model.model." + prefix[len("model.language_model.") :]
             )
 
         return tuple(dict.fromkeys(candidates))
