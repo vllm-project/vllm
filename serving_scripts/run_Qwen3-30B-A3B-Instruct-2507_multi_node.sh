@@ -504,7 +504,6 @@ HOST="${HEAD_NODE_IP}" PORT="${PORT}" MODEL_ID="${MODEL_ID}" \
   HEAD_NODE_IP="${HEAD_NODE_IP}" \
   GPUS_PER_NODE="${GPUS_PER_NODE}" CPUS_PER_TASK="${CPUS_PER_TASK}" \
   RAY_PORT="${RAY_PORT}" bash "${SERVE_SCRIPT}" "${SLURM_JOB_ID}" "${HEAD_NODE}"
-
 echo "Workload finished. Stopping vLLM/Nsight server process cleanly..."
 if [ -n "${SERVER_STEP_PID}" ] && kill -0 "${SERVER_STEP_PID}" 2>/dev/null; then
   kill -INT "${SERVER_STEP_PID}" 2>/dev/null || true
@@ -512,26 +511,10 @@ if [ -n "${SERVER_STEP_PID}" ] && kill -0 "${SERVER_STEP_PID}" 2>/dev/null; then
   SERVER_STEP_PID=""
 fi
 
-echo "Stopping Ray background srun steps before copying Nsight reports..."
-
-if [ -n "${HEAD_RAY_PID}" ] && kill -0 "${HEAD_RAY_PID}" 2>/dev/null; then
-  kill -TERM "${HEAD_RAY_PID}" 2>/dev/null || true
-  wait "${HEAD_RAY_PID}" 2>/dev/null || true
-fi
-HEAD_RAY_PID=""
-
-for pid in ${WORKER_RAY_PIDS}; do
-  if kill -0 "${pid}" 2>/dev/null; then
-    kill -TERM "${pid}" 2>/dev/null || true
-    wait "${pid}" 2>/dev/null || true
-  fi
-done
-WORKER_RAY_PIDS=""
-
-echo "Waiting briefly for Ray/Nsight files to flush..."
+echo "Waiting briefly for Ray worker Nsight files to flush..."
 sleep 30
 
-echo "Copying Ray worker Nsight reports..."
+echo "Copying Ray worker Nsight reports before stopping Ray..."
 mkdir -p "${TRACE_RUN_DIR}/ray_worker_nsight"
 
 copy_ray_nsight_from_node() {
@@ -548,9 +531,16 @@ copy_ray_nsight_from_node() {
     --mem=1G \
     bash -lc "
       mkdir -p '${TRACE_RUN_DIR}/ray_worker_nsight/${NODE}'
+
+      echo 'Looking for Nsight reports on ${NODE}:'
+      find /tmp/ray/session_latest/logs/nsight \
+        -type f -name '*.nsys-rep' \
+        -printf '%p %s bytes\n' 2>/dev/null || true
+
       if [ -d /tmp/ray/session_latest/logs/nsight ]; then
-        cp -v /tmp/ray/session_latest/logs/nsight/*.nsys-rep \
-          '${TRACE_RUN_DIR}/ray_worker_nsight/${NODE}/' 2>/dev/null || true
+        find /tmp/ray/session_latest/logs/nsight \
+          -type f -name '*.nsys-rep' \
+          -exec cp -v {} '${TRACE_RUN_DIR}/ray_worker_nsight/${NODE}/' \; 2>/dev/null || true
       else
         echo 'No /tmp/ray/session_latest/logs/nsight on ${NODE}'
       fi
@@ -562,6 +552,22 @@ copy_ray_nsight_from_node "${HEAD_NODE}"
 for WORKER in ${WORKER_NODES}; do
   copy_ray_nsight_from_node "${WORKER}"
 done
+
+echo "Stopping Ray background srun steps after copying Nsight reports..."
+
+if [ -n "${HEAD_RAY_PID}" ] && kill -0 "${HEAD_RAY_PID}" 2>/dev/null; then
+  kill -TERM "${HEAD_RAY_PID}" 2>/dev/null || true
+  wait "${HEAD_RAY_PID}" 2>/dev/null || true
+fi
+HEAD_RAY_PID=""
+
+for pid in ${WORKER_RAY_PIDS}; do
+  if kill -0 "${pid}" 2>/dev/null; then
+    kill -TERM "${pid}" 2>/dev/null || true
+    wait "${pid}" 2>/dev/null || true
+  fi
+done
+WORKER_RAY_PIDS=""
 
 echo "Trace files:"
 find "${TRACE_RUN_DIR}" -maxdepth 5 -type f -printf "%p %s bytes\n" 2>/dev/null || true
