@@ -21,7 +21,7 @@ from vllm.distributed.weight_transfer.base import (
 from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     DEFAULT_PACKED_NUM_BUFFERS,
-    packed_broadcast_consumer,
+    packed_nccl_broadcast_consumer,
 )
 
 
@@ -184,7 +184,7 @@ class NCCLWeightTransferEngine(
                     dtype = getattr(torch, dtype_name)
                     yield (name, (shape, dtype))
 
-            packed_broadcast_consumer(
+            packed_nccl_broadcast_consumer(
                 iterator=state_dict_info_iterator(),
                 group=self.model_update_group,
                 src=0,
@@ -247,10 +247,10 @@ class NCCLWeightTransferEngine(
         if args.packed:
             # Use packed tensor broadcasting for efficiency
             from vllm.distributed.weight_transfer.packed_tensor import (
-                packed_broadcast_producer,
+                packed_nccl_broadcast_producer,
             )
 
-            packed_broadcast_producer(
+            packed_nccl_broadcast_producer(
                 iterator=iterator,
                 group=args.group,
                 src=args.src,

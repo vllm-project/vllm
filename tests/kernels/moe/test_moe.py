@@ -746,7 +746,8 @@ def marlin_moe_generate_valid_test_cases():
         for sub_case in inner_combinations:
             if (
                 sub_case[0] == scalar_types.float8_e4m3fn
-                and current_platform.get_device_capability() not in [89, 120]
+                and not current_platform.is_device_capability(89)
+                and not current_platform.is_device_capability_family(120)
             ):
                 continue
 
@@ -897,6 +898,7 @@ class MarlinMoEWeightData:
     marlin_moe_generate_valid_test_cases(),
 )
 @pytest.mark.skipif(current_platform.is_rocm(), reason="Skip for rocm")
+@pytest.mark.usefixtures("default_vllm_config")
 def test_fused_marlin_moe(
     a_type: ScalarType,
     b_type: ScalarType,
@@ -1009,6 +1011,7 @@ def test_fused_marlin_moe(
 
 @pytest.mark.flaky(reruns=2)
 @pytest.mark.skipif(current_platform.is_rocm(), reason="Skip for rocm")
+@pytest.mark.usefixtures("default_vllm_config")
 @pytest.mark.parametrize("m", [1, 256])
 def test_fused_marlin_moe_with_bias(m):
     set_random_seed(0)
@@ -1081,6 +1084,7 @@ def test_fused_marlin_moe_with_bias(m):
 
 @pytest.mark.flaky(reruns=2)
 @pytest.mark.skipif(current_platform.is_rocm(), reason="Skip for rocm")
+@pytest.mark.usefixtures("default_vllm_config")
 @pytest.mark.parametrize("m", [1, 64, 256])
 @pytest.mark.parametrize("n,k", [(1024, 1024), (2048, 2048)])
 @pytest.mark.parametrize("e,topk", [(8, 2), (64, 4)])
