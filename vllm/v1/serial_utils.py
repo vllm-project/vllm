@@ -497,6 +497,11 @@ def run_method(
     If the method is a callable, it will be called directly.
     """
     if isinstance(method, bytes):
+        if not envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
+            raise TypeError(
+                "Deserializing methods using cloudpickle is only allowed when "
+                "VLLM_ALLOW_INSECURE_SERIALIZATION=1 is set."
+            )
         func = partial(cloudpickle.loads(method), obj)
     elif isinstance(method, str):
         try:
