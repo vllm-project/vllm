@@ -907,24 +907,27 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         else:
             assert mxfp4_backend == Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16
 
-            def _interleave_mxfp4_cutlass_sm90(w):
-                w_shape = w.shape
-                w_interleaved = w.reshape(w_shape[0], w_shape[1], (w_shape[2] // 4), 4)
-                w_interleaved = w_interleaved.permute(0, 2, 1, 3)
-                w_interleaved = w_interleaved.reshape(
-                    w_shape[0], w_shape[2] // 4, w_shape[1] * 4
-                )
-                return w_interleaved
+            from flashinfer.fused_moe import (
+                interleave_moe_scales_for_sm90_mixed_gemm,
+                interleave_moe_weights_for_sm90_mixed_gemm,
+            )
 
-            w31_scales = w13_scale_swapped.to(torch.uint8)
-            w31_scales_interleaved = _interleave_mxfp4_cutlass_sm90(w31_scales)
-
-            w2_scale = w2_weight_scale.data.to(torch.uint8)
-            w2_scale_interleaved = _interleave_mxfp4_cutlass_sm90(w2_scale)
+            w13_weight_interleaved = interleave_moe_weights_for_sm90_mixed_gemm(
+                w13_weight_swapped.contiguous(), "fp4"
+            )
+            w2_weight_interleaved = interleave_moe_weights_for_sm90_mixed_gemm(
+                w2_weight.contiguous(), "fp4"
+            )
+            w31_scales_interleaved = interleave_moe_scales_for_sm90_mixed_gemm(
+                w13_scale_swapped.to(torch.uint8)
+            )
+            w2_scale_interleaved = interleave_moe_scales_for_sm90_mixed_gemm(
+                w2_weight_scale.data.to(torch.uint8)
+            )
 
             return (
-                w13_weight_swapped,
-                w2_weight,
+                w13_weight_interleaved,
+                w2_weight_interleaved,
                 w31_scales_interleaved,
                 w2_scale_interleaved,
                 w13_bias_swapped,
