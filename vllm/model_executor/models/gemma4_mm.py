@@ -39,6 +39,7 @@ from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -871,6 +872,8 @@ class Gemma4MultimodalEmbedder(nn.Module):
         self,
         multimodal_config: Gemma4VisionConfig | Gemma4AudioConfig,
         text_config: Gemma4TextConfig,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
 
@@ -894,6 +897,8 @@ class Gemma4MultimodalEmbedder(nn.Module):
             embedding_dim,
             self.text_hidden_size,
             bias=False,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "embedding_projection"),
         )
 
     def forward(self, inputs_embeds: torch.Tensor) -> torch.Tensor:
@@ -958,7 +963,10 @@ class Gemma4ForConditionalGeneration(
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.vision_tower = AutoModel.from_config(config=config.vision_config)
             self.embed_vision = Gemma4MultimodalEmbedder(
-                config.vision_config, config.text_config
+                config.vision_config,
+                config.text_config,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "embed_vision"),
             )
 
         # ---- Audio tower (variants with audio_config) ----
@@ -971,7 +979,10 @@ class Gemma4ForConditionalGeneration(
                 # position embeddings, softcap, gradient_clipping).
                 self.audio_tower.post_init()
                 self.embed_audio = Gemma4MultimodalEmbedder(
-                    config.audio_config, config.text_config
+                    config.audio_config,
+                    config.text_config,
+                    quant_config=quant_config,
+                    prefix=maybe_prefix(prefix, "embed_audio"),
                 )
         else:
             self.audio_tower = None

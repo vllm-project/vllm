@@ -76,6 +76,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         self.expert_params_mapping: list[tuple[str, str, int, str]] = []
         # mapping weight names from transformers to vllm.
         self.weight_mapper: Callable = lambda name: name
+        self.param_dict: dict[str, nn.Parameter] = {}
         self.pre_quant: bool = False
         self.load_8bit: bool = False
         self.is_pool_model: bool = False
@@ -248,6 +249,45 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         suffix = weight_name.split(".")[-1]
         return any(q_suffix in suffix for q_suffix in quantized_suffix)
 
+    def _resolve_target_param_name(self, quant_param_name: str) -> str | None:
+        if quant_param_name in self.param_dict:
+            return quant_param_name
+
+        for shard_name, (
+            weight_name,
+            _,
+        ) in self.modules_mapping.inverse_packed_mapping.items():
+            # Keep this rename condition aligned with
+            # _stack_quantization_states so packed modules are detected
+            # consistently while avoiding substring matches like
+            # kv_proj inside qkv_proj.
+            shard_pos = quant_param_name.find(shard_name)
+            can_correct_rename = (shard_pos > 0) and (
+                quant_param_name[shard_pos - 1] == "."
+            )
+            new_quant_param_name = quant_param_name.replace(shard_name, weight_name)
+            if can_correct_rename and new_quant_param_name in self.param_dict:
+                return new_quant_param_name
+
+        return None
+
+    @staticmethod
+    def _param_accepts_bnb_4bit_packed(param: nn.Parameter) -> bool:
+        return bool(getattr(param, "use_bitsandbytes_4bit", False))
+
+    @staticmethod
+    def _dequantize_prequant_4bit_weight(
+        weight_tensor: torch.Tensor,
+        quant_state: Any,
+        target_param: nn.Parameter,
+    ) -> torch.Tensor:
+        from bitsandbytes.functional import dequantize_4bit
+
+        weight_tensor = weight_tensor.to(device=current_platform.device_type)
+        return dequantize_4bit(weight_tensor, quant_state).to(
+            device=target_param.device, dtype=target_param.dtype
+        )
+
     def _quantized_8bit_generator(
         self, hf_weights_files, use_safetensors, quant_state_dict
     ) -> Generator:
@@ -325,7 +365,20 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 f"{mapped_weight_name}.quant_state.bitsandbytes__fp4" in temp_state_dict
             ):
                 quant_state = _parse_quant_state(mapped_weight_name, temp_state_dict)
-                quant_state_dict[mapped_weight_name] = quant_state
+                target_param_name = self._resolve_target_param_name(mapped_weight_name)
+                target_param = (
+                    self.param_dict[target_param_name]
+                    if target_param_name is not None
+                    else None
+                )
+                if target_param is not None and not self._param_accepts_bnb_4bit_packed(
+                    target_param
+                ):
+                    weight_tensor = self._dequantize_prequant_4bit_weight(
+                        weight_tensor, quant_state, target_param
+                    )
+                else:
+                    quant_state_dict[mapped_weight_name] = quant_state
                 yield org_weight_name, weight_tensor
             else:
                 yield org_weight_name, weight_tensor
@@ -337,9 +390,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
         global_tp_size = get_tensor_model_parallel_world_size()
         global_tp_rank = get_tensor_model_parallel_rank()
-        check_match = (
-            lambda weight_name, module_name: weight_name.removesuffix(".weight")
-            == module_name
+        check_match = lambda weight_name, module_name: (
+            weight_name.removesuffix(".weight") == module_name
         )
         for (
             org_weight_name,
@@ -565,6 +617,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         """
         self.is_pool_model = is_pooling_model(model)
         self.modules_mapping = ParamMapping(get_packed_modules_mapping(model))
+        self.param_dict = dict(model.named_parameters())
 
         if is_moe_model(model):
             self.expert_params_mapping = get_moe_expert_mapping(model)
