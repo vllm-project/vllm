@@ -261,13 +261,18 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             # _stack_quantization_states so packed modules are detected
             # consistently while avoiding substring matches like
             # kv_proj inside qkv_proj.
-            shard_pos = quant_param_name.find(shard_name)
+            shard_pos = quant_param_name.rfind(shard_name)
             can_correct_rename = (shard_pos > 0) and (
                 quant_param_name[shard_pos - 1] == "."
             )
-            new_quant_param_name = quant_param_name.replace(shard_name, weight_name)
-            if can_correct_rename and new_quant_param_name in self.param_dict:
-                return new_quant_param_name
+            if can_correct_rename:
+                new_quant_param_name = (
+                    quant_param_name[:shard_pos]
+                    + weight_name
+                    + quant_param_name[shard_pos + len(shard_name) :]
+                )
+                if new_quant_param_name in self.param_dict:
+                    return new_quant_param_name
 
         return None
 
@@ -367,7 +372,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 quant_state = _parse_quant_state(mapped_weight_name, temp_state_dict)
                 target_param_name = self._resolve_target_param_name(mapped_weight_name)
                 target_param = (
-                    self.param_dict[target_param_name]
+                    self.param_dict.get(target_param_name)
                     if target_param_name is not None
                     else None
                 )
@@ -785,7 +790,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         # after the checks are updated to run on a new version
         from vllm.model_executor.models.utils import is_pp_missing_parameter
 
-        param_dict = dict(model.named_parameters())
+        param_dict = self.param_dict
         for quant_param_name in quant_state_dict:
             if is_pp_missing_parameter(quant_param_name, model):
                 continue
@@ -801,20 +806,25 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 # module names 'kv_proj' and 'qkv_proj'. To prevent 'kv_proj'
                 # from being incorrectly identified as being present in
                 # 'vpm.encoder.layers.0.self_attn.qkv_proj.weight
-                shard_pos = quant_param_name.find(shard_name)
+                shard_pos = quant_param_name.rfind(shard_name)
                 can_correct_rename = (shard_pos > 0) and (
                     quant_param_name[shard_pos - 1] == "."
                 )
-                # If the quant_param_name is packed, it won't occur in the
-                # param_dict before renaming.
-                new_quant_param_name = quant_param_name.replace(shard_name, weight_name)
-                need_rename = (quant_param_name not in param_dict) and (
-                    new_quant_param_name in param_dict
-                )
-                if can_correct_rename and need_rename:
-                    shard_index = index
-                    quant_param_name = new_quant_param_name
-                    break
+                if can_correct_rename:
+                    # If the quant_param_name is packed, it won't occur in the
+                    # param_dict before renaming.
+                    new_quant_param_name = (
+                        quant_param_name[:shard_pos]
+                        + weight_name
+                        + quant_param_name[shard_pos + len(shard_name) :]
+                    )
+                    need_rename = (quant_param_name not in param_dict) and (
+                        new_quant_param_name in param_dict
+                    )
+                    if need_rename:
+                        shard_index = index
+                        quant_param_name = new_quant_param_name
+                        break
 
             # Models like Clip/Siglip may skip some layers in initialization,
             # causing unused quant_param_name in state_dict.
@@ -833,7 +843,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         self, model: nn.Module, stacked_quant_state_dict: dict
     ) -> None:
         # save quant_states and offsets as the attributes of the parameters
-        param_dict = dict(model.named_parameters())
+        param_dict = self.param_dict
         for param_name, param in param_dict.items():
             if param_name in stacked_quant_state_dict:
                 quant_states = stacked_quant_state_dict[param_name]

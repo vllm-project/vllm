@@ -109,6 +109,30 @@ def test_prequant_4bit_bnb_param_keeps_packed_weight(monkeypatch):
     assert "bnb.weight" in quant_state_dict
 
 
+def test_prequant_4bit_renames_only_last_packed_module_match(monkeypatch):
+    packed_weight = torch.arange(3, dtype=torch.uint8).reshape(3, 1)
+    dequantized_weight = torch.arange(6, dtype=torch.float32).reshape(2, 3)
+    target_param = torch.nn.Parameter(torch.empty(2, 3, dtype=torch.float16))
+    _install_fake_bitsandbytes(monkeypatch, dequantized_weight)
+
+    loader = _loader_for_entries(
+        _bnb_4bit_entries("q_proj_adapter.layer.q_proj.weight", packed_weight),
+        {"q_proj_adapter.layer.qkv_proj.weight": target_param},
+    )
+    loader.modules_mapping = ParamMapping({"qkv_proj": ["q_proj", "k_proj", "v_proj"]})
+    quant_state_dict: dict[str, Any] = {}
+
+    loaded = list(loader._quantized_4bit_generator([], True, quant_state_dict))
+
+    assert len(loaded) == 1
+    assert loaded[0][0] == "q_proj_adapter.layer.q_proj.weight"
+    assert loaded[0][1].shape == target_param.shape
+    torch.testing.assert_close(
+        loaded[0][1], dequantized_weight.to(dtype=target_param.dtype)
+    )
+    assert quant_state_dict == {}
+
+
 def test_prequant_4bit_packed_bnb_param_keeps_packed_weight(monkeypatch):
     packed_weight = torch.arange(3, dtype=torch.uint8).reshape(3, 1)
     dequantized_weight = torch.arange(6, dtype=torch.float32).reshape(2, 3)
