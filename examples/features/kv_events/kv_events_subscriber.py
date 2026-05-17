@@ -12,14 +12,12 @@ from vllm.v1.core.kv_cache_utils import ExternalBlockHash
 #
 # Types copied from vllm.distributed.kv_events
 #
-class EventBatch(msgspec.Struct, array_like=True, omit_defaults=True, gc=False):
+class EventBatch(msgspec.Struct, omit_defaults=True, gc=False):
     ts: float
     events: list[Any]
 
 
-class KVCacheEvent(
-    msgspec.Struct, array_like=True, omit_defaults=True, gc=False, tag=True
-):
+class KVCacheEvent(msgspec.Struct, omit_defaults=True, gc=False, tag=True):
     """Base class for all KV cache-related events"""
 
 
