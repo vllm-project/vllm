@@ -122,20 +122,24 @@ def _release_stale_cuda_primary_contexts(local_rank: int) -> None:
     except OSError:
         return
 
-    libcuda.cuInit(0)
+    if libcuda.cuInit(0) != 0:
+        return
     device_count = torch.cuda.device_count()
 
     for dev_id in range(device_count):
         if dev_id == local_rank:
             continue
         dev = ctypes.c_int()
-        libcuda.cuDeviceGet(ctypes.byref(dev), dev_id)
+        if libcuda.cuDeviceGet(ctypes.byref(dev), dev_id) != 0:
+            continue
         flags = ctypes.c_uint()
         state = ctypes.c_int()
-        libcuda.cuDevicePrimaryCtxGetState(
-            dev, ctypes.byref(flags), ctypes.byref(state)
-        )
-        if state.value != 0:
+        if (
+            libcuda.cuDevicePrimaryCtxGetState(
+                dev, ctypes.byref(flags), ctypes.byref(state)
+            ) == 0
+            and state.value != 0
+        ):
             libcuda.cuDevicePrimaryCtxRelease(dev)
             logger.debug(
                 "Released stale CUDA primary context for device %d "
