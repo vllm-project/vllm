@@ -131,6 +131,11 @@ __device__ __forceinline__ __nv_bfloat162 silu2_v2(float2 x) {
 }
 
 #ifndef USE_ROCM
+  #ifdef _MSC_VER
+using __int128_t = uint4;
+using __int64_t = long long;
+  #endif
+
 __device__ __forceinline__ float warp_max(float v) {
   static constexpr unsigned FULL_MASK = 0xffffffffu;
   for (int offset = 1; offset < WARP_SIZE; offset *= 2) {

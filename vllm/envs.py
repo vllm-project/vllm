@@ -806,9 +806,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_USE_RAY_V2_EXECUTOR_BACKEND", "1"))
     ),
     # Use dedicated multiprocess context for workers.
-    # Both spawn and fork work
+    # Windows does not support fork, so native Windows builds default to spawn.
     "VLLM_WORKER_MULTIPROC_METHOD": env_with_choices(
-        "VLLM_WORKER_MULTIPROC_METHOD", "fork", ["spawn", "fork"]
+        "VLLM_WORKER_MULTIPROC_METHOD",
+        "spawn" if sys.platform == "win32" else "fork",
+        ["spawn", "fork"],
     ),
     # Path to the cache for storing downloaded assets
     "VLLM_ASSETS_CACHE": lambda: os.path.expanduser(

@@ -3,7 +3,6 @@
 import glob
 import itertools
 import os
-import subprocess
 import sys
 
 import jinja2
@@ -164,10 +163,13 @@ QUANT_CONFIGS = [
 
 def remove_old_kernels():
     for filename in glob.glob(os.path.dirname(__file__) + "/*kernel_*.cu"):
-        subprocess.call(["rm", "-f", filename])
+        os.remove(filename)
 
     filename = os.path.dirname(__file__) + "/kernel_selector.h"
-    subprocess.call(["rm", "-f", filename])
+    try:
+        os.remove(filename)
+    except FileNotFoundError:
+        pass
 
 
 def generate_new_kernels():

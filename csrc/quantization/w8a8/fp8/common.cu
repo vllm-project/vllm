@@ -1,7 +1,14 @@
+#include <cuda_runtime.h>
+#ifdef small
+  #undef small
+#endif
 #include "common.cuh"
 #include "dispatch_utils.h"
 #include "cub_helpers.h"
 #include "libtorch_stable/quantization/vectorization_utils.cuh"
+#ifdef small
+  #undef small
+#endif
 #include <c10/cuda/CUDAGuard.h>
 #include <ATen/cuda/Exceptions.h>
 #include <tuple>
@@ -112,7 +119,7 @@ __global__ void segmented_max_reduction_strided(
 
   // thread 0 updates global scale (per-tensor) atomically.
   if (tid == 0) {
-    atomicMaxFloat(scale, cache[0] / quant_type_max_v<fp8_type>);
+    atomicMaxFloat(scale, cache[0] / quant_type_max_val<fp8_type>());
   }
 }
 
@@ -165,7 +172,7 @@ __global__ void dynamic_per_token_scaled_fp8_quant_kernel_strided(
   __shared__ float token_scale;
   if (tid == 0) {
     token_scale = scale_ub ? fminf(block_max, *scale_ub) : block_max;
-    token_scale = fmaxf(token_scale / quant_type_max_v<fp8_type>,
+    token_scale = fmaxf(token_scale / quant_type_max_val<fp8_type>(),
                         min_scaling_factor<fp8_type>::val());
     scale[token_idx] = token_scale;
   }

@@ -3,8 +3,6 @@
 
 import argparse
 
-import uvloop
-
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -13,6 +11,7 @@ from vllm.entrypoints.openai.api_server import (
     build_and_serve_renderer,
     setup_server,
 )
+from vllm.utils import uvloop_compat as uvloop
 from vllm.entrypoints.openai.cli_args import (
     make_arg_parser,
     validate_parsed_serve_args,

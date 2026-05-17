@@ -4,6 +4,10 @@
 #include "core/batch_invariant.hpp"
 #include "libtorch_stable/quantization/vectorization_utils.cuh"
 
+#ifdef small
+  #undef small
+#endif
+
 #include <torch/cuda.h>
 #include <c10/cuda/CUDAGuard.h>
 

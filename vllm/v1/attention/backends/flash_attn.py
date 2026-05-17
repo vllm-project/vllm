@@ -214,6 +214,8 @@ class FlashAttentionBackend(AttentionBackend):
         use_sparse: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
+        if not is_flash_attn_varlen_func_available():
+            return "flash attention extension is not available"
         if has_sink and device_capability < DeviceCapability(9, 0):
             return "sink not supported on compute capability < 9.0"
         return None

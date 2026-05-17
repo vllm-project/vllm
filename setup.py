@@ -30,6 +30,13 @@ def load_module_from_path(module_name, path):
     return module
 
 
+def cmake_path(path: os.PathLike[str] | str) -> str:
+    path_str = os.fspath(path)
+    if sys.platform == "win32":
+        return path_str.replace("\\", "/")
+    return path_str
+
+
 ROOT_DIR = Path(__file__).parent
 logger = logging.getLogger(__name__)
 
@@ -42,7 +49,15 @@ VLLM_TARGET_DEVICE = envs.VLLM_TARGET_DEVICE
 if sys.platform.startswith("darwin") and VLLM_TARGET_DEVICE != "cpu":
     logger.warning("VLLM_TARGET_DEVICE automatically set to `cpu` due to macOS")
     VLLM_TARGET_DEVICE = "cpu"
-elif not (sys.platform.startswith("linux") or sys.platform.startswith("darwin")):
+elif sys.platform == "win32":
+    if os.getenv("VLLM_TARGET_DEVICE") is None:
+        if torch.version.cuda is not None:
+            VLLM_TARGET_DEVICE = "cuda"
+            logger.info("Auto-detected CUDA on Windows")
+        else:
+            VLLM_TARGET_DEVICE = "cpu"
+            logger.info("No CUDA-enabled torch detected on Windows, using CPU")
+elif not sys.platform.startswith("linux"):
     logger.warning(
         "vLLM only supports Linux platform (including WSL) and MacOS."
         "Building on %s, "
@@ -236,11 +251,14 @@ class cmake_build_ext(build_ext):
 
         # Pass the python executable to cmake so it can find an exact
         # match.
-        cmake_args += ["-DVLLM_PYTHON_EXECUTABLE={}".format(sys.executable)]
+        cmake_args += [
+            "-DVLLM_PYTHON_EXECUTABLE={}".format(cmake_path(sys.executable))
+        ]
 
         # Pass the python path to cmake so it can reuse the build dependencies
         # on subsequent calls to python.
-        cmake_args += ["-DVLLM_PYTHON_PATH={}".format(":".join(sys.path))]
+        cmake_python_path = os.pathsep.join(cmake_path(path) for path in sys.path)
+        cmake_args += ["-DVLLM_PYTHON_PATH={}".format(cmake_python_path)]
 
         # Override the base directory for FetchContent downloads to $ROOT/.deps
         # This allows sharing dependencies between profiles,
@@ -248,7 +266,7 @@ class cmake_build_ext(build_ext):
         # To override this, set the FETCHCONTENT_BASE_DIR environment variable.
         fc_base_dir = os.path.join(ROOT_DIR, ".deps")
         fc_base_dir = os.environ.get("FETCHCONTENT_BASE_DIR", fc_base_dir)
-        cmake_args += ["-DFETCHCONTENT_BASE_DIR={}".format(fc_base_dir)]
+        cmake_args += ["-DFETCHCONTENT_BASE_DIR={}".format(cmake_path(fc_base_dir))]
 
         #
         # Setup parallelism and build tool
@@ -269,16 +287,19 @@ class cmake_build_ext(build_ext):
             build_tool = []
         # Make sure we use the nvcc from CUDA_HOME
         if _is_cuda() and CUDA_HOME is not None:
-            cmake_args += [f"-DCMAKE_CUDA_COMPILER={CUDA_HOME}/bin/nvcc"]
+            nvcc_name = "nvcc.exe" if sys.platform == "win32" else "nvcc"
+            cmake_args += [
+                f"-DCMAKE_CUDA_COMPILER={cmake_path(CUDA_HOME)}/bin/{nvcc_name}"
+            ]
         elif _is_hip() and ROCM_HOME is not None:
-            cmake_args += [f"-DROCM_PATH={ROCM_HOME}"]
+            cmake_args += [f"-DROCM_PATH={cmake_path(ROCM_HOME)}"]
 
         other_cmake_args = os.environ.get("CMAKE_ARGS")
         if other_cmake_args:
             cmake_args += other_cmake_args.split()
 
         subprocess.check_call(
-            ["cmake", ext.cmake_lists_dir, *build_tool, *cmake_args],
+            ["cmake", cmake_path(ext.cmake_lists_dir), *build_tool, *cmake_args],
             cwd=self.build_temp,
         )
 
@@ -1002,7 +1023,7 @@ ext_modules.append(CMakeExtension(name="vllm.spinloop"))
 if _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._rocm_C"))
 
-if _is_cuda():
+if _is_cuda() and sys.platform != "win32":
     ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa2_C"))
     if envs.VLLM_USE_PRECOMPILED or (
         CUDA_HOME and get_nvcc_cuda_version() >= Version("12.3")
@@ -1014,6 +1035,8 @@ if _is_cuda():
     ext_modules.append(
         CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa4_cutedsl_C", optional=True)
     )
+
+if _is_cuda():
     if envs.VLLM_USE_PRECOMPILED or (
         CUDA_HOME and get_nvcc_cuda_version() >= Version("12.9")
     ):

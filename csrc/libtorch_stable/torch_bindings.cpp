@@ -302,9 +302,11 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   // mxfp4_experts_quant: registered in mxfp4_experts_quant.cu (SM100 only).
   // W4A8 ops: registered in w4a8_mm_entry.cu / w4a8_grouped_mm_entry.cu.
 
-  // AWQ ops
+#if !defined(_MSC_VER)
+  // AWQ kernels use GNU-style inline assembly and are not built with MSVC.
   ops.impl("awq_gemm", TORCH_BOX(&awq_gemm));
   ops.impl("awq_dequantize", TORCH_BOX(&awq_dequantize));
+#endif
 
   // DSV3 fused A GEMM: conditionally compiled so impl registration is in
   // source file (dsv3_fused_a_gemm.cu)

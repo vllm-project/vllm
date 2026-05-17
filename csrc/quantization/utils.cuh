@@ -11,7 +11,11 @@
 
 #ifndef USE_ROCM
   #include <c10/util/Float8_e4m3fn.h>
-  #define MAYBE_HOST_DEVICE C10_HOST_DEVICE
+  #ifdef _WIN32
+    #define MAYBE_HOST_DEVICE
+  #else
+    #define MAYBE_HOST_DEVICE C10_HOST_DEVICE
+  #endif
 #else
   #include <ATen/hip/HIPContext.h>
   #include <c10/util/Float8_e4m3fn.h>
@@ -25,14 +29,16 @@ template <typename T,
                                       std::is_same_v<T, c10::Float8_e4m3fnuz> ||
                                       std::is_same_v<T, int8_t>>>
 struct quant_type_max {
-  static constexpr T val() { return std::numeric_limits<T>::max(); }
+  C10_HOST_DEVICE static constexpr T val() {
+    return std::numeric_limits<T>::max();
+  }
 };
 
 // Using the default max value from pytorch (240.0 0x7F) will cause accuracy
 // issues when running dynamic quantization. Here use 224.0 0x7E for rocm.
 template <>
 struct quant_type_max<c10::Float8_e4m3fnuz> {
-  static constexpr c10::Float8_e4m3fnuz val() {
+  C10_HOST_DEVICE static constexpr c10::Float8_e4m3fnuz val() {
     return c10::Float8_e4m3fnuz(0x7E, c10::Float8_e4m3fnuz::from_bits());
   }
 };
@@ -41,13 +47,18 @@ template <typename T>
 MAYBE_HOST_DEVICE static constexpr T quant_type_max_v =
     quant_type_max<T>::val();
 
+template <typename T>
+C10_HOST_DEVICE static constexpr T quant_type_max_val() {
+  return quant_type_max<T>::val();
+}
+
 template <typename T,
           typename = std::enable_if_t<std::is_same_v<T, c10::Float8_e4m3fn> ||
                                       std::is_same_v<T, c10::Float8_e4m3fnuz> ||
                                       std::is_same_v<T, int8_t>>>
 struct min_scaling_factor {
   C10_DEVICE C10_ALWAYS_INLINE static float val() {
-    return 1.0f / (quant_type_max_v<T> * 512.0f);
+    return 1.0f / (quant_type_max_val<T>() * 512.0f);
   }
 };
 

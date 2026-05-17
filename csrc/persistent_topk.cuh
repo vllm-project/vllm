@@ -948,7 +948,11 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 2)
     }                                   \
   }
 
-#define FLASHINFER_INLINE inline __attribute__((always_inline)) __device__
+#ifdef _MSC_VER
+  #define FLASHINFER_INLINE __forceinline __device__
+#else
+  #define FLASHINFER_INLINE inline __attribute__((always_inline)) __device__
+#endif
 
 template <typename T, size_t N>
 struct vec_t {

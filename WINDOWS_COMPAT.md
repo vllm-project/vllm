@@ -6,17 +6,62 @@ This fork tracks native Windows fixes needed by OmniChat's embedded vLLM experim
 
 Branch: `windows-compat`
 
-## Change
+## Changes
 
-- `vllm.utils.network_utils.get_open_zmq_ipc_path()` now returns a loopback TCP ZMQ endpoint on Windows, because pyzmq does not support `ipc://` transport on Windows.
-- Unix behavior is unchanged: non-Windows platforms still return `ipc://...`.
-- Added a targeted unit test that simulates `sys.platform == "win32"` and verifies the returned ZMQ path is TCP.
+- `vllm.utils.network_utils.get_open_zmq_ipc_path()` returns a loopback TCP ZMQ endpoint on Windows, because pyzmq does not support `ipc://` transport on Windows. Unix behavior is unchanged.
+- Windows CUDA source builds now auto-select `VLLM_TARGET_DEVICE=cuda` when CUDA-enabled PyTorch is present instead of forcing the empty backend.
+- CMake path handling now normalizes Windows paths before passing them through Python/CMake/Torch discovery.
+- Windows defaults to `spawn` for worker multiprocessing and avoids registering Windows process handles with `zmq.Poller`.
+- `uvloop` call sites use `vllm.utils.uvloop_compat`, falling back to `asyncio.run` on Windows.
+- CUDA backend selection treats missing `vllm-flash-attn` extensions as unavailable and falls back to FlashInfer/Triton instead of failing during model import or first attention call.
+- MSVC/CUDA compile fixes cover core kernels, MoE top-k kernels, shared-memory alignment, `clock_gettime`, `ssize_t`, MSVC macro conflicts, and CUDA 13 / C++20 compatibility.
+
+## CUDA 13 Build Notes
+
+Validated locally with:
+
+- CUDA Toolkit 13.0.3 installed as `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0`
+- Junction `C:\tmp\cuda13_system` pointing at the CUDA install to avoid spaces in toolchain paths
+- PyTorch `2.11.0+cu130`
+- NVIDIA RTX PRO 6000 Blackwell, compute capability `(12, 0)`
+- Visual Studio 2022 Build Tools developer environment
+
+Build command shape:
+
+```powershell
+set CUDA_HOME=C:\tmp\cuda13_system
+set CUDA_PATH=C:\tmp\cuda13_system
+set CUDACXX=C:\tmp\cuda13_system\bin\nvcc.exe
+set VLLM_TARGET_DEVICE=cuda
+set MAX_JOBS=4
+set NVCC_THREADS=1
+set FETCHCONTENT_BASE_DIR=C:\tmp\vllm_deps
+set CMAKE_ARGS=-DCMAKE_CUDA_ARCHITECTURES=120 -DCMAKE_CUDA_FLAGS=--allow-unsupported-compiler
+C:\tmp\vllmvenv\Scripts\python.exe setup.py build_ext --inplace
+```
+
+## Current MSVC Limits
+
+These optional acceleration paths are intentionally skipped under MSVC while the native build is brought up:
+
+- `vllm-flash-attn` extensions
+- AWQ stable GEMM kernels
+- Marlin / Marlin-MOE generated kernels
+- QuTLASS
+- CUTLASS stable scaled-mm / MoE / FP4 / MLA kernels that currently fail under MSVC/CUDA 13
+
+Core CUDA extensions, stable libtorch extension, MoE extension, triton-kernels packaging, CUDA memory allocator, and spinloop extension build and import.
 
 ## Validation
 
-- `python -m py_compile vllm/utils/network_utils.py tests/utils_/test_network_utils.py` passes in the local vLLM spike environment.
-- Running the upstream pytest target from the unbuilt source tree is blocked by missing compiled extension `vllm._C`; this branch still needs a full source build / wheel CI pass.
+- `setup.py build_ext --inplace` completed successfully with CUDA 13.
+- `python -m py_compile` passed for changed Python build/runtime helpers.
+- Extension import smoke passed for `vllm._C`, `vllm._C_stable_libtorch`, `vllm._moe_C`, `vllm.cumem_allocator`, and `vllm.spinloop`.
+- `scripts/windows_cuda_smoke.py` passed with default spawned V1 engine multiprocessing:
+  - model: `facebook/opt-125m`
+  - attention backend: FlashInfer
+  - generated output included `I have a Windows CUDA`
 
 ## Runtime Evidence
 
-This mirrors the monkeypatch that allowed native Windows vLLM-Omni stage handshakes to progress from `Protocol not supported` to successful three-stage `Qwen/Qwen2.5-Omni-3B` text and audio output.
+This now goes beyond the earlier runtime monkeypatches: a native Windows source build can compile, import, start a spawned V1 CUDA engine, load a model, warm FlashInfer attention, and generate text without WSL or a client/server workaround.

@@ -27,6 +27,8 @@
 #include "dispatch_utils.h"
 #include "type_convert.cuh"
 
+using uint = unsigned int;
+
 #define CHECK_TYPE(x, st)                                              \
   TORCH_CHECK(x.scalar_type() == st, #x " dtype is ", x.scalar_type(), \
               ", while ", st, " is expected")
