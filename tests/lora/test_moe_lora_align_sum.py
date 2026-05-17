@@ -221,8 +221,9 @@ def _build_and_run_align(
 
 @pytest.mark.parametrize(
     "max_loras",
-    [1,
-    2,
+    [
+        1,
+        2,
     ],
 )
 def test_moe_lora_align_block_size_mixed_base_and_lora(max_loras):
