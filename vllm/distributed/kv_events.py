@@ -24,7 +24,6 @@ logger = init_logger(__name__)
 
 class EventBatch(
     msgspec.Struct,
-    array_like=True,  # type: ignore[call-arg]
     omit_defaults=True,  # type: ignore[call-arg]
     gc=False,  # type: ignore[call-arg]
 ):
@@ -35,7 +34,6 @@ class EventBatch(
 
 class KVCacheEvent(
     msgspec.Struct,
-    array_like=True,  # type: ignore[call-arg]
     omit_defaults=True,  # type: ignore[call-arg]
     gc=False,  # type: ignore[call-arg]
     tag=True,
