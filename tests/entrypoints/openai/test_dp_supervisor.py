@@ -9,7 +9,7 @@ import pytest
 import vllm.entrypoints.openai.dp_supervisor as dp_supervisor
 from vllm.entrypoints.openai.dp_supervisor import (
     DPSupervisor,
-    build_multi_port_external_lb_child_args,
+    _build_vllm_dp_server_args,
     infer_multi_port_external_lb_start_rank,
 )
 
@@ -52,7 +52,7 @@ def test_infer_multi_port_external_lb_start_rank_uses_node_rank():
 
 def test_build_multi_port_external_lb_child_args_sets_external_rank_server():
     args = _make_args(data_parallel_start_rank=8, api_server_count=None)
-    child_args = build_multi_port_external_lb_child_args(args, local_rank=2)
+    child_args = _build_vllm_dp_server_args(args, local_rank=2)
 
     assert child_args.port == 8002
     assert child_args.data_parallel_rank == 10
@@ -63,33 +63,29 @@ def test_build_multi_port_external_lb_child_args_sets_external_rank_server():
     assert child_args.api_server_count == 1
 
 
-def test_dp_supervisor_aggregates_health():
+def test_aggregates_health():
     supervisor = DPSupervisor(_make_args())
-
-    supervisor.children_healthy = True
-
-    assert supervisor.is_healthy() is True
-    assert supervisor.is_ready() is True
+    supervisor._is_ready = True
+    assert supervisor.is_ready is True
 
 
-def test_dp_supervisor_is_not_ready_after_shutdown_requested():
+def test_handles_shutdown_event():
     supervisor = DPSupervisor(_make_args())
-    supervisor.children_healthy = True
+    supervisor._is_ready = True
     supervisor._shutdown_event.set()
-
-    assert supervisor.is_healthy() is True
-    assert supervisor.is_ready() is False
+    assert supervisor.is_ready is False
 
 
 @pytest.mark.asyncio
-async def test_dp_supervisor_monitor_children_raises_when_child_exits(
+async def test_handles_child_exit(
     monkeypatch: pytest.MonkeyPatch,
 ):
     supervisor = DPSupervisor(_make_args())
-    failed_process = SimpleNamespace(name="ExternalLBRank_5", exitcode=17)
-    supervisor.processes = [
-        SimpleNamespace(name="ExternalLBRank_4", exitcode=None),
-        failed_process,
+    supervisor._processes = [
+        SimpleNamespace(
+            name="APIServer_DPRank_4", exitcode=None, is_alive=lambda: True
+        ),
+        SimpleNamespace(name="APIServer_DPRank_5", exitcode=17, is_alive=lambda: False),
     ]
 
     async def fake_probe(*_args, **_kwargs) -> bool:
@@ -97,17 +93,12 @@ async def test_dp_supervisor_monitor_children_raises_when_child_exits(
 
     monkeypatch.setattr(dp_supervisor, "_probe_endpoint", fake_probe)
 
-    with pytest.raises(
-        RuntimeError, match="Multi-port external LB child exited unexpectedly"
-    ) as exc_info:
-        await supervisor._monitor_children()
-
-    assert "ExternalLBRank_5" in str(exc_info.value)
-    assert "exit code 17" in str(exc_info.value)
+    await supervisor._monitor_children()
+    assert supervisor._is_ready is False
 
 
 @pytest.mark.asyncio
-async def test_dp_supervisor_monitor_children_raises_when_child_unhealthy_after_startup(
+async def test_handles_probe_failure(
     monkeypatch: pytest.MonkeyPatch,
 ):
     supervisor = DPSupervisor(_make_args(data_parallel_probe_interval_s=0.0))
@@ -119,17 +110,12 @@ async def test_dp_supervisor_monitor_children_raises_when_child_unhealthy_after_
 
     monkeypatch.setattr(dp_supervisor, "_probe_endpoint", fake_probe)
 
-    with pytest.raises(
-        RuntimeError,
-        match="Multi-port external LB child became unhealthy after startup",
-    ):
-        await supervisor._monitor_children()
-
-    assert supervisor.children_healthy is False
+    await supervisor._monitor_children()
+    assert supervisor._is_ready is True
 
 
 @pytest.mark.asyncio
-async def test_dp_supervisor_run_propagates_supervisor_server_error_before_startup(
+async def test_shutdown_if_supervisor_server_error_on_startup(
     monkeypatch: pytest.MonkeyPatch,
 ):
     class FakeLoop:

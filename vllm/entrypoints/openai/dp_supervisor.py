@@ -258,7 +258,7 @@ class DPSupervisor:
 
     @property
     def is_ready(self) -> bool:
-        return self._is_ready
+        return self._is_ready and not self._shutdown_event.is_set()
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
