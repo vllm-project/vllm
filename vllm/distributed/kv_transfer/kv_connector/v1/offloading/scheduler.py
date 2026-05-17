@@ -55,7 +55,7 @@ class TransferJobStatus:
     non_sliding_window_block_ids: list[int] | None = None
     # Store src block IDs that may be freed before the request finishes.
     # Registered in _block_id_to_pending_jobs at store creation time.
-    sliding_window_block_ids: list[int] | None = None
+    sliding_window_block_ids: set[int] | None = None
 
 
 class GroupOffloadConfig(NamedTuple):
@@ -240,12 +240,12 @@ class OffloadingConnectorScheduler:
         self._job_counter += 1
         return job_id
 
-    def _remove_pending_job(self, job_id: int, block_ids: list[int] | None) -> None:
+    def _remove_pending_job(
+        self, job_id: int, block_ids: Iterable[int] | None
+    ) -> None:
         for bid in block_ids or ():
-            pending = self._block_id_to_pending_jobs.get(bid)
-            if pending is None:
-                continue
-            pending.discard(job_id)
+            pending = self._block_id_to_pending_jobs[bid]
+            pending.remove(job_id)
             if not pending:
                 del self._block_id_to_pending_jobs[bid]
 
@@ -691,7 +691,7 @@ class OffloadingConnectorScheduler:
             group_sizes: list[int] = []
             block_indices: list[int] = []
             src_block_ids: list[int] = []
-            sliding_window_block_ids: list[int] = []
+            sliding_window_block_ids: set[int] = set()
             non_sliding_window_block_ids: list[int] = []
             for group_config, group_state in zip(
                 self.config.kv_group_configs, req_status.group_states
@@ -723,7 +723,7 @@ class OffloadingConnectorScheduler:
                             start_gpu_block_idx = gpu_block_idx + i
                         src_block_ids.append(block_id)
                         if is_sliding_window:
-                            sliding_window_block_ids.append(block_id)
+                            sliding_window_block_ids.add(block_id)
                         else:
                             non_sliding_window_block_ids.append(block_id)
 
