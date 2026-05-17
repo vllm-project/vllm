@@ -381,8 +381,12 @@ def _distributed_packed_a2a_worker(env: dict[str, str]) -> None:
     torch.accelerator.set_device_index(local_rank)
     dist.init_process_group(backend="nccl")
     use_workspace = env.get("USE_WORKSPACE") == "1"
+    workspace_aliased_input = env.get("WORKSPACE_ALIASED_INPUT") == "1"
     if use_workspace:
-        from vllm.v1.worker.workspace import init_workspace_manager
+        from vllm.v1.worker.workspace import (
+            current_workspace_manager,
+            init_workspace_manager,
+        )
 
         init_workspace_manager(torch.device(f"cuda:{local_rank}"))
     try:
@@ -406,6 +410,24 @@ def _distributed_packed_a2a_worker(env: dict[str, str]) -> None:
             dtype=dtype,
             generator=generator,
         )
+        if workspace_aliased_input:
+            # Mirror flash_attn._forward_with_dcp: pre-grow the workspace
+            # for the send/recv buffers, then allocate cp_attn_out from it
+            # at offset 0 so dcp_a2a_lse_reduce's would-be send buffer
+            # would alias the pack kernel's input (issue #41623).
+            from vllm.v1.attention.ops.dcp_alltoall import _dcp_a2a_lse_pack_dim
+
+            lse_pack_dim = _dcp_a2a_lse_pack_dim(dtype)
+            send_shape = (world_size, B, h_per_rank, D + lse_pack_dim)
+            current_workspace_manager().get_simultaneous(
+                (send_shape, dtype),
+                (send_shape, dtype),
+            )
+            (workspace_view,) = current_workspace_manager().get_simultaneous(
+                ((B, H, D), dtype),
+            )
+            workspace_view.copy_(cp_attn_out)
+            cp_attn_out = workspace_view
         cp_attn_lse = torch.randn(
             B,
             H,
@@ -478,16 +500,29 @@ def test_distributed_packed_a2a_matches_reference(dtype_name: str):
 @pytest.mark.skipif(
     torch.accelerator.device_count() < 4, reason="Need at least 4 GPUs."
 )
-def test_distributed_packed_a2a_with_workspace_matches_reference():
+@pytest.mark.parametrize(
+    "aliased_input",
+    [False, True],
+    ids=["fresh_input", "workspace_aliased_input"],
+)
+def test_distributed_packed_a2a_with_workspace_matches_reference(
+    aliased_input: bool,
+):
+    # `aliased_input=True` is the regression case for #41623: cp_attn_out
+    # comes from the same workspace bytes the (pre-fix) send buffer would
+    # have aliased.
+    extra_env = {
+        "TEST_DTYPE": "bfloat16",
+        "RETURN_LSE": "1",
+        "LSE_BASE_E": "1",
+        "USE_WORKSPACE": "1",
+    }
+    if aliased_input:
+        extra_env["WORKSPACE_ALIASED_INPUT"] = "1"
     _distributed_run(
         _distributed_packed_a2a_worker,
         world_size=4,
-        extra_env={
-            "TEST_DTYPE": "bfloat16",
-            "RETURN_LSE": "1",
-            "LSE_BASE_E": "1",
-            "USE_WORKSPACE": "1",
-        },
+        extra_env=extra_env,
     )
 
 
