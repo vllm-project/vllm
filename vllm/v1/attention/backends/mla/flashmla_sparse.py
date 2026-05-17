@@ -238,7 +238,11 @@ def get_prefill_workspace_size(max_model_len: int):
     #   Example: DeepSeek-V3.2 with max_model_len=163840 ->
     #            5 * 163840 * 576 * 2 = ~900 MB
     # This fits nicely below the typical MoE workspace size of >2GB so this is "free"
-    return max_model_len * 5
+    # SM12x: drop multiplier 5 -> 2. Workspace just holds chunk rows;
+    # cp_gather_and_upconvert_fp8_kv_cache iterates PREFILL_CHUNK_SIZE=4
+    # rows at a time so smaller workspace just means more passes.
+    multiplier = 2 if current_platform.is_device_capability_family(120) else 5
+    return max_model_len * multiplier
 
 
 class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetadata]):

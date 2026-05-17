@@ -41,7 +41,7 @@ def sparse_indexer_max_logits_bytes(is_sm12x: bool | None = None) -> int:
         )
     if "VLLM_SPARSE_INDEXER_MAX_LOGITS_MB" in os.environ:
         return envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
-    default_mb = 256 if is_sm12x else 512
+    default_mb = 96 if is_sm12x else 512
     return default_mb * 1024 * 1024
 
 
@@ -247,7 +247,12 @@ def get_max_prefill_buffer_size(vllm_config: VllmConfig):
     # within the flashmla_sparse workspace.
     # For DeepSeek-V3.2, the max_model_len is 163840.
     #   40 * 163840 * 132 = 865075200 bytes = 825 MB
-    return max_model_len * 40
+    # SM12x (consumer Blackwell, 95 GiB) cannot afford the upstream multiplier
+    # of 40 that was sized for H200's 140 GiB headroom. Drop to 8 — prefill
+    # chunks subdivide automatically via split_indexer_prefill_chunks so
+    # correctness is preserved; just more chunk passes on very long prefills.
+    multiplier = 8 if current_platform.is_device_capability_family(120) else 40
+    return max_model_len * multiplier
 
 
 class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
