@@ -1168,6 +1168,124 @@ class AiterAllreduceFusedAddRMSNormGroupQuantFP8Pattern(
         return _replacement
 
 
+class AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern(
+    BasePattern, VllmPatternReplacement
+):
+    """Fuse ``AR -> fused_add_rms_norm -> (triton FP8 group quant + indexer GEMM)``.
+
+    DeepSeek V3.2 MLA feeds the post-AR normed activation into ``fused_qkv_a_proj``
+    (per-token-group FP8 quant, then ``rocm_aiter_triton_gemm_a8w8_blockscale``) and
+    also into the indexer ``wk_weights_proj`` (bf16 ``rocm_unquantized_gemm``).
+    The existing ``AiterAllreduceFusedAddRMSNormGroupQuantFP8Pattern`` cannot fire
+    here because the bf16 indexer use of the RMS output stays in the graph -- so
+    the AR pass falls back to the no-quant ``AiterAllreduceFusedAddRMSNormPattern``
+    and the standalone FP8 quant kernel survives (~535us / decode step on MI355X TP4).
+
+    AITER's custom AR launcher has an ``emit_bf16=True`` variant that returns both
+    the FP8 quant + scales **and** the bf16 normed activations in one kernel; this
+    pattern lowers the shared subgraph to
+    ``rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm`` and
+    rewires the indexer GEMM onto the emitted bf16 norm output. The graph's
+    external uses of the RMS output (it is also a graph output in DSv3.2's
+    post-MLP residual carry) are preserved by returning the bf16 norm as a
+    pattern output and substituting it directly.
+
+    Ground truth FX form taken from a DSv3.2 MI355X TP4 dump
+    (``__compiled_fn_1.post_grad.1.rocm_aiter_allreduce_fusion_pass.before.1.py``):
+
+        all_reduce_1 = torch.ops.vllm.all_reduce.default(prev_gemm, 'tp:0')
+        fused = torch.ops.vllm_ir.fused_add_rms_norm.default(
+            all_reduce_1, residual_in, norm_weight, 1e-06
+        )
+        rms      = fused[0]            # also a graph output
+        residual = fused[1]
+        quant, scale = torch.ops.vllm.triton_per_token_group_quant_fp8.default(rms, 128)
+        idx          = torch.ops.vllm.rocm_unquantized_gemm.default(rms, indexer_weight)
+
+    Dynamo may place ``tensor_model_parallel_all_reduce`` and the following norm in
+    **different** compiled segments; this pass cannot fuse across that split.
+    """
+
+    def __init__(
+        self,
+        epsilon: float,
+        dtype: torch.dtype,
+        device: str | None,
+        group_size: int = 128,
+    ) -> None:
+        super().__init__(dtype, device)
+        self.epsilon = epsilon
+        self.dtype = dtype
+        self.group_size = group_size
+        self.FUSED_AR_RMS_QUANT_BF16_OP = (
+            rocm_aiter_ops.get_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm_op()  # noqa: E501
+        )
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        h = self.group_size
+        indexer_out = 8
+        return [
+            self.empty(5, h),
+            self.empty(5, h),
+            self.empty(h),
+            self.empty(indexer_out, h),
+        ]
+
+    @property
+    def pattern(self):
+        eps = self.epsilon
+        gs = self.group_size
+
+        def _pattern(
+            residual: torch.Tensor,
+            input_: torch.Tensor,
+            norm_weight: torch.Tensor,
+            indexer_weight: torch.Tensor,
+        ) -> tuple[
+            torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
+        ]:
+            ar_out = tensor_model_parallel_all_reduce(input_)
+            rms, res_out = vllm.ir.ops.fused_add_rms_norm(
+                ar_out, residual, norm_weight, eps
+            )
+            q, s = torch.ops.vllm.triton_per_token_group_quant_fp8(rms, gs)
+            idx = torch.ops.vllm.rocm_unquantized_gemm(rms, indexer_weight)
+            return q, s, res_out, idx, rms
+
+        return _pattern
+
+    @property
+    def replacement(self):
+        gs = self.group_size
+        eps = self.epsilon
+
+        def _replacement(
+            residual: torch.Tensor,
+            input_: torch.Tensor,
+            norm_weight: torch.Tensor,
+            indexer_weight: torch.Tensor,
+        ) -> tuple[
+            torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
+        ]:
+            fused = self.FUSED_AR_RMS_QUANT_BF16_OP(
+                input_=input_,
+                residual=residual,
+                weight=norm_weight,
+                epsilon=eps,
+                group_size=gs,
+            )
+            quant_out, residual_out, scale_out, bf16_norm = (
+                fused[0],
+                fused[1],
+                fused[2],
+                fused[3],
+            )
+            idx = torch.ops.vllm.rocm_unquantized_gemm(bf16_norm, indexer_weight)
+            return quant_out, scale_out, residual_out, idx, bf16_norm
+
+        return _replacement
+
+
 class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
     def __init__(self, config: VllmConfig) -> None:
         super().__init__(config, "rocm_aiter_allreduce_fusion_pass")
@@ -1258,7 +1376,16 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
             # tries them before the AR+RMS-only variants. Otherwise the
             # AR+RMS-only fusion runs first and consumes the all_reduce node,
             # leaving the trailing quant op stranded as an unfused kernel.
+            # Register larger subgraphs first (DeepSeek indexer fan-out, then
+            # quant-only AR+RMS+quant, then AR+RMS-only).
             if supports_per_group_quant:
+                self.register(
+                    AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern(
+                        epsilon,
+                        self.model_dtype,
+                        self.device,
+                    )
+                )
                 self.register(
                     AiterAllreduceFusedRMSNormGroupQuantFP8Pattern(
                         epsilon,
