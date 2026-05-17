@@ -2,7 +2,7 @@
 
 MooncakeStoreConnector is a KV cache connector that uses [MooncakeDistributedStore](https://github.com/kvcache-ai/Mooncake) as a shared KV cache pool. Unlike `MooncakeConnector` which does direct point-to-point KV transfer between prefiller and decoder, MooncakeStoreConnector enables KV cache offloading to an external distributed store, supporting:
 
-- **CPU offloading**: Extend effective KV cache capacity by offloading to CPU memory via Mooncake's transfer engine.
+- **CPU/disk offloading**: Extend effective KV cache capacity by offloading to CPU memory or disk via Mooncake's transfer engine.
 - **Prefix caching across instances**: Hash-based deduplication allows multiple vLLM instances to share cached KV blocks through the store.
 - **Single-node and multi-node deployment**: Works both as a standalone KV cache extension and in disaggregated prefill-decode setups.
 
@@ -38,18 +38,29 @@ Create a JSON configuration file (e.g., `mooncake_config.json`):
 
 ```json
 {
+  "mode": "embedded",
   "metadata_server": "P2PHANDSHAKE",
   "master_server_address": "127.0.0.1:50051",
   "global_segment_size": "80GB",
   "local_buffer_size": "4GB",
   "protocol": "rdma",
-  "device_name": ""
+  "device_name": "",
+  "enable_offload": false
 }
 ```
 
+- `mode`: Topology selection. `"embedded"` (default, PR-40900 baseline) has each
+  vLLM rank contribute `global_segment_size` to the pool in-process.
+  `"standalone-store"` makes ranks pure requesters — an external
+  `mooncake_client` process owns the CPU pool and (optionally) the SSD tier.
 - `protocol`: Use `"rdma"` for best performance. `"tcp"` works as a fallback.
-- `global_segment_size`: CPU memory contributed to the distributed pool (per GPU).
+- `global_segment_size`: CPU memory contributed to the distributed pool (per
+  GPU). Must be `> 0` in `embedded` mode and `0` in `standalone-store` mode.
 - `local_buffer_size`: Private buffer for this node's own operations (per GPU).
+- `enable_offload`: When `true`, vLLM allocates a DirectIO staging buffer so
+  large prefills do not exceed the owner's SSD-write budget. Set this together
+  with the matching `--enable_offload=true` flag on `mooncake_master` and on
+  the external `mooncake_client` (if any).
 
 Set the config path via environment variable:
 
@@ -126,12 +137,60 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
 
 A disaggregation proxy is required to route requests between prefiller and decoder nodes. The proxy assigns `do_remote_prefill=True` / `do_remote_decode=True` to coordinate P2P transfer via `MooncakeConnector`. Refer to the [MooncakeConnector usage guide](mooncake_connector_usage.md) for proxy setup details.
 
+### Disk Offloading
+
+Disk offloading is most commonly run in `standalone-store` mode: an external
+`mooncake_client` process owns the CPU pool and the SSD tier, and each vLLM
+rank is a pure requester. This avoids per-rank duplication of the SSD pool
+and keeps DirectIO budget tracking on a single process.
+
+Three things need to be aligned for end-to-end disk offloading:
+
+1. **`mooncake_master`** is started with `--enable_offload=true`.
+2. **`mooncake_client`** (the owner) is started with `--enable_offload=true`
+   plus an SSD path via `MOONCAKE_OFFLOAD_FILE_STORAGE_PATH`.
+3. **vLLM-side** sets `"enable_offload": true` in the JSON config file (this is
+   read by the connector and is **not** an environment variable).
+
+Example `mooncake_config.json` for the vLLM side:
+
+```json
+{
+  "mode": "standalone-store",
+  "metadata_server": "P2PHANDSHAKE",
+  "master_server_address": "127.0.0.1:50051",
+  "global_segment_size": 0,
+  "local_buffer_size": "4GB",
+  "protocol": "rdma",
+  "device_name": "mlx5_0",
+  "enable_offload": true
+}
+```
+
+Steer this rank to the local owner segment with:
+
+```bash
+export MOONCAKE_PREFERRED_SEGMENT=127.0.0.1:50053
+```
+
+The owner's SSD directory, on-disk eviction policy, and the DirectIO staging
+buffer size are controlled on the `mooncake_client` side via the standard
+Mooncake environment variables (`MOONCAKE_OFFLOAD_FILE_STORAGE_PATH`,
+`MOONCAKE_BUCKET_EVICTION_POLICY`, `MOONCAKE_USE_URING`,
+`MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES`,
+`MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES`, etc.). Those are independent of
+the vLLM JSON config.
+
 ## Environment Variables
 
 | Variable | Description | Default |
 | --- | --- | --- |
 | `MOONCAKE_CONFIG_PATH` | Path to Mooncake JSON config file | (required) |
 | `VLLM_MOONCAKE_BOOTSTRAP_PORT` | Bootstrap port for MooncakeConnector P2P transfer (disagg mode only) | 8998 |
+| `MOONCAKE_PREFERRED_SEGMENT` | Pin this rank's replicas to a specific owner segment (`host:port`); used in `standalone-store` mode | — |
+| `MOONCAKE_REQUESTER_LOCAL_HOSTNAME` | Override the hostname the vLLM rank registers with Mooncake as a requester. Defaults to the rank's resolved IP. | — |
+| `VLLM_MOONCAKE_STORE_TIER_LOG` | When `1`, logs a per-batch tier summary (memory vs disk hits) for observability | disabled |
+| `VLLM_MOONCAKE_DISK_STAGING_USABLE_RATIO` | Fraction of the owner's DirectIO staging buffer that the requester will fill in a single `batch_get_into_multi_buffers` call. Lower → more conservative pre-split, more round trips. | 0.9 |
 
 ## KV Transfer Config
 

@@ -55,7 +55,6 @@ astor==0.8.1
 attrs==26.1.0
     # via
     #   aiohttp
-    #   jsonlines
     #   jsonschema
     #   pytest-subtests
     #   referencing
@@ -433,8 +432,6 @@ joblib==1.5.3
     #   librosa
     #   nltk
     #   scikit-learn
-jsonlines==4.0.0
-    # via lm-eval
 jsonpointer==3.1.0
     # via jsonschema
 jsonschema==4.26.0
@@ -472,7 +469,7 @@ llguidance==1.7.5
     #   -r requirements/test/../common.txt
 llvmlite==0.47.0
     # via numba
-lm-eval==0.4.11
+lm-eval==0.4.12
     # via -r requirements/test/rocm.in
 lm-format-enforcer==0.11.3
     # via
@@ -1362,8 +1359,6 @@ yarl==1.23.0
     #   schemathesis
 zipp==3.23.0
     # via importlib-metadata
-zstandard==0.25.0
-    # via lm-eval
 
 # The following packages were excluded from the output:
 # torch
