@@ -146,7 +146,6 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         all2all_manager = device_communicator.all2all_manager
         assert isinstance(all2all_manager, NixlEPAll2AllManager)
         all2all_manager.commit_staged_ep_size()
-        self.num_dispatchers_ = all2all_manager.world_size
 
     def topk_indices_dtype(self) -> torch.dtype | None:
         return torch.int64
