@@ -177,6 +177,7 @@ class DeepseekV32IndexerPrefillChunkMetadata:
     token_end: int
     num_reqs: int
     skip_kv_gather: bool = False
+    max_valid_len: int = 0
 
 
 @dataclass
@@ -195,6 +196,7 @@ class DeepSeekV32IndexerDecodeMetadata:
     decode_lens: torch.Tensor
     requires_padding: bool
     schedule_metadata: torch.Tensor
+    max_seq_len: int = 0
 
 
 @dataclass
@@ -571,6 +573,13 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
             seq_lens = common_attn_metadata.seq_lens[:num_decodes]
             block_table = common_attn_metadata.block_table_tensor[:num_decodes, ...]
+            seq_lens_cpu_upper_bound = common_attn_metadata.seq_lens_cpu_upper_bound
+            if seq_lens_cpu_upper_bound is not None:
+                max_decode_seq_len = int(
+                    seq_lens_cpu_upper_bound[:num_decodes].max().item()
+                )
+            else:
+                max_decode_seq_len = common_attn_metadata.max_seq_len
 
             max_decode_len = int(decode_lens_cpu.max().item())
             next_n = 1 + self.num_speculative_tokens
@@ -608,6 +617,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     )
                     self.expanded_seq_lens_buffer[num_decodes:num_decode_tokens] = 0
                     seq_lens = self.expanded_seq_lens_buffer[:num_decode_tokens]
+                max_decode_seq_len //= self.compress_ratio
 
             # Non-MTP: deep_gemm paged MQA logits requires 2D context_lens
             # (csrc/apis/attention.hpp). Unsqueeze to (B, 1) so downstream
@@ -629,6 +639,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 decode_lens=decode_lens,
                 requires_padding=requires_padding,
                 schedule_metadata=self.scheduler_metadata_buffer,
+                max_seq_len=max_decode_seq_len,
             )
 
         attn_metadata = DeepseekV32IndexerMetadata(
@@ -722,6 +733,7 @@ def build_prefill_chunk_metadata(
         token_end=token_end,
         num_reqs=num_reqs,
         skip_kv_gather=skip_kv_gather,
+        max_valid_len=int(compressed_seq_lens_cpu[start_idx:end_idx].max().item()),
     )
 
 

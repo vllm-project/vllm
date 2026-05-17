@@ -156,6 +156,109 @@ def compute_global_topk_ragged_indices_and_indptr(
 
 
 @triton.jit
+def _compute_trivial_c4a_decode_lens_kernel(
+    topk_lens_ptr,
+    query_start_loc_ptr,
+    seq_lens_ptr,
+    token_to_req_indices_ptr,
+    is_valid_token_ptr,
+    topk: tl.constexpr,
+    compress_ratio: tl.constexpr,
+):
+    token_idx = tl.program_id(0)
+    is_valid = tl.load(is_valid_token_ptr + token_idx)
+    req_idx = tl.load(token_to_req_indices_ptr + token_idx)
+
+    query_start = tl.load(query_start_loc_ptr + req_idx)
+    query_end = tl.load(query_start_loc_ptr + req_idx + 1)
+    query_len = query_end - query_start
+    seq_len = tl.load(seq_lens_ptr + req_idx)
+    prefix_len = seq_len - query_len
+    pos = prefix_len + token_idx - query_start
+    compressed_len = (pos + 1) // compress_ratio
+    compressed_len = tl.minimum(compressed_len, topk)
+    tl.store(topk_lens_ptr + token_idx, tl.where(is_valid, compressed_len, 0))
+
+
+@triton.jit
+def _pack_trivial_c4a_global_topk_ragged_kernel(
+    global_topk_ragged_ptr,
+    topk_indptr_ptr,
+    topk_lens_ptr,
+    token_to_req_indices_ptr,
+    block_table_ptr,
+    block_table_stride,
+    block_size,
+    BLOCK_SIZE: tl.constexpr,
+):
+    token_idx = tl.program_id(0)
+    block_idx = tl.program_id(1)
+    offset = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+
+    out_start = tl.load(topk_indptr_ptr + token_idx)
+    out_len = tl.load(topk_lens_ptr + token_idx)
+    if block_idx * BLOCK_SIZE >= out_len:
+        return
+
+    req_idx = tl.load(token_to_req_indices_ptr + token_idx)
+    valid = offset < out_len
+    block_indices = offset // block_size
+    block_numbers = tl.load(
+        block_table_ptr + req_idx * block_table_stride + block_indices,
+        mask=valid,
+        other=0,
+    )
+    block_offsets = offset % block_size
+    slot_ids = block_numbers * block_size + block_offsets
+    tl.store(global_topk_ragged_ptr + out_start + offset, slot_ids, mask=valid)
+
+
+def compute_trivial_c4a_global_topk_ragged_indices_and_indptr(
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    token_to_req_indices: torch.Tensor,
+    block_table: torch.Tensor,
+    block_size: int,
+    is_valid_token: torch.Tensor,
+    compress_ratio: int,
+    topk: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    num_tokens = token_to_req_indices.shape[0]
+    topk_lens = torch.empty(num_tokens, dtype=torch.int32, device=seq_lens.device)
+    _compute_trivial_c4a_decode_lens_kernel[(num_tokens,)](
+        topk_lens,
+        query_start_loc,
+        seq_lens,
+        token_to_req_indices,
+        is_valid_token,
+        topk=topk,
+        compress_ratio=compress_ratio,
+    )
+
+    topk_indptr = _build_indptr_from_lengths(topk_lens)
+    global_topk_ragged = torch.empty(
+        num_tokens * topk,
+        dtype=torch.int32,
+        device=seq_lens.device,
+    )
+    if global_topk_ragged.numel() > 0:
+        block = 256
+        _pack_trivial_c4a_global_topk_ragged_kernel[
+            (num_tokens, triton.cdiv(topk, block))
+        ](
+            global_topk_ragged,
+            topk_indptr,
+            topk_lens,
+            token_to_req_indices,
+            block_table,
+            block_table.stride(0),
+            block_size,
+            BLOCK_SIZE=block,
+        )
+    return global_topk_ragged, topk_indptr, topk_lens
+
+
+@triton.jit
 def _compute_combined_lens_kernel(
     combined_lens_ptr,
     query_start_loc_ptr,
@@ -245,6 +348,60 @@ def _combine_topk_swa_indices_ragged_kernel(
             )
 
 
+@triton.jit
+def _combine_trivial_topk_swa_indices_ragged_kernel(
+    combined_ragged_ptr,
+    combined_indptr_ptr,
+    query_start_loc_ptr,
+    seq_lens_ptr,
+    gather_lens_ptr,
+    M,
+    N,
+    TOP_K: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+    WINDOW_SIZE: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    batch_idx = tl.program_id(0)
+    worker_id = tl.program_id(1)
+    block_idx = tl.program_id(2)
+    num_workers = tl.num_programs(1)
+
+    base = tl.load(query_start_loc_ptr)
+    query_start = tl.load(query_start_loc_ptr + batch_idx) - base
+    query_end = tl.load(query_start_loc_ptr + batch_idx + 1) - base
+    query_len = query_end - query_start
+    seq_len = tl.load(seq_lens_ptr + batch_idx)
+    gather_len = tl.load(gather_lens_ptr + batch_idx)
+    start_pos = seq_len - query_len
+    gather_start = seq_len - gather_len
+
+    for token_idx in range(query_start + worker_id, query_end, num_workers):
+        token_idx_in_query = token_idx - query_start
+        pos = start_pos + token_idx_in_query
+        topk_len = tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K)
+        swa_len = tl.minimum(pos + 1, WINDOW_SIZE)
+        combined_len = topk_len + swa_len
+
+        offset = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        if block_idx * BLOCK_SIZE < combined_len:
+            out_start = tl.load(combined_indptr_ptr + token_idx)
+            topk_mask = offset < topk_len
+            tl.store(
+                combined_ragged_ptr + out_start + offset,
+                offset + M * batch_idx,
+                mask=topk_mask,
+            )
+
+            swa_offset = offset - topk_len
+            swa_mask = (offset >= topk_len) & (swa_offset < swa_len)
+            tl.store(
+                combined_ragged_ptr + out_start + offset,
+                M * batch_idx + N + swa_offset + pos - swa_len + 1 - gather_start,
+                mask=swa_mask,
+            )
+
+
 def combine_topk_swa_indices_ragged(
     topk_indices: torch.Tensor,
     query_start_loc: torch.Tensor,
@@ -294,6 +451,56 @@ def combine_topk_swa_indices_ragged(
             M,
             N,
             topk_indices.shape[-1],
+            TOP_K=topk,
+            COMPRESS_RATIO=compress_ratio,
+            WINDOW_SIZE=window_size,
+            BLOCK_SIZE=block,
+        )
+    return combined_ragged, combined_indptr, combined_lens
+
+
+def combine_trivial_topk_swa_indices_ragged(
+    num_tokens: int,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    gather_lens: torch.Tensor,
+    window_size: int,
+    compress_ratio: int,
+    topk: int,
+    M: int,
+    N: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    num_reqs = seq_lens.shape[0]
+    combined_lens = torch.empty(num_tokens, dtype=torch.int32, device=seq_lens.device)
+
+    num_workers = 128
+    _compute_combined_lens_kernel[(num_reqs, num_workers)](
+        combined_lens,
+        query_start_loc,
+        seq_lens,
+        TOP_K=topk,
+        COMPRESS_RATIO=compress_ratio,
+        WINDOW_SIZE=window_size,
+    )
+
+    combined_indptr = _build_indptr_from_lengths(combined_lens)
+    combined_ragged = torch.empty(
+        num_tokens * (topk + window_size),
+        dtype=torch.int32,
+        device=seq_lens.device,
+    )
+    if combined_ragged.numel() > 0:
+        block = 256
+        _combine_trivial_topk_swa_indices_ragged_kernel[
+            (num_reqs, num_workers, triton.cdiv(topk + window_size, block))
+        ](
+            combined_ragged,
+            combined_indptr,
+            query_start_loc,
+            seq_lens,
+            gather_lens,
+            M,
+            N,
             TOP_K=topk,
             COMPRESS_RATIO=compress_ratio,
             WINDOW_SIZE=window_size,
@@ -573,18 +780,37 @@ class DeepseekV4ROCMAiterMLASparseImpl(
             block_size = attn_metadata.block_size // layer.compress_ratio
             is_valid = swa_metadata.is_valid_token[:num_decode_tokens]
             if layer.compress_ratio == 4:
-                assert layer.topk_indices_buffer is not None
-                (
-                    topk_ragged_indices,
-                    topk_ragged_indptr,
-                    topk_lens,
-                ) = compute_global_topk_ragged_indices_and_indptr(
-                    layer.topk_indices_buffer[:num_decode_tokens],
-                    swa_metadata.token_to_req_indices,
-                    attn_metadata.block_table[:num_decodes],
-                    block_size,
-                    is_valid,
-                )
+                if getattr(layer, "use_trivial_c4a_topk", False):
+                    assert swa_metadata.query_start_loc is not None
+                    assert swa_metadata.seq_lens is not None
+                    assert swa_metadata.token_to_req_indices is not None
+                    (
+                        topk_ragged_indices,
+                        topk_ragged_indptr,
+                        topk_lens,
+                    ) = compute_trivial_c4a_global_topk_ragged_indices_and_indptr(
+                        swa_metadata.query_start_loc,
+                        swa_metadata.seq_lens,
+                        swa_metadata.token_to_req_indices[:num_decode_tokens],
+                        attn_metadata.block_table[:num_decodes],
+                        block_size,
+                        is_valid,
+                        layer.compress_ratio,
+                        layer.indexer.topk_tokens,
+                    )
+                else:
+                    assert layer.topk_indices_buffer is not None
+                    (
+                        topk_ragged_indices,
+                        topk_ragged_indptr,
+                        topk_lens,
+                    ) = compute_global_topk_ragged_indices_and_indptr(
+                        layer.topk_indices_buffer[:num_decode_tokens],
+                        swa_metadata.token_to_req_indices,
+                        attn_metadata.block_table[:num_decodes],
+                        block_size,
+                        is_valid,
+                    )
             else:
                 topk_indices = attn_metadata.c128a_global_decode_topk_indices
                 topk_lens = attn_metadata.c128a_decode_topk_lens
@@ -642,16 +868,21 @@ class DeepseekV4ROCMAiterMLASparseImpl(
         assert query_start_loc is not None
         prefill_token_base = query_start_loc_cpu[num_decodes]
 
+        topk_indices = None
         if not swa_only:
             if layer.compress_ratio == 4:
-                assert layer.topk_indices_buffer is not None
-                topk_indices = layer.topk_indices_buffer[num_decode_tokens:]
-                topk_indices = topk_indices[:num_prefill_tokens]
+                if getattr(layer, "use_trivial_c4a_topk", False):
+                    top_k = layer.indexer.topk_tokens
+                else:
+                    assert layer.topk_indices_buffer is not None
+                    topk_indices = layer.topk_indices_buffer[num_decode_tokens:]
+                    topk_indices = topk_indices[:num_prefill_tokens]
+                    top_k = topk_indices.shape[-1]
             else:
                 assert attn_metadata is not None
                 topk_indices = attn_metadata.c128a_prefill_topk_indices
-            assert topk_indices is not None
-            top_k = topk_indices.shape[-1]
+                assert topk_indices is not None
+                top_k = topk_indices.shape[-1]
             N = (layer.max_model_len + layer.compress_ratio - 1) // layer.compress_ratio
         else:
             assert layer.topk_indices_buffer is not None
@@ -660,17 +891,16 @@ class DeepseekV4ROCMAiterMLASparseImpl(
             N = 0
 
         M = N + layer.window_size + layer.max_num_batched_tokens
-        num_chunks = (num_prefills + cls._PREFILL_CHUNK_SIZE - 1) // (
-            cls._PREFILL_CHUNK_SIZE
-        )
+        prefill_chunk_size = cls._PREFILL_CHUNK_SIZE
+        num_chunks = (num_prefills + prefill_chunk_size - 1) // prefill_chunk_size
 
         workspace_manager = current_workspace_manager()
         kv = workspace_manager.get_simultaneous(
-            ((cls._PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
+            ((prefill_chunk_size, M, q.shape[-1]), torch.bfloat16),
         )[0]
         for chunk_idx in range(num_chunks):
-            chunk_start = chunk_idx * cls._PREFILL_CHUNK_SIZE
-            chunk_end = min(chunk_start + cls._PREFILL_CHUNK_SIZE, num_prefills)
+            chunk_start = chunk_idx * prefill_chunk_size
+            chunk_end = min(chunk_start + prefill_chunk_size, num_prefills)
             chunk_size = chunk_end - chunk_start
             if not swa_only:
                 assert attn_metadata is not None
@@ -704,21 +934,45 @@ class DeepseekV4ROCMAiterMLASparseImpl(
                 query_start_loc_cpu[num_decodes + chunk_end] - prefill_token_base
             )
 
-            combined_ragged_indices, combined_ragged_indptr, combined_lens = (
-                combine_topk_swa_indices_ragged(
-                    topk_indices[query_start:query_end],
-                    query_start_loc[
-                        num_decodes + chunk_start : num_decodes + chunk_end + 1
-                    ],
-                    seq_lens[chunk_start:chunk_end],
-                    gather_lens[chunk_start:chunk_end],
-                    layer.window_size,
-                    layer.compress_ratio,
-                    top_k,
-                    M,
-                    N,
+            if (
+                layer.compress_ratio == 4
+                and getattr(layer, "use_trivial_c4a_topk", False)
+            ):
+                combined_ragged_indices, combined_ragged_indptr, combined_lens = (
+                    combine_trivial_topk_swa_indices_ragged(
+                        query_end - query_start,
+                        query_start_loc[
+                            num_decodes + chunk_start : num_decodes + chunk_end + 1
+                        ],
+                        seq_lens[chunk_start:chunk_end],
+                        gather_lens[chunk_start:chunk_end],
+                        layer.window_size,
+                        layer.compress_ratio,
+                        top_k,
+                        M,
+                        N,
+                    )
                 )
-            )
+            else:
+                assert topk_indices is not None
+                combined_ragged_indices, combined_ragged_indptr, combined_lens = (
+                    combine_topk_swa_indices_ragged(
+                        topk_indices[query_start:query_end],
+                        query_start_loc[
+                            num_decodes
+                            + chunk_start : num_decodes
+                            + chunk_end
+                            + 1
+                        ],
+                        seq_lens[chunk_start:chunk_end],
+                        gather_lens[chunk_start:chunk_end],
+                        layer.window_size,
+                        layer.compress_ratio,
+                        top_k,
+                        M,
+                        N,
+                    )
+                )
             rocm_sparse_attn_prefill(
                 q=q[query_start:query_end],
                 kv=kv.view(-1, 1, q.shape[-1]),

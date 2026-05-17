@@ -190,10 +190,11 @@ def _fp4_paged_mqa_logits_kernel(
     NUM_HEADS: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     BLOCK_KV: tl.constexpr,
+    KV_BLOCKS_PER_PROG: tl.constexpr,
     IS_CONTEXT_LENS_2D: tl.constexpr,
 ):
     row = tl.program_id(0)
-    logical_block = tl.program_id(1)
+    logical_block_group = tl.program_id(1)
 
     batch = row // NEXT_N
     next_idx = row - batch * NEXT_N
@@ -207,27 +208,34 @@ def _fp4_paged_mqa_logits_kernel(
         valid_limit = context_len - NEXT_N + next_idx + 1
     valid_limit = tl.minimum(valid_limit, max_context_len)
 
-    tile_start = logical_block * KV_BLOCK_SIZE
+    first_logical_block = logical_block_group * KV_BLOCKS_PER_PROG
+    tile_start = first_logical_block * KV_BLOCK_SIZE
     if tile_start >= valid_limit:
         return
 
-    physical_block = tl.load(
-        block_table_ptr + batch * block_table_stride_b + logical_block
-    )
     value_dim: tl.constexpr = HEAD_DIM // 2
     scale_dim: tl.constexpr = HEAD_DIM // 32
-    block_base = kv_cache_ptr + physical_block.to(tl.int64) * KV_CACHE_STRIDE_B
-    scale_base = (block_base + KV_BLOCK_SIZE * value_dim).to(
-        tl.pointer_type(tl.int32)
-    )
 
     h = tl.arange(0, NUM_HEADS)
     d_byte = tl.arange(0, value_dim)
     scale_idx = tl.arange(0, scale_dim)
     k_offsets = tl.arange(0, BLOCK_KV)
-    token_pos = k_offsets
     global_k = tile_start + k_offsets
+    logical_blocks = first_logical_block + k_offsets // KV_BLOCK_SIZE
+    token_pos = k_offsets % KV_BLOCK_SIZE
     valid_k = (k_offsets < KV_BLOCK_SIZE) & (global_k < valid_limit)
+    if KV_BLOCKS_PER_PROG != 1:
+        valid_k = global_k < valid_limit
+
+    physical_block = tl.load(
+        block_table_ptr + batch * block_table_stride_b + logical_blocks,
+        mask=valid_k,
+        other=0,
+    )
+    block_base = kv_cache_ptr + physical_block.to(tl.int64) * KV_CACHE_STRIDE_B
+    scale_base = (block_base + KV_BLOCK_SIZE * value_dim).to(
+        tl.pointer_type(tl.int32)
+    )
 
     q_packed = tl.load(
         q_ptr
@@ -250,7 +258,7 @@ def _fp4_paged_mqa_logits_kernel(
 
     k_packed = tl.load(
         block_base + token_pos[None, :] * value_dim + d_byte[:, None],
-        mask=(k_offsets[None, :] < KV_BLOCK_SIZE),
+        mask=valid_k[None, :],
         other=0,
     ).to(tl.uint8)
     k_scale_word = tl.load(scale_base + token_pos, mask=valid_k, other=0)
@@ -499,7 +507,7 @@ def rocm_fp4_mqa_logits(
     if max_valid_len == 0 or seq_len_kv == 0:
         return logits
 
-    block_kv = 64
+    block_kv = 128
     grid = (seq_len, triton.cdiv(max_valid_len, block_kv))
     _fp4_mqa_logits_kernel[grid](
         q_values,
@@ -622,12 +630,16 @@ def rocm_fp8_fp4_paged_mqa_logits(
     if num_logical_blocks == 0:
         return logits
 
-    grid = (batch_size * next_n, num_logical_blocks)
-    block_kv = _block_kv_for_dot(block_size)
     is_context_lens_2d = context_lens.dim() == 2
 
     if is_fp4:
         assert q_scales is not None
+        kv_blocks_per_prog = 2
+        grid = (
+            batch_size * next_n,
+            triton.cdiv(num_logical_blocks, kv_blocks_per_prog),
+        )
+        block_kv = _block_kv_for_dot(block_size * kv_blocks_per_prog)
         _fp4_paged_mqa_logits_kernel[grid](
             q_values,
             q_scales,
@@ -656,10 +668,13 @@ def rocm_fp8_fp4_paged_mqa_logits(
             NUM_HEADS=num_heads,
             HEAD_DIM=head_dim,
             BLOCK_KV=block_kv,
+            KV_BLOCKS_PER_PROG=kv_blocks_per_prog,
             IS_CONTEXT_LENS_2D=is_context_lens_2d,
-            num_warps=4,
+            num_warps=8,
         )
     else:
+        grid = (batch_size * next_n, num_logical_blocks)
+        block_kv = _block_kv_for_dot(block_size)
         _fp8_paged_mqa_logits_kernel[grid](
             q_values,
             kv_cache,
