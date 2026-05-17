@@ -111,7 +111,7 @@ def validate_multi_port_external_lb_args(args: argparse.Namespace) -> None:
         )
 
 
-def build_multi_port_external_lb_child_args(
+def _build_vllm_dp_server_args(
     args: argparse.Namespace, local_rank: int
 ) -> argparse.Namespace:
     child_args = copy.copy(args)
@@ -129,7 +129,7 @@ def build_multi_port_external_lb_child_args(
     return child_args
 
 
-def _build_multi_port_external_lb_child_env(
+def _build_vllm_dp_server_env(
     args: argparse.Namespace, local_rank: int
 ) -> dict[str, str]:
     # set visible devices for the child process
@@ -168,12 +168,37 @@ async def _probe_endpoint(
     args: argparse.Namespace,
     port: int,
     path: str,
+    failure_threshold: int = 3,
+    retry_delay: float = 1.0,
 ) -> bool:
-    try:
-        async with session.get(_child_base_url(args, port) + path) as response:
-            return response.status == HTTPStatus.OK
-    except (aiohttp.ClientError, asyncio.TimeoutError, TimeoutError, OSError):
-        return False
+    """
+    Probe endpoint failure_threshold times looking for 200 status.
+    """
+    for iteration in range(failure_threshold):
+        try:
+            async with session.get(_child_base_url(args, port) + path) as response:
+                if response.status == HTTPStatus.OK:
+                    return True
+                logger.debug(
+                    "Probe got status %d on port %d (attempt %d/%d)",
+                    response.status,
+                    port,
+                    iteration + 1,
+                    failure_threshold,
+                )
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.debug(
+                "Probe attempt %d/%d failed on port %d: %r",
+                iteration + 1,
+                failure_threshold,
+                port,
+                e,
+            )
+
+        if iteration < failure_threshold - 1:
+            await asyncio.sleep(retry_delay)
+
+    return False
 
 
 def _build_dp_supervisor_app(
@@ -189,26 +214,28 @@ def _build_dp_supervisor_app(
 
     @app.get("/health", include_in_schema=False)
     async def health() -> Response:
-        return _status_response(app.state.supervisor.is_healthy())
+        return _status_response(app.state.supervisor.is_ready)
 
     @app.get("/ready", include_in_schema=False)
     @app.get("/readyz", include_in_schema=False)
     async def ready() -> Response:
-        return _status_response(app.state.supervisor.is_ready())
+        return _status_response(app.state.supervisor.is_ready)
 
     return app
 
 
-def _run_multi_port_external_lb_child(
+def _run_vllm_dp_server(
     child_args: argparse.Namespace, env_updates: dict[str, str]
 ) -> None:
+    """
+    Entrypoint function for the vLLM DP Server.
+    """
     from vllm.entrypoints.openai.api_server import run_server
 
     rank = child_args.data_parallel_rank
-    os.setpgrp()
     update_environment_variables(env_updates)
-    set_process_title("ExternalLBRank", str(rank))
-    decorate_logs(f"ExternalLBRank{rank}")
+    set_process_title("DPRank", str(rank))
+    decorate_logs(f"DPRank_{rank}")
     uvloop.run(run_server(child_args))
 
 
@@ -221,88 +248,96 @@ class DPSupervisor:
             args.port + local_rank
             for local_rank in range(args.data_parallel_size_local)
         ]
-        self.children_healthy = False
-        self.processes: list[BaseProcess] = []
+        self._is_ready = False
+        self._processes: list[BaseProcess] = []
         self._shutdown_event = asyncio.Event()
         self._shutdown_signal = signal.SIGTERM
 
-    def is_healthy(self) -> bool:
-        return self.children_healthy
-
+    @property
     def is_ready(self) -> bool:
-        return not self._shutdown_event.is_set() and self.children_healthy
+        return self._is_ready
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
 
-        def on_server_exit(_task: asyncio.Task[None]) -> None:
-            self._shutdown_event.set()
+        # K8s sends SIGTERM for shutdown - begin graceful termination.
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, partial(self._handle_signal, sig))
 
-        host = self.args.host or "0.0.0.0"
+        # Launch DPSupervisor Server.
         app = _build_dp_supervisor_app(self)
+        host = self.args.host or "0.0.0.0"
         config = uvicorn.Config(
             app,
             host=host,
             port=self.supervisor_port,
             log_level=self.args.uvicorn_log_level,
-            access_log=False,
         )
         supervisor_server = uvicorn.Server(config)
         supervisor_server_task = asyncio.create_task(
             supervisor_server.serve(),
             name="multi-port-external-lb-supervisor",
         )
-        supervisor_server_task.add_done_callback(on_server_exit)
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            loop.add_signal_handler(sig, partial(self._handle_signal, sig))
 
-        while (
-            not supervisor_server.started
-            and not supervisor_server_task.done()
-            and not self._shutdown_event.is_set()
-        ):
-            await asyncio.sleep(0)
-        if supervisor_server_task.done() or self._shutdown_event.is_set():
-            supervisor_server.should_exit = True
-            await supervisor_server_task
-            return
-        logger.info(
-            "Started multi-port external LB supervisor on %s:%d",
-            host,
-            self.supervisor_port,
-        )
+        def _set_shutdown_event(_task: asyncio.Task[None]) -> None:
+            self._shutdown_event.set()
+
+        supervisor_server_task.add_done_callback(_set_shutdown_event)
+
+        # Ensure DPSupervisor task starts on the event loop.
+        while not supervisor_server.started:
+            if supervisor_server_task.done():
+                supervisor_server_task.result()
+                raise RuntimeError("DPSupervisor exited before startup.")
+            await asyncio.sleep(0.05)
+        logger.info("Started DPSupervisor on %s:%d", host, self.supervisor_port)
+
+        # Launch and Monitor vLLM Server Processes.
         try:
             self._start_children()
             await self._monitor_children()
         finally:
-            self.children_healthy = False
+            self._is_ready = False
             await self._shutdown_children()
+
+            # Shutdown the DP Supervisor server.
             supervisor_server.should_exit = True
             await supervisor_server_task
 
     def _handle_signal(self, signum: int) -> None:
+        """
+        Signal handler that is added to the event loop.
+
+        This catches the SIGTERM from K8s and begins graceful shutdown,
+        by setting the _shutdown_event(), which is watched by the main
+        coroutine monitoring the vLLM DP Servers.
+        """
+
         if self._shutdown_event.is_set():
             return
+
         self._shutdown_signal = signal.Signals(signum)
         logger.info(
-            "Received signal %d, forwarding graceful termination to "
-            "multi-port external LB child ranks",
-            signum,
+            "DPSupervisor received signal %d, starting shutdown.", self._shutdown_signal
         )
+
         self._shutdown_event.set()
 
     def _start_children(self) -> None:
+        """
+        Launch vLLM DP Servers on separate GPUs.
+        """
         context = multiprocessing.get_context("spawn")
         for local_rank in range(self.args.data_parallel_size_local):
-            child_args = build_multi_port_external_lb_child_args(self.args, local_rank)
-            child_env = _build_multi_port_external_lb_child_env(self.args, local_rank)
+            child_args = _build_vllm_dp_server_args(self.args, local_rank)
+            child_env = _build_vllm_dp_server_env(self.args, local_rank)
             process = context.Process(
-                target=_run_multi_port_external_lb_child,
-                name=f"ExternalLBRank_{child_args.data_parallel_rank}",
+                target=_run_vllm_dp_server,
+                name=f"DPRank_{child_args.data_parallel_rank}",
                 args=(child_args, child_env),
             )
             process.start()
-            self.processes.append(process)
+            self._processes.append(process)
 
     async def _monitor_children(self) -> None:
         """
@@ -316,38 +351,36 @@ class DPSupervisor:
         - if the pid is dead, we will shut down
         - if the probe fails, we will shut down
         """
+
         timeout = aiohttp.ClientTimeout(total=self.args.data_parallel_probe_timeout_s)
-        ready_once = False
         async with aiohttp.ClientSession(timeout=timeout) as session:
+            # Monitor the vLLM workers until:
+            # - shutdown triggered by external event
+            # - an error is detected in the vLLM processes
             while not self._shutdown_event.is_set():
-                child_health = await asyncio.gather(
+                # Monitor for any processes that died.
+                n_failed = len([p for p in self._processes if not p.is_alive()])
+                if n_failed > 0:
+                    logger.info("DPSupervisor found %s dead vLLM DP Servers.", n_failed)
+                    return
+
+                # Probe the endpoint to confirm the server is still active.
+                results = await asyncio.gather(
                     *(
                         _probe_endpoint(session, self.args, port, "/health")
                         for port in self.child_ports
-                    )
-                )
-                all_healthy = all(child_health)
-                self.children_healthy = all_healthy
-                failed_process = next(
-                    (
-                        process
-                        for process in self.processes
-                        if process.exitcode is not None
                     ),
-                    None,
+                    return_exceptions=True,
                 )
-                if failed_process is not None:
-                    raise RuntimeError(
-                        f"Multi-port external LB child exited unexpectedly: "
-                        f"{failed_process.name} "
-                        f"exit code {failed_process.exitcode}"
-                    )
+                all_healthy = all(r is True for r in results)
+
                 if all_healthy:
-                    ready_once = True
-                elif ready_once:
-                    raise RuntimeError(
-                        "Multi-port external LB child became unhealthy after startup"
-                    )
+                    self._is_ready = True
+                elif self._is_ready:
+                    logger.info("DPSupervisor found unhealthy vLLM DP Server")
+                    return
+
+                # Sleep for the probe interval or until a shutdown event.
                 with contextlib.suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(
                         self._shutdown_event.wait(),
@@ -355,27 +388,38 @@ class DPSupervisor:
                     )
 
     async def _shutdown_children(self) -> None:
-        if self.processes:
+        """Terminate the vLLM DP servers."""
+        timeout = self.args.shutdown_timeout + CHILD_EXIT_GRACE_S
+
+        try:
             logger.info(
-                "Forwarding signal %d to %d multi-port external LB child processes",
+                "Forwarding signal %d to %d vLLM DP servers.",
                 self._shutdown_signal,
-                len(self.processes),
+                len(self._processes),
             )
-            timeout = self.args.shutdown_timeout + CHILD_EXIT_GRACE_S
-            for process in self.processes:
-                if not process.is_alive() or (pid := process.pid) is None:
+            for process in self._processes:
+                pid = process.pid
+                if not process.is_alive() or pid is None:
                     continue
                 with contextlib.suppress(ProcessLookupError, OSError):
-                    os.killpg(pid, self._shutdown_signal)
+                    os.kill(pid, self._shutdown_signal)
 
             await asyncio.to_thread(
                 _join_processes_with_timeout,
-                self.processes,
+                self._processes,
                 timeout,
             )
-
-            for process in self.processes:
-                if process.is_alive() and (pid := process.pid) is not None:
+        finally:
+            for process in self._processes:
+                pid = process.pid
+                if not process.is_alive() or pid is None:
+                    continue
+                logger.warning(
+                    "DP server %s did not exit within %.1fs; force killing.",
+                    process.name,
+                    timeout,
+                )
+                with contextlib.suppress(ProcessLookupError, OSError):
                     kill_process_tree(pid)
 
 
