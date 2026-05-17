@@ -260,6 +260,10 @@ class DeepseekV2MoE(nn.Module):
         self.n_shared_experts: int = config.n_shared_experts
 
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
+        self.is_modelopt_fp4 = (
+            quant_config is not None
+            and getattr(quant_config, "get_name", lambda: None)() == "modelopt_fp4"
+        )
 
         if config.hidden_act != "silu":
             raise ValueError(
@@ -273,8 +277,9 @@ class DeepseekV2MoE(nn.Module):
             prefix=f"{prefix}.gate",
         )
         if getattr(config, "topk_method", None) == "noaux_tc":
+            bias_dtype = torch.bfloat16 if self.is_modelopt_fp4 else torch.float32
             self.gate.e_score_correction_bias = nn.Parameter(
-                torch.empty(config.n_routed_experts, dtype=torch.float32)
+                torch.empty(config.n_routed_experts, dtype=bias_dtype)
             )
         else:
             self.gate.e_score_correction_bias = None
@@ -354,15 +359,18 @@ class DeepseekV2MoE(nn.Module):
         # downstream references (FusedMoE, router) share the same
         # nn.Parameter object, so mutating .data propagates everywhere.
         # Weight loading uses copy_(), which handles the dtype conversion.
-        # Only needed on ROCm where the aiter biased_grouped_topk kernel
-        # requires the bias dtype to match the gating output dtype.
-        if (
-            self.is_rocm_aiter_moe_enabled
-            and self.gate.e_score_correction_bias is not None
-        ):
-            self.gate.e_score_correction_bias.data = (
-                self.gate.e_score_correction_bias.data.to(self.gate.out_dtype)
-            )
+        # ROCm aiter wants this to match the router output dtype. The
+        # FlashInfer NVFP4 path wants bf16 and otherwise casts every token.
+        if self.gate.e_score_correction_bias is not None:
+            bias_dtype = None
+            if self.is_rocm_aiter_moe_enabled:
+                bias_dtype = self.gate.out_dtype
+            elif self.is_modelopt_fp4:
+                bias_dtype = torch.bfloat16
+            if bias_dtype is not None:
+                self.gate.e_score_correction_bias.data = (
+                    self.gate.e_score_correction_bias.data.to(bias_dtype)
+                )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape

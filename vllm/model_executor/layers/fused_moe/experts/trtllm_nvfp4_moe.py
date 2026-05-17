@@ -331,7 +331,10 @@ class TrtLlmNvFp4ExpertsMonolithic(
 
         # Currently FI requires bfloat16 routing bias.
         # https://github.com/flashinfer-ai/flashinfer/issues/2909
-        if e_score_correction_bias is not None:
+        if (
+            e_score_correction_bias is not None
+            and e_score_correction_bias.dtype != torch.bfloat16
+        ):
             e_score_correction_bias = e_score_correction_bias.to(torch.bfloat16)
 
         # Invoke kernel.
