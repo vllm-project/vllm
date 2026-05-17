@@ -35,7 +35,9 @@ def _default_send_coord() -> mooncake_store_worker.MooncakeStoreCoordinator:
 
     spec = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
     return mooncake_store_worker.MooncakeStoreCoordinator(
-        [KVCacheGroupSpec(["layer0"], spec)], hash_block_size=16
+        [KVCacheGroupSpec(["layer0"], spec)],
+        scheduler_block_size=16,
+        hash_block_size=16,
     )
 
 
@@ -83,7 +85,9 @@ def _make_store_recving_thread(
     token_database.set_block_len([256])
     spec = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
     coord = mooncake_store_worker.MooncakeStoreCoordinator(
-        [KVCacheGroupSpec(["layer0"], spec)], hash_block_size=16
+        [KVCacheGroupSpec(["layer0"], spec)],
+        scheduler_block_size=16,
+        hash_block_size=16,
     )
     thread = mooncake_store_worker.KVCacheStoreRecvingThread(
         store=store,
@@ -842,7 +846,9 @@ def test_store_sending_thread_skips_when_token_len_below_lcm():
     # lcm=64 via single full-attn block_size=64.
     spec = FullAttentionSpec(block_size=64, num_kv_heads=8, head_size=64, dtype=None)
     coord = mooncake_store_worker.MooncakeStoreCoordinator(
-        [KVCacheGroupSpec(["L"], spec)], hash_block_size=64
+        [KVCacheGroupSpec(["L"], spec)],
+        scheduler_block_size=64,
+        hash_block_size=64,
     )
     db = ChunkedTokenDatabase(
         KeyMetadata("test-model", 0, 0, 0, 0, group_id=0),
@@ -906,6 +912,7 @@ def test_store_sending_thread_only_stores_swa_blocks_in_window():
     )
     coord = mooncake_store_worker.MooncakeStoreCoordinator(
         [KVCacheGroupSpec(["L0"], full_spec), KVCacheGroupSpec(["L1"], swa_spec)],
+        scheduler_block_size=32,
         hash_block_size=8,
     )
 
@@ -1038,7 +1045,9 @@ def _make_bare_worker(
         )
     ]
     worker.coord = mooncake_store_worker.MooncakeStoreCoordinator(
-        worker._kv_cache_groups, hash_block_size=block_size
+        worker._kv_cache_groups,
+        scheduler_block_size=block_size,
+        hash_block_size=block_size,
     )
     return worker
 
@@ -1061,7 +1070,9 @@ def test_lookup_swa_single_group_returns_full_when_tail_window_present():
     )
     worker._kv_cache_groups = [KVCacheGroupSpec(["layer0"], swa)]
     worker.coord = mooncake_store_worker.MooncakeStoreCoordinator(
-        worker._kv_cache_groups, hash_block_size=worker.hash_block_size
+        worker._kv_cache_groups,
+        scheduler_block_size=worker.hash_block_size,
+        hash_block_size=worker.hash_block_size,
     )
     worker.store.batch_is_exist.return_value = [0, 0, 1, 1]
     assert worker.lookup(64, [b"h0", b"h1", b"h2", b"h3"]) == 64

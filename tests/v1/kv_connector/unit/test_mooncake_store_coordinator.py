@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from math import lcm
+
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
     ExternalCachedBlockPool,
     MooncakeStoreCoordinator,
@@ -11,6 +13,21 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     SlidingWindowSpec,
 )
+
+
+def _make_coord(groups, hash_block_size, use_eagle=False):
+    """Construct a coordinator using the natural LCM of group block sizes as
+    the scheduler block size — mirrors ``resolve_kv_cache_block_sizes`` for
+    the test fixtures."""
+    block_sizes = [g.kv_cache_spec.block_size for g in groups]
+    scheduler_block_size = lcm(*block_sizes)
+    return MooncakeStoreCoordinator(
+        groups,
+        scheduler_block_size=scheduler_block_size,
+        hash_block_size=hash_block_size,
+        use_eagle=use_eagle,
+    )
+
 
 # ----- ExternalCachedBlockPool -----
 
@@ -80,7 +97,7 @@ def _hashes(n: int) -> list[BlockHash]:
 
 def test_coordinator_single_full_attention_all_hits():
     groups = [KVCacheGroupSpec(["L0"], _full(16))]
-    coord = MooncakeStoreCoordinator(groups, hash_block_size=16)
+    coord = _make_coord(groups, hash_block_size=16)
     hs = _hashes(4)
     cmap = ExternalCachedBlockPool({(0, bytes(h)) for h in hs})
     masks, hit = coord.find_longest_cache_hit(hs, max_length=64, cached_block_pool=cmap)
@@ -90,7 +107,7 @@ def test_coordinator_single_full_attention_all_hits():
 
 def test_coordinator_single_full_attention_partial_prefix():
     groups = [KVCacheGroupSpec(["L0"], _full(16))]
-    coord = MooncakeStoreCoordinator(groups, hash_block_size=16)
+    coord = _make_coord(groups, hash_block_size=16)
     hs = _hashes(4)
     cmap = ExternalCachedBlockPool({(0, bytes(hs[0])), (0, bytes(hs[1]))})
     masks, hit = coord.find_longest_cache_hit(hs, max_length=64, cached_block_pool=cmap)
@@ -100,7 +117,7 @@ def test_coordinator_single_full_attention_partial_prefix():
 
 def test_coordinator_single_full_attention_no_hits():
     groups = [KVCacheGroupSpec(["L0"], _full(16))]
-    coord = MooncakeStoreCoordinator(groups, hash_block_size=16)
+    coord = _make_coord(groups, hash_block_size=16)
     hs = _hashes(4)
     cmap = ExternalCachedBlockPool(set())
     masks, hit = coord.find_longest_cache_hit(hs, max_length=64, cached_block_pool=cmap)
@@ -112,7 +129,7 @@ def test_coordinator_single_swa_tautological_pool_masks_pre_window():
     """SWA tautological-pool: hit_length spans full prefix, mask is
     tail-window only."""
     groups = [KVCacheGroupSpec(["L0"], _swa(block_size=16, sliding_window=32))]
-    coord = MooncakeStoreCoordinator(groups, hash_block_size=16)
+    coord = _make_coord(groups, hash_block_size=16)
     hs = _hashes(4)  # 4 chunks * 16 tokens
     cmap = ExternalCachedBlockPool()
     masks, hit = coord.find_longest_cache_hit(hs, max_length=64, cached_block_pool=cmap)
@@ -130,7 +147,7 @@ def test_coordinator_hybrid_full_plus_swa_all_hit():
         KVCacheGroupSpec(["L0"], _full(16)),
         KVCacheGroupSpec(["L1"], _swa(16, 32)),
     ]
-    coord = MooncakeStoreCoordinator(groups, hash_block_size=16)
+    coord = _make_coord(groups, hash_block_size=16)
     hs = _hashes(4)
     cmap = ExternalCachedBlockPool({(g, bytes(h)) for g in (0, 1) for h in hs})
     _masks, hit = coord.find_longest_cache_hit(
@@ -144,7 +161,7 @@ def test_coordinator_hybrid_hole_in_full_clips_both():
         KVCacheGroupSpec(["L0"], _full(16)),
         KVCacheGroupSpec(["L1"], _swa(16, 32)),
     ]
-    coord = MooncakeStoreCoordinator(groups, hash_block_size=16)
+    coord = _make_coord(groups, hash_block_size=16)
     hs = _hashes(4)
     exists = {(0, bytes(hs[0])), (0, bytes(hs[2])), (0, bytes(hs[3]))}
     exists |= {(1, bytes(h)) for h in hs}
@@ -162,7 +179,7 @@ def test_coordinator_group_block_size_double_hash():
         KVCacheGroupSpec(["L0"], _full(16)),
         KVCacheGroupSpec(["L1"], _full(32)),
     ]
-    coord = MooncakeStoreCoordinator(groups, hash_block_size=16)
+    coord = _make_coord(groups, hash_block_size=16)
     hs = _hashes(4)
     big_hashes = list(BlockHashListWithBlockSize(hs, 16, 32))
     exists = {(0, bytes(h)) for h in hs}
@@ -180,7 +197,7 @@ def test_coordinator_group_block_size_double_hash():
 
 def test_store_mask_full_attention_all_true():
     groups = [KVCacheGroupSpec(["L0"], _full(16))]
-    coord = MooncakeStoreCoordinator(groups, hash_block_size=16)
+    coord = _make_coord(groups, hash_block_size=16)
     masks = coord.store_mask(64)
     assert masks == ([True, True, True, True],)
 
@@ -190,7 +207,7 @@ def test_store_mask_zero_aligned_returns_empty_per_group():
         KVCacheGroupSpec(["L0"], _full(16)),
         KVCacheGroupSpec(["L1"], _swa(16, 32)),
     ]
-    coord = MooncakeStoreCoordinator(groups, hash_block_size=16)
+    coord = _make_coord(groups, hash_block_size=16)
     masks = coord.store_mask(0)
     assert masks == ([], [])
 
@@ -203,7 +220,7 @@ def test_store_mask_swa_only_window_around_each_lcm_boundary():
     full = _full(32)
     swa = _swa(block_size=8, sliding_window=8)
     groups = [KVCacheGroupSpec(["L0"], full), KVCacheGroupSpec(["L1"], swa)]
-    coord = MooncakeStoreCoordinator(groups, hash_block_size=8)
+    coord = _make_coord(groups, hash_block_size=8)
     masks = coord.store_mask(64)
     # Full-attn: 2 chunks * 32 tokens.
     assert masks[0] == [True, True]
@@ -217,7 +234,7 @@ def test_store_mask_swa_wider_window_covers_more_blocks_per_lcm():
     full = _full(32)
     swa = _swa(block_size=8, sliding_window=16)
     groups = [KVCacheGroupSpec(["L0"], full), KVCacheGroupSpec(["L1"], swa)]
-    coord = MooncakeStoreCoordinator(groups, hash_block_size=8)
+    coord = _make_coord(groups, hash_block_size=8)
     masks = coord.store_mask(64)
     assert masks[0] == [True, True]
     # Boundary at 32: blocks ending in [16, 32) — chunks 2 and 3.
@@ -242,7 +259,7 @@ def test_store_mask_dsv4_5_groups_full_mla_plus_4_swa():
         KVCacheGroupSpec(["L3"], swa_4_sw16),
         KVCacheGroupSpec(["L4"], swa_8_sw64),
     ]
-    coord = MooncakeStoreCoordinator(groups, hash_block_size=4)
+    coord = _make_coord(groups, hash_block_size=4)
     assert coord.lcm_block_size == 256
     masks = coord.store_mask(512)
 
@@ -267,7 +284,7 @@ def test_store_mask_fast_path_all_block_sizes_equal_lcm():
     full = _full(block_size=64)
     swa = _swa(block_size=64, sliding_window=128)
     groups = [KVCacheGroupSpec(["L0"], full), KVCacheGroupSpec(["L1"], swa)]
-    coord = MooncakeStoreCoordinator(groups, hash_block_size=64)
+    coord = _make_coord(groups, hash_block_size=64)
     assert coord.lcm_block_size == 64
     masks = coord.store_mask(256)
     # Every block in every group is True — no sub-lcm filtering possible.
@@ -279,7 +296,7 @@ def test_store_mask_fast_path_single_attention_group():
     no lcm filter applies, every chunk is True."""
     swa = _swa(block_size=16, sliding_window=32)
     groups = [KVCacheGroupSpec(["L0"], swa), KVCacheGroupSpec(["L1"], swa)]
-    coord = MooncakeStoreCoordinator(groups, hash_block_size=16)
+    coord = _make_coord(groups, hash_block_size=16)
     assert len(coord.attention_groups) == 1
     masks = coord.store_mask(64)
     assert masks == ([True] * 4, [True] * 4)

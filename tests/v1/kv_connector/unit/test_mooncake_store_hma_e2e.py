@@ -281,7 +281,9 @@ def test_recv_skips_swa_blocks_before_window():
             return [0] * len(keys)
 
     ready = threading.Event()
-    coord = MooncakeStoreCoordinator(groups, hash_block_size=16)
+    coord = MooncakeStoreCoordinator(
+        groups, scheduler_block_size=16, hash_block_size=16
+    )
     recv = KVCacheStoreRecvingThread(
         store=_CapturingStore(),
         token_databases=[db_full, db_swa],

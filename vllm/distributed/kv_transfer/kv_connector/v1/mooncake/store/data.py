@@ -94,9 +94,6 @@ class ChunkedTokenDatabase:
         self.kv_caches_base_addr = kv_caches_base_addr
 
     def set_block_len(self, block_len: list[int]):
-        for length in block_len:
-            if length % self.block_size != 0:
-                raise ValueError(f"block_len {length} % {self.block_size} != 0")
         self.block_len = block_len
 
     def prepare_value(
@@ -113,7 +110,8 @@ class ChunkedTokenDatabase:
         length = len(self.block_len)
         for index, base_addr in enumerate(self.kv_caches_base_addr):
             addr = base_addr + block_id * self.block_len[index % length]
-            size = self.block_len[index % length] // self.block_size * (end - start)
+            assert (end - start) % self.block_size == 0
+            size = self.block_len[index % length] * cdiv(end - start, self.block_size)
             addr_list.append(addr)
             size_list.append(size)
         return addr_list, size_list, block_id
