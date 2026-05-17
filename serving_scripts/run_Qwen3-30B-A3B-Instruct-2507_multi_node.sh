@@ -527,6 +527,23 @@ if [ -n "${SERVER_STEP_PID}" ] && kill -0 "${SERVER_STEP_PID}" 2>/dev/null; then
   wait "${SERVER_STEP_PID}" 2>/dev/null || true
   SERVER_STEP_PID=""
 fi
+
+echo "Stopping Ray background srun steps so Nsight worker reports finalize..."
+
+if [ -n "${HEAD_RAY_PID}" ] && kill -0 "${HEAD_RAY_PID}" 2>/dev/null; then
+  kill -TERM "${HEAD_RAY_PID}" 2>/dev/null || true
+  wait "${HEAD_RAY_PID}" 2>/dev/null || true
+fi
+HEAD_RAY_PID=""
+
+for pid in ${WORKER_RAY_PIDS}; do
+  if kill -0 "${pid}" 2>/dev/null; then
+    kill -TERM "${pid}" 2>/dev/null || true
+    wait "${pid}" 2>/dev/null || true
+  fi
+done
+WORKER_RAY_PIDS=""
+
 echo "Waiting briefly for Ray/Nsight files to flush..."
 sleep 30
 
@@ -546,22 +563,6 @@ find "${RAY_TMP_ROOT}" \
       mkdir -p "${TRACE_RUN_DIR}/ray_worker_nsight/${node}"
       cp -v "${report}" "${TRACE_RUN_DIR}/ray_worker_nsight/${node}/" || true
     done
-
-echo "Stopping Ray background srun steps after collecting Nsight reports..."
-
-if [ -n "${HEAD_RAY_PID}" ] && kill -0 "${HEAD_RAY_PID}" 2>/dev/null; then
-  kill -TERM "${HEAD_RAY_PID}" 2>/dev/null || true
-  wait "${HEAD_RAY_PID}" 2>/dev/null || true
-fi
-HEAD_RAY_PID=""
-
-for pid in ${WORKER_RAY_PIDS}; do
-  if kill -0 "${pid}" 2>/dev/null; then
-    kill -TERM "${pid}" 2>/dev/null || true
-    wait "${pid}" 2>/dev/null || true
-  fi
-done
-WORKER_RAY_PIDS=""
 
 echo "Trace files:"
 find "${TRACE_RUN_DIR}" -maxdepth 5 -type f -printf "%p %s bytes\n" 2>/dev/null || true
