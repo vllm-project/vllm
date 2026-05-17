@@ -789,6 +789,18 @@ class DeepseekV4ROCMAiterMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
         kv = workspace_manager.get_simultaneous(
             ((cls.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
         )[0]
+        # The workspace allocator returns uninitialized memory and is shared
+        # across requests + other layers. dequantize_and_gather_k_cache only
+        # writes the compressed-K prefix (rows [0, seq_len/compress_ratio))
+        # and the SWA window (rows [N, N+gather_lens)) for each chunk row,
+        # leaving holes in the M dimension. rocm_sparse_attn_prefill then
+        # reads ``kv.view(-1, 1, head_dim)`` via ragged indices which can
+        # reach those holes for very short sequences, causing data-dependent
+        # non-determinism across otherwise-identical temperature=0 requests.
+        # Zero once per call so the holes are deterministic (zero attention
+        # contribution). The cost is one bf16 fill of the workspace tile,
+        # which is dwarfed by the FP8 dequant + sparse attention themselves.
+        kv.zero_()
         for chunk_idx in range(num_chunks):
             chunk_start = chunk_idx * cls.PREFILL_CHUNK_SIZE
             chunk_end = min(chunk_start + cls.PREFILL_CHUNK_SIZE, num_prefills)
