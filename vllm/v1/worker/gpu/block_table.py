@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
 
+import numpy as np
 import torch
 
 from vllm.triton_utils import tl, triton
@@ -13,6 +14,7 @@ class BlockTables:
     def __init__(
         self,
         block_sizes: list[int],
+        kernel_block_sizes: list[int],
         max_num_reqs: int,
         max_num_batched_tokens: int,
         max_num_blocks_per_group: list[int],
@@ -21,7 +23,24 @@ class BlockTables:
         cp_rank: int = 0,
         cp_interleave: int = 1,
     ):
-        self.block_sizes = block_sizes
+        if len(kernel_block_sizes) != len(block_sizes):
+            raise ValueError(
+                f"kernel_block_sizes length ({len(kernel_block_sizes)}) "
+                f"must match block_sizes length ({len(block_sizes)})"
+            )
+        self.block_sizes = kernel_block_sizes
+        self.blocks_per_kv_block: list[int] = []
+        for block_size, kernel_block_size in zip(block_sizes, kernel_block_sizes):
+            if block_size % kernel_block_size != 0:
+                raise ValueError(
+                    f"kernel_block_size {kernel_block_size} must divide "
+                    f"kv_manager_block_size {block_size} evenly"
+                )
+            self.blocks_per_kv_block.append(block_size // kernel_block_size)
+        self._kernel_block_offsets: list[np.ndarray] = [
+            np.arange(blocks_per_kv_block, dtype=np.int32).reshape(1, -1)
+            for blocks_per_kv_block in self.blocks_per_kv_block
+        ]
         self.max_num_reqs = max_num_reqs
         self.max_num_batched_tokens = max_num_batched_tokens
         self.device = device
@@ -35,7 +54,7 @@ class BlockTables:
         # num_kv_cache_groups x [max_num_reqs, max_num_blocks]
         self.block_tables: list[StagedWriteTensor] = []
         for i in range(self.num_kv_cache_groups):
-            max_num_blocks = max_num_blocks_per_group[i]
+            max_num_blocks = max_num_blocks_per_group[i] * self.blocks_per_kv_block[i]
             block_table = StagedWriteTensor(
                 (self.max_num_reqs, max_num_blocks),
                 dtype=torch.int32,
@@ -88,6 +107,21 @@ class BlockTables:
         )
         self.input_block_table_ptrs = self._make_ptr_tensor(self.input_block_tables)
 
+    @staticmethod
+    def map_to_kernel_blocks(
+        kv_manager_block_ids: np.ndarray,
+        blocks_per_kv_block: int,
+        kernel_block_offsets: np.ndarray,
+    ) -> np.ndarray:
+        """Convert KV cache manager block IDs to kernel block IDs."""
+        if blocks_per_kv_block == 1:
+            return kv_manager_block_ids
+        kernel_block_ids = (
+            kv_manager_block_ids.reshape(-1, 1) * blocks_per_kv_block
+            + kernel_block_offsets
+        )
+        return kernel_block_ids.reshape(-1)
+
     def append_block_ids(
         self,
         req_index: int,
@@ -96,7 +130,11 @@ class BlockTables:
     ) -> None:
         for i in range(self.num_kv_cache_groups):
             start = self.num_blocks.np[i, req_index] if not overwrite else 0
-            block_ids = new_block_ids[i]
+            block_ids = self.map_to_kernel_blocks(
+                np.array(new_block_ids[i]),
+                self.blocks_per_kv_block[i],
+                self._kernel_block_offsets[i],
+            ).tolist()
             self.block_tables[i].stage_write(req_index, start, block_ids)
             self.num_blocks.np[i, req_index] = start + len(block_ids)
 
