@@ -9,7 +9,7 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-from vllm.triton_utils import triton
+from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.kv_offload.base import (
@@ -41,6 +41,10 @@ def _select_swap_blocks_fn(
     """Resolve the swap_blocks function for a handler at init time."""
     # GPU->CPU is bandwidth-bound; the dedicated copy engine beats Triton.
     if gpu_to_cpu:
+        return ops.swap_blocks_batch
+    # Fall back to the C++ DMA path on platforms where Triton isn't usable
+    # (e.g. ROCm builds without Triton).
+    if not HAS_TRITON:
         return ops.swap_blocks_batch
     page_sizes = [r.page_size_bytes for g in kv_cache_groups_data_refs for r in g]
     # Triton wins only on small, 8-byte-aligned payloads.
