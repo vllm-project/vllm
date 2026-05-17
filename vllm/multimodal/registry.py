@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from multiprocessing.synchronize import Lock as LockType
 from typing import TYPE_CHECKING, Generic, Literal, Protocol, TypeVar, cast
 
+from vllm.inputs import MultiModalInput
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
 
@@ -19,7 +20,6 @@ from .cache import (
     ShmObjectStoreReceiverCache,
     ShmObjectStoreSenderCache,
 )
-from .inputs import MultiModalInputs
 from .processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
@@ -111,7 +111,15 @@ class MultiModalRegistry:
             return False
 
         mm_config = model_config.get_multimodal_config()
-        info = self._create_processing_info(model_config, tokenizer=None)
+        try:
+            info = self._create_processing_info(model_config, tokenizer=None)
+        except ValueError:
+            logger.warning_once(
+                "Model %s is treated as multimodal but has no registered "
+                "multimodal processor; running in text-only mode.",
+                model_config.model,
+            )
+            return False
 
         # Check if all supported modalities have limit == 0
         if all(
@@ -170,7 +178,11 @@ class MultiModalRegistry:
         from vllm.model_executor.model_loader import get_model_architecture
 
         model_cls, _ = get_model_architecture(model_config)
-        assert hasattr(model_cls, "_processor_factory")
+        if not hasattr(model_cls, "_processor_factory"):
+            raise ValueError(
+                f"Model class {model_cls.__name__} has no registered "
+                "multimodal processor"
+            )
         return cast("SupportsMultiModal", model_cls)
 
     def _create_processing_ctx(
@@ -193,6 +205,9 @@ class MultiModalRegistry:
         ctx = self._create_processing_ctx(model_config, tokenizer)
         return factories.info(ctx)
 
+    def get_processing_info(self, model_config: "ModelConfig") -> BaseProcessingInfo:
+        return self._create_processing_info(model_config, tokenizer=None)
+
     def create_processor(
         self,
         model_config: "ModelConfig",
@@ -204,7 +219,8 @@ class MultiModalRegistry:
         Create a multi-modal processor for a specific model and tokenizer.
         """
         if not model_config.is_multimodal_model:
-            raise ValueError(f"{model_config.model} is not a multimodal model")
+            model_name = model_config.served_model_name or model_config.model
+            raise ValueError(f"{model_name} is not a multimodal model")
 
         model_cls = self._get_model_cls(model_config)
         factories = model_cls._processor_factory
@@ -220,7 +236,7 @@ class MultiModalRegistry:
         *,
         cache: BaseMultiModalProcessorCache | None = None,
         processor: BaseMultiModalProcessor | None = None,
-    ) -> MultiModalInputs:
+    ) -> MultiModalInput:
         """
         Create dummy data for profiling the memory usage of a model.
 

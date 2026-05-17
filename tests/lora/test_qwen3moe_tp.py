@@ -5,6 +5,8 @@
 # NOTE To avoid overloading the CI pipeline, this test script will not
 # be triggered on CI and is primarily intended for local testing and verification.
 
+import pytest
+
 import vllm
 from vllm.lora.request import LoRARequest
 
@@ -82,15 +84,15 @@ def test_qwen3moe_lora(qwen3moe_lora_files):
 
 
 @multi_gpu_test(num_gpus=2)
-def test_qwen3moe_lora_tp2(qwen3moe_lora_files):
+@pytest.mark.parametrize("ep", [False, True])
+def test_qwen3moe_lora_tp2(ep, qwen3moe_lora_files):
     llm = vllm.LLM(
         MODEL_PATH,
         max_model_len=1024,
         enable_lora=True,
         max_loras=4,
-        enforce_eager=True,
         trust_remote_code=True,
-        enable_chunked_prefill=True,
+        enable_expert_parallel=ep,
         tensor_parallel_size=2,
     )
 
@@ -99,15 +101,15 @@ def test_qwen3moe_lora_tp2(qwen3moe_lora_files):
 
 
 @multi_gpu_test(num_gpus=4)
-def test_qwen3moe_lora_tp4(qwen3moe_lora_files):
+@pytest.mark.parametrize("ep", [False, True])
+def test_qwen3moe_lora_tp4(ep, qwen3moe_lora_files):
     llm = vllm.LLM(
         MODEL_PATH,
         max_model_len=1024,
         enable_lora=True,
         max_loras=4,
-        enforce_eager=True,
         trust_remote_code=True,
-        enable_chunked_prefill=True,
+        enable_expert_parallel=ep,
         tensor_parallel_size=4,
     )
 

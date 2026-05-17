@@ -40,6 +40,7 @@ class MockAudioFlamingo3Processor:
     def __init__(self):
         self.audio_token = "<sound>"
         self.audio_token_id = 12345
+        self.max_audio_len = 60
         self.feature_extractor = MockFeatureExtractor()
 
     def __call__(self, text=None, audios=None, **kwargs):
@@ -65,7 +66,6 @@ def mock_ctx():
 
 @pytest.fixture(autouse=True)
 def check_transformers_version():
-    # Check if the model is supported by the current transformers version
     model_info = HF_EXAMPLE_MODELS.get_hf_info("AudioFlamingo3ForConditionalGeneration")
     model_info.check_transformers_version(on_fail="skip")
 
@@ -84,7 +84,7 @@ def test_audio_chunk_counting(mock_ctx):
 
     sr = 16000
     audio_1 = np.zeros(30 * sr)
-    audio_2 = np.zeros(45 * sr)
+    audio_2 = np.zeros(75 * sr)
 
     mm_data = {"audio": [audio_1, audio_2]}
     prompt = "<|user|>Listen.<|end|>"
@@ -121,5 +121,22 @@ def test_dummy_data_generation(mock_ctx):
     assert "audio" in dummy_data
     assert len(dummy_data["audio"]) == 2
 
-    expected_len = 600 * 16000
+    expected_len = 60 * 16000
     assert len(dummy_data["audio"][0]) == expected_len
+
+
+def test_audio_token_count_matches_hf_processor_math():
+    from vllm.model_executor.models.audioflamingo3 import (
+        _count_audio_tokens_from_mask,
+    )
+
+    feature_attention_mask = torch.zeros((3, 3000), dtype=torch.long)
+    feature_attention_mask[0, :2999] = 1
+    feature_attention_mask[1, :2999] = 1
+    feature_attention_mask[2, :1500] = 1
+    chunk_counts = torch.tensor([2, 1], dtype=torch.long)
+
+    assert (
+        _count_audio_tokens_from_mask(feature_attention_mask, chunk_counts, 0) == 1499
+    )
+    assert _count_audio_tokens_from_mask(feature_attention_mask, chunk_counts, 1) == 375

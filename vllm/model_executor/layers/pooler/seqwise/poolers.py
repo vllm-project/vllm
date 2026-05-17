@@ -108,17 +108,19 @@ def pooler_for_classify(
     *,
     pooling: SequencePoolingMethod | SequencePoolingFn | None = None,
     classifier: ClassifierFn | None = None,
-    act_fn: PoolerActivation | str | None = None,
+    act_fn: PoolerActivation | None = None,
 ):
     if pooling is None:
         pooling = get_seq_pooling_method(pooler_config.get_seq_pooling_type())
 
     vllm_config = get_current_vllm_config()
     model_config = vllm_config.model_config
+    assert model_config.pooler_config is not None
     head = ClassifierPoolerHead(
         head_dtype=model_config.head_dtype,
         classifier=classifier,
-        logit_bias=model_config.pooler_config.logit_bias,
+        logit_mean=model_config.pooler_config.logit_mean,
+        logit_sigma=model_config.pooler_config.logit_sigma,
         activation=resolve_classifier_act_fn(
             model_config, static_num_labels=True, act_fn=act_fn
         ),

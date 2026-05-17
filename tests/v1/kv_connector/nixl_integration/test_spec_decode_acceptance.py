@@ -27,7 +27,8 @@ from transformers import AutoTokenizer
 
 from vllm.benchmarks.datasets import get_samples
 
-PROXY_BASE_URL = "http://localhost:8192/v1"
+SERVER_HOST = os.environ.get("SERVER_HOST", "127.0.0.1")
+PROXY_BASE_URL = f"http://{SERVER_HOST}:8192/v1"
 DECODE_PORT = os.environ.get("DECODE_PORT", "8200")
 MODEL_NAME = os.environ.get("TEST_MODEL", "meta-llama/Llama-3.1-8B-Instruct")
 
@@ -101,7 +102,7 @@ def _get_mt_bench_prompts() -> list[str]:
 
 def _fetch_metric(metric_name: str) -> float:
     """Fetch a single counter metric from the decode server's /metrics."""
-    url = f"http://localhost:{DECODE_PORT}/metrics"
+    url = f"http://{SERVER_HOST}:{DECODE_PORT}/metrics"
     body = urlopen(url).read().decode()
     for line in body.split("\n"):
         if line.startswith(metric_name + "{") or line.startswith(metric_name + " "):
@@ -111,7 +112,7 @@ def _fetch_metric(metric_name: str) -> float:
 
 def _fetch_per_position_acceptance() -> dict[int, float]:
     """Fetch per-position acceptance counts from decode /metrics."""
-    url = f"http://localhost:{DECODE_PORT}/metrics"
+    url = f"http://{SERVER_HOST}:{DECODE_PORT}/metrics"
     body = urlopen(url).read().decode()
     counts: dict[int, float] = {}
     for line in body.split("\n"):

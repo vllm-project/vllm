@@ -149,6 +149,10 @@ def test_online_serving(vllm_runner, audio_assets: AudioTestAssets):
     )
 
 
+@pytest.mark.skip(
+    reason="VoxtralProcessor.apply_chat_template() in transformers v5 "
+    "doesn't resolve chat_template=None to the default template"
+)
 def test_hf_reference(hf_runner, vllm_runner, audio_assets: AudioTestAssets):
     """Compare vLLM Mistral-format output against HF Transformers reference.
 

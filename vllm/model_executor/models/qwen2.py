@@ -62,7 +62,13 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import is_interleaved, set_default_rope_theta
 from vllm.v1.attention.backend import AttentionType
 
-from .interfaces import SupportsEagle3, SupportsLoRA, SupportsPP
+from .interfaces import (
+    EagleModelMixin,
+    SupportsEagle,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsPP,
+)
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -306,50 +312,17 @@ class Qwen2DecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-def qwen_2_model_invariants(
-    input_ids: torch.Tensor,
-    positions: torch.Tensor,
-    intermediate_tensors: IntermediateTensors | None = None,
-    inputs_embeds: torch.Tensor | None = None,
-):
-    """Shape invariants for Qwen2Model Model, those are translated to
-    runtime assertions for unbacked dynamic shapes and are compiled away for
-    backed"""
-    # All these should be equal.
-    # input_ids.size()[0]
-    # positions.size()[-1]
-    # intermediate_tensors["hidden_states"].size()[0]
-    # inputs_embeds.size()[0]
-    torch._check(input_ids.size()[0] == positions.size()[-1])
-    if intermediate_tensors is not None:
-        torch._check(
-            input_ids.size()[0] == intermediate_tensors["hidden_states"].size()[0]
-        )
-
-    if inputs_embeds is not None:
-        torch._check(input_ids.size()[0] == inputs_embeds.size()[0])
-
-    # Hidden dimensions should match (hidden_size)
-    # intermediate_tensors["hidden_states"].size()[1]
-    # inputs_embeds.size()[1]
-    if inputs_embeds is not None and intermediate_tensors is not None:
-        torch._check(
-            inputs_embeds.size()[1] == intermediate_tensors["hidden_states"].size()[1]
-        )
-
-
 @support_torch_compile(
     dynamic_arg_dims={
-        "input_ids": 0,
+        "input_ids": {0: "b"},
         # positions is of shape (3, seq_len) if mrope is enabled for qwen2-vl,
         # otherwise (seq_len, ).
-        "positions": -1,
-        "intermediate_tensors": 0,
-        "inputs_embeds": 0,
-    },
-    shape_invariants=qwen_2_model_invariants,
+        "positions": {-1: "b"},
+        "intermediate_tensors": {0: "b"},
+        "inputs_embeds": {0: "b"},
+    }
 )
-class Qwen2Model(nn.Module):
+class Qwen2Model(nn.Module, EagleModelMixin):
     def __init__(
         self,
         *,
@@ -410,8 +383,6 @@ class Qwen2Model(nn.Module):
         else:
             self.norm = PPMissingLayer()
 
-        self.aux_hidden_state_layers = tuple[int, ...]()
-
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
@@ -433,13 +404,14 @@ class Qwen2Model(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        aux_hidden_states = []
+        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
         for idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer)
         ):
-            if idx in self.aux_hidden_state_layers:
-                aux_hidden_states.append(hidden_states + residual)
             hidden_states, residual = layer(positions, hidden_states, residual)
+            self._maybe_add_hidden_state(
+                aux_hidden_states, idx + 1, hidden_states, residual
+            )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -519,7 +491,9 @@ class Qwen2Model(nn.Module):
         return loaded_params
 
 
-class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
+class Qwen2ForCausalLM(
+    nn.Module, SupportsLoRA, SupportsPP, SupportsEagle, SupportsEagle3
+):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -565,13 +539,6 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
-
-    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        self.model.aux_hidden_state_layers = layers
-
-    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
-        num_layers = len(self.model.layers)
-        return (2, num_layers // 2, num_layers - 3)
 
     def forward(
         self,

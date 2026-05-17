@@ -16,6 +16,7 @@ BASE_TRUST_REMOTE_CODE_MODELS = {
     "nvidia/Llama-3_3-Nemotron-Super-49B-v1",
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
     "XiaomiMiMo/MiMo-7B-RL",
+    "stepfun-ai/Step-3.5-Flash",
     # Excluded: Not available online right now
     # "FreedomIntelligence/openPangu-Ultra-MoE-718B-V1.1",
     "meituan-longcat/LongCat-Flash-Chat",
