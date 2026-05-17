@@ -17,7 +17,6 @@ import queue
 import socket
 import threading
 from collections import defaultdict
-from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -53,7 +52,6 @@ from vllm.logger import init_logger
 from vllm.utils.network_utils import get_ip, make_zmq_socket
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
-    BlockHashListWithBlockSize,
     maybe_convert_block_hash,
     resolve_kv_cache_block_sizes,
 )
@@ -1201,12 +1199,9 @@ class MooncakeStoreWorker:
         tp_count = min(self.tp_size, self.num_kv_head)
         for g_idx, db in enumerate(self.token_dbs):
             spec_block_size = db.block_size
-            if spec_block_size == self.hash_block_size:
-                group_hashes: Iterable[BlockHash] = block_hashes
-            else:
-                group_hashes = BlockHashListWithBlockSize(
-                    block_hashes, self.hash_block_size, spec_block_size
-                )
+            group_hashes = self.coord.block_hashes_for_spec(
+                block_hashes, self._kv_cache_groups[g_idx].kv_cache_spec
+            )
             for chunk_id, h in enumerate(group_hashes):
                 start_idx = chunk_id * spec_block_size
                 if start_idx >= token_len:

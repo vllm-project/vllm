@@ -181,7 +181,7 @@ class MooncakeStoreScheduler:
 
         meta = MooncakeStoreConnectorMetadata(
             self._unfinished_request_ids,
-            scheduler_output.preempted_req_ids,
+            preempted_ids,
         )
 
         # Handle new requests

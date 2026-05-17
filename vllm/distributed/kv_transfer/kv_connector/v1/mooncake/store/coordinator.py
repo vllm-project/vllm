@@ -174,7 +174,7 @@ class MooncakeStoreCoordinator:
             for g in range(len(self.kv_cache_groups))
         )
 
-    def _block_hashes_for_spec(
+    def block_hashes_for_spec(
         self, block_hashes: list[BlockHash], spec: KVCacheSpec
     ) -> BlockHashList:
         if spec.block_size == self.hash_block_size:
@@ -194,7 +194,7 @@ class MooncakeStoreCoordinator:
         """
         if len(self.attention_groups) == 1:
             spec, group_ids, manager_cls = self.attention_groups[0]
-            hashes = self._block_hashes_for_spec(block_hashes, spec)
+            hashes = self.block_hashes_for_spec(block_hashes, spec)
             hit_blocks = manager_cls.find_longest_cache_hit(
                 block_hashes=hashes,
                 max_length=max_length,
@@ -236,7 +236,7 @@ class MooncakeStoreCoordinator:
                 _max_length = curr_hit_length
                 if use_eagle:
                     _max_length = min(curr_hit_length + spec.block_size, max_length)
-                hashes = self._block_hashes_for_spec(block_hashes, spec)
+                hashes = self.block_hashes_for_spec(block_hashes, spec)
                 hit_blocks = manager_cls.find_longest_cache_hit(
                     block_hashes=hashes,
                     max_length=_max_length,

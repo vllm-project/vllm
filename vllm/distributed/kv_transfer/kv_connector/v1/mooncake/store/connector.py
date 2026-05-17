@@ -109,7 +109,7 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 )
         pcp = vllm_config.parallel_config.prefill_context_parallel_size
         dcp = vllm_config.parallel_config.decode_context_parallel_size
-        if len(kv_cache_config.kv_cache_groups) > 1 and (pcp > 1 or dcp > 1):
+        if len(kv_cache_config.kv_cache_groups) > 1 and pcp * dcp > 1:
             unsupported.append(
                 f"PCP/DCP > 1 (pcp={pcp}, dcp={dcp}) with hybrid attention"
             )
