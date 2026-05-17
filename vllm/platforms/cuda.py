@@ -162,11 +162,19 @@ def with_nvml_context(fn: Callable[_P, _R]) -> Callable[_P, _R]:
 
 @cache
 def _maybe_warn_arch_ptx_fallback(major: int, minor: int) -> None:
-    """Warn (once) when the running GPU's compute capability is not in the
-    arches torch was built against, so all Triton kernels JIT through a PTX
-    fallback. Optionally wipe the on-disk Triton cache to defend against
-    stale cubins silently producing wrong code (see issue #41871).
+    """Warn (once per node) when the running GPU's compute capability is
+    not in the arches torch was built against, so all Triton kernels JIT
+    through a PTX fallback. Optionally wipe the on-disk Triton cache to
+    defend against stale cubins silently producing wrong code (see issue
+    #41871).
+
+    Restricted to ``LOCAL_RANK == 0`` so that on multi-GPU nodes (TP, PP,
+    DP) only the local master logs the warning and touches the shared
+    cache directory — workers don't race on rmtree or spam the log.
     """
+    if envs.LOCAL_RANK != 0:
+        return
+
     sm = f"sm_{major}{minor}"
     try:
         arch_list = list(torch.cuda.get_arch_list())
@@ -208,6 +216,11 @@ def _maybe_warn_arch_ptx_fallback(major: int, minor: int) -> None:
         return
     try:
         shutil.rmtree(cache_dir)
+    except FileNotFoundError:
+        # Another local-master-ish process (or an external cleaner) wiped
+        # the directory between the isdir check above and rmtree. Treat as
+        # success — the goal (no stale cubins) is already achieved.
+        return
     except OSError as e:
         logger.warning(
             "VLLM_FORCE_TRITON_CACHE_INVALIDATE=1 set but failed to wipe "

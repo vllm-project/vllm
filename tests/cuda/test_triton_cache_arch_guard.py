@@ -10,6 +10,7 @@ torch.cuda.get_arch_list() (e.g. sm_121 device falling back to sm_120 PTX).
 from __future__ import annotations
 
 import logging
+import shutil
 
 import pytest
 import torch
@@ -24,6 +25,15 @@ def _reset_guard_cache():
     cuda_platform._maybe_warn_arch_ptx_fallback.cache_clear()
     yield
     cuda_platform._maybe_warn_arch_ptx_fallback.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _local_rank_zero(monkeypatch: pytest.MonkeyPatch):
+    """Default tests to LOCAL_RANK == 0 so the guard's body runs. Individual
+    tests that exercise the non-master short-circuit override this."""
+    import vllm.envs as envs
+
+    monkeypatch.setattr(envs, "LOCAL_RANK", 0)
 
 
 class _ListHandler(logging.Handler):
@@ -174,3 +184,67 @@ def test_get_arch_list_raising_is_handled(
     cuda_platform._maybe_warn_arch_ptx_fallback(12, 1)
 
     assert not any("PTX fallback" in r.getMessage() for r in cuda_log.records)
+
+
+def test_non_master_local_rank_is_silent_and_no_wipe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    cuda_log: _ListHandler,
+):
+    """LOCAL_RANK != 0 short-circuits BEFORE the arch check, the warning,
+    and the cache wipe — so worker processes don't race on rmtree or
+    spam the log on multi-GPU nodes."""
+    import vllm.envs as envs
+
+    monkeypatch.setattr(envs, "LOCAL_RANK", 3)
+
+    cache_dir = tmp_path / "triton_cache"
+    cache_dir.mkdir()
+    (cache_dir / "stale.cubin").write_bytes(b"\x00")
+
+    monkeypatch.setattr(torch.cuda, "get_arch_list", lambda: ["sm_120"])
+    monkeypatch.setenv("TRITON_CACHE_DIR", str(cache_dir))
+    monkeypatch.setenv("VLLM_FORCE_TRITON_CACHE_INVALIDATE", "1")
+    monkeypatch.setattr(envs, "VLLM_FORCE_TRITON_CACHE_INVALIDATE", True)
+
+    cuda_platform._maybe_warn_arch_ptx_fallback(12, 1)
+
+    # No warning, no wipe.
+    assert not any("PTX fallback" in r.getMessage() for r in cuda_log.records)
+    assert cache_dir.exists() and (cache_dir / "stale.cubin").exists(), (
+        "Non-master worker must not touch the shared cache directory"
+    )
+
+
+def test_rmtree_filenotfound_is_silent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    cuda_log: _ListHandler,
+):
+    """If the cache dir disappears between the isdir check and the rmtree
+    (e.g. an external cleaner or another local-master process raced us),
+    we treat that as success — no spurious WARNING."""
+    cache_dir = tmp_path / "triton_cache"
+    cache_dir.mkdir()
+    real_rmtree = shutil.rmtree
+
+    def _vanishes_then_rmtree(path, *a, **kw):
+        # Simulate the race: directory exists at isdir check, gone by rmtree.
+        real_rmtree(path)
+        raise FileNotFoundError(path)
+
+    monkeypatch.setattr(torch.cuda, "get_arch_list", lambda: ["sm_120"])
+    monkeypatch.setenv("TRITON_CACHE_DIR", str(cache_dir))
+    monkeypatch.setenv("VLLM_FORCE_TRITON_CACHE_INVALIDATE", "1")
+    import vllm.envs as envs
+
+    monkeypatch.setattr(envs, "VLLM_FORCE_TRITON_CACHE_INVALIDATE", True)
+    monkeypatch.setattr(cuda_platform.shutil, "rmtree", _vanishes_then_rmtree)
+
+    cuda_platform._maybe_warn_arch_ptx_fallback(12, 1)
+
+    # The PTX-fallback notice still fires, but no "failed to wipe" WARNING.
+    failure_warnings = [
+        r for r in cuda_log.records if "failed to wipe" in r.getMessage()
+    ]
+    assert failure_warnings == []
