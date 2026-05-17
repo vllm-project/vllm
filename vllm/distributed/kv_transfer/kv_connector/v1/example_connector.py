@@ -15,6 +15,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
+from vllm.platforms import current_platform
 from vllm.utils.hashing import safe_hash
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
@@ -188,7 +189,9 @@ class ExampleConnector(KVConnectorBase_V1):
                 filename = self._generate_filename_debug(
                     layer_name, request.token_ids, request.mm_hashes
                 )
-                kv_cache = safetensors.torch.load_file(filename)["kv_cache"].cuda()
+                kv_cache = safetensors.torch.load_file(
+                    filename, device=current_platform.device_type
+                )["kv_cache"]
                 if isinstance(attn_metadata, dict):
                     inject_kv_into_layer(
                         kv_cache_layer,
