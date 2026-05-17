@@ -1,6 +1,11 @@
 #include "allspark_utils.cuh"
-#include <torch/all.h>
+
+#include <torch/csrc/stable/library.h>
+#include <torch/csrc/stable/tensor.h>
+#include <torch/headeronly/core/ScalarType.h>
+
 #include "core/registration.h"
+#include "libtorch_stable/torch_utils.h"
 
 namespace allspark {
 
@@ -99,36 +104,40 @@ void rearrange_kn_weight_as_n32k16_order_ldg16(
 }  // namespace allspark
 
 void rearrange_kn_weight_as_n32k16_order(
-    torch::Tensor const& b_qweight, torch::Tensor const& b_scales,
-    std::optional<torch::Tensor> const& b_zeros, bool has_zp,
-    torch::Tensor& b_qweight_reorder, torch::Tensor& b_scales_reorder,
-    std::optional<torch::Tensor> const& b_zeros_reorder, const int64_t K,
-    const int64_t N, const int64_t N_32align) {
+    torch::stable::Tensor const& b_qweight,
+    torch::stable::Tensor const& b_scales,
+    std::optional<torch::stable::Tensor> const& b_zeros, bool has_zp,
+    torch::stable::Tensor& b_qweight_reorder,
+    torch::stable::Tensor& b_scales_reorder,
+    std::optional<torch::stable::Tensor> const& b_zeros_reorder,
+    const int64_t K, const int64_t N, const int64_t N_32align) {
   // Verify device and strides
-  TORCH_CHECK(b_qweight.device().is_cuda(), "b_qweight is not on GPU");
-  TORCH_CHECK(b_qweight.is_contiguous(), "b_qweight is not contiguous");
+  STD_TORCH_CHECK(b_qweight.device().is_cuda(), "b_qweight is not on GPU");
+  STD_TORCH_CHECK(b_qweight.is_contiguous(), "b_qweight is not contiguous");
 
-  TORCH_CHECK(b_scales.device().is_cuda(), "b_scales is not on GPU");
-  TORCH_CHECK(b_scales.is_contiguous(), "b_scales is not contiguous");
+  STD_TORCH_CHECK(b_scales.device().is_cuda(), "b_scales is not on GPU");
+  STD_TORCH_CHECK(b_scales.is_contiguous(), "b_scales is not contiguous");
 
-  TORCH_CHECK(b_qweight_reorder.device().is_cuda(),
-              "b_qweight_reorder is not on GPU");
-  TORCH_CHECK(b_qweight_reorder.is_contiguous(),
-              "b_qweight_reorder is not contiguous");
+  STD_TORCH_CHECK(b_qweight_reorder.device().is_cuda(),
+                  "b_qweight_reorder is not on GPU");
+  STD_TORCH_CHECK(b_qweight_reorder.is_contiguous(),
+                  "b_qweight_reorder is not contiguous");
 
-  TORCH_CHECK(b_scales_reorder.device().is_cuda(),
-              "b_scales_reorder is not on GPU");
-  TORCH_CHECK(b_scales_reorder.is_contiguous(),
-              "b_scales_reorder is not contiguous");
+  STD_TORCH_CHECK(b_scales_reorder.device().is_cuda(),
+                  "b_scales_reorder is not on GPU");
+  STD_TORCH_CHECK(b_scales_reorder.is_contiguous(),
+                  "b_scales_reorder is not contiguous");
 
   if (has_zp) {
-    TORCH_CHECK(b_zeros.value().device().is_cuda(), "b_zeros is not on GPU");
-    TORCH_CHECK(b_zeros.value().is_contiguous(), "b_zeros is not contiguous");
+    STD_TORCH_CHECK(b_zeros.value().device().is_cuda(),
+                    "b_zeros is not on GPU");
+    STD_TORCH_CHECK(b_zeros.value().is_contiguous(),
+                    "b_zeros is not contiguous");
 
-    TORCH_CHECK(b_zeros_reorder.value().device().is_cuda(),
-                "b_zeros_reorder is not on GPU");
-    TORCH_CHECK(b_zeros_reorder.value().is_contiguous(),
-                "b_zeros_reorder is not contiguous");
+    STD_TORCH_CHECK(b_zeros_reorder.value().device().is_cuda(),
+                    "b_zeros_reorder is not on GPU");
+    STD_TORCH_CHECK(b_zeros_reorder.value().is_contiguous(),
+                    "b_zeros_reorder is not contiguous");
   }
 
   const uint8_t* matB = reinterpret_cast<const uint8_t*>(b_qweight.data_ptr());
@@ -136,18 +145,20 @@ void rearrange_kn_weight_as_n32k16_order(
   const void* b_zero = has_zp ? b_zeros.value().data_ptr() : nullptr;
 
   uint8_t* matB_reorder =
-      reinterpret_cast<uint8_t*>(b_qweight_reorder.data_ptr());
-  void* b_scale_reorder = b_scales_reorder.data_ptr();
-  void* b_zero_reorder = has_zp ? b_zeros_reorder.value().data_ptr() : nullptr;
+      reinterpret_cast<uint8_t*>(b_qweight_reorder.mutable_data_ptr());
+  void* b_scale_reorder = b_scales_reorder.mutable_data_ptr();
+  void* b_zero_reorder =
+      has_zp ? b_zeros_reorder.value().mutable_data_ptr() : nullptr;
 
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  if (b_scales.dtype() == at::ScalarType::Half) {
+  cudaStream_t stream = get_current_cuda_stream();
+  if (b_scales.scalar_type() == torch::headeronly::ScalarType::Half) {
     allspark::rearrange_kn_weight_as_n32k16_order_ldg16<__half>(
         matB, reinterpret_cast<const __half*>(b_scale),
         reinterpret_cast<const __half*>(b_zero), matB_reorder,
         reinterpret_cast<__half*>(b_scale_reorder),
         reinterpret_cast<__half*>(b_zero_reorder), K, N, N_32align, stream);
-  } else if (b_scales.dtype() == at::ScalarType::BFloat16) {
+  } else if (b_scales.scalar_type() ==
+             torch::headeronly::ScalarType::BFloat16) {
     allspark::rearrange_kn_weight_as_n32k16_order_ldg16<__nv_bfloat16>(
         matB, reinterpret_cast<const __nv_bfloat16*>(b_scale),
         reinterpret_cast<const __nv_bfloat16*>(b_zero), matB_reorder,
@@ -157,7 +168,7 @@ void rearrange_kn_weight_as_n32k16_order(
   }
 }
 
-TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
+STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, m) {
   m.impl("rearrange_kn_weight_as_n32k16_order",
-         &rearrange_kn_weight_as_n32k16_order);
+         TORCH_BOX(&rearrange_kn_weight_as_n32k16_order));
 }
