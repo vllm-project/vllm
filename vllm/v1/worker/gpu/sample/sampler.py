@@ -206,10 +206,7 @@ class Sampler:
             )
             if (
                 (top_k is None and top_p is None)
-                or (
-                    return_logprobs
-                    and self.logprobs_mode in ("processed_logits", "processed_logprobs")
-                )
+                or (return_logprobs and self.logprobs_mode == "processed_logprobs")
                 or self.sampling_states.any_greedy(idx_mapping_np)
                 or self.sampling_states.any_explicit_seed(idx_mapping_np)
             ):
