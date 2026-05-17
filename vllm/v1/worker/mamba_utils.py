@@ -228,6 +228,41 @@ def preprocess_mamba(
     do_mamba_copy_block(copy_bufs)
 
 
+def can_skip_mamba_postprocess(
+    scheduler_output: SchedulerOutput,
+    input_batch: GPUInputBatch,
+    requests: dict[str, CachedRequestState],
+    mamba_block_size: int,
+    num_reqs: int,
+) -> bool:
+    """Return True iff `postprocess_mamba` is provably a no-op this step.
+
+    Bounded by ``n_draft + 1`` accepted tokens, we can decide on CPU
+    whether any request can cross a mamba block boundary. If not, the
+    caller can defer the device-to-host sync of ``num_accepted_tokens``.
+
+    Must stay in lockstep with the inner conditional in
+    :func:`postprocess_mamba` below.
+    """
+    if not mamba_block_size or mamba_block_size <= 0:
+        return False
+    num_scheduled = scheduler_output.num_scheduled_tokens
+    spec_decode = scheduler_output.scheduled_spec_decode_tokens
+    req_ids = input_batch.req_ids
+    for i in range(num_reqs):
+        req_id = req_ids[i]
+        n_draft = len(spec_decode.get(req_id, ()))
+        n_running = (
+            requests[req_id].num_computed_tokens
+            + num_scheduled[req_id]
+            - n_draft
+        )
+        max_new = n_running + n_draft
+        if (max_new // mamba_block_size) * mamba_block_size >= n_running:
+            return False
+    return True
+
+
 def postprocess_mamba(
     scheduler_output: SchedulerOutput,
     kv_cache_config: KVCacheConfig,

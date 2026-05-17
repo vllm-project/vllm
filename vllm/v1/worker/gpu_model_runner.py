@@ -1482,11 +1482,29 @@ class GPUModelRunner(
         self.num_accepted_tokens.gpu[:num_reqs] = (output_token_ids != -1).sum(dim=1)
 
         is_align = self.cache_config.mamba_cache_mode == "align"
+        copy_bufs = self._get_mamba_copy_bufs() if is_align else None
         if is_align:
-            for i, num_tokens in enumerate(
-                self.num_accepted_tokens.gpu[:num_reqs].cpu().numpy()
+            # Skip the blocking sync when `postprocess_mamba` is provably a
+            # no-op this step. With ``n_draft + 1`` bounding the accepted
+            # tokens, we can decide on CPU whether any request can cross a
+            # mamba block boundary. If not, defer the device-to-host sync
+            # of ``num_accepted_tokens`` -- the event.synchronize() in
+            # ``_prepare_inputs`` absorbs the wait next iteration.
+            if mamba_utils.can_skip_mamba_postprocess(
+                scheduler_output,
+                self.input_batch,
+                self.requests,
+                copy_bufs.mamba_spec.block_size,
+                num_reqs,
             ):
-                self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
+                self.input_batch.num_accepted_tokens_cpu_tensor[:num_reqs].copy_(
+                    self.num_accepted_tokens.gpu[:num_reqs], non_blocking=True
+                )
+                assert self.num_accepted_tokens_event is not None
+                self.num_accepted_tokens_event.record()
+                return
+            np_arr = self.num_accepted_tokens.gpu[:num_reqs].cpu().numpy()
+            self.input_batch.num_accepted_tokens_cpu[:num_reqs] = np_arr
         else:
             self.input_batch.num_accepted_tokens_cpu_tensor[:num_reqs].copy_(
                 self.num_accepted_tokens.gpu[:num_reqs], non_blocking=True
@@ -1509,7 +1527,7 @@ class GPUModelRunner(
             mamba_state_copy_funcs=(
                 self.model.get_mamba_state_copy_func() if is_align else None
             ),
-            copy_bufs=self._get_mamba_copy_bufs() if is_align else None,
+            copy_bufs=copy_bufs,
         )
 
     def _update_streaming_request(
