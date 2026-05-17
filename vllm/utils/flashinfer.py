@@ -277,11 +277,20 @@ def has_flashinfer_cutedsl_moe_nvfp4() -> bool:
 
 @functools.cache
 def has_flashinfer_b12x_gemm() -> bool:
-    """Return True if FlashInfer b12x FP4 GEMM backend is available (SM120+)."""
+    """Return True if FlashInfer b12x FP4 GEMM backend is available (SM120+).
+
+    Accepts both the legacy ``Sm120BlockScaledDenseGemmKernel`` name (older
+    FlashInfer builds) and the current ``Sm120B12xBlockScaledDenseGemmKernel``
+    (upstream renamed it).
+    """
     if not has_flashinfer_cutedsl():
         return False
     mod = _get_submodule("flashinfer.gemm")
-    return mod is not None and hasattr(mod, "Sm120BlockScaledDenseGemmKernel")
+    if mod is None:
+        return False
+    return hasattr(mod, "Sm120B12xBlockScaledDenseGemmKernel") or hasattr(
+        mod, "Sm120BlockScaledDenseGemmKernel"
+    )
 
 
 @functools.cache
