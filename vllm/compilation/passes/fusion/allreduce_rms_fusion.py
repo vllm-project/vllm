@@ -1167,7 +1167,7 @@ class AiterAllreduceFusedAddRMSNormGroupQuantFP8Pattern(
 class AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern(
     BasePattern, VllmPatternReplacement
 ):
-    """Fuse ``AR -> fused_add_rms_norm -> (triton FP8 group quant + indexer GEMM)``.
+    """Fuse ``AR -> fused_add_rms_norm -> (per-group FP8 quant + indexer GEMM)``.
 
     DeepSeek V3.2 MLA feeds the post-AR normed activation into ``fused_qkv_a_proj``
     (per-token-group FP8 quant, then ``rocm_aiter_triton_gemm_a8w8_blockscale``) and
@@ -1186,6 +1186,20 @@ class AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern(
     post-MLP residual carry) are preserved by returning the bf16 norm as a
     pattern output and substituting it directly.
 
+    Two variants are registered (controlled by ``use_triton_quant``) because
+    different FP8 quant call sites in the same model lower to different ops:
+
+    - ``use_triton_quant=True`` matches the ``vllm.triton_per_token_group_quant_fp8``
+      form. This is what DSv3.2's ``fused_qkv_a_proj`` emits via
+      ``QuantFP8.forward_hip`` (`vllm/model_executor/layers/quantization/
+      input_quant_fp8.py:144`). This variant catches the dominant indexer
+      fan-out site empirically observed in DSv3.2 MI355X TP4 dumps.
+
+    - ``use_triton_quant=False`` matches the ``vllm.rocm_aiter_group_fp8_quant``
+      form via ``MatcherQuantFP8`` (consistent with the sibling AR+RMS+QUANT
+      patterns above). This catches sites where the producer routes through
+      AITER's group-quant path (`vllm/_aiter_ops.py:group_fp8_quant`).
+
     Ground truth FX form taken from a DSv3.2 MI355X TP4 dump
     (``__compiled_fn_1.post_grad.1.rocm_aiter_allreduce_fusion_pass.before.1.py``):
 
@@ -1195,7 +1209,7 @@ class AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern(
         )
         rms      = fused[0]            # also a graph output
         residual = fused[1]
-        quant, scale = torch.ops.vllm.triton_per_token_group_quant_fp8.default(rms, 128)
+        quant, scale = <fp8 group quant op>(rms, 128)
         idx          = torch.ops.vllm.rocm_unquantized_gemm.default(rms, indexer_weight)
 
     Dynamo may place ``tensor_model_parallel_all_reduce`` and the following norm in
@@ -1208,14 +1222,26 @@ class AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern(
         dtype: torch.dtype,
         device: str | None,
         group_size: int = 128,
+        use_triton_quant: bool = True,
     ) -> None:
         super().__init__(dtype, device)
         self.epsilon = epsilon
         self.dtype = dtype
         self.group_size = group_size
+        self.use_triton_quant = use_triton_quant
         self.FUSED_AR_RMS_QUANT_BF16_OP = (
             rocm_aiter_ops.get_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm_op()  # noqa: E501
         )
+        if not use_triton_quant:
+            self.quant_dtype = current_platform.fp8_dtype()
+            self.quant_matcher = MatcherQuantFP8(
+                QuantKey(
+                    dtype=self.quant_dtype,
+                    scale=ScaleDesc(torch.float32, False, GroupShape(1, group_size)),
+                    symmetric=True,
+                ),
+                match_rocm_aiter=True,
+            )
 
     def get_inputs(self) -> list[torch.Tensor]:
         h = self.group_size
@@ -1231,6 +1257,7 @@ class AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern(
     def pattern(self):
         eps = self.epsilon
         gs = self.group_size
+        use_triton = self.use_triton_quant
 
         def _pattern(
             residual: torch.Tensor,
@@ -1244,7 +1271,10 @@ class AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern(
             rms, res_out = vllm.ir.ops.fused_add_rms_norm(
                 ar_out, residual, norm_weight, eps
             )
-            q, s = torch.ops.vllm.triton_per_token_group_quant_fp8(rms, gs)
+            if use_triton:
+                q, s = torch.ops.vllm.triton_per_token_group_quant_fp8(rms, gs)
+            else:
+                q, s = self.quant_matcher(rms)
             idx = torch.ops.vllm.rocm_unquantized_gemm(rms, indexer_weight)
             return q, s, res_out, idx, rms
 
@@ -1375,11 +1405,25 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
             # Register larger subgraphs first (DeepSeek indexer fan-out, then
             # quant-only AR+RMS+quant, then AR+RMS-only).
             if supports_per_group_quant:
+                # Two variants: the Triton-quant form matches what DSv3.2's
+                # fused_qkv_a_proj emits at the indexer fan-out site today; the
+                # AITER-quant form matches sites that route through
+                # rocm_aiter_group_fp8_quant (for consistency with the sibling
+                # AR+RMS+QUANT patterns below).
                 self.register(
                     AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern(
                         epsilon,
                         self.model_dtype,
                         self.device,
+                        use_triton_quant=True,
+                    )
+                )
+                self.register(
+                    AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern(
+                        epsilon,
+                        self.model_dtype,
+                        self.device,
+                        use_triton_quant=False,
                     )
                 )
                 self.register(
