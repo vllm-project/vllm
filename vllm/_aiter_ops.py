@@ -1924,12 +1924,8 @@ class rocm_aiter_ops:
 
             direct_register_custom_op(
                 op_name="rocm_aiter_fused_allreduce_rmsnorm_quant_per_group",
-                op_func=(
-                    _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_impl
-                ),
-                fake_impl=(
-                    _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_fake
-                ),
+                op_func=(_rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_impl),
+                fake_impl=(_rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_fake),
             )
 
             direct_register_custom_op(
@@ -1994,9 +1990,7 @@ class rocm_aiter_ops:
 
     @staticmethod
     def get_fused_allreduce_rmsnorm_quant_per_group_op() -> OpOverload:
-        return (
-            torch.ops.vllm.rocm_aiter_fused_allreduce_rmsnorm_quant_per_group.default
-        )
+        return torch.ops.vllm.rocm_aiter_fused_allreduce_rmsnorm_quant_per_group.default
 
     @staticmethod
     def get_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm_op() -> OpOverload:  # noqa: E501

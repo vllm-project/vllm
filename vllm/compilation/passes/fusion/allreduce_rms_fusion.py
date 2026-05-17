@@ -1042,9 +1042,7 @@ class AiterAllreduceFusedRMSNormGroupQuantFP8Pattern(
         self.quant_matcher = MatcherQuantFP8(
             QuantKey(
                 dtype=self.quant_dtype,
-                scale=ScaleDesc(
-                    torch.float32, False, GroupShape(1, group_size)
-                ),
+                scale=ScaleDesc(torch.float32, False, GroupShape(1, group_size)),
                 symmetric=True,
             ),
             match_rocm_aiter=True,
@@ -1116,9 +1114,7 @@ class AiterAllreduceFusedAddRMSNormGroupQuantFP8Pattern(
         self.quant_matcher = MatcherQuantFP8(
             QuantKey(
                 dtype=self.quant_dtype,
-                scale=ScaleDesc(
-                    torch.float32, False, GroupShape(1, group_size)
-                ),
+                scale=ScaleDesc(torch.float32, False, GroupShape(1, group_size)),
                 symmetric=True,
             ),
             match_rocm_aiter=True,
