@@ -318,7 +318,43 @@ cleanup() {
     fi
   done
 }
+
 trap cleanup EXIT
+
+collect_ray_logs() {
+  echo "Collecting Ray logs from shared Ray temp dir..."
+  local out="${TRACE_RUN_DIR}/ray_logs"
+  mkdir -p "${out}"
+
+  for node_dir in "${RAY_TMP_ROOT}"/*; do
+    [ -d "${node_dir}" ] || continue
+
+    local node
+    node="$(basename "${node_dir}")"
+
+    local session
+    session="$(readlink -f "${node_dir}/session_latest" 2>/dev/null || true)"
+
+    if [ -z "${session}" ] || [ ! -d "${session}/logs" ]; then
+      echo "No Ray session logs found for ${node} under ${node_dir}" >&2
+      continue
+    fi
+
+    echo "Archiving Ray logs for ${node}: ${session}/logs"
+
+    tar \
+      -C "${session}" \
+      -czf "${out}/ray_logs_${node}.tgz" \
+      logs \
+      --exclude='logs/nsight/*.qdstrm' \
+      --exclude='logs/nsight/*.nsys-rep' \
+      --exclude='logs/events/*' \
+      2>/dev/null || true
+  done
+
+  echo "Ray log archives:"
+  find "${out}" -type f -printf "%p %s bytes\n" 2>/dev/null || true
+}
 
 echo "=== Ray head (background srun) ==="
 echo "Starting head node ${HEAD_NODE} (HEAD_RAY_PID will be set)..."
@@ -370,6 +406,8 @@ srun \
   --ntasks-per-node=1 \
   --gpus-per-task="${GPUS_PER_NODE}" \
   --cpus-per-task="${CPUS_PER_TASK}" \
+  --output="${TRACE_RUN_DIR}/slurm_ray_head_${HEAD_NODE}.out" \
+  --error="${TRACE_RUN_DIR}/slurm_ray_head_${HEAD_NODE}.err" \
   bash -lc "${RAY_HEAD_CMD}" &
 HEAD_RAY_PID=$!
 echo "HEAD_RAY_PID=${HEAD_RAY_PID}"
@@ -431,6 +469,8 @@ fi"
       --ntasks-per-node=1 \
       --gpus-per-task="${GPUS_PER_NODE}" \
       --cpus-per-task="${CPUS_PER_TASK}" \
+      --output="${TRACE_RUN_DIR}/slurm_ray_worker_${WORKER}.out" \
+      --error="${TRACE_RUN_DIR}/slurm_ray_worker_${WORKER}.err" \
       bash -lc "${RAY_WORKER_CMD}" &
     WORKER_RAY_PIDS="${WORKER_RAY_PIDS} $!"
     echo "Worker Ray step pid: $! (WORKER_RAY_PIDS=${WORKER_RAY_PIDS})"
@@ -546,6 +586,8 @@ WORKER_RAY_PIDS=""
 
 echo "Waiting briefly for Ray/Nsight files to flush..."
 sleep 30
+
+collect_ray_logs
 
 echo "Collecting Ray worker Nsight reports from shared Ray temp dir..."
 mkdir -p "${TRACE_RUN_DIR}/ray_worker_nsight"
