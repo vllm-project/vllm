@@ -19,6 +19,7 @@ set -euo pipefail
 
 SCRIPT_VERSION="arc-ray-qwen15-moe-a2.7b-chat"
 
+# Set DEBUG_SLURM_SCRIPT=1 for extra diagnostics (DNS probes, PATH, ray location).
 DEBUG_SLURM_SCRIPT="${DEBUG_SLURM_SCRIPT:-0}"
 slurm_debug() {
   if [ "${DEBUG_SLURM_SCRIPT}" = "1" ]; then
@@ -26,15 +27,14 @@ slurm_debug() {
   fi
 }
 
+# SP = prompt / prefill token bucket
+# SD = decode / output tokens per request
 SP="${SP:-128}"
 SD="${SD:-128}"
 export NSYS_ENABLE="${NSYS_ENABLE:-1}"
 
-export HEAD_NODE
-HEAD_NODE=$(scontrol show hostnames "${SLURM_NODELIST}" | head -n1)
-
-export WORKER_NODES
-WORKER_NODES=$(scontrol show hostnames "${SLURM_NODELIST}" | tail -n+2)
+export HEAD_NODE=$(scontrol show hostnames $SLURM_NODELIST | head -n1)
+export WORKER_NODES=$(scontrol show hostnames $SLURM_NODELIST | tail -n+2)
 
 echo "=== vLLM multi-node host job ==="
 echo "SCRIPT_VERSION=${SCRIPT_VERSION}"
@@ -48,6 +48,8 @@ echo "WORKER_NODES=${WORKER_NODES}"
 slurm_debug "SLURM_NTASKS=${SLURM_NTASKS:-} SLURM_JOB_NUM_NODES=${SLURM_JOB_NUM_NODES:-}"
 slurm_debug "Full nodelist: $(scontrol show hostnames "${SLURM_NODELIST}" 2>/dev/null | tr '\n' ' ')"
 
+# ARC/some clusters return link-local IPv6 records for Slurm hostnames.
+# Ray/vLLM need a routable node address here, so resolve an IPv4 address.
 resolve_host_ip() {
   local nodename="$1"
   local ip=""
@@ -61,12 +63,10 @@ resolve_host_ip() {
   if [ -n "${ip}" ]; then
     method="dig_ipv4"
   fi
-
   if [ -z "${ip}" ]; then
     ip=$(getent hosts "${nodename}" 2>/dev/null | awk '{print $1}' | pick_ipv4 || true)
     [ -n "${ip}" ] && method="getent_ipv4"
   fi
-
   if [ -z "${ip}" ]; then
     ip=$(
       srun --nodelist="${nodename}" --nodes=1 --ntasks=1 \
@@ -132,11 +132,9 @@ configure_socket_ifnames() {
     echo "Ignoring GLOO_SOCKET_IFNAME=${iface}; it does not own ${target_ip} on $(hostname)." >&2
     iface=""
   fi
-
   if [ -z "${iface}" ]; then
     iface="$(interface_for_ip "${target_ip}")"
   fi
-
   if [ -z "${iface}" ]; then
     echo "Error: could not find a network interface for ${target_ip} on $(hostname)." >&2
     ip -o -4 addr show >&2 || true
@@ -144,7 +142,6 @@ configure_socket_ifnames() {
   fi
 
   export GLOO_SOCKET_IFNAME="${iface}"
-
   if [ "${set_nccl}" = "1" ]; then
     local nccl_iface="${NCCL_SOCKET_IFNAME:-}"
     if [ -n "${nccl_iface}" ] && ! interface_has_ip "${nccl_iface}" "${target_ip}"; then
@@ -157,16 +154,12 @@ configure_socket_ifnames() {
   echo "Socket interface for ${target_ip} on $(hostname): GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME} NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-<unset>}"
 }
 
-export HEAD_NODE_IP
-HEAD_NODE_IP="$(resolve_host_ip "${HEAD_NODE}")"
-
+export HEAD_NODE_IP="$(resolve_host_ip "${HEAD_NODE}")"
 if [ -z "${HEAD_NODE_IP}" ]; then
   echo "Error: could not resolve an IPv4 address for head node ${HEAD_NODE}." >&2
   exit 1
 fi
-
 echo "HEAD_NODE_IP=${HEAD_NODE_IP}"
-
 export VLLM_HOST_IP="${HEAD_NODE_IP}"
 echo "VLLM_HOST_IP=${VLLM_HOST_IP}"
 configure_socket_ifnames "${HEAD_NODE_IP}" 0
@@ -192,22 +185,22 @@ module purge
 module load Anaconda3/2025.06-1
 module load CUDA/12.9.0
 
+# === Trace output directory ===
 TRACE_BASE="/data/engs-glass/catz0932/inference-traces/vllm/results"
 TRACE_RUN_DIR="${TRACE_BASE}/${SLURM_JOB_ID}"
-RAY_TMP_ROOT="${TRACE_RUN_DIR}/ray_tmp"
-RAY_TMP_LINK_BASE="/tmp/vray-${SLURM_JOB_ID}"
 
 mkdir -p "${TRACE_RUN_DIR}/nsight"
 mkdir -p "${TRACE_RUN_DIR}/nccl_logs"
-mkdir -p "${RAY_TMP_ROOT}"
 
+# === Nsight Systems ===
 export NSYS_ENABLE="${NSYS_ENABLE:-1}"
 export NSYS_DIR="${TRACE_RUN_DIR}/nsight"
 export NSYS_TRACE="${NSYS_TRACE:-cuda,nvtx,osrt,cudnn,cublas}"
 export NSYS_DELAY="${NSYS_DELAY:-0}"
-export NSYS_PROFILE_VLLM="${NSYS_PROFILE_VLLM:-1}"
+export NSYS_PROFILE_SERVER="${NSYS_PROFILE_SERVER:-1}"
 export NSYS_PROFILE_RAY="${NSYS_PROFILE_RAY:-0}"
 
+# === NCCL logs ===
 export NCCL_DEBUG="${NCCL_DEBUG:-INFO}"
 export NCCL_DEBUG_FILE="${TRACE_RUN_DIR}/nccl_logs/nccl_%h_%p.log"
 
@@ -216,10 +209,8 @@ echo "NSYS_DIR=${NSYS_DIR}"
 echo "NCCL_DEBUG_FILE=${NCCL_DEBUG_FILE}"
 echo "NSYS_TRACE=${NSYS_TRACE}"
 echo "NSYS_DELAY=${NSYS_DELAY}"
-echo "NSYS_PROFILE_VLLM=${NSYS_PROFILE_VLLM}"
+echo "NSYS_PROFILE_SERVER=${NSYS_PROFILE_SERVER}"
 echo "NSYS_PROFILE_RAY=${NSYS_PROFILE_RAY}"
-echo "RAY_TMP_ROOT=${RAY_TMP_ROOT}"
-echo "RAY_TMP_LINK_BASE=${RAY_TMP_LINK_BASE}"
 echo "nsys path: $(command -v nsys || echo '<not found>')"
 nsys --version || true
 
@@ -228,7 +219,6 @@ if [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
 else
   REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fi
-
 VENV_DIR="${REPO_ROOT}/.venv"
 echo "REPO_ROOT=${REPO_ROOT}"
 echo "VENV_DIR=${VENV_DIR}"
@@ -236,13 +226,11 @@ echo "VENV_DIR=${VENV_DIR}"
 if [ ! -d "${VENV_DIR}" ]; then
   python3 -m venv "${VENV_DIR}"
 fi
-
 source "${VENV_DIR}/bin/activate"
 
 PYTHON_PATH="$(command -v python)"
 EXPECTED_PYTHON="${VENV_DIR}/bin/python"
 echo "Using python: ${PYTHON_PATH}"
-
 if [ "${PYTHON_PATH}" != "${EXPECTED_PYTHON}" ]; then
   echo "Error: python did not resolve to venv interpreter." >&2
   echo "Expected: ${EXPECTED_PYTHON}" >&2
@@ -257,11 +245,9 @@ slurm_debug "pip install starting (cuda + build + editable vllm)..."
 python -m pip install -U pip
 python -m pip install -r "${REPO_ROOT}/requirements/cuda.txt"
 python -m pip install -r "${REPO_ROOT}/requirements/build/cuda.txt"
-
 RAY_REQUIREMENT="${RAY_REQUIREMENT:-ray[cgraph]>=2.48.0}"
 echo "Installing Ray requirement: ${RAY_REQUIREMENT}"
 python -m pip install "${RAY_REQUIREMENT}"
-
 (
   cd "${REPO_ROOT}" || exit 1
   export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED:-1}"
@@ -286,11 +272,9 @@ HOST="${HOST:-${HEAD_NODE_IP}}"
 PORT="${PORT:-8000}"
 GPUS_PER_NODE="${GPUS_PER_NODE:-1}"
 NUM_NODES="${SLURM_JOB_NUM_NODES:-${SLURM_NNODES:-2}}"
-
 TP="${TP:-1}"
-PP="${PP:-2}"
+PP="${PP:-${NUM_NODES}}"
 EP="${EP:-1}"
-
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 CPUS_PER_TASK="${CPUS_PER_TASK:-${SLURM_CPUS_PER_TASK:-1}}"
 SERVE_SCRIPT="${REPO_ROOT}/serving_scripts/serve_ShareGPT_multi_node.sh"
@@ -303,13 +287,11 @@ echo "NCCL_IB_DISABLE=${NCCL_IB_DISABLE} NCCL_NET=${NCCL_NET} NCCL_IB_HCA=${NCCL
 echo "NCCL_SOCKET_FAMILY=${NCCL_SOCKET_FAMILY} NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME}"
 echo "NCCL_DEBUG=${NCCL_DEBUG} NCCL_DEBUG_SUBSYS=${NCCL_DEBUG_SUBSYS}"
 echo "SERVE_SCRIPT=${SERVE_SCRIPT}"
-
 if [ -n "${HF_TOKEN:-}" ]; then
   echo "HF_TOKEN is set"
 else
   echo "HF_TOKEN is not set"
 fi
-
 slurm_debug "VLLM_TARGET_DEVICE=${VLLM_TARGET_DEVICE} VLLM_USE_DEEP_GEMM=${VLLM_USE_DEEP_GEMM}"
 
 SERVER_STEP_PID=""
@@ -321,12 +303,10 @@ cleanup() {
     kill "${SERVER_STEP_PID}" 2>/dev/null || true
     wait "${SERVER_STEP_PID}" 2>/dev/null || true
   fi
-
   if [ -n "${HEAD_RAY_PID}" ] && kill -0 "${HEAD_RAY_PID}" 2>/dev/null; then
     kill "${HEAD_RAY_PID}" 2>/dev/null || true
     wait "${HEAD_RAY_PID}" 2>/dev/null || true
   fi
-
   for pid in ${WORKER_RAY_PIDS}; do
     if kill -0 "${pid}" 2>/dev/null; then
       kill "${pid}" 2>/dev/null || true
@@ -336,210 +316,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-collect_ray_logs() {
-  echo "Collecting Ray logs from shared Ray temp dir..."
-  local out="${TRACE_RUN_DIR}/ray_logs"
-  mkdir -p "${out}"
-
-  for node_dir in "${RAY_TMP_ROOT}"/*; do
-    [ -d "${node_dir}" ] || continue
-
-    local node
-    node="$(basename "${node_dir}")"
-
-    local session
-    session="$(readlink -f "${node_dir}/session_latest" 2>/dev/null || true)"
-
-    if [ -z "${session}" ] || [ ! -d "${session}/logs" ]; then
-      echo "No Ray session logs found for ${node} under ${node_dir}" >&2
-      continue
-    fi
-
-    echo "Archiving Ray logs for ${node}: ${session}/logs"
-
-    tar \
-      -C "${session}" \
-      --exclude='logs/nsight/*.qdstrm' \
-      --exclude='logs/nsight/*.nsys-rep' \
-      --exclude='logs/events/*' \
-      -czf "${out}/ray_logs_${node}.tgz" \
-      logs \
-      2>/dev/null || true
-  done
-
-  echo "Ray log archives:"
-  find "${out}" -type f -printf "%p %s bytes\n" 2>/dev/null || true
-}
-
-print_ray_log_locations_from_node() {
-  local NODE="$1"
-  echo "Printing Ray log locations from ${NODE}"
-
-  srun \
-    --overlap \
-    --nodelist "${NODE}" \
-    --nodes=1 \
-    --ntasks=1 \
-    --ntasks-per-node=1 \
-    --cpus-per-task=1 \
-    --mem=1G \
-    bash -lc "
-      set +e
-      shopt -s nullglob
-
-      echo '===== Ray log locations on ${NODE} ====='
-      echo \"hostname=\$(hostname)\"
-
-      CANDIDATE_ROOTS=(
-        /tmp/ray
-        ${RAY_TMP_LINK_BASE}-${NODE}
-        ${RAY_TMP_ROOT}/${NODE}
-      )
-
-      for root in \"\${CANDIDATE_ROOTS[@]}\"; do
-        echo
-        echo \"Ray temp root candidate: \${root}\"
-
-        if [ ! -e \"\${root}\" ]; then
-          echo \"  missing\"
-          continue
-        fi
-
-        real_root=\$(readlink -f \"\${root}\" 2>/dev/null || echo \"\${root}\")
-        echo \"  resolved root: \${real_root}\"
-
-        if [ -e \"\${root}/session_latest\" ]; then
-          session=\$(readlink -f \"\${root}/session_latest\" 2>/dev/null || true)
-          echo \"  session_latest: \${session}\"
-          echo \"  logs dir:       \${session}/logs\"
-          echo \"  nsight dir:     \${session}/logs/nsight\"
-
-          echo \"  current nsight files:\"
-          find \"\${session}/logs/nsight\" \
-            -maxdepth 1 \
-            -type f \
-            -printf '    %p %s bytes\n' 2>/dev/null || true
-        else
-          echo \"  no session_latest yet\"
-          echo \"  recent session dirs:\"
-          find \"\${root}\" \
-            -maxdepth 2 \
-            -type d \
-            -name 'session_*' \
-            -printf '    %p\n' 2>/dev/null | tail -10 || true
-        fi
-      done
-    " || true
-}
-
-copy_ray_nsight_from_node() {
-  local NODE="$1"
-  echo "Copying Ray worker Nsight reports from ${NODE}"
-
-  srun \
-    --overlap \
-    --nodelist "${NODE}" \
-    --nodes=1 \
-    --ntasks=1 \
-    --ntasks-per-node=1 \
-    --cpus-per-task=1 \
-    --mem=1G \
-    bash -lc "
-      set +e
-      shopt -s nullglob
-
-      mkdir -p '${TRACE_RUN_DIR}/ray_worker_nsight/${NODE}'
-
-      echo 'Checking Nsight locations on ${NODE}...'
-
-      CANDIDATE_DIRS=(
-        /tmp/ray/session_latest/logs/nsight
-        /tmp/ray/session_*/logs/nsight
-        ${RAY_TMP_LINK_BASE}-${NODE}/session_latest/logs/nsight
-        ${RAY_TMP_LINK_BASE}-${NODE}/session_*/logs/nsight
-        ${RAY_TMP_ROOT}/${NODE}/session_latest/logs/nsight
-        ${RAY_TMP_ROOT}/${NODE}/session_*/logs/nsight
-      )
-
-      found_rep=0
-      found_any=0
-
-      for d in \"\${CANDIDATE_DIRS[@]}\"; do
-        for expanded in \${d}; do
-          [ -d \"\${expanded}\" ] || continue
-
-          echo \"DIR: \${expanded}\"
-          find \"\${expanded}\" -maxdepth 1 -type f -printf '%p %s bytes\n' 2>/dev/null || true
-
-          for report in \"\${expanded}\"/*.nsys-rep; do
-            [ -e \"\${report}\" ] || continue
-            found_any=1
-            size=\$(stat -c '%s' \"\${report}\" 2>/dev/null || echo 0)
-            echo \"Found nsys-rep: \${report} \${size} bytes\"
-
-            if [ \"\${size}\" = \"0\" ]; then
-              echo \"Skipping zero-byte nsys-rep: \${report}\"
-              continue
-            fi
-
-            found_rep=1
-            cp -v \"\${report}\" '${TRACE_RUN_DIR}/ray_worker_nsight/${NODE}/' || true
-          done
-
-          for qdstrm in \"\${expanded}\"/*.qdstrm; do
-            [ -e \"\${qdstrm}\" ] || continue
-            found_any=1
-            size=\$(stat -c '%s' \"\${qdstrm}\" 2>/dev/null || echo 0)
-            echo \"Found qdstrm: \${qdstrm} \${size} bytes\"
-            cp -v \"\${qdstrm}\" '${TRACE_RUN_DIR}/ray_worker_nsight/${NODE}/' || true
-          done
-        done
-      done
-
-      if [ \"\${found_any}\" = \"0\" ]; then
-        echo 'No Nsight report files found on ${NODE}. Searching wider under /tmp and custom Ray temp root...'
-        find /tmp -maxdepth 5 \\( -name '*.nsys-rep' -o -name '*.qdstrm' \\) -printf '%p %s bytes\n' 2>/dev/null || true
-        find '${RAY_TMP_ROOT}/${NODE}' -maxdepth 8 \\( -name '*.nsys-rep' -o -name '*.qdstrm' \\) -printf '%p %s bytes\n' 2>/dev/null || true
-      elif [ \"\${found_rep}\" = \"0\" ]; then
-        echo 'Nsight files were found on ${NODE}, but no non-empty .nsys-rep was copied.'
-      fi
-    " || true
-}
-
-copy_ray_nsight_from_shared_root() {
-  echo "Collecting any Nsight reports directly from shared Ray temp root..."
-  mkdir -p "${TRACE_RUN_DIR}/ray_worker_nsight"
-
-  echo "Looking for Nsight reports under ${RAY_TMP_ROOT}:"
-  find "${RAY_TMP_ROOT}" \
-    -type f \( -name "*.nsys-rep" -o -name "*.qdstrm" \) \
-    -printf "%p %s bytes\n" 2>/dev/null || true
-
-  find "${RAY_TMP_ROOT}" \
-    -type f \( -name "*.nsys-rep" -o -name "*.qdstrm" \) -print0 2>/dev/null \
-    | while IFS= read -r -d '' report; do
-        rel="${report#${RAY_TMP_ROOT}/}"
-        node="${rel%%/*}"
-
-        if [ -z "${node}" ] || [ "${node}" = "${rel}" ]; then
-          node="unknown"
-        fi
-
-        mkdir -p "${TRACE_RUN_DIR}/ray_worker_nsight/${node}"
-
-        size="$(stat -c '%s' "${report}" 2>/dev/null || echo 0)"
-        if [[ "${report}" == *.nsys-rep ]] && [ "${size}" = "0" ]; then
-          echo "Skipping zero-byte nsys-rep: ${report}"
-          continue
-        fi
-
-        cp -v "${report}" "${TRACE_RUN_DIR}/ray_worker_nsight/${node}/" || true
-      done
-}
-
 echo "=== Ray head (background srun) ==="
-echo "Starting head node ${HEAD_NODE}..."
-
+echo "Starting head node ${HEAD_NODE} (HEAD_RAY_PID will be set)..."
 RAY_HEAD_CMD="$(
   declare -f interface_for_ip
   declare -f interface_has_ip
@@ -549,11 +327,6 @@ source \"${VENV_DIR}/bin/activate\"
 unset GLOO_SOCKET_IFNAME
 export VLLM_HOST_IP=${HEAD_NODE_IP}
 configure_socket_ifnames \"${HEAD_NODE_IP}\" 0
-
-rm -rf \"${RAY_TMP_LINK_BASE}-${HEAD_NODE}\"
-mkdir -p \"${RAY_TMP_ROOT}/${HEAD_NODE}\"
-ln -sfn \"${RAY_TMP_ROOT}/${HEAD_NODE}\" \"${RAY_TMP_LINK_BASE}-${HEAD_NODE}\"
-echo \"Ray head temp dir link: ${RAY_TMP_LINK_BASE}-${HEAD_NODE} -> ${RAY_TMP_ROOT}/${HEAD_NODE}\"
 
 if [ \"${NSYS_ENABLE}\" = \"1\" ] && [ \"${NSYS_PROFILE_RAY}\" = \"1\" ]; then
   echo \"Profiling Ray head with Nsight Systems\"
@@ -570,18 +343,15 @@ if [ \"${NSYS_ENABLE}\" = \"1\" ] && [ \"${NSYS_PROFILE_RAY}\" = \"1\" ]; then
       --node-ip-address=${HEAD_NODE_IP} \\
       --port=${RAY_PORT} \\
       --num-gpus=${GPUS_PER_NODE} \\
-      --num-cpus=${CPUS_PER_TASK} \\
-      --temp-dir=${RAY_TMP_LINK_BASE}-${HEAD_NODE}
+      --num-cpus=${CPUS_PER_TASK}
 else
   \"${RAY_BIN}\" start --block \\
     --head \\
     --node-ip-address=${HEAD_NODE_IP} \\
     --port=${RAY_PORT} \\
     --num-gpus=${GPUS_PER_NODE} \\
-    --num-cpus=${CPUS_PER_TASK} \\
-    --temp-dir=${RAY_TMP_LINK_BASE}-${HEAD_NODE}
+    --num-cpus=${CPUS_PER_TASK}
 fi"
-
 srun \
   --nodelist "${HEAD_NODE}" \
   --nodes=1 \
@@ -589,52 +359,21 @@ srun \
   --ntasks-per-node=1 \
   --gpus-per-task="${GPUS_PER_NODE}" \
   --cpus-per-task="${CPUS_PER_TASK}" \
-  --output="${TRACE_RUN_DIR}/slurm_ray_head_${HEAD_NODE}.out" \
-  --error="${TRACE_RUN_DIR}/slurm_ray_head_${HEAD_NODE}.err" \
   bash -lc "${RAY_HEAD_CMD}" &
-
 HEAD_RAY_PID=$!
 echo "HEAD_RAY_PID=${HEAD_RAY_PID}"
-
-echo "Waiting for Ray head to become ready..."
-_ray_head_wait_n=0
-until "${RAY_BIN}" status --address="${HEAD_NODE_IP}:${RAY_PORT}" >/dev/null 2>&1; do
-  _ray_head_wait_n=$((_ray_head_wait_n + 1))
-
-  if ! kill -0 "${HEAD_RAY_PID}" 2>/dev/null; then
-    echo "Error: Ray head srun process exited before Ray became ready." >&2
-    wait "${HEAD_RAY_PID}" || true
-    exit 1
-  fi
-
-  if [ "$((_ray_head_wait_n % 6))" -eq 0 ]; then
-    echo "Still waiting for Ray head at ${HEAD_NODE_IP}:${RAY_PORT}..."
-  fi
-
-  if [ "${_ray_head_wait_n}" -ge 120 ]; then
-    echo "Error: timed out waiting for Ray head at ${HEAD_NODE_IP}:${RAY_PORT}." >&2
-    exit 1
-  fi
-
-  sleep 5
-done
-unset _ray_head_wait_n
-
-echo "Ray head is ready."
+sleep 20
 
 if [ -n "${WORKER_NODES}" ]; then
   echo "=== Ray workers ==="
   echo "Starting worker nodes..."
-
   for WORKER in ${WORKER_NODES}; do
     WORKER_IP="$(resolve_host_ip "${WORKER}")"
     if [ -z "${WORKER_IP}" ]; then
       echo "Error: could not resolve IP for worker ${WORKER}." >&2
       exit 1
     fi
-
     echo "Starting worker node: ${WORKER} with IP ${WORKER_IP}"
-
     RAY_WORKER_CMD="$(
       declare -f interface_for_ip
       declare -f interface_has_ip
@@ -644,11 +383,6 @@ source \"${VENV_DIR}/bin/activate\"
 unset GLOO_SOCKET_IFNAME
 export VLLM_HOST_IP=${WORKER_IP}
 configure_socket_ifnames \"${WORKER_IP}\" 0
-
-rm -rf \"${RAY_TMP_LINK_BASE}-${WORKER}\"
-mkdir -p \"${RAY_TMP_ROOT}/${WORKER}\"
-ln -sfn \"${RAY_TMP_ROOT}/${WORKER}\" \"${RAY_TMP_LINK_BASE}-${WORKER}\"
-echo \"Ray worker temp dir link: ${RAY_TMP_LINK_BASE}-${WORKER} -> ${RAY_TMP_ROOT}/${WORKER}\"
 
 if [ \"${NSYS_ENABLE}\" = \"1\" ] && [ \"${NSYS_PROFILE_RAY}\" = \"1\" ]; then
   echo \"Profiling Ray worker ${WORKER} with Nsight Systems\"
@@ -664,17 +398,14 @@ if [ \"${NSYS_ENABLE}\" = \"1\" ] && [ \"${NSYS_PROFILE_RAY}\" = \"1\" ]; then
       --address=${HEAD_NODE_IP}:${RAY_PORT} \\
       --node-ip-address=${WORKER_IP} \\
       --num-gpus=${GPUS_PER_NODE} \\
-      --num-cpus=${CPUS_PER_TASK} \\
-      --temp-dir=${RAY_TMP_LINK_BASE}-${WORKER}
+      --num-cpus=${CPUS_PER_TASK}
 else
   \"${RAY_BIN}\" start --block \\
     --address=${HEAD_NODE_IP}:${RAY_PORT} \\
     --node-ip-address=${WORKER_IP} \\
     --num-gpus=${GPUS_PER_NODE} \\
-    --num-cpus=${CPUS_PER_TASK} \\
-    --temp-dir=${RAY_TMP_LINK_BASE}-${WORKER}
+    --num-cpus=${CPUS_PER_TASK}
 fi"
-
     srun \
       --nodelist "${WORKER}" \
       --nodes=1 \
@@ -682,60 +413,20 @@ fi"
       --ntasks-per-node=1 \
       --gpus-per-task="${GPUS_PER_NODE}" \
       --cpus-per-task="${CPUS_PER_TASK}" \
-      --output="${TRACE_RUN_DIR}/slurm_ray_worker_${WORKER}.out" \
-      --error="${TRACE_RUN_DIR}/slurm_ray_worker_${WORKER}.err" \
       bash -lc "${RAY_WORKER_CMD}" &
-
     WORKER_RAY_PIDS="${WORKER_RAY_PIDS} $!"
     echo "Worker Ray step pid: $! (WORKER_RAY_PIDS=${WORKER_RAY_PIDS})"
   done
-
-  echo "Waiting for Ray workers to join..."
-  _expected_nodes="${SLURM_JOB_NUM_NODES:-${SLURM_NNODES:-2}}"
-  _worker_wait_n=0
-
-  until python - <<PY
-import ray
-ray.init(address="${HEAD_NODE_IP}:${RAY_PORT}", ignore_reinit_error=True)
-alive = [n for n in ray.nodes() if n.get("Alive")]
-print("alive Ray nodes:", [n.get("NodeManagerAddress") for n in alive])
-raise SystemExit(0 if len(alive) >= int("${_expected_nodes}") else 1)
-PY
-  do
-    _worker_wait_n=$((_worker_wait_n + 1))
-
-    for pid in ${WORKER_RAY_PIDS}; do
-      if ! kill -0 "${pid}" 2>/dev/null; then
-        echo "Error: one Ray worker srun process exited before joining." >&2
-        wait "${pid}" || true
-        exit 1
-      fi
-    done
-
-    if [ "$((_worker_wait_n % 6))" -eq 0 ]; then
-      echo "Still waiting for Ray workers to join..."
-    fi
-
-    if [ "${_worker_wait_n}" -ge 120 ]; then
-      echo "Error: timed out waiting for Ray workers to join." >&2
-      exit 1
-    fi
-
-    sleep 5
-  done
-
-  unset _worker_wait_n
-  echo "All Ray workers joined."
+  sleep 20
 fi
 
 echo "=== ray status ==="
 echo "Checking cluster status..."
-"${RAY_BIN}" status --address="${HEAD_NODE_IP}:${RAY_PORT}" || echo "Warning: ray status failed; continuing with Python Ray node check."
-
-python - <<PY
+"${RAY_BIN}" status || echo "Warning: ray status failed; continuing with Python Ray node check."
+python - <<'PY'
 import ray
 
-ray.init(address="${HEAD_NODE_IP}:${RAY_PORT}", ignore_reinit_error=True)
+ray.init(address="auto")
 nodes = ray.nodes()
 print("Ray nodes:")
 for node in nodes:
@@ -746,45 +437,39 @@ for node in nodes:
     )
 PY
 
-echo "=== Ray log locations ==="
-print_ray_log_locations_from_node "${HEAD_NODE}"
-
-for WORKER in ${WORKER_NODES}; do
-  print_ray_log_locations_from_node "${WORKER}"
-done
-
 echo "=== vLLM api_server (background process) ==="
 echo "Starting vLLM server on head node..."
 
 VLLM_TRACE_FLAGS=()
-if [ "${NSYS_ENABLE}" = "1" ] && [ "${NSYS_PROFILE_VLLM}" = "1" ]; then
+if [ "${NSYS_ENABLE}" = "1" ] && [ "${NSYS_PROFILE_SERVER}" = "1" ]; then
   VLLM_TRACE_FLAGS+=(
     --ray-workers-use-nsight
     --enable-layerwise-nvtx-tracing
-    --enable-mfu-metrics
-    --kv-cache-metrics
-    --kv-cache-metrics-sample 1.0
     --enable-logging-iteration-details
   )
 fi
 
-if [ "${NSYS_ENABLE}" = "1" ] && [ "${NSYS_PROFILE_VLLM}" = "1" ]; then
-  echo "Starting vLLM server with Ray worker Nsight profiling enabled"
-  echo "Ray worker Nsight reports may appear under:"
-  echo "  /tmp/ray/session_*/logs/nsight"
-  echo "  ${RAY_TMP_ROOT}/<node>/session_*/logs/nsight"
+if [ "${NSYS_ENABLE}" = "1" ] && [ "${NSYS_PROFILE_SERVER}" = "1" ]; then
+  echo "Profiling vLLM server and Ray workers with Nsight Systems"
+  echo "API-server Nsight output: ${NSYS_DIR}/vllm_api_server_${HEAD_NODE}.nsys-rep"
 
-  python -m vllm.entrypoints.openai.api_server \
-    --model "${MODEL_ID}" \
-    --host "${HOST}" \
-    --port "${PORT}" \
-    --distributed-executor-backend ray \
-    --tensor-parallel-size "${TP}" \
-    --pipeline-parallel-size "${PP}" \
-    --max-model-len "${MAX_MODEL_LEN}" \
-    --enforce-eager \
-    "${VLLM_TRACE_FLAGS[@]}" \
-    --disable-custom-all-reduce &
+  nsys profile \
+    --force-overwrite=true \
+    --trace="${NSYS_TRACE}" \
+    --sample=none \
+    --delay="${NSYS_DELAY}" \
+    --output="${NSYS_DIR}/vllm_api_server_${HEAD_NODE}" \
+    python -m vllm.entrypoints.openai.api_server \
+      --model "${MODEL_ID}" \
+      --host "${HOST}" \
+      --port "${PORT}" \
+      --distributed-executor-backend ray \
+      --tensor-parallel-size "${TP}" \
+      --pipeline-parallel-size "${PP}" \
+      --max-model-len "${MAX_MODEL_LEN}" \
+      --enforce-eager \
+      "${VLLM_TRACE_FLAGS[@]}" \
+      --disable-custom-all-reduce &
 else
   python -m vllm.entrypoints.openai.api_server \
     --model "${MODEL_ID}" \
@@ -808,20 +493,17 @@ until curl -fsS "http://${HEAD_NODE_IP}:${PORT}/health" >/dev/null 2>&1; do
     wait "${SERVER_STEP_PID}" || true
     exit 1
   fi
-
   _health_wait_n=$((_health_wait_n + 1))
-
+  # Every ~60s by default; every loop if DEBUG_SLURM_SCRIPT=1
   if [ "${DEBUG_SLURM_SCRIPT}" = "1" ] || [ "$((_health_wait_n % 12))" -eq 0 ]; then
     echo "Still waiting for http://${HEAD_NODE_IP}:${PORT}/health (attempt ${_health_wait_n}) ..."
   fi
-
   sleep 5
 done
 unset _health_wait_n
 
 echo "Server is healthy. Running ${SERVE_SCRIPT} ..."
 echo "SP=${SP} SD=${SD}"
-
 HOST="${HEAD_NODE_IP}" PORT="${PORT}" MODEL_ID="${MODEL_ID}" \
   SP="${SP}" SD="${SD}" \
   HEAD_NODE_IP="${HEAD_NODE_IP}" \
@@ -835,43 +517,34 @@ if [ -n "${SERVER_STEP_PID}" ] && kill -0 "${SERVER_STEP_PID}" 2>/dev/null; then
   SERVER_STEP_PID=""
 fi
 
-echo "Waiting briefly for Ray worker Nsight reports to flush..."
-sleep 30
-
-echo "=== Ray log locations after workload ==="
-print_ray_log_locations_from_node "${HEAD_NODE}"
-
-for WORKER in ${WORKER_NODES}; do
-  print_ray_log_locations_from_node "${WORKER}"
-done
-
-echo "Copying Ray worker Nsight reports before stopping Ray background steps..."
+echo "Copying Ray worker Nsight reports..."
 mkdir -p "${TRACE_RUN_DIR}/ray_worker_nsight"
+
+copy_ray_nsight_from_node() {
+  local NODE="$1"
+  srun \
+    --nodelist "${NODE}" \
+    --overlap \
+    --nodes=1 \
+    --ntasks=1 \
+    --ntasks-per-node=1 \
+    --cpus-per-task=1 \
+    bash -lc "
+      mkdir -p '${TRACE_RUN_DIR}/ray_worker_nsight/${NODE}'
+      if [ -d /tmp/ray/session_latest/logs/nsight ]; then
+        cp -v /tmp/ray/session_latest/logs/nsight/*.nsys-rep \
+          '${TRACE_RUN_DIR}/ray_worker_nsight/${NODE}/' 2>/dev/null || true
+      else
+        echo 'No /tmp/ray/session_latest/logs/nsight on ${NODE}'
+      fi
+    " || true
+}
 
 copy_ray_nsight_from_node "${HEAD_NODE}"
 
 for WORKER in ${WORKER_NODES}; do
   copy_ray_nsight_from_node "${WORKER}"
 done
-
-copy_ray_nsight_from_shared_root
-collect_ray_logs
-
-echo "Stopping Ray background srun steps after collecting reports..."
-
-if [ -n "${HEAD_RAY_PID}" ] && kill -0 "${HEAD_RAY_PID}" 2>/dev/null; then
-  kill -TERM "${HEAD_RAY_PID}" 2>/dev/null || true
-  wait "${HEAD_RAY_PID}" 2>/dev/null || true
-fi
-HEAD_RAY_PID=""
-
-for pid in ${WORKER_RAY_PIDS}; do
-  if kill -0 "${pid}" 2>/dev/null; then
-    kill -TERM "${pid}" 2>/dev/null || true
-    wait "${pid}" 2>/dev/null || true
-  fi
-done
-WORKER_RAY_PIDS=""
 
 echo "Trace files:"
 find "${TRACE_RUN_DIR}" -maxdepth 5 -type f -printf "%p %s bytes\n" 2>/dev/null || true
