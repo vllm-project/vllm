@@ -23,6 +23,7 @@ from vllm.entrypoints.codec_dispatcher import (
     CODEC_BOLT_ON_DISPATCH,
     ToolRegistry,
     dispatch_call,
+    dispatch_call_async,
     reinject_ids_into_context,
 )
 from vllm.entrypoints.codec_frame import encode_frame
@@ -187,6 +188,15 @@ class OpenAIServingChat(OpenAIServing):
         # Please use the Responses API instead.
         self.supports_code_interpreter = False
         self.python_tool = None
+
+        # v0.5 #87: lazy-cached Codec ToolRegistry. `ToolRegistry.from_env`
+        # performs blocking HTTP fetches against manifest URLs; doing that
+        # per-request blocks the event loop and adds startup latency to
+        # every tool-watcher stream. Resolve once per process on first use
+        # and reuse the registry thereafter. Sentinel = "not yet attempted";
+        # None after load = attempted but env not configured.
+        self._codec_dispatcher_registry: ToolRegistry | None = None
+        self._codec_dispatcher_registry_loaded: bool = False
 
     def warmup(self) -> None:
         self.renderer.warmup(
@@ -1081,8 +1091,19 @@ class OpenAIServingChat(OpenAIServing):
         # tool's response_ids back into the stream.
         dispatcher_registry: ToolRegistry | None = None
         if CODEC_BOLT_ON_DISPATCH and watcher is not None:
-            tokenizer_hash = getattr(self, "_codec_tokenizer_map_hash", "")
-            dispatcher_registry = ToolRegistry.from_env(tokenizer_hash)
+            # Cached on the serving instance — ToolRegistry.from_env makes
+            # blocking HTTP fetches against manifest URLs, so it must NEVER
+            # run inside the async request loop. First request after process
+            # start pays the fetch cost (off-loop via to_thread); subsequent
+            # requests reuse the cached registry.
+            if not self._codec_dispatcher_registry_loaded:
+                tokenizer_hash = getattr(self, "_codec_tokenizer_map_hash", "")
+                import asyncio as _asyncio
+                self._codec_dispatcher_registry = await _asyncio.to_thread(
+                    ToolRegistry.from_env, tokenizer_hash
+                )
+                self._codec_dispatcher_registry_loaded = True
+            dispatcher_registry = self._codec_dispatcher_registry
 
         try:
             async for res in result_generator:
@@ -1119,7 +1140,14 @@ class OpenAIServingChat(OpenAIServing):
                             tool = dispatcher_registry.get(ev.name)
                             if tool is not None and tool.mode == "dispatch":
                                 try:
-                                    result = dispatch_call(
+                                    # Use the async variant — sync `dispatch_call`
+                                    # does a blocking urllib POST that would
+                                    # freeze the event loop if called from this
+                                    # `async def`. `dispatch_call_async` wraps
+                                    # it in asyncio.to_thread so other
+                                    # concurrent requests on the worker keep
+                                    # flowing while the tool reply is in flight.
+                                    result = await dispatch_call_async(
                                         tool,
                                         arguments_json=ev.arguments_json,
                                         call_id=ev.id or make_call_id(next_call_seq),

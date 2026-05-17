@@ -197,8 +197,11 @@ def dispatch_call(
 ) -> CodecToolResult:
     """POST a CodecToolCall to ``tool.endpoint`` and decode the response.
 
-    Synchronous + stdlib-only. Engines that want async dispatch can
-    wrap this in a thread or replace with their preferred HTTP client.
+    Synchronous + stdlib-only. ASGI engines should NOT call this
+    directly from inside the async request loop — `urlopen` blocks the
+    event loop. Use `dispatch_call_async` instead (it wraps this in
+    `asyncio.to_thread`). The sync form stays for non-async callers
+    (CLI tools, batch eval drivers).
     """
     import urllib.request
     call = CodecToolCall(
@@ -216,6 +219,24 @@ def dispatch_call(
     with urllib.request.urlopen(req, timeout=60) as resp:
         body = resp.read()
     return decode_tool_result(body)
+
+
+async def dispatch_call_async(
+    tool: RegisteredTool,
+    arguments_json: str,
+    call_id: str,
+) -> CodecToolResult:
+    """Async variant of :func:`dispatch_call`.
+
+    Runs the blocking urllib POST in a worker thread via
+    `asyncio.to_thread` so it doesn't block the event loop. ASGI engines
+    (vLLM's chat / completion serving paths) MUST use this variant —
+    calling the sync `dispatch_call` from inside an `async def` request
+    handler blocks every other in-flight request on the same uvicorn
+    worker until the tool replies.
+    """
+    import asyncio
+    return await asyncio.to_thread(dispatch_call, tool, arguments_json, call_id)
 
 
 # ── Reinjection hook ───────────────────────────────────────────────────────
@@ -244,6 +265,7 @@ __all__ = [
     "ToolRegistry",
     "decode_tool_result",
     "dispatch_call",
+    "dispatch_call_async",
     "encode_tool_call",
     "reinject_ids_into_context",
 ]
