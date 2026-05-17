@@ -407,11 +407,12 @@ _MEGA_MOE_DG_ENV_APPLIED = False
 
 
 def _apply_mega_moe_dg_env() -> None:
-    """Forward VLLM_DEEPGEMM_MEGA_MOE_* env vars to DeepGEMM internals.
+    """Forward VLLM_DEEPGEMM_MEGA_MOE_* env vars to sgl-deep-gemm internals.
 
-    Experimental: uses external deep_gemm (sgl-deep-gemm) for FP4 acts.
-    TODO(upstream): remove once vendored deep_gemm includes
-    mega_moe_pre_dispatch and FP4-aware buffer sizing.
+    PoC: upstream DeepGEMM does not yet support FP4 activations
+    (use_fp8_dispatch is accepted but ignored). Uses sgl-deep-gemm
+    for FP4-aware buffer sizing and mega_moe_pre_dispatch.
+    Remove once upstream wires use_fp8_dispatch=False end-to-end.
     """
     global _MEGA_MOE_DG_ENV_APPLIED
     if _MEGA_MOE_DG_ENV_APPLIED:
@@ -605,8 +606,8 @@ class DeepseekV4MegaMoEExperts(nn.Module):
 
     def get_symm_buffer(self):
         _apply_mega_moe_dg_env()
-        # Experimental: external deep_gemm for FP4-aware buffer sizing.
-        # TODO: collapse to vendored import once upstream supports FP4 layout.
+        # PoC: sgl-deep-gemm for FP4 buffer sizing (upstream ignores
+        # use_fp8_dispatch). Remove branch when upstream supports it.
         if envs.VLLM_DEEPGEMM_MEGA_MOE_USE_FP4_ACTS:
             import deep_gemm
         else:
@@ -671,8 +672,8 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         activation_clamp: float | None,
         fast_math: bool,
     ) -> None:
-        # Experimental: external deep_gemm for mega_moe_pre_dispatch.
-        # TODO: collapse to vendored import once upstream supports this API.
+        # PoC: sgl-deep-gemm provides mega_moe_pre_dispatch for FP4
+        # packing. Remove branch when upstream supports FP4 acts.
         if envs.VLLM_DEEPGEMM_MEGA_MOE_USE_FP4_ACTS:
             import deep_gemm
         else:
