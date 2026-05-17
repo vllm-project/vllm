@@ -11,7 +11,8 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
 )
-from vllm.entrypoints.context_compression import apply_ace_eviction
+from vllm.entrypoints.attention_capture import get_capture, start_capture, stop_capture
+from vllm.entrypoints.context_compression import apply_ace_eviction, get_tracker
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
@@ -250,6 +251,13 @@ class OpenAIServingRender:
             )
             # Use 3 chars/token (conservative; code/tool output is denser than prose)
             budget_chars = max(0, max_model_len - max_tokens) * 3
+
+            # Phase 3: retrieve accumulated attention tracker from the previous
+            # generation turn, if the client provides a stable conversation_id.
+            # Falls back to BM25 (Phase 2) when no attention data is available.
+            session_id: str | None = getattr(request, "conversation_id", None)
+            tracker = get_tracker(session_id) if session_id else None
+
             apply_ace_eviction(
                 messages,  # type: ignore[arg-type]
                 budget_chars=budget_chars,
@@ -260,7 +268,17 @@ class OpenAIServingRender:
                     request, "context_compression_ratio", 0.4
                 ),
                 use_query_relevance=True,
+                tracker=tracker,
             )
+
+            # Register an attention capture for this generation turn so that
+            # the next request with the same conversation_id can use Mode 3.
+            # The capture is stopped by the response streaming teardown.
+            if session_id:
+                if tracker is None:
+                    # First turn: register a fresh tracker.
+                    start_capture(session_id, max_seq_len=max_model_len)
+                # else: tracker already registered; capture is already active.
 
         if not self.use_harmony:
             # Common case.
