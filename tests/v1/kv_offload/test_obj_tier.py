@@ -57,10 +57,13 @@ _STORE_CONFIG = {
 
 # Probe NIXL OBJ plugin availability
 try:
-    _probe = ObjectStoreSecondaryTierManager.from_config({
-        "store_config": _STORE_CONFIG,
-    })
-    del _probe
+    _probe_view = memoryview(torch.zeros(1, 1, dtype=torch.float32).numpy())
+    _probe = ObjectStoreSecondaryTierManager(
+        vllm_config=None,
+        primary_kv_view=_probe_view,
+        store_config=_STORE_CONFIG,
+    )
+    del _probe, _probe_view
 except RuntimeError as _e:
     pytest.skip(f"NIXL OBJ plugin not available: {_e}", allow_module_level=True)
 
@@ -93,27 +96,39 @@ def make_job(
         job_id=job_id,
         keys=keys,
         block_ids=np.array(block_ids, dtype=np.int64),
+        is_promotion=False,
+        req_context=_CTX,
     )
 
 
 def make_tier(
     key_prefix: str = _RUN_PREFIX,
+    num_blocks: int = 1,
     **kwargs,
 ) -> ObjectStoreSecondaryTierManager:
-    return ObjectStoreSecondaryTierManager.from_config({
-        "store_config": _STORE_CONFIG,
-        "prefix": key_prefix,
+    view = memoryview(torch.zeros(num_blocks, _BLOCK_ELEMENTS, dtype=_DTYPE).numpy())
+    return ObjectStoreSecondaryTierManager(
+        vllm_config=None,
+        primary_kv_view=view,
+        store_config=_STORE_CONFIG,
+        prefix=key_prefix,
         **kwargs,
-    })
+    )
 
 
 def make_tier_with_view(
     num_total_blocks: int = 8,
+    key_prefix: str = _RUN_PREFIX,
     **kwargs,
 ) -> tuple[ObjectStoreSecondaryTierManager, torch.Tensor]:
-    tier = make_tier(**kwargs)
     tensor = torch.zeros((num_total_blocks, _BLOCK_ELEMENTS), dtype=_DTYPE)
-    tier.set_primary_view(memoryview(tensor.numpy()))
+    tier = ObjectStoreSecondaryTierManager(
+        vllm_config=None,
+        primary_kv_view=memoryview(tensor.numpy()),
+        store_config=_STORE_CONFIG,
+        prefix=key_prefix,
+        **kwargs,
+    )
     return tier, tensor
 
 

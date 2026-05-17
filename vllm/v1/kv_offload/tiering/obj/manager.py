@@ -3,7 +3,7 @@
 """Object store secondary tier implementation."""
 
 from collections.abc import Iterable
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
 import torch
@@ -18,6 +18,9 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.tiering.base import JobMetadata, JobResult, SecondaryTierManager
 from vllm.v1.kv_offload.tiering.obj.config import ObjStoreConfig
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
@@ -40,12 +43,16 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
 
     def __init__(
         self,
-        obj_config: ObjStoreConfig,
+        vllm_config: "VllmConfig",
+        primary_kv_view: memoryview,
+        store_config: dict,
         prefix: str = "",
         io_threads: int = 4,
     ):
+        super().__init__(vllm_config, primary_kv_view)
         agent_config = nixl_agent_config(backends=[])
         self._agent = nixl_agent("ObjAgent", agent_config)
+        obj_config = ObjStoreConfig(**store_config)
         params = {**obj_config.to_nixl_params(), "num_threads": str(io_threads)}
         self._agent.create_backend("OBJ", params)
         self._transfers: dict[int, TransferEntry] = {}
@@ -57,6 +64,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         self._next_obj_dev_id: int = 0  # unique devId for each OBJ registration
 
         self._probe_connectivity()
+        self.set_primary_view(primary_kv_view)
 
     def _probe_connectivity(self) -> None:
         """Verify object store connectivity at startup via a NIXL lookup probe.
@@ -192,14 +200,6 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
                 logger.warning("failed to deregister primary buffer: %s", exc)
             self._primary_reg = None
         self._primary_tensor = None
-
-    @classmethod
-    def from_config(cls, config: dict) -> "ObjectStoreSecondaryTierManager":
-        return cls(
-            obj_config=ObjStoreConfig(**config["store_config"]),
-            prefix=config.get("prefix", ""),
-            io_threads=config.get("io_threads", 4),
-        )
 
     @staticmethod
     def get_tier_type() -> str:
