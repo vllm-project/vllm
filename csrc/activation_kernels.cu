@@ -79,9 +79,16 @@ __global__ void act_and_mul_kernel(
     scalar_t* __restrict__ out,          // [..., d]
     const scalar_t* __restrict__ input,  // [..., 2, d]
     const int d, const float limit) {
-  const scalar_t* x_ptr = input + blockIdx.x * 2 * d;
+  // `blockIdx.x` is `unsigned int`; multiplying by `d` (`int`) keeps the
+  // result in 32 bits, which overflows once `blockIdx.x * 2 * d` exceeds
+  // INT_MAX (about 2.15 billion). For large hidden sizes this corrupts the
+  // pointer arithmetic and reads/writes the wrong memory. Promote the index
+  // to int64_t first; matches the pattern already used in
+  // `swigluoai_and_mul_kernel` below. See issue #42860.
+  const int64_t token_idx = blockIdx.x;
+  const scalar_t* x_ptr = input + token_idx * 2 * d;
   const scalar_t* y_ptr = x_ptr + d;
-  scalar_t* out_ptr = out + blockIdx.x * d;
+  scalar_t* out_ptr = out + token_idx * d;
 
   if constexpr (use_vec) {
     using cuda_t = typename CUDATypeConverter<scalar_t>::Type;
@@ -313,9 +320,12 @@ template <typename scalar_t, typename packed_t,
 __global__ void act_and_mul_kernel_with_param(
     scalar_t* __restrict__ out, const scalar_t* __restrict__ input, const int d,
     const float param) {
-  const scalar_t* x_ptr = input + blockIdx.x * 2 * d;
+  // See `act_and_mul_kernel` above for the int64_t-promotion rationale
+  // (overflow at `blockIdx.x * 2 * d` for large hidden sizes). #42860.
+  const int64_t token_idx = blockIdx.x;
+  const scalar_t* x_ptr = input + token_idx * 2 * d;
   const scalar_t* y_ptr = x_ptr + d;
-  scalar_t* out_ptr = out + blockIdx.x * d;
+  scalar_t* out_ptr = out + token_idx * d;
 
   if constexpr (use_vec) {
     using cuda_t = typename CUDATypeConverter<scalar_t>::Type;
@@ -517,8 +527,12 @@ __global__ void activation_kernel(
     scalar_t* __restrict__ out,          // [..., d]
     const scalar_t* __restrict__ input,  // [..., d]
     const int d) {
-  const scalar_t* in_ptr = input + blockIdx.x * d;
-  scalar_t* out_ptr = out + blockIdx.x * d;
+  // See `act_and_mul_kernel` near the top of this file for the
+  // int64_t-promotion rationale (`blockIdx.x * d` overflows int when
+  // `blockIdx.x * d > INT_MAX`). #42860.
+  const int64_t token_idx = blockIdx.x;
+  const scalar_t* in_ptr = input + token_idx * d;
+  scalar_t* out_ptr = out + token_idx * d;
 
   if constexpr (use_vec) {
     // Fast path: 128-bit/256-bit vectorized loop
