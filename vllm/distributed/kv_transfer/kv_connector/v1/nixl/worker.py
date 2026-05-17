@@ -906,11 +906,16 @@ class NixlConnectorWorker:
                 else:
                     self.block_len_per_layer.append(physical_page_size)
 
-                if cache.shape[0] != num_blocks:
+                expected_first_dim = (
+                    self._logical_num_blocks
+                    if self.vllm_config.use_v2_model_runner
+                    else self.num_blocks
+                )
+                if cache.shape[0] != expected_first_dim:
                     raise AssertionError(
                         "All kv cache tensors must have the same number of "
                         f"blocks; layer={layer_name}, "
-                        f"expected_num_blocks={num_blocks}, "
+                        f"expected_num_blocks={expected_first_dim}, "
                         f"cache_shape={tuple(cache.shape)}, "
                         f"cache_stride={tuple(cache.stride())}, "
                         f"layer_spec={type(layer_spec).__name__}, "
@@ -919,7 +924,8 @@ class NixlConnectorWorker:
                         f"{[backend.get_name() for backend in self.attn_backends]}, "
                         f"kv_cache_layout={self.kv_cache_layout}, "
                         "blocks_first="
-                        f"{self.transfer_topo.is_kv_layout_blocks_first}"
+                        f"{self.transfer_topo.is_kv_layout_blocks_first}, "
+                        f"use_v2_model_runner={self.vllm_config.use_v2_model_runner}"
                     )
 
                 if not self.use_mla:
