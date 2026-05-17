@@ -1467,3 +1467,35 @@ def test_ir_op_priority_ctx():
         # context restored even after exception
         assert ir.ops.rms_norm.get_priority() == ["vllm_c", "native"]
         assert ir.ops.fused_add_rms_norm.get_priority() == ["native"]
+
+
+# ---------------------------------------------------------------------------
+# Issue #42593 — --enable-return-routed-experts on non-MoE models
+# ---------------------------------------------------------------------------
+
+class _FakeModelConfig:
+    """Minimal stand-in for ModelConfig to exercise _verify_return_routed_experts."""
+    def __init__(self, is_moe: bool, model: str = "test-model") -> None:
+        self.is_moe = is_moe
+        self.model = model
+
+
+def test_return_routed_experts_rejected_for_non_moe():
+    """_verify_return_routed_experts raises early for dense (non-MoE) models."""
+    fake = _FakeModelConfig(is_moe=False, model="meta-llama/Meta-Llama-3.1-8B-Instruct")
+    with pytest.raises(ValueError, match="--enable-return-routed-experts requires a MoE model"):
+        ModelConfig._verify_return_routed_experts(fake)
+
+
+def test_return_routed_experts_passes_for_moe():
+    """_verify_return_routed_experts does not raise for MoE models."""
+    fake = _FakeModelConfig(is_moe=True, model="mistralai/Mixtral-8x7B-Instruct-v0.1")
+    ModelConfig._verify_return_routed_experts(fake)  # must not raise
+
+
+def test_return_routed_experts_error_message_contains_model_name():
+    """Error message must include the model name so users know which model failed."""
+    model_name = "meta-llama/Meta-Llama-3.1-8B-Instruct"
+    fake = _FakeModelConfig(is_moe=False, model=model_name)
+    with pytest.raises(ValueError, match=model_name):
+        ModelConfig._verify_return_routed_experts(fake)

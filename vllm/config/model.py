@@ -1101,6 +1101,16 @@ class ModelConfig:
                 "when expert parallelism is enabled."
             )
 
+    def _verify_return_routed_experts(self) -> None:
+        if not self.is_moe:
+            raise ValueError(
+                "--enable-return-routed-experts requires a MoE model "
+                "architecture. The loaded model "
+                f"'{self.model}' does not have routed experts. "
+                "Remove --enable-return-routed-experts from your "
+                "configuration."
+            )
+
     def _try_verify_and_update_model_config(self):
         # Avoid running try_verify_and_update_config multiple times
         if getattr(self, "config_updated", False):

@@ -834,6 +834,8 @@ class VllmConfig:
             self.model_config is not None
             and self.model_config.enable_return_routed_experts
         ):
+            self.model_config._verify_return_routed_experts()
+
             if self.parallel_config.pipeline_parallel_size > 1:
                 raise ValueError(
                     "--enable-return-routed-experts is incompatible with "
