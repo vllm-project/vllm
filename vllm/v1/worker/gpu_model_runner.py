@@ -2268,9 +2268,12 @@ class GPUModelRunner(
         # Used by mamba backends to distinguish actual decodes from
         # short extends.
         is_prefilling = num_computed_tokens_cpu < num_prompt_tokens_cpu
-        # Zero out padded rows so stale data from condense() doesn't
-        # misclassify padding as prefill in CUDA graph mode.
-        is_prefilling[num_reqs:] = False
+        if num_reqs_padded > num_reqs:
+            # Rows beyond num_reqs are full-CUDA-graph padding rows, not real
+            # scheduled requests. They have zero query tokens and cannot be
+            # doing prefill work, even if stale padded request counters still
+            # satisfy num_computed_tokens < num_prompt_tokens.
+            is_prefilling[num_reqs:num_reqs_padded] = False
 
         if self.use_async_spec_decode:
             # GPU tensors are authoritative in async mode.

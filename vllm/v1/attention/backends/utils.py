@@ -589,7 +589,10 @@ def split_decodes_and_prefills(
 
     if not treat_short_extends_as_decodes:
         assert common_attn_metadata.is_prefilling is not None
-        is_prefill |= common_attn_metadata.is_prefilling
+        # Full CUDA graphs can pad decode batches with zero-query rows. Those
+        # padding rows do not represent real prefill work, even if stale padded
+        # request metadata marks them as still prefilling.
+        is_prefill |= common_attn_metadata.is_prefilling & (query_lens > 0)
 
     if not torch.any(is_prefill):
         return num_reqs, 0, num_tokens, 0

@@ -296,6 +296,30 @@ def test_split_decodes_and_prefills_uniform_padded_batch_all_same():
     assert num_prefill_tokens == 0
 
 
+def test_split_decodes_and_prefills_ignores_stale_padded_is_prefilling():
+    common_metadata = create_common_attn_metadata(
+        BatchSpec(seq_lens=[10, 20, 30, 40], query_lens=[1, 1, 0, 0]),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    common_metadata.is_prefilling = torch.tensor([False, False, False, True])
+    common_metadata.num_actual_tokens = 4
+
+    num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
+        split_decodes_and_prefills(
+            common_metadata,
+            decode_threshold=1,
+            require_uniform=False,
+            treat_short_extends_as_decodes=False,
+        )
+    )
+
+    assert num_decodes == 4
+    assert num_prefills == 0
+    assert num_decode_tokens == 4
+    assert num_prefill_tokens == 0
+
+
 @pytest.mark.parametrize(
     "seq_lens,query_lens,split_point,expected_first_reqs,expected_second_reqs",
     [
