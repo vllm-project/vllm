@@ -87,7 +87,6 @@ from vllm.model_executor.models.utils import (
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.flashinfer import (
-    flashinfer_fp4_quantize,
     flashinfer_scaled_fp4_mm,
     has_flashinfer_trtllm_fused_moe,
 )
@@ -117,6 +116,19 @@ _kimi_moe_setup_log_lock = threading.Lock()
 _kimi_moe_setup_log_keys: set[tuple[int, int, int, int, int, int, bool]] = set()
 _kimi_moe_runtime_log_lock = threading.Lock()
 _kimi_moe_runtime_log_keys: set[tuple[int, int, int, int, bool]] = set()
+
+
+def _kimi_fp4_quantize_hidden_states(
+    hidden_states: torch.Tensor,
+    global_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    import vllm._custom_ops as ops
+
+    return ops.scaled_fp4_quant(
+        hidden_states,
+        global_scale,
+        is_sf_swizzled_layout=False,
+    )
 
 
 def _kimi_tensor_meta(tensor: torch.Tensor | None) -> str:
@@ -2499,13 +2511,9 @@ class KimiK25Nvfp4RoutedExperts(nn.Module):
             )
 
         assert quant_config.a1_gscale is not None
-        hidden_states, hidden_states_scale = flashinfer_fp4_quantize(
+        hidden_states, hidden_states_scale = _kimi_fp4_quantize_hidden_states(
             hidden_states,
             quant_config.a1_gscale,
-            sf_vec_size=16,
-            sf_use_ue8m0=False,
-            is_sf_swizzled_layout=False,
-            is_sf_8x4_layout=False,
         )
         assert hidden_states_scale is not None
         assert quant_config.w1_scale is not None
