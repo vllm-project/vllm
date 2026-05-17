@@ -149,7 +149,11 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         return True
 
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
-        return self._exists(self._get_obj_key(key))
+        try:
+            return self._exists(self._get_obj_key(key))
+        except Exception as e:
+            logger.warning("lookup failed for key %s: %s", key, e)
+            return False
 
     def submit_store(self, job_metadata: JobMetadata) -> None:
         obj_keys = (self._get_obj_key(k) for k in job_metadata.keys)
