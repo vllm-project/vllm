@@ -155,9 +155,9 @@ switch to `--physcpubind=<cpu-list> --membind=<node>`.
 
 These `--numa-bind*` options only apply to GPU execution processes. They do not
 configure the CPU backend's separate thread-affinity controls. Automatic
-GPU-to-NUMA detection is currently implemented for CUDA/NVML-based platforms;
-other GPU backends must provide explicit binding lists if they use these
-options.
+GPU-to-NUMA detection is currently implemented for CUDA/NVML-based as well as
+ROCM-based platforms; other GPU backends must provide explicit binding lists if
+they use these options.
 
 `--numa-bind-nodes` takes one non-negative NUMA node index per visible GPU, in
 the same order as the GPU indices.
@@ -269,6 +269,36 @@ Known supported models (with corresponding benchmarks):
 - Step3 (<https://github.com/vllm-project/vllm/pull/22697>)
 
 ## Input Processing
+
+### fastokens Tokenizer Mode
+
+By default vLLM uses the standard Hugging Face `tokenizers` library to power
+the fast tokenizer (`--tokenizer-mode hf`). For BPE tokenizers (Qwen, Llama,
+DeepSeek, GPT-OSS, etc.) you can switch to the
+[fastokens](https://github.com/crusoecloud/fastokens) Rust backend, a drop-in
+replacement that's substantially faster on encode/decode and on streaming
+detokenization:
+
+```console
+vllm serve Qwen/Qwen3-8B --tokenizer-mode fastokens
+```
+
+Equivalent in the offline API:
+
+```python
+from vllm import LLM
+llm = LLM(model="Qwen/Qwen3-8B", tokenizer_mode="fastokens")
+```
+
+The `fastokens` Python package must be installed; if it isn't, vLLM raises
+a clear `ImportError` at tokenizer load. `fastokens` loads a Hugging Face
+fast tokenizer with its inner Rust tokenizer replaced by the fastokens shim,
+so it is mutually exclusive with non-HF modes such as `mistral` or
+`deepseek_v32`.
+
+Tokenizer-bound workloads — long shared prefixes, bursty short prompts,
+batch detokenization — see the largest wins. If your bottleneck is GPU
+prefill/decode, the tokenizer change is unlikely to be visible end-to-end.
 
 ### Parallel Processing
 

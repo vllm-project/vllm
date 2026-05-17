@@ -29,9 +29,9 @@ except ImportError:
     soundfile = PlaceholderModule("soundfile")  # type: ignore[assignment]
 
 
-# Public libsndfile error codes exposed via `soundfile.LibsndfileError.code`, soundfile
-# being librosa's main backend. Used to validate if an audio loading error is due to a
-# server error vs a client error (invalid audio file).
+# Public libsndfile error codes exposed via `soundfile.LibsndfileError.code`,
+# soundfile being the main audio loading backend. Used to validate if an audio
+# loading error is due to a server error vs a client error (invalid audio file).
 # 0 = sf_error(NULL) race condition: when multiple threads fail sf_open_virtual
 #     concurrently, one thread may clear the global error before another reads it,
 #     producing code=0 ("Garbled error message from libsndfile" in soundfile).
