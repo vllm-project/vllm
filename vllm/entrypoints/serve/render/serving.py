@@ -259,6 +259,7 @@ class OpenAIServingRender:
                 target_ratio=getattr(
                     request, "context_compression_ratio", 0.4
                 ),
+                use_query_relevance=True,
             )
 
         if not self.use_harmony:
