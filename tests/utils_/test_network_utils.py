@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import socket
+import sys
 
 import pytest
 import zmq
 
 from vllm.utils.network_utils import (
+    get_open_zmq_ipc_path,
     get_open_port,
     get_open_ports_list,
     get_tcp_uri,
@@ -108,6 +110,18 @@ def test_make_zmq_path():
 def test_get_tcp_uri():
     assert get_tcp_uri("127.0.0.1", 5555) == "tcp://127.0.0.1:5555"
     assert get_tcp_uri("::1", 5555) == "tcp://[::1]:5555"
+
+
+def test_get_open_zmq_ipc_path_uses_tcp_on_windows(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    path = get_open_zmq_ipc_path()
+
+    assert path.startswith("tcp://")
+    scheme, host, port = split_zmq_path(path)
+    assert scheme == "tcp"
+    assert host in {"127.0.0.1", "::1"}
+    assert port.isdigit()
 
 
 def test_split_host_port():
