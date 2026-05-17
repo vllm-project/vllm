@@ -183,6 +183,7 @@ EXPECTED_METRICS_V1 = [
     "vllm:num_requests_running",
     "vllm:num_requests_waiting",
     "vllm:num_requests_waiting_by_reason",
+    "vllm:scheduler_queue_pressure",
     "vllm:kv_cache_usage_perc",
     "vllm:prefix_cache_queries",
     "vllm:prefix_cache_hits",

@@ -490,6 +490,27 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 gauge_waiting_by_reason, per_engine_labelvalues_with_reason
             )
 
+        self.scheduler_capacity = vllm_config.scheduler_config.max_num_seqs
+        gauge_queue_pressure = self._gauge_cls(
+            name="vllm:scheduler_queue_pressure",
+            documentation=(
+                "Waiting requests by reason normalized by scheduler capacity "
+                "(max_num_seqs). Reason labels match "
+                "vllm:num_requests_waiting_by_reason."
+            ),
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames + ["reason"],
+        )
+        self.gauge_queue_pressure: dict[str, dict[int, Gauge]] = {}
+        for waiting_reason in [WAITING_REASON_CAPACITY, WAITING_REASON_DEFERRED]:
+            per_engine_labelvalues_with_reason = {
+                idx: labelvalues + [waiting_reason]
+                for idx, labelvalues in per_engine_labelvalues.items()
+            }
+            self.gauge_queue_pressure[waiting_reason] = create_metric_per_engine(
+                gauge_queue_pressure, per_engine_labelvalues_with_reason
+            )
+
         gauge_engine_sleep_state = self._gauge_cls(
             name="vllm:engine_sleep_state",
             documentation=(
@@ -1077,6 +1098,12 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             )
             self.gauge_waiting_by_reason[WAITING_REASON_DEFERRED][engine_idx].set(
                 scheduler_stats.num_skipped_waiting_reqs
+            )
+            self.gauge_queue_pressure[WAITING_REASON_CAPACITY][engine_idx].set(
+                scheduler_stats.num_waiting_reqs / self.scheduler_capacity
+            )
+            self.gauge_queue_pressure[WAITING_REASON_DEFERRED][engine_idx].set(
+                scheduler_stats.num_skipped_waiting_reqs / self.scheduler_capacity
             )
             self.gauge_kv_cache_usage[engine_idx].set(scheduler_stats.kv_cache_usage)
 
