@@ -8,7 +8,6 @@ import pytest
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.pooler.activations import (
     LambdaPoolerActivation,
     PoolerClassify,
@@ -18,15 +17,6 @@ from vllm.model_executor.layers.pooler.activations import (
     get_act_fn,
     resolve_classifier_act_fn,
 )
-
-
-@pytest.fixture
-def vllm_config():
-    """VllmConfig with a minimal model_config stub for PoolerClassify."""
-    config = VllmConfig()
-    config.model_config = SimpleNamespace(hf_config=SimpleNamespace(num_labels=0))
-    with set_current_vllm_config(config):
-        yield config
 
 
 # ---------------------------------------------------------------------------
@@ -102,35 +92,38 @@ class TestPoolerMultiLabelClassify:
 # PoolerClassify
 # ---------------------------------------------------------------------------
 class TestPoolerClassify:
-    def test_dynamic_softmax_when_num_labels_ge_2(self):
-        pooler = PoolerClassify(static_num_labels=False)
+    def test_infers_from_shape_when_num_labels_none(self):
+        pooler = PoolerClassify(num_labels=None)
         assert pooler.num_labels is None
         x = torch.randn(2, 5)
         out = pooler(x)
         sums = out.sum(dim=-1)
         assert torch.allclose(sums, torch.ones(2), atol=1e-5)
 
-    def test_dynamic_sigmoid_when_num_labels_lt_2(self):
-        pooler = PoolerClassify(static_num_labels=False)
+    def test_sigmoid_when_num_labels_lt_2(self):
+        pooler = PoolerClassify(num_labels=1)
         x = torch.zeros(1, 1)
         out = pooler(x)
         assert torch.allclose(out, torch.tensor([[0.5]]), atol=1e-5)
 
-    def test_static_default_num_labels_zero_uses_sigmoid(self, vllm_config):
-        pooler = PoolerClassify(static_num_labels=True)
+    def test_num_labels_zero_uses_sigmoid(self):
+        pooler = PoolerClassify(num_labels=0)
         assert pooler.num_labels == 0
         x = torch.zeros(1, 3)
         out = pooler(x)
         assert torch.allclose(out, torch.full((1, 3), 0.5), atol=1e-5)
 
-    def test_static_num_labels_ge_2_uses_softmax(self, vllm_config):
-        vllm_config.model_config.hf_config.num_labels = 4
-        pooler = PoolerClassify(static_num_labels=True)
+    def test_num_labels_ge_2_uses_softmax(self):
+        pooler = PoolerClassify(num_labels=4)
         assert pooler.num_labels == 4
         x = torch.randn(2, 4)
         out = pooler(x)
         sums = out.sum(dim=-1)
         assert torch.allclose(sums, torch.ones(2), atol=1e-5)
+
+    def test_default_num_labels_is_none(self):
+        pooler = PoolerClassify()
+        assert pooler.num_labels is None
 
 
 # ---------------------------------------------------------------------------
@@ -160,24 +153,25 @@ class TestGetActFn:
     def _make_config(**kwargs):
         return SimpleNamespace(**kwargs)
 
-    def test_regression(self, vllm_config):
+    def test_regression(self):
         cfg = self._make_config(problem_type="regression")
         result = get_act_fn(cfg)
         assert isinstance(result, PoolerIdentity)
 
-    def test_single_label_classification(self, vllm_config):
+    def test_single_label_classification(self):
         cfg = self._make_config(
             problem_type="single_label_classification", num_labels=3
         )
         result = get_act_fn(cfg)
         assert isinstance(result, PoolerClassify)
+        assert result.num_labels == 3
 
-    def test_multi_label_classification(self, vllm_config):
+    def test_multi_label_classification(self):
         cfg = self._make_config(problem_type="multi_label_classification")
         result = get_act_fn(cfg)
         assert isinstance(result, PoolerMultiLabelClassify)
 
-    def test_sentence_transformers_activation(self, vllm_config):
+    def test_sentence_transformers_activation(self):
         cfg = self._make_config(
             problem_type="",
             sentence_transformers={
@@ -187,7 +181,7 @@ class TestGetActFn:
         result = get_act_fn(cfg)
         assert isinstance(result, PoolerClassify)
 
-    def test_sbert_activation(self, vllm_config):
+    def test_sbert_activation(self):
         cfg = self._make_config(
             problem_type="",
             sbert_ce_default_activation_function=(
@@ -197,12 +191,12 @@ class TestGetActFn:
         result = get_act_fn(cfg)
         assert isinstance(result, PoolerClassify)
 
-    def test_default_fallback(self, vllm_config):
+    def test_default_fallback(self):
         cfg = self._make_config(problem_type="")
         result = get_act_fn(cfg)
         assert isinstance(result, PoolerClassify)
 
-    def test_sentence_transformers_takes_priority(self, vllm_config):
+    def test_sentence_transformers_takes_priority(self):
         cfg = self._make_config(
             problem_type="",
             sentence_transformers={"activation_fn": "torch.nn.modules.linear.Identity"},
@@ -213,7 +207,7 @@ class TestGetActFn:
         result = get_act_fn(cfg)
         assert isinstance(result, PoolerIdentity)
 
-    def test_rejects_non_torch_activation(self, vllm_config):
+    def test_rejects_non_torch_activation(self):
         cfg = self._make_config(
             problem_type="",
             sentence_transformers={"activation_fn": "os.system"},
@@ -226,10 +220,13 @@ class TestGetActFn:
 # resolve_classifier_act_fn
 # ---------------------------------------------------------------------------
 class TestResolveClassifierActFn:
-    def test_delegates_to_get_act_fn_when_none(self, vllm_config):
-        model_config = vllm_config.model_config
+    def test_delegates_to_get_act_fn_when_none(self):
+        model_config = SimpleNamespace(
+            hf_config=SimpleNamespace(num_labels=3, problem_type="")
+        )
         result = resolve_classifier_act_fn(model_config, act_fn=None)
         assert isinstance(result, PoolerClassify)
+        assert result.num_labels == 3
 
     def test_passes_through_provided_act_fn(self):
         custom = PoolerIdentity()
