@@ -14,7 +14,56 @@ Branch: `windows-compat`
 - Windows defaults to `spawn` for worker multiprocessing and avoids registering Windows process handles with `zmq.Poller`.
 - `uvloop` call sites use `vllm.utils.uvloop_compat`, falling back to `asyncio.run` on Windows.
 - CUDA backend selection treats missing `vllm-flash-attn` extensions as unavailable and falls back to FlashInfer/Triton instead of failing during model import or first attention call.
+- Multimodal encoder backend selection skips FlashAttention when the varlen flash-attn op is unavailable, avoiding a Blackwell Windows `cudaErrorUnsupportedPtxVersion` path.
+- Rotary embedding falls back to the native PyTorch implementation when `vllm_flash_attn.layers.rotary` is absent in the Windows build.
 - MSVC/CUDA compile fixes cover core kernels, MoE top-k kernels, shared-memory alignment, `clock_gettime`, `ssize_t`, MSVC macro conflicts, and CUDA 13 / C++20 compatibility.
+
+## Start From Scratch
+
+These notes assume PowerShell on Windows, Visual Studio 2022 Build Tools, CUDA
+13, and a CUDA-enabled PyTorch build.
+
+1. Create the venv and install build helpers:
+
+```powershell
+py -3.12 -m venv C:\tmp\vllmvenv
+C:\tmp\vllmvenv\Scripts\python.exe -m pip install -U pip setuptools wheel ninja cmake
+```
+
+2. Install PyTorch and runtime dependencies appropriate for the CUDA toolkit
+   being used. The locally validated venv used:
+
+```text
+torch 2.11.0+cu130
+torchvision 0.26.0+cu130
+torchaudio 2.11.0+cu130
+triton-windows 3.6.0.post26
+flashinfer-python 0.6.8.post1
+```
+
+3. Clone and build the fork:
+
+```powershell
+cd C:\Users\ericl\Documents\ai-agents\Claude
+git clone -b windows-compat https://github.com/ericleigh007/vllm-windows.git
+cd vllm-windows
+
+$env:CUDA_HOME = "C:\tmp\cuda13"
+$env:CUDA_PATH = "C:\tmp\cuda13"
+$env:CUDACXX = "C:\tmp\cuda13\bin\nvcc.exe"
+$env:VLLM_TARGET_DEVICE = "cuda"
+$env:MAX_JOBS = "4"
+$env:NVCC_THREADS = "1"
+$env:FETCHCONTENT_BASE_DIR = "C:\tmp\vllm_deps"
+$env:CMAKE_ARGS = "-DCMAKE_CUDA_ARCHITECTURES=120 -DCMAKE_CUDA_FLAGS=--allow-unsupported-compiler"
+
+C:\tmp\vllmvenv\Scripts\python.exe setup.py build_ext --inplace
+C:\tmp\vllmvenv\Scripts\python.exe -m pip install -e .
+```
+
+Use a space-free CUDA path such as `C:\tmp\cuda13`. If CUDA is installed under
+`C:\Program Files\...`, create a junction and point `CUDA_HOME`, `CUDA_PATH`,
+and `CUDACXX` at the junction.
 
 ## CUDA 13 Build Notes
 
@@ -61,6 +110,9 @@ Core CUDA extensions, stable libtorch extension, MoE extension, triton-kernels p
   - model: `facebook/opt-125m`
   - attention backend: FlashInfer
   - generated output included `I have a Windows CUDA`
+- The build has also been used underneath `vllm-omni-windows` to run Qwen3-TTS
+  streaming, Qwen3-Omni image/audio understanding, and Qwen3-Omni full
+  audio-in/audio-out streaming on Windows.
 
 ## Runtime Evidence
 
