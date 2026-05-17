@@ -9,6 +9,7 @@ from collections.abc import Callable, Generator
 from typing import Any
 
 import numpy as np
+import regex as re
 import torch
 from huggingface_hub import HfApi
 from packaging import version
@@ -791,6 +792,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         from vllm.model_executor.models.utils import is_pp_missing_parameter
 
         param_dict = self.param_dict
+        self._duplicate_k_eq_v_quant_states(model, quant_state_dict)
         for quant_param_name in quant_state_dict:
             if is_pp_missing_parameter(quant_param_name, model):
                 continue
@@ -838,6 +840,60 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 non_stacked_param_name
             ]
         return stacked_quant_state_dict
+
+    def _get_k_eq_v_layer_indices(self, model: nn.Module) -> set[int]:
+        config = getattr(model, "config", None)
+        text_config = getattr(config, "text_config", config)
+        if not getattr(text_config, "attention_k_eq_v", False):
+            return set()
+
+        layer_types = getattr(text_config, "layer_types", None)
+        if layer_types is None:
+            return set()
+
+        return {
+            layer_idx
+            for layer_idx, layer_type in enumerate(layer_types)
+            if layer_type == "full_attention"
+        }
+
+    def _duplicate_k_eq_v_quant_states(
+        self, model: nn.Module, quant_state_dict: dict
+    ) -> None:
+        k_eq_v_layer_indices = self._get_k_eq_v_layer_indices(model)
+        if not k_eq_v_layer_indices:
+            return
+
+        for quant_param_name, quant_state in list(quant_state_dict.items()):
+            if not quant_param_name.endswith(".self_attn.k_proj.weight"):
+                continue
+
+            match = re.search(
+                r"(?:^|\.)layers\.(\d+)\.self_attn\.k_proj\.weight$", quant_param_name
+            )
+            if match is None or int(match.group(1)) not in k_eq_v_layer_indices:
+                continue
+
+            v_quant_param_name = (
+                quant_param_name.removesuffix(".self_attn.k_proj.weight")
+                + ".self_attn.v_proj.weight"
+            )
+            if v_quant_param_name in quant_state_dict:
+                continue
+
+            target_param_name = self._resolve_target_param_name(quant_param_name)
+            v_target_param_name = self._resolve_target_param_name(v_quant_param_name)
+            if target_param_name is None or target_param_name != v_target_param_name:
+                continue
+
+            quant_state_dict[v_quant_param_name] = quant_state
+            logger.debug(
+                "Duplicated BNB quant state for Gemma4 k_eq_v layer: %s -> %s "
+                "(target parameter %s).",
+                quant_param_name,
+                v_quant_param_name,
+                target_param_name,
+            )
 
     def _bind_quant_states_to_params(
         self, model: nn.Module, stacked_quant_state_dict: dict

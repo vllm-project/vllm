@@ -155,3 +155,88 @@ def test_prequant_4bit_packed_bnb_param_keeps_packed_weight(monkeypatch):
     assert len(loaded) == 1
     assert loaded[0] == ("layer.q_proj.weight", packed_weight)
     assert "layer.q_proj.weight" in quant_state_dict
+
+
+def test_stack_quantization_states_duplicates_gemma4_k_eq_v_state():
+    target_param = torch.nn.Parameter(
+        torch.empty(4, 1, dtype=torch.uint8), requires_grad=False
+    )
+    target_param.use_bitsandbytes_4bit = True
+    target_param.pack_factor = 2
+
+    loader = _loader_for_entries(
+        [],
+        {"language_model.model.layers.5.self_attn.qkv_proj.weight": target_param},
+    )
+    loader.modules_mapping = ParamMapping({"qkv_proj": ["q_proj", "k_proj", "v_proj"]})
+
+    q_state = object()
+    k_state = object()
+    quant_state_dict = {
+        "language_model.model.layers.5.self_attn.q_proj.weight": q_state,
+        "language_model.model.layers.5.self_attn.k_proj.weight": k_state,
+    }
+    model = torch.nn.Module()
+    model.config = types.SimpleNamespace(
+        text_config=types.SimpleNamespace(
+            attention_k_eq_v=True,
+            layer_types=[
+                "sliding_attention",
+                "sliding_attention",
+                "sliding_attention",
+                "sliding_attention",
+                "sliding_attention",
+                "full_attention",
+            ],
+        )
+    )
+
+    stacked = loader._stack_quantization_states(model, quant_state_dict)
+
+    assert stacked["language_model.model.layers.5.self_attn.qkv_proj.weight"] == {
+        0: q_state,
+        1: k_state,
+        2: k_state,
+    }
+
+
+def test_stack_quantization_states_does_not_duplicate_non_k_eq_v_state():
+    target_param = torch.nn.Parameter(
+        torch.empty(4, 1, dtype=torch.uint8), requires_grad=False
+    )
+    target_param.use_bitsandbytes_4bit = True
+    target_param.pack_factor = 2
+
+    loader = _loader_for_entries(
+        [],
+        {"language_model.model.layers.5.self_attn.qkv_proj.weight": target_param},
+    )
+    loader.modules_mapping = ParamMapping({"qkv_proj": ["q_proj", "k_proj", "v_proj"]})
+
+    q_state = object()
+    k_state = object()
+    quant_state_dict = {
+        "language_model.model.layers.5.self_attn.q_proj.weight": q_state,
+        "language_model.model.layers.5.self_attn.k_proj.weight": k_state,
+    }
+    model = torch.nn.Module()
+    model.config = types.SimpleNamespace(
+        text_config=types.SimpleNamespace(
+            attention_k_eq_v=False,
+            layer_types=[
+                "sliding_attention",
+                "sliding_attention",
+                "sliding_attention",
+                "sliding_attention",
+                "sliding_attention",
+                "full_attention",
+            ],
+        )
+    )
+
+    stacked = loader._stack_quantization_states(model, quant_state_dict)
+
+    assert stacked["language_model.model.layers.5.self_attn.qkv_proj.weight"] == {
+        0: q_state,
+        1: k_state,
+    }
