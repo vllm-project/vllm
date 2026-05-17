@@ -946,6 +946,7 @@ class MooncakeStoreWorker:
         )
         self.coord = MooncakeStoreCoordinator(
             self._kv_cache_groups,
+            scheduler_block_size=self.block_size,
             hash_block_size=self.hash_block_size,
             use_eagle=use_eagle,
         )
