@@ -16,27 +16,25 @@ from types import SimpleNamespace
 
 import torch
 
+from tests.v1.attention.utils import MockMambaBuilder
 from vllm.config.compilation import CUDAGraphMode
-from vllm.v1.attention.backends.mamba_attn import (
-    BaseMambaAttentionMetadata,
-    BaseMambaAttentionMetadataBuilder,
-)
+from vllm.v1.attention.backends.mamba_attn import BaseMambaAttentionMetadata
 from vllm.v1.kv_cache_interface import MambaSpec
 
 
-class _ConcreteMambaBuilder(
-    BaseMambaAttentionMetadataBuilder[BaseMambaAttentionMetadata]
+def _make_vllm_config(
+    block_size: int,
+    max_model_len: int,
+    max_num_seqs: int,
+    mamba_cache_mode: str = "none",
 ):
-    """Minimal concrete subclass for testing (base class is ABC)."""
-
-    metadata_cls = BaseMambaAttentionMetadata
-
-
-def _make_vllm_config(block_size, max_model_len, max_num_seqs):
     """Create a minimal mock VllmConfig with only the fields the builder
     accesses, avoiding any model download / HF config inspection."""
     return SimpleNamespace(
-        cache_config=SimpleNamespace(mamba_cache_mode="all"),
+        cache_config=SimpleNamespace(
+            block_size=block_size,
+            mamba_cache_mode=mamba_cache_mode,
+        ),
         compilation_config=SimpleNamespace(
             cudagraph_mode=CUDAGraphMode.FULL,
             max_cudagraph_capture_size=None,
@@ -49,6 +47,21 @@ def _make_vllm_config(block_size, max_model_len, max_num_seqs):
     )
 
 
+def test_mamba_single_token_prompt_runs_as_prefill():
+    seq_lens = [8, 9, 1]
+    config = _make_vllm_config(16, 256, len(seq_lens))
+    metadata = MockMambaBuilder.build_mamba_metadata(
+        config,
+        seq_lens=seq_lens,
+        query_lens=[1] * len(seq_lens),
+        is_prefilling=[False, False, True],
+    )
+
+    assert metadata.num_decodes == 2
+    assert metadata.num_prefills == 1
+    assert metadata.has_initial_states_p.tolist() == [False]
+
+
 def test_update_block_table_copies_block_idx_to_persistent_buffers():
     """update_block_table() must write block_idx tensors to the current
     builder's persistent buffers, not leave them pointing to a different
@@ -59,7 +72,12 @@ def test_update_block_table_copies_block_idx_to_persistent_buffers():
     num_reqs = 4
     device = torch.device("cpu")
 
-    vllm_config = _make_vllm_config(block_size, max_model_len, num_reqs)
+    vllm_config = _make_vllm_config(
+        block_size,
+        max_model_len,
+        num_reqs,
+        mamba_cache_mode="all",
+    )
 
     spec = MambaSpec(
         block_size=block_size,
@@ -69,8 +87,8 @@ def test_update_block_table_copies_block_idx_to_persistent_buffers():
     )
 
     # Two builders simulating two KV cache groups with the same MambaSpec.
-    builder_a = _ConcreteMambaBuilder(spec, ["layer0"], vllm_config, device)
-    builder_b = _ConcreteMambaBuilder(spec, ["layer1"], vllm_config, device)
+    builder_a = MockMambaBuilder(spec, ["layer0"], vllm_config, device)
+    builder_b = MockMambaBuilder(spec, ["layer1"], vllm_config, device)
 
     # Sanity: each builder has its own persistent buffer.
     assert (
