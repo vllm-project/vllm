@@ -238,6 +238,29 @@ class OpenAIServingRender:
         else:
             tool_dicts = [tool.model_dump() for tool in request.tools]
 
+        # ACE: compress old tool-result messages before tokenization.
+        # Applied before the harmony/non-harmony split so both paths benefit.
+        messages = list(request.messages)
+        if getattr(request, "context_compression", None) == "ace":
+            max_model_len = self.model_config.max_model_len
+            max_tokens = (
+                getattr(request, "max_completion_tokens", None)
+                or getattr(request, "max_tokens", None)
+                or max(256, max_model_len // 8)  # safe default: reserve 1/8 for output
+            )
+            # Use 3 chars/token (conservative; code/tool output is denser than prose)
+            budget_chars = max(0, max_model_len - max_tokens) * 3
+            apply_ace_eviction(
+                messages,  # type: ignore[arg-type]
+                budget_chars=budget_chars,
+                keep_recent=getattr(
+                    request, "context_compression_keep_recent", 2
+                ),
+                target_ratio=getattr(
+                    request, "context_compression_ratio", 0.4
+                ),
+            )
+
         if not self.use_harmony:
             # Common case.
             error_check_ret = self.validate_chat_template(
@@ -247,28 +270,6 @@ class OpenAIServingRender:
             )
             if error_check_ret is not None:
                 return error_check_ret
-
-            # ACE: compress old tool-result messages before tokenization when
-            # the conversation may exceed the model's context budget.
-            messages = list(request.messages)
-            if getattr(request, "context_compression", None) == "ace":
-                max_model_len = self.model_config.max_model_len
-                max_tokens = (
-                    getattr(request, "max_completion_tokens", None)
-                    or getattr(request, "max_tokens", None)
-                    or 0
-                )
-                budget_chars = (max_model_len - max_tokens) * 4
-                apply_ace_eviction(
-                    messages,  # type: ignore[arg-type]
-                    budget_chars=budget_chars,
-                    keep_recent=getattr(
-                        request, "context_compression_keep_recent", 2
-                    ),
-                    target_ratio=getattr(
-                        request, "context_compression_ratio", 0.4
-                    ),
-                )
 
             conversation, engine_inputs = await self.preprocess_chat(
                 request,
@@ -282,10 +283,10 @@ class OpenAIServingRender:
                 reasoning_parser=self.reasoning_parser,
             )
         else:
-            # For GPT-OSS.
+            # For GPT-OSS: pass the (potentially compressed) messages list.
             should_include_tools = tool_dicts is not None
             conversation, engine_inputs = self._make_request_with_harmony(
-                request, should_include_tools
+                request, should_include_tools, compressed_messages=messages
             )
 
         return conversation, engine_inputs
@@ -421,6 +422,7 @@ class OpenAIServingRender:
         self,
         request: ChatCompletionRequest,
         should_include_tools: bool = True,
+        compressed_messages=None,
     ):
         """Build Harmony (GPT-OSS) messages and engine prompt from a chat request."""
         messages: list[OpenAIMessage] = []
@@ -452,8 +454,9 @@ class OpenAIServingRender:
             )
             messages.append(dev_msg)
 
-        # Add user message.
-        messages.extend(parse_chat_inputs_to_harmony_messages(request.messages))
+        # Add user message. Use pre-compressed messages when available.
+        raw_messages = compressed_messages if compressed_messages is not None else request.messages
+        messages.extend(parse_chat_inputs_to_harmony_messages(raw_messages))
 
         # Render prompt token ids.
         prompt_token_ids = render_for_completion(messages)
