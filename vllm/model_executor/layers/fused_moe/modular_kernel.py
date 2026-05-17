@@ -1567,6 +1567,10 @@ class FusedMoEKernel:
     def fused_experts(self) -> FusedMoEExperts:
         return self.impl.fused_experts
 
+    @property
+    def moe_config(self) -> FusedMoEConfig:
+        return self.fused_experts.moe_config
+
     def supports_lora(self) -> bool:
         return self.fused_experts.supports_lora()
 

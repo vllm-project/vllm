@@ -6,10 +6,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
-from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEConfig,
-    FusedMoEQuantConfig,
-)
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
@@ -33,9 +30,8 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         self,
         old_quant_method: FusedMoEMethodBase,
         moe_kernel: FusedMoEKernel,
-        moe_config: FusedMoEConfig | None = None,
     ):
-        super().__init__(moe_config or old_quant_method.moe)
+        super().__init__(moe_kernel.moe_config)
         self.moe_quant_config = old_quant_method.moe_quant_config
         self.moe_kernel = moe_kernel
         self.disable_expert_map = getattr(

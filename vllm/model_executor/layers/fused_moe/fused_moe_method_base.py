@@ -212,7 +212,6 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 experts,
                 inplace=self.moe_kernel.inplace,
             ),
-            moe_config=moe,
         )
 
     def select_gemm_impl(
