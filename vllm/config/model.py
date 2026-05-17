@@ -710,6 +710,7 @@ class ModelConfig:
         self._verify_quantization()
         self._verify_cuda_graph()
         self._verify_bnb_config()
+        self._verify_return_routed_experts()
 
     def get_model_arch_config(
         self,
@@ -1099,6 +1100,17 @@ class ModelConfig:
             raise ValueError(
                 "Number of experts in the model must be greater than 0 "
                 "when expert parallelism is enabled."
+            )
+
+    def _verify_return_routed_experts(self) -> None:
+        if not self.enable_return_routed_experts:
+            return
+        if not self.is_moe:
+            raise ValueError(
+                "--enable-return-routed-experts requires a MoE model, "
+                f"but the current model ({self.model}) is not a MoE "
+                "architecture (no routed-expert HF config keys found). "
+                "Drop the flag for dense models."
             )
 
     def _try_verify_and_update_model_config(self):
