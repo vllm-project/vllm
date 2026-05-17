@@ -1167,53 +1167,28 @@ class AiterAllreduceFusedAddRMSNormGroupQuantFP8Pattern(
 class AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern(
     BasePattern, VllmPatternReplacement
 ):
-    """Fuse ``AR -> fused_add_rms_norm -> (per-group FP8 quant + indexer GEMM)``.
+    """Indexer-fan-out variant of ``AiterAllreduceFusedAddRMSNormGroupQuantFP8Pattern``.
 
-    DeepSeek V3.2 MLA feeds the post-AR normed activation into ``fused_qkv_a_proj``
-    (per-token-group FP8 quant, then ``rocm_aiter_triton_gemm_a8w8_blockscale``) and
-    also into the indexer ``wk_weights_proj`` (bf16 ``rocm_unquantized_gemm``).
-    The existing ``AiterAllreduceFusedAddRMSNormGroupQuantFP8Pattern`` cannot fire
-    here because the bf16 indexer use of the RMS output stays in the graph -- so
-    the AR pass falls back to the no-quant ``AiterAllreduceFusedAddRMSNormPattern``
-    and the standalone FP8 quant kernel survives (~535us / decode step on MI355X TP4).
+    Targets the DSv3.2 post-attention / post-MLP path where the post-AR normed
+    activation has two consumers: a per-group FP8 quant for ``fused_qkv_a_proj``
+    *and* a bf16 ``rocm_unquantized_gemm`` for the indexer ``wk_weights_proj``.
+    The single-consumer pattern above cannot fire when this fan-out is present,
+    so without this pattern the standalone FP8 quant kernel survives unfused
+    (~535us / decode step on DSv3.2 MI355X TP4).
 
-    AITER's custom AR launcher has an ``emit_bf16=True`` variant that returns both
-    the FP8 quant + scales **and** the bf16 normed activations in one kernel; this
-    pattern lowers the shared subgraph to
-    ``rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm`` and
-    rewires the indexer GEMM onto the emitted bf16 norm output. The graph's
-    external uses of the RMS output (it is also a graph output in DSv3.2's
-    post-MLP residual carry) are preserved by returning the bf16 norm as a
-    pattern output and substituting it directly.
+    Lowers to ``rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm``
+    (the ``emit_bf16=True`` variant of the AR+RMS+QUANT launcher, which returns
+    FP8 quant + scales + bf16 normed activations in one kernel) and rewires the
+    indexer GEMM onto the emitted bf16 norm output. The RMS output is also a
+    graph output in DSv3.2's residual carry; it is returned as a pattern output
+    so the matcher can substitute the bf16 norm in its place.
 
-    Two variants are registered (controlled by ``use_triton_quant``) because
-    different FP8 quant call sites in the same model lower to different ops:
-
-    - ``use_triton_quant=True`` matches the ``vllm.triton_per_token_group_quant_fp8``
-      form. This is what DSv3.2's ``fused_qkv_a_proj`` emits via
-      ``QuantFP8.forward_hip`` (`vllm/model_executor/layers/quantization/
-      input_quant_fp8.py:144`). This variant catches the dominant indexer
-      fan-out site empirically observed in DSv3.2 MI355X TP4 dumps.
-
-    - ``use_triton_quant=False`` matches the ``vllm.rocm_aiter_group_fp8_quant``
-      form via ``MatcherQuantFP8`` (consistent with the sibling AR+RMS+QUANT
-      patterns above). This catches sites where the producer routes through
-      AITER's group-quant path (`vllm/_aiter_ops.py:group_fp8_quant`).
-
-    Ground truth FX form taken from a DSv3.2 MI355X TP4 dump
-    (``__compiled_fn_1.post_grad.1.rocm_aiter_allreduce_fusion_pass.before.1.py``):
-
-        all_reduce_1 = torch.ops.vllm.all_reduce.default(prev_gemm, 'tp:0')
-        fused = torch.ops.vllm_ir.fused_add_rms_norm.default(
-            all_reduce_1, residual_in, norm_weight, 1e-06
-        )
-        rms      = fused[0]            # also a graph output
-        residual = fused[1]
-        quant, scale = <fp8 group quant op>(rms, 128)
-        idx          = torch.ops.vllm.rocm_unquantized_gemm.default(rms, indexer_weight)
-
-    Dynamo may place ``tensor_model_parallel_all_reduce`` and the following norm in
-    **different** compiled segments; this pass cannot fuse across that split.
+    Two variants are registered (``use_triton_quant=True/False``) because FP8
+    group-quant call sites in the same model lower to different ops: the
+    indexer-fan-out site goes through ``QuantFP8.forward_hip`` and emits
+    ``vllm.triton_per_token_group_quant_fp8``, while other sites route through
+    AITER and emit ``vllm.rocm_aiter_group_fp8_quant`` (matched via
+    ``MatcherQuantFP8``, consistent with the sibling patterns above).
     """
 
     def __init__(
@@ -1405,27 +1380,15 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
             # Register larger subgraphs first (DeepSeek indexer fan-out, then
             # quant-only AR+RMS+quant, then AR+RMS-only).
             if supports_per_group_quant:
-                # Two variants: the Triton-quant form matches what DSv3.2's
-                # fused_qkv_a_proj emits at the indexer fan-out site today; the
-                # AITER-quant form matches sites that route through
-                # rocm_aiter_group_fp8_quant (for consistency with the sibling
-                # AR+RMS+QUANT patterns below).
-                self.register(
-                    AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern(
-                        epsilon,
-                        self.model_dtype,
-                        self.device,
-                        use_triton_quant=True,
+                for use_triton_quant in (True, False):
+                    self.register(
+                        AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern(
+                            epsilon,
+                            self.model_dtype,
+                            self.device,
+                            use_triton_quant=use_triton_quant,
+                        )
                     )
-                )
-                self.register(
-                    AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern(
-                        epsilon,
-                        self.model_dtype,
-                        self.device,
-                        use_triton_quant=False,
-                    )
-                )
                 self.register(
                     AiterAllreduceFusedRMSNormGroupQuantFP8Pattern(
                         epsilon,
