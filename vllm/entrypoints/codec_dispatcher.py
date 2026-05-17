@@ -175,11 +175,23 @@ class ToolRegistry:
 
 def _fetch_manifest(url: str) -> dict:
     """Fetch a tool manifest JSON from the URL. Stdlib-only to keep the
-    engine startup path free of heavy HTTP deps."""
+    engine startup path free of heavy HTTP deps.
+
+    Synchronous on purpose — only called from `ToolRegistry.from_env`,
+    which the engine wraps in `asyncio.to_thread` so this never runs on
+    the request event loop. See `dispatch_call_async` for the runtime-
+    request equivalent.
+    """
     import urllib.request
     with urllib.request.urlopen(url, timeout=30) as resp:
         body = resp.read()
     parsed = json.loads(body)
+    if not isinstance(parsed, dict):
+        # Defend against the URL returning a JSON list/scalar — the
+        # field-presence loop below would TypeError on a non-dict.
+        raise ValueError(
+            f"manifest at {url!r} must be a JSON object, got {type(parsed).__name__}"
+        )
     # Minimum required fields per @codecai/tool-kit's manifest.json shape.
     for required in ("name", "endpoint", "tokenizerHash"):
         if required not in parsed:
