@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from fastapi import Request
 
+from vllm import envs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
@@ -52,6 +53,7 @@ from vllm.entrypoints.openai.engine.serving import (
     OpenAIServing,
     clamp_prompt_logprobs,
 )
+from vllm.entrypoints.openai.llm_sign import maybe_sign_chat_completion
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.parser.harmony_utils import (
     get_stop_tokens_for_assistant_actions,
@@ -378,7 +380,7 @@ class OpenAIServingChat(OpenAIServing):
                 chat_template_kwargs=chat_template_kwargs,
             )
 
-        return await self.chat_completion_full_generator(
+        response = await self.chat_completion_full_generator(
             request,
             result_generator,
             request_id,
@@ -388,6 +390,9 @@ class OpenAIServingChat(OpenAIServing):
             request_metadata,
             reasoning_parser,
         )
+        if envs.VLLM_LLM_SIGN_ENABLED:
+            return maybe_sign_chat_completion(request, response)
+        return response
 
     def get_chat_request_role(self, request: ChatCompletionRequest) -> str:
         if request.add_generation_prompt:

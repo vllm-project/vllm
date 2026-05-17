@@ -43,6 +43,10 @@ from vllm.entrypoints.openai.engine.serving import (
     GenerationError,
     OpenAIServing,
 )
+from vllm.entrypoints.openai.llm_sign import (
+    maybe_sign_responses_response,
+    responses_parent_signing_context,
+)
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.parser.harmony_utils import (
     get_developer_message,
@@ -919,6 +923,31 @@ class OpenAIServingResponses(OpenAIServing):
                 # If the response is already cancelled, don't update it.
                 if stored_response is None or stored_response.status != "cancelled":
                     self.response_store[response.id] = response
+
+        if envs.VLLM_LLM_SIGN_ENABLED:
+            # Resolve cross-turn signing context (parent_hash from
+            # the prior turn's stored llm_sign envelope, and the
+            # next start_seq for monotone numbering across turns)
+            # only when llm_sign is on. Doing this here keeps the
+            # llm_sign-only state out of the inference function
+            # signatures: the signing-related lookup is fully
+            # localized to the signing call site.
+            parent_hash: str | None = None
+            start_seq = 0
+            prev_id = request.previous_response_id
+            if prev_id is not None:
+                async with self.response_store_lock:
+                    prev_response = self.response_store.get(prev_id)
+                if prev_response is not None:
+                    parent_hash, start_seq = responses_parent_signing_context(
+                        prev_response
+                    )
+            return maybe_sign_responses_response(
+                request,
+                response,
+                parent_hash=parent_hash,
+                start_seq=start_seq,
+            )
         return response
 
     def _topk_logprobs(
