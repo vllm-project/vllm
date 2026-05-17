@@ -369,8 +369,6 @@ class Attention(nn.Module, AttentionLayerBase):
             if block_n is not None:
                 extra_impl_args.setdefault("block_n", block_n)
 
-        self.is_custom_backend = self.attn_backend.get_name() == "CUSTOM"
-
         impl_cls = self.attn_backend.get_impl_cls()
         self.impl = impl_cls(  # type: ignore[assignment]  # impl_cls always returns an AttentionImpl subclass
             num_heads,
@@ -472,14 +470,9 @@ class Attention(nn.Module, AttentionLayerBase):
             if self.impl.supports_quant_query_input:
                 query, _ = self.query_quant(query, self._q_scale)
 
-        if (
-            self.is_custom_backend
-            and self.use_direct_call
-            and output_shape is None
-            and not self.attn_backend.accept_output_buffer
-        ):
-            kv_cache_dummy_dep = None
-            # Update KV cache if not handled by the backend
+        kv_cache_dummy_dep = None
+        if self.use_direct_call:
+            # Skip this if sharing KV cache with an earlier attention layer.
             if (
                 not self.attn_backend.forward_includes_kv_cache_update
                 and self.kv_sharing_target_layer_name is None
@@ -489,7 +482,24 @@ class Attention(nn.Module, AttentionLayerBase):
                 kv_cache_dummy_dep = unified_kv_cache_update(
                     key, value, self.layer_name
                 )
+        else:
+            # Skip this if sharing KV cache with an earlier attention layer.
+            encoded = _encode_layer_name(self.layer_name)
+            if (
+                not self.attn_backend.forward_includes_kv_cache_update
+                and self.kv_sharing_target_layer_name is None
+                and key is not None
+                and value is not None
+            ):
+                kv_cache_dummy_dep = torch.ops.vllm.unified_kv_cache_update(
+                    key, value, encoded
+                )
 
+        if (
+            self.use_direct_call
+            and output_shape is None
+            and not self.attn_backend.accept_output_buffer
+        ):
             return unified_attention_without_output(
                 query,
                 key,
@@ -514,18 +524,7 @@ class Attention(nn.Module, AttentionLayerBase):
             key = key.view(-1, self.num_kv_heads, self.head_size)
         if value is not None:
             value = value.view(-1, self.num_kv_heads, self.head_size_v)
-        kv_cache_dummy_dep = None
         if self.use_direct_call:
-            # Skip this if sharing KV cache with an earlier attention layer.
-            if (
-                not self.attn_backend.forward_includes_kv_cache_update
-                and self.kv_sharing_target_layer_name is None
-                and key is not None
-                and value is not None
-            ):
-                kv_cache_dummy_dep = unified_kv_cache_update(
-                    key, value, self.layer_name
-                )
             unified_attention_with_output(
                 query,
                 key,
@@ -535,17 +534,6 @@ class Attention(nn.Module, AttentionLayerBase):
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
             )
         else:
-            # Skip this if sharing KV cache with an earlier attention layer.
-            encoded = _encode_layer_name(self.layer_name)
-            if (
-                not self.attn_backend.forward_includes_kv_cache_update
-                and self.kv_sharing_target_layer_name is None
-                and key is not None
-                and value is not None
-            ):
-                kv_cache_dummy_dep = torch.ops.vllm.unified_kv_cache_update(
-                    key, value, encoded
-                )
             torch.ops.vllm.unified_attention_with_output(
                 query,
                 key,
