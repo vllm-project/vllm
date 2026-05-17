@@ -1530,6 +1530,7 @@ class DeepseekV4Model(nn.Module):
                     ):
                         loaded_weight = loaded_weight.view(torch.uint8)
                     name_mapped = None
+                    success = False
                     for mapping in expert_mapping:
                         param_name, weight_name, expert_id, shard_id = mapping
                         if weight_name not in name:
@@ -1555,12 +1556,12 @@ class DeepseekV4Model(nn.Module):
                         if success:
                             name = name_mapped
                             break
-                    if name_mapped is None:
-                        # No expert mapping matched (e.g. a non-canonical
-                        # checkpoint whose expert tensor names differ from
-                        # this model's expert_mapping); nothing was loaded
-                        # for this weight, so skip it instead of raising
-                        # UnboundLocalError.
+                    if not success:
+                        # No expert mapping matched, or the loader did not
+                        # load this weight for the current rank (e.g. a
+                        # non-canonical checkpoint, or this rank holds no
+                        # replica). Skip it instead of marking it loaded or
+                        # raising UnboundLocalError.
                         continue
                     loaded_params.add(name_mapped)
                     continue
