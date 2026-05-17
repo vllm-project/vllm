@@ -868,6 +868,18 @@ class VllmConfig:
             self.model_config.disable_cascade_attn = True
 
         if (
+            self.speculative_config is not None
+            and self.speculative_config.use_ddtree()
+            and self.attention_config.backend is not None
+            and self.attention_config.backend.name != "TREE_ATTN"
+        ):
+            raise ValueError(
+                "DDTree speculative decoding requires "
+                "attention_config.backend = 'TREE_ATTN'. "
+                f"Got: {self.attention_config.backend.name!r}."
+            )
+
+        if (
             self.model_config is not None
             and self.model_config.multimodal_config is not None
             and self.model_config.multimodal_config.mm_tensor_ipc == "torch_shm"

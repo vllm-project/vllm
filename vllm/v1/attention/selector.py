@@ -82,8 +82,9 @@ def get_attn_backend(
         block_size = None
 
     speculative_config = vllm_config.speculative_config
-    use_non_causal = (
-        speculative_config is not None and speculative_config.method == "dflash"
+    use_non_causal = speculative_config is not None and speculative_config.method in (
+        "dflash",
+        "ddtree",
     )
 
     attn_selector_config = AttentionSelectorConfig(

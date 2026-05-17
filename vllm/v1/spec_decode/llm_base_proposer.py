@@ -92,7 +92,12 @@ class SpecDecodeBaseProposer:
             1 if not self.parallel_drafting else self.num_speculative_tokens
         )
         self.net_num_new_slots_per_request = self.extra_slots_per_request - (
-            1 if (self.pass_hidden_states_to_model and self.method != "dflash") else 0
+            1
+            if (
+                self.pass_hidden_states_to_model
+                and self.method not in ("dflash", "ddtree")
+            )
+            else 0
         )
         self.needs_extra_input_slots = self.net_num_new_slots_per_request > 0
 
@@ -422,7 +427,7 @@ class SpecDecodeBaseProposer:
     ) -> torch.Tensor:
         batch_size = common_attn_metadata.batch_size()
 
-        if self.method in ("eagle3", "dflash"):
+        if self.method in ("eagle3", "dflash", "ddtree"):
             assert isinstance(
                 self.model,
                 (
@@ -825,7 +830,7 @@ class SpecDecodeBaseProposer:
         return per_group_attn_metadata, per_layer_attn_metadata
 
     def model_returns_tuple(self) -> bool:
-        return self.method not in ("mtp", "draft_model", "dflash")
+        return self.method not in ("mtp", "draft_model", "dflash", "ddtree")
 
     def prepare_next_token_ids_cpu(
         self,

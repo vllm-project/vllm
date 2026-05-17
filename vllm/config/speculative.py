@@ -51,8 +51,14 @@ MTPModelTypes = Literal[
 ]
 NgramGPUTypes = Literal["ngram_gpu"]
 DFlashModelTypes = Literal["dflash"]
+DDTreeModelTypes = Literal["ddtree"]
 EagleModelTypes = Literal[
-    "eagle", "eagle3", "extract_hidden_states", MTPModelTypes, DFlashModelTypes
+    "eagle",
+    "eagle3",
+    "extract_hidden_states",
+    MTPModelTypes,
+    DFlashModelTypes,
+    DDTreeModelTypes,
 ]
 SpeculativeMethod = Literal[
     "ngram",
@@ -267,6 +273,7 @@ class SpeculativeConfig:
             "eagle3",
             "extract_hidden_states",
             "dflash",
+            "ddtree",
         )
         factors.append(uses_aux_hidden_states)
 
@@ -568,7 +575,7 @@ class SpeculativeConfig:
                 )
 
                 # Automatically detect the method
-                if self.method in ("eagle", "eagle3", "dflash"):
+                if self.method in ("eagle", "eagle3", "dflash", "ddtree"):
                     pass
                 # examples:
                 # yuhuili/EAGLE-LLaMA3-Instruct-8B
@@ -612,7 +619,7 @@ class SpeculativeConfig:
                     )
 
                 # Replace hf_config for EAGLE draft_model
-                if self.method in ("eagle", "eagle3", "dflash"):
+                if self.method in ("eagle", "eagle3", "dflash", "ddtree"):
                     from vllm.transformers_utils.configs.eagle import EAGLEConfig
                     from vllm.transformers_utils.configs.speculators import (
                         SpeculatorsConfig,
@@ -632,7 +639,7 @@ class SpeculativeConfig:
                         self.draft_model_config.hf_config = eagle_config
                         self.update_arch_()
 
-                if self.method == "dflash":
+                if self.method in ("dflash", "ddtree"):
                     self.parallel_drafting = True
 
                 if self.num_speculative_tokens is not None and hasattr(
@@ -957,10 +964,13 @@ class SpeculativeConfig:
         return slots_per_req
 
     def use_eagle(self) -> bool:
-        return self.method in ("eagle", "eagle3", "mtp", "dflash")
+        return self.method in ("eagle", "eagle3", "mtp", "dflash", "ddtree")
 
     def use_dflash(self) -> bool:
         return self.method == "dflash"
+
+    def use_ddtree(self) -> bool:
+        return self.method == "ddtree"
 
     def uses_draft_model(self) -> bool:
         return self.method == "draft_model"

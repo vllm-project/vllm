@@ -620,6 +620,13 @@ def maybe_override_with_speculators(
     verifier_model = speculators_config["verifier"]["name_or_path"]
     model = tokenizer = verifier_model
 
+    # Apply explicit user overrides (e.g. method='ddtree') on top of the
+    # extracted model defaults, so user-provided values always take precedence.
+    if vllm_speculative_config is not None:
+        for key in ("method", "num_speculative_tokens"):
+            if key in vllm_speculative_config:
+                speculative_config[key] = vllm_speculative_config[key]
+
     return model, tokenizer, speculative_config
 
 
