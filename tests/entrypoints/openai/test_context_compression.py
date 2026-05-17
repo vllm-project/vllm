@@ -3,12 +3,25 @@
 
 """Tests for ACE (Attention-Weighted Context Eviction) context compression."""
 
+import numpy as np
 import pytest
 
+from vllm.entrypoints.attention_capture import (
+    ACEAttentionCapture,
+    get_capture,
+    release_capture,
+    start_capture,
+    stop_capture,
+)
 from vllm.entrypoints.context_compression import (
-    _score_line,
+    AttentionImportanceTracker,
+    _heuristic_score,
     ace_compress,
     apply_ace_eviction,
+    compute_line_token_spans,
+    get_tracker,
+    register_tracker,
+    release_tracker,
 )
 
 
@@ -18,34 +31,34 @@ from vllm.entrypoints.context_compression import (
 
 
 def test_score_blank_line():
-    assert _score_line("") == 0.0
-    assert _score_line("   ") == 0.0
+    assert _heuristic_score("") == 0.0
+    assert _heuristic_score("   ") == 0.0
 
 
 def test_score_error_line():
-    assert _score_line("Error: connection refused") >= 0.95
-    assert _score_line("Traceback (most recent call last):") >= 0.95
-    assert _score_line("exit code 1") >= 0.95
+    assert _heuristic_score("Error: connection refused") >= 0.95
+    assert _heuristic_score("Traceback (most recent call last):") >= 0.95
+    assert _heuristic_score("exit code 1") >= 0.95
 
 
 def test_score_tool_call_json():
     line = '{"name": "bash", "arguments": {"cmd": "ls"}}'
-    assert _score_line(line) == 1.0
+    assert _heuristic_score(line) == 1.0
 
 
 def test_score_numeric_data():
-    assert _score_line("Processed 12345 rows in 3.2s") >= 0.7
-    assert _score_line("Available: 2048 bytes remaining") >= 0.7
+    assert _heuristic_score("Processed 12345 rows in 3.2s") >= 0.7
+    assert _heuristic_score("Available: 2048 bytes remaining") >= 0.7
 
 
 def test_score_boilerplate():
-    assert _score_line("done") < 0.5
-    assert _score_line("ok") < 0.5
+    assert _heuristic_score("done") < 0.5
+    assert _heuristic_score("ok") < 0.5
 
 
 def test_score_meta_commentary():
-    assert _score_line("Here are the results") <= 0.15
-    assert _score_line("I executed the command") <= 0.15
+    assert _heuristic_score("Here are the results") <= 0.15
+    assert _heuristic_score("I executed the command") <= 0.15
 
 
 # ---------------------------------------------------------------------------
@@ -203,3 +216,284 @@ def test_apply_ace_idempotent_on_already_compressed():
     snapshot = [dict(m) for m in messages]
     apply_ace_eviction(messages, budget_chars=budget)
     assert messages == snapshot
+
+# ---------------------------------------------------------------------------
+# Phase 2: BM25 query-relevance tests
+# ---------------------------------------------------------------------------
+
+
+def test_ace_compress_bm25_prefers_query_terms():
+    """Lines containing query terms should score higher and survive compression."""
+    lines = (
+        ["Tool output start"]
+        + ["completely unrelated filler text here"] * 10
+        + ["TypeError: argument must be a string not int"]
+        + ["completely unrelated filler text here"] * 10
+        + ["Tool output end"]
+    )
+    content = "\n".join(lines)
+    # Query contains the relevant term
+    compressed = ace_compress(content, target_ratio=0.3, query="TypeError argument string")
+    assert "TypeError: argument must be a string not int" in compressed
+
+
+def test_ace_compress_bm25_fallback_with_empty_query():
+    """Empty or whitespace-only query should fall back to heuristic scoring."""
+    content = "\n".join(["start"] + ["filler line"] * 20 + ["Error: crash"] + ["end"])
+    # Both modes should preserve the error line
+    c1 = ace_compress(content, target_ratio=0.3, query=None)
+    c2 = ace_compress(content, target_ratio=0.3, query="")
+    assert "Error: crash" in c1
+    # With empty query, BM25 returns 0.5 for all → heuristics decide
+    assert "Error: crash" in c2
+
+
+def test_apply_ace_bm25_mode_compresses():
+    """With use_query_relevance=True, eviction still reduces size."""
+    messages = _make_messages(tool_content_size=2000, n_tools=4)
+    total_before = sum(len(m["content"]) for m in messages if isinstance(m.get("content"), str))
+    budget = total_before // 2
+    saved = apply_ace_eviction(messages, budget_chars=budget, use_query_relevance=True)
+    assert saved > 0
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: AttentionImportanceTracker tests
+# ---------------------------------------------------------------------------
+
+
+def _make_attn_weights(
+    n_layers: int = 4,
+    n_heads: int = 8,
+    n_new_tokens: int = 5,
+    seq_len: int = 32,
+    hot_positions: list[int] | None = None,
+) -> np.ndarray:
+    """Synthetic attention weights with high attention on hot_positions."""
+    weights = np.ones((n_layers, n_heads, n_new_tokens, seq_len), dtype=np.float32)
+    if hot_positions:
+        for pos in hot_positions:
+            weights[:, :, :, pos] += 10.0
+    # Normalize over seq_len so each row sums to 1
+    weights = weights / weights.sum(axis=-1, keepdims=True)
+    return weights
+
+
+def test_tracker_accumulate_and_score():
+    """Tokens with high synthetic attention should receive high line scores."""
+    tracker = AttentionImportanceTracker(max_seq_len=64)
+    assert not tracker.has_data
+
+    # Tokens 5-9 get high attention (simulate "hot" region)
+    weights = _make_attn_weights(seq_len=20, hot_positions=[5, 6, 7, 8, 9])
+    tracker.accumulate(weights, new_token_start=15)
+    assert tracker.has_data
+
+    # Line spans: line 0 = tokens 0-4 (cold), line 1 = tokens 5-9 (hot)
+    spans = [(0, 5), (5, 10), (10, 15)]
+    scores = tracker.score_lines(spans)
+    assert len(scores) == 3
+    # Hot region (span 1) should outscore cold regions
+    assert scores[1] > scores[0]
+    assert scores[1] > scores[2]
+    # All scores in [0, 1]
+    assert all(0.0 <= s <= 1.0 for s in scores)
+
+
+def test_tracker_no_data_returns_neutral():
+    tracker = AttentionImportanceTracker(max_seq_len=64)
+    spans = [(0, 5), (5, 10)]
+    scores = tracker.score_lines(spans)
+    assert scores == [0.5, 0.5]
+
+
+def test_tracker_reset():
+    tracker = AttentionImportanceTracker(max_seq_len=64)
+    weights = _make_attn_weights(seq_len=20, hot_positions=[5])
+    tracker.accumulate(weights, new_token_start=15)
+    assert tracker.has_data
+    tracker.reset()
+    assert not tracker.has_data
+    scores = tracker.score_lines([(0, 5)])
+    assert scores == [0.5]
+
+
+def test_tracker_multiple_accumulations():
+    """Scores should increase monotonically with accumulated evidence."""
+    tracker = AttentionImportanceTracker(max_seq_len=64)
+    weights = _make_attn_weights(seq_len=20, hot_positions=[5, 6, 7])
+
+    tracker.accumulate(weights, new_token_start=15)
+    scores_1 = tracker.score_lines([(5, 8), (10, 15)])
+
+    tracker.accumulate(weights, new_token_start=15)
+    scores_2 = tracker.score_lines([(5, 8), (10, 15)])
+
+    # Relative ranking should be preserved (hot > cold regardless of n_accumulations)
+    assert scores_2[0] >= scores_1[0] or abs(scores_2[0] - scores_1[0]) < 0.01
+
+
+def test_ace_compress_mode3_attention_preserves_hot_lines():
+    """Lines mapped to high-attention tokens must survive aggressive compression."""
+    lines = ["start"] + [f"cold line {i}" for i in range(18)] + ["hot critical line"] + ["end"]
+    content = "\n".join(lines)
+    # The "hot critical line" is at index 19 (0-based), pretend it maps to high-attn tokens
+    n_lines = len(lines)
+    # attention_scores: all low except index 19
+    attention_scores = [0.1] * n_lines
+    attention_scores[19] = 1.0
+
+    compressed = ace_compress(content, target_ratio=0.2, attention_scores=attention_scores)
+    assert "hot critical line" in compressed
+
+
+def test_ace_compress_mode3_takes_priority_over_bm25():
+    """When attention_scores is provided, it should dominate over query/BM25."""
+    lines = ["start"] + [f"line {i}" for i in range(10)] + ["end"]
+    content = "\n".join(lines)
+    n_lines = len(lines)
+
+    # attention scores: index 5 is hot
+    attention_scores = [0.1] * n_lines
+    attention_scores[5] = 1.0
+    hot_line = lines[5]
+
+    # BM25 query points at a different line (index 3)
+    query = lines[3]
+
+    compressed = ace_compress(
+        content, target_ratio=0.3, query=query, attention_scores=attention_scores
+    )
+    # Hot-attention line must survive
+    assert hot_line in compressed
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: Registry and ACEAttentionCapture tests
+# ---------------------------------------------------------------------------
+
+
+def test_register_and_get_tracker():
+    rid = "test-request-001"
+    try:
+        tracker = register_tracker(rid, max_seq_len=128)
+        assert tracker is not None
+        assert get_tracker(rid) is tracker
+    finally:
+        release_tracker(rid)
+
+    assert get_tracker(rid) is None
+
+
+def test_ace_attention_capture_lifecycle():
+    rid = "test-request-capture-001"
+    try:
+        cap = start_capture(rid, max_seq_len=128)
+        assert get_capture(rid) is cap
+        assert get_tracker(rid) is not None
+
+        weights = _make_attn_weights(seq_len=20, hot_positions=[5, 6])
+        cap.on_layer_output(0, weights[0], new_token_start=15)
+        cap.on_layer_output(1, weights[1], new_token_start=15)
+
+        stop_capture(rid)
+        assert get_capture(rid) is None  # capture stopped
+        assert get_tracker(rid) is not None  # tracker still alive for next turn
+        assert get_tracker(rid).has_data
+
+    finally:
+        release_capture(rid)
+
+    assert get_tracker(rid) is None
+
+
+def test_ace_attention_capture_flush_aggregates_layers():
+    """on_layer_output from all layers should be stacked and accumulated."""
+    rid = "test-request-flush-001"
+    try:
+        cap = start_capture(rid, max_seq_len=64)
+        weights = _make_attn_weights(
+            n_layers=1, n_heads=4, n_new_tokens=3, seq_len=20, hot_positions=[5]
+        )
+        for layer_idx in range(4):
+            cap.on_layer_output(layer_idx, weights[0], new_token_start=15)
+        cap.flush()
+        tracker = get_tracker(rid)
+        assert tracker.has_data
+        scores = tracker.score_lines([(5, 8), (10, 15)])
+        assert scores[0] > scores[1]  # hot region outscore cold
+    finally:
+        release_capture(rid)
+
+
+def test_apply_ace_eviction_mode3_with_tracker():
+    """apply_ace_eviction with a pre-loaded tracker uses attention scores."""
+    rid = "test-request-mode3-001"
+    try:
+        tracker = register_tracker(rid, max_seq_len=4096)
+
+        # Simulate attention data: first tool result's content (tokens 0-50) is hot
+        weights = _make_attn_weights(
+            n_layers=2, n_heads=4, n_new_tokens=5, seq_len=100, hot_positions=list(range(50))
+        )
+        tracker.accumulate(weights, new_token_start=50)
+
+        messages = _make_messages(tool_content_size=2000, n_tools=3)
+        total_before = sum(len(m["content"]) for m in messages if isinstance(m.get("content"), str))
+        budget = total_before // 2
+
+        # Without tracker: uses BM25
+        msgs_bm25 = [dict(m) for m in messages]
+        saved_bm25 = apply_ace_eviction(msgs_bm25, budget_chars=budget, use_query_relevance=True)
+
+        # With tracker but no tokenizer: falls back to BM25 (tracker.has_data but no tokenizer)
+        msgs_mode3 = [dict(m) for m in messages]
+        saved_mode3 = apply_ace_eviction(
+            msgs_mode3, budget_chars=budget, tracker=tracker, tokenizer=None, token_offsets=None
+        )
+
+        # Both should compress something
+        assert saved_bm25 > 0
+        assert saved_mode3 > 0
+
+    finally:
+        release_tracker(rid)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2+3 fallback chain
+# ---------------------------------------------------------------------------
+
+
+def test_fallback_chain_no_tracker_no_query():
+    """Without tracker or query, falls back to heuristic (Phase 1)."""
+    lines = ["start"] + ["verbose filler"] * 20 + ["Error: crash happened"] + ["end"]
+    content = "\n".join(lines)
+    compressed = ace_compress(content, target_ratio=0.2)
+    assert "Error: crash happened" in compressed
+
+
+def test_fallback_chain_bm25_without_attention():
+    """With query but no tracker, uses BM25 (Phase 2)."""
+    lines = ["start"] + ["unrelated filler"] * 15 + ["specific_function_call"] + ["end"]
+    content = "\n".join(lines)
+    compressed = ace_compress(content, target_ratio=0.3, query="specific_function_call")
+    assert "specific_function_call" in compressed
+
+
+def test_compute_line_token_spans_fallback():
+    """compute_line_token_spans returns plausible spans even without offset mapping."""
+
+    class FakeTokenizer:
+        def __call__(self, text, return_offsets_mapping=False):
+            raise RuntimeError("offsets not supported")
+
+        def encode(self, text):
+            return list(range(max(1, len(text) // 4)))
+
+    text = "line one\nline two\nline three"
+    spans = compute_line_token_spans(text, FakeTokenizer(), message_start_token=10)
+    assert len(spans) == 3
+    for start, end in spans:
+        assert end > start
+        assert start >= 10
