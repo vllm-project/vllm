@@ -434,19 +434,6 @@ def trtllm_moe_pack_topk_ids_weights(
     return output.reshape(original_shape)
 
 
-# @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
-# def trtllm_moe_pack_topk_ids_weights(
-#     topk_ids: torch.Tensor, topk_weights: torch.Tensor
-# ) -> torch.Tensor:
-#     """
-#     Pack topk_ids and topk_weights into a single int32 tensor.
-#     Format: (expert_id << 16) | weight_bf16.view(int16)
-#     """
-#     return (topk_ids.to(torch.int32) << 16) | topk_weights.to(torch.bfloat16).view(
-#         torch.int16
-#     )
-
-
 @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def swiglu_limit_func(
     output: torch.Tensor,
