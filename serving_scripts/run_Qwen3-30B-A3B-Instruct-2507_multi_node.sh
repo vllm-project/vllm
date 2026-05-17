@@ -189,6 +189,7 @@ module load CUDA/12.9.0
 TRACE_BASE="/data/engs-glass/catz0932/inference-traces/vllm/results"
 TRACE_RUN_DIR="${TRACE_BASE}/${SLURM_JOB_ID}"
 RAY_TMP_ROOT="${TRACE_RUN_DIR}/ray_tmp"
+RAY_TMP_LINK_BASE="/tmp/vray-${SLURM_JOB_ID}"
 
 mkdir -p "${TRACE_RUN_DIR}/nsight"
 mkdir -p "${TRACE_RUN_DIR}/nccl_logs"
@@ -331,6 +332,11 @@ unset GLOO_SOCKET_IFNAME
 export VLLM_HOST_IP=${HEAD_NODE_IP}
 configure_socket_ifnames \"${HEAD_NODE_IP}\" 0
 
+rm -rf \"${RAY_TMP_LINK_BASE}-${HEAD_NODE}\"
+mkdir -p \"${RAY_TMP_ROOT}/${HEAD_NODE}\"
+ln -sfn \"${RAY_TMP_ROOT}/${HEAD_NODE}\" \"${RAY_TMP_LINK_BASE}-${HEAD_NODE}\"
+echo \"Ray head temp dir link: ${RAY_TMP_LINK_BASE}-${HEAD_NODE} -> ${RAY_TMP_ROOT}/${HEAD_NODE}\"
+
 if [ \"${NSYS_ENABLE}\" = \"1\" ] && [ \"${NSYS_PROFILE_RAY}\" = \"1\" ]; then
   echo \"Profiling Ray head with Nsight Systems\"
   echo \"Nsight output: ${NSYS_DIR}/ray_head_${HEAD_NODE}.nsys-rep\"
@@ -347,7 +353,7 @@ if [ \"${NSYS_ENABLE}\" = \"1\" ] && [ \"${NSYS_PROFILE_RAY}\" = \"1\" ]; then
       --port=${RAY_PORT} \\
       --num-gpus=${GPUS_PER_NODE} \\
       --num-cpus=${CPUS_PER_TASK} \\
-      --temp-dir=${RAY_TMP_ROOT}/${HEAD_NODE}
+      --temp-dir=${RAY_TMP_LINK_BASE}-${HEAD_NODE}
 else
   \"${RAY_BIN}\" start --block \\
     --head \\
@@ -355,7 +361,7 @@ else
     --port=${RAY_PORT} \\
     --num-gpus=${GPUS_PER_NODE} \\
     --num-cpus=${CPUS_PER_TASK} \\
-    --temp-dir=${RAY_TMP_ROOT}/${HEAD_NODE}
+    --temp-dir=${RAY_TMP_LINK_BASE}-${HEAD_NODE}
 fi"
 srun \
   --nodelist "${HEAD_NODE}" \
@@ -389,6 +395,11 @@ unset GLOO_SOCKET_IFNAME
 export VLLM_HOST_IP=${WORKER_IP}
 configure_socket_ifnames \"${WORKER_IP}\" 0
 
+rm -rf \"${RAY_TMP_LINK_BASE}-${WORKER}\"
+mkdir -p \"${RAY_TMP_ROOT}/${WORKER}\"
+ln -sfn \"${RAY_TMP_ROOT}/${WORKER}\" \"${RAY_TMP_LINK_BASE}-${WORKER}\"
+echo \"Ray worker temp dir link: ${RAY_TMP_LINK_BASE}-${WORKER} -> ${RAY_TMP_ROOT}/${WORKER}\"
+
 if [ \"${NSYS_ENABLE}\" = \"1\" ] && [ \"${NSYS_PROFILE_RAY}\" = \"1\" ]; then
   echo \"Profiling Ray worker ${WORKER} with Nsight Systems\"
   echo \"Nsight output: ${NSYS_DIR}/ray_worker_${WORKER}.nsys-rep\"
@@ -404,14 +415,14 @@ if [ \"${NSYS_ENABLE}\" = \"1\" ] && [ \"${NSYS_PROFILE_RAY}\" = \"1\" ]; then
       --node-ip-address=${WORKER_IP} \\
       --num-gpus=${GPUS_PER_NODE} \\
       --num-cpus=${CPUS_PER_TASK} \\
-      --temp-dir=${RAY_TMP_ROOT}/${WORKER} 
+      --temp-dir=${RAY_TMP_LINK_BASE}-${WORKER}
 else
   \"${RAY_BIN}\" start --block \\
     --address=${HEAD_NODE_IP}:${RAY_PORT} \\
     --node-ip-address=${WORKER_IP} \\
     --num-gpus=${GPUS_PER_NODE} \\
     --num-cpus=${CPUS_PER_TASK} \\
-    --temp-dir=${RAY_TMP_ROOT}/${WORKER} 
+    --temp-dir=${RAY_TMP_LINK_BASE}-${WORKER}
 fi"
     srun \
       --nodelist "${WORKER}" \
