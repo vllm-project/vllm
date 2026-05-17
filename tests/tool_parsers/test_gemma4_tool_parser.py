@@ -135,6 +135,26 @@ class TestParseGemma4Args:
         result = _parse_gemma4_args('name:<|"|>test<|"|>,flag:', partial=True)
         assert result == {"name": "test"}
 
+    def test_trailing_dot_float_partial_withheld(self):
+        """Bare float ending with '.' is withheld in partial mode.
+
+        Regression test for #42047: float("108.") → 108.0 causes
+        streaming diff corruption (108.0 → 108.2 becomes 108.02).
+        """
+        # Single key with trailing dot — withheld entirely
+        result = _parse_gemma4_args("left:108.,right:22.8", partial=True)
+        assert result == {}
+
+        # Stable key before trailing-dot key — stable key is kept
+        result = _parse_gemma4_args(
+            'name:<|"|>test<|"|>,score:3.,count:1', partial=True
+        )
+        assert result == {"name": "test"}
+
+        # Non-partial mode parses trailing dot normally
+        result = _parse_gemma4_args("left:108.,right:22.8", partial=False)
+        assert result == {"left": 108.0, "right": 22.8}
+
     @pytest.mark.timeout(5)
     def test_malformed_partial_array(self):
         result = _parse_gemma4_args(":[t:[]")
@@ -162,6 +182,15 @@ class TestParseGemma4Array:
     @pytest.mark.timeout(5)
     def test_stray_closing_bracket(self):
         result = _parse_gemma4_array("42,]trailing")
+        assert result == [42]
+
+    def test_trailing_dot_float_partial_withheld(self):
+        """Array elements with trailing dot withheld in partial mode."""
+        result = _parse_gemma4_array("108.,22.8", partial=True)
+        assert result == []
+
+        # Stable elements before trailing-dot element are kept
+        result = _parse_gemma4_array("42,108.,3", partial=True)
         assert result == [42]
 
 
