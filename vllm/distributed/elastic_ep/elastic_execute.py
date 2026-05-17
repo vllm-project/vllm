@@ -40,6 +40,9 @@ from vllm.distributed.parallel_state import (
 from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
+from vllm.model_executor.layers.fused_moe.eep_reconfigure import (
+    make_eep_staged_quant_method,
+)
 from vllm.utils import is_moe_layer
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
@@ -302,12 +305,13 @@ class ElasticEPScalingExecutor:
         self._staged_moe_quant_methods.clear()
         with set_current_vllm_config(self.worker.vllm_config):
             for module in moe_modules:
-                staged_quant_method = module.eep_make_staged_quant_method(
+                staged_quant_method = make_eep_staged_quant_method(
+                    module,
                     self._make_eep_moe_config(
                         module,
                         standby_dp_group,
                         standby_ep_group,
-                    )
+                    ),
                 )
                 if staged_quant_method is not None:
                     self._staged_moe_quant_methods[module] = staged_quant_method
