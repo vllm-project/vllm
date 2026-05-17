@@ -521,11 +521,13 @@ class EngineCore:
                 # Add this step's future to the queue.
                 batch_queue.appendleft((future, scheduler_output, exec_future))
                 if (
-                    len(batch_queue) < self.batch_queue_size
+                    model_executed
+                    and len(batch_queue) < self.batch_queue_size
                     and self.scheduler.has_requests()
                 ):
-                    # Don't block on next worker response unless the queue is full
-                    # or there are no more requests to schedule.
+                    # Don't block on next worker response unless the queue is
+                    # full or there are no more requests to schedule.
+                    # The `model_executed` gate is required for the PP+DP path.
                     return None, True
 
         elif not batch_queue:
