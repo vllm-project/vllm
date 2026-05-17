@@ -960,9 +960,10 @@ class DeepseekV4Attention(nn.Module):
             if hasattr(config, "compress_ratios") and config.compress_ratios is not None:
                 self.compress_ratio = max(1, config.compress_ratios[layer_id])
             else:
-                _rates = getattr(config, "compress_rates", {}) or {}
-                _types = getattr(config, "layer_types", [])
-                self.compress_ratio = max(1, _rates.get(_types[layer_id], 0))
+                _rates = getattr(config, "compress_rates", None) or {}
+                _types = getattr(config, "layer_types", None) or []
+                layer_type = _types[layer_id] if layer_id < len(_types) else None
+                self.compress_ratio = max(1, _rates.get(layer_type, 0))
         else:
             self.compress_ratio = 1
         self.eps = config.rms_norm_eps
