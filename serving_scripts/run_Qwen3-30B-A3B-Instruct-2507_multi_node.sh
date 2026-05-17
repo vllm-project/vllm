@@ -212,6 +212,8 @@ echo "NSYS_TRACE=${NSYS_TRACE}"
 echo "NSYS_DELAY=${NSYS_DELAY}"
 echo "NSYS_PROFILE_SERVER=${NSYS_PROFILE_SERVER}"
 echo "NSYS_PROFILE_RAY=${NSYS_PROFILE_RAY}"
+echo "Expected Ray worker Nsight source on each node: /tmp/ray/session_latest/logs/nsight"
+echo "Expected copied Ray worker Nsight destination: ${TRACE_RUN_DIR}/ray_worker_nsight/<node>"
 echo "nsys path: $(command -v nsys || echo '<not found>')"
 nsys --version || true
 
@@ -263,6 +265,9 @@ if [ ! -x "${RAY_BIN}" ]; then
   exit 1
 fi
 echo "Using RAY_BIN=${RAY_BIN}"
+echo "Ray binary for head/workers: ${RAY_BIN}"
+echo "Ray address for workers: ${RAY_ADDRESS}"
+echo "Ray default temp/session root to inspect on htc-g059 and htc-g060: /tmp/ray"
 
 export VLLM_TARGET_DEVICE=cuda
 export VLLM_USE_DEEP_GEMM="${VLLM_USE_DEEP_GEMM:-0}"
@@ -320,6 +325,8 @@ trap cleanup EXIT
 
 echo "=== Ray head (background srun) ==="
 echo "Starting head node ${HEAD_NODE} (HEAD_RAY_PID will be set)..."
+echo "Head Ray node ${HEAD_NODE} expected session root: /tmp/ray/session_latest"
+echo "Head Ray node ${HEAD_NODE} expected Nsight worker log dir: /tmp/ray/session_latest/logs/nsight"
 RAY_HEAD_CMD="$(
   declare -f interface_for_ip
   declare -f interface_has_ip
@@ -329,6 +336,11 @@ source \"${VENV_DIR}/bin/activate\"
 unset GLOO_SOCKET_IFNAME
 export VLLM_HOST_IP=${HEAD_NODE_IP}
 configure_socket_ifnames \"${HEAD_NODE_IP}\" 0
+echo \"Ray head host: \$(hostname) node=${HEAD_NODE} VLLM_HOST_IP=\${VLLM_HOST_IP}\"
+echo \"Ray head TMPDIR=\${TMPDIR:-<unset>} RAY_TMPDIR=\${RAY_TMPDIR:-<unset>}\"
+echo \"Ray head expected session root: /tmp/ray/session_latest\"
+echo \"Ray head expected Nsight worker log dir: /tmp/ray/session_latest/logs/nsight\"
+echo \"Ray head NSYS_DIR=${NSYS_DIR}\"
 
 if [ \"${NSYS_ENABLE}\" = \"1\" ] && [ \"${NSYS_PROFILE_RAY}\" = \"1\" ]; then
   echo \"Profiling Ray head with Nsight Systems\"
@@ -376,6 +388,8 @@ if [ -n "${WORKER_NODES}" ]; then
       exit 1
     fi
     echo "Starting worker node: ${WORKER} with IP ${WORKER_IP}"
+    echo "Worker Ray node ${WORKER} expected session root: /tmp/ray/session_latest"
+    echo "Worker Ray node ${WORKER} expected Nsight worker log dir: /tmp/ray/session_latest/logs/nsight"
     RAY_WORKER_CMD="$(
       declare -f interface_for_ip
       declare -f interface_has_ip
@@ -385,6 +399,11 @@ source \"${VENV_DIR}/bin/activate\"
 unset GLOO_SOCKET_IFNAME
 export VLLM_HOST_IP=${WORKER_IP}
 configure_socket_ifnames \"${WORKER_IP}\" 0
+echo \"Ray worker host: \$(hostname) node=${WORKER} VLLM_HOST_IP=\${VLLM_HOST_IP}\"
+echo \"Ray worker TMPDIR=\${TMPDIR:-<unset>} RAY_TMPDIR=\${RAY_TMPDIR:-<unset>}\"
+echo \"Ray worker expected session root: /tmp/ray/session_latest\"
+echo \"Ray worker expected Nsight worker log dir: /tmp/ray/session_latest/logs/nsight\"
+echo \"Ray worker NSYS_DIR=${NSYS_DIR}\"
 
 if [ \"${NSYS_ENABLE}\" = \"1\" ] && [ \"${NSYS_PROFILE_RAY}\" = \"1\" ]; then
   echo \"Profiling Ray worker ${WORKER} with Nsight Systems\"
@@ -449,6 +468,8 @@ if [ "${NSYS_ENABLE}" = "1" ] && [ "${NSYS_PROFILE_SERVER}" = "1" ]; then
     --enable-logging-iteration-details
   )
 fi
+echo "VLLM_TRACE_FLAGS=${VLLM_TRACE_FLAGS[*]:-<none>}"
+echo "When --ray-workers-use-nsight is active, check Ray worker Nsight logs under /tmp/ray/session_latest/logs/nsight on htc-g059 and htc-g060"
 
 if [ "${NSYS_ENABLE}" = "1" ] && [ "${NSYS_PROFILE_SERVER}" = "1" ]; then
   echo "Profiling vLLM server and Ray workers with Nsight Systems"
@@ -518,10 +539,13 @@ if [ -n "${SERVER_STEP_PID}" ] && kill -0 "${SERVER_STEP_PID}" 2>/dev/null; then
 fi
 
 echo "Copying Ray worker Nsight reports..."
+echo "Will probe head node ${HEAD_NODE} and worker nodes ${WORKER_NODES:-<none>} for /tmp/ray/session_latest/logs/nsight"
 mkdir -p "${TRACE_RUN_DIR}/ray_worker_nsight"
 
 copy_ray_nsight_from_node() {
   local NODE="$1"
+  echo "Probing ${NODE} for Ray worker Nsight logs at /tmp/ray/session_latest/logs/nsight"
+  echo "Destination for ${NODE}: ${TRACE_RUN_DIR}/ray_worker_nsight/${NODE}"
   srun \
     --nodelist "${NODE}" \
     --overlap \
@@ -531,7 +555,11 @@ copy_ray_nsight_from_node() {
     --cpus-per-task=1 \
     bash -lc "
       mkdir -p '${TRACE_RUN_DIR}/ray_worker_nsight/${NODE}'
+      echo 'Ray Nsight probe node ${NODE}: host='\"\$(hostname)\"
+      echo 'Ray Nsight probe node ${NODE}: source=/tmp/ray/session_latest/logs/nsight'
+      echo 'Ray Nsight probe node ${NODE}: destination=${TRACE_RUN_DIR}/ray_worker_nsight/${NODE}'
       if [ -d /tmp/ray/session_latest/logs/nsight ]; then
+        echo 'Found /tmp/ray/session_latest/logs/nsight on ${NODE}'
         cp -v /tmp/ray/session_latest/logs/nsight/*.nsys-rep \
           '${TRACE_RUN_DIR}/ray_worker_nsight/${NODE}/' 2>/dev/null || true
       else
@@ -544,6 +572,34 @@ copy_ray_nsight_from_node "${HEAD_NODE}"
 
 for WORKER in ${WORKER_NODES}; do
   copy_ray_nsight_from_node "${WORKER}"
+done
+
+echo "Recursive /tmp/ray listings from Ray nodes..."
+
+print_tmp_ray_from_node() {
+  local NODE="$1"
+  echo "Printing recursive /tmp/ray listing from ${NODE}"
+  srun \
+    --nodelist "${NODE}" \
+    --overlap \
+    --nodes=1 \
+    --ntasks=1 \
+    --ntasks-per-node=1 \
+    --cpus-per-task=1 \
+    bash -lc "
+      echo '=== /tmp/ray recursive listing on ${NODE} host='\"\$(hostname)\"' ==='
+      if [ -d /tmp/ray ]; then
+        find /tmp/ray -printf '%M %u %g %s bytes %TY-%Tm-%Td %TH:%TM:%TS %p\n' 2>/dev/null | sort || true
+      else
+        echo 'No /tmp/ray directory on ${NODE}'
+      fi
+    " || true
+}
+
+print_tmp_ray_from_node "${HEAD_NODE}"
+
+for WORKER in ${WORKER_NODES}; do
+  print_tmp_ray_from_node "${WORKER}"
 done
 
 echo "Trace files:"
