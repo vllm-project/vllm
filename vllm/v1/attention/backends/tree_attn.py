@@ -38,6 +38,10 @@ class TreeAttentionBackend(AttentionBackend):
     ]
     forward_includes_kv_cache_update: bool = False
 
+    @classmethod
+    def supports_non_causal(cls) -> bool:
+        return True
+
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [MultipleOf(16)]
@@ -91,6 +95,7 @@ class TreeAttentionMetadata:
     num_decodes: int = 0
 
     tree_attn_bias: torch.Tensor | None = None
+    causal: bool = True
 
     # Cached Prefill/decode metadata.
     _cached_prefill_metadata: "TreeAttentionMetadata | None" = None
@@ -118,6 +123,7 @@ class TreeAttentionMetadata:
             seq_lens=kv_seqlens,
             block_table=self.block_table[self.num_decodes :],
             slot_mapping=self.slot_mapping[self.num_decode_tokens :],
+            causal=self.causal,
         )
         return self._cached_prefill_metadata
 
@@ -144,6 +150,7 @@ class TreeAttentionMetadata:
             block_table=self.block_table[: self.num_decodes],
             slot_mapping=self.slot_mapping[: self.num_decode_tokens],
             tree_attn_bias=self.tree_attn_bias,
+            causal=self.causal,
         )
         return self._cached_decode_metadata
 
@@ -177,6 +184,9 @@ class TreeAttentionMetadataBuilder(AttentionMetadataBuilder[TreeAttentionMetadat
         )
 
         self.reorder_batch_threshold = self.tree_attn_bias.shape[0]
+        # Decode threshold used in build(); may differ from reorder_batch_threshold
+        # when DDTree uses per-request 3D biases (see _update_target_tree_attn_bias).
+        self._tree_decode_threshold = self.tree_attn_bias.shape[0]
 
     def build(
         self,
@@ -184,7 +194,7 @@ class TreeAttentionMetadataBuilder(AttentionMetadataBuilder[TreeAttentionMetadat
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> TreeAttentionMetadata:
-        decode_threshold = self.tree_attn_bias.shape[0]
+        decode_threshold = self._tree_decode_threshold
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
                 common_attn_metadata, decode_threshold=decode_threshold
@@ -212,6 +222,7 @@ class TreeAttentionMetadataBuilder(AttentionMetadataBuilder[TreeAttentionMetadat
             block_table=block_table,
             slot_mapping=slot_mapping,
             tree_attn_bias=self.tree_attn_bias,
+            causal=common_attn_metadata.causal,
         )
 
     def build_for_drafting(
@@ -229,7 +240,9 @@ class TreeAttentionMetadataBuilder(AttentionMetadataBuilder[TreeAttentionMetadat
             # Slice the tree attention bias for drafting. Exclude
             # the root level.
             start, end = 1, 1 + common_attn_metadata.max_query_len
-            self.tree_attn_bias = self.tree_attn_bias[start:end, start:end].contiguous()
+            self.tree_attn_bias = self.tree_attn_bias[
+                ..., start:end, start:end
+            ].contiguous()
 
         # Build attention bias.
         attn_metadata = self.build(0, common_attn_metadata, fast_build=True)
@@ -408,7 +421,7 @@ class TreeAttentionImpl(AttentionImpl):
                 seqused_k=prefill_meta.seq_lens,
                 max_seqlen_k=prefill_meta.max_seq_len,
                 softmax_scale=self.scale,
-                causal=True,
+                causal=prefill_meta.causal,
                 alibi_slopes=self.alibi_slopes,
                 window_size=self.sliding_window,
                 block_table=prefill_meta.block_table,
@@ -419,24 +432,104 @@ class TreeAttentionImpl(AttentionImpl):
             )
 
         if decode_meta := attn_metadata.decode_metadata:
-            unified_attention(
-                q=query[:num_decode_tokens],
-                k=key_cache,
-                v=value_cache,
-                out=output[:num_decode_tokens],
-                cu_seqlens_q=decode_meta.query_start_loc,
-                max_seqlen_q=decode_meta.max_query_len,
-                seqused_k=decode_meta.seq_lens,
-                max_seqlen_k=decode_meta.max_seq_len,
-                softmax_scale=self.scale,
-                causal=True,
-                alibi_slopes=self.alibi_slopes,
-                qq_bias=decode_meta.tree_attn_bias,
-                window_size=self.sliding_window,
-                block_table=decode_meta.block_table,
-                softcap=self.logits_soft_cap,
-                q_descale=None,  # Not supported
-                k_descale=layer._k_scale.expand(descale_shape),
-                v_descale=layer._v_scale.expand(descale_shape),
-            )
+            tree_bias = decode_meta.tree_attn_bias
+            if tree_bias is not None and tree_bias.numel() == 0:
+                tree_bias = None
+
+            # Determine whether to use the 3D per-request DDTree bias.
+            # Guard: if the batch shrank since the bias was built (requests
+            # finished between propose and this execute_model call),
+            # ns_tokens goes negative, causing a Triton OOB.  Fall back to
+            # plain causal attention for this transition step.
+            # The next propose call rebuilds a correctly-sized bias.
+            use_3d_bias = tree_bias is not None and tree_bias.ndim == 3
+            if use_3d_bias:
+                assert tree_bias is not None
+                num_spec = tree_bias.shape[0]
+                N1 = tree_bias.shape[-1]  # = N+1 tokens per spec request
+                num_nonspec = attn_metadata.num_decodes - num_spec
+                ns_tokens = num_decode_tokens - num_spec * N1
+                if ns_tokens < 0:
+                    use_3d_bias = False
+
+            if use_3d_bias:
+                # tree_bias is shape [num_spec, N+1, N+1] — one [N+1, N+1] matrix per
+                # spec-decode request. The Triton kernel indexes it by seq_idx (position
+                # within the call), so the call must contain ONLY spec-decode requests;
+                # mixing non-spec requests at the front would shift seq_idx and cause
+                # wrong or out-of-bounds bias lookups.
+                #
+                # To make this work, the decode batch is always ordered:
+                #   [non-spec (regular decodes + short extends)] then [spec-decodes]
+                # guaranteed by reorder_batch_threshold = N (set when the
+                # bias is built).
+                #
+                # We therefore split into two unified_attention calls:
+                #   call 1: non-spec requests, no qq_bias (plain causal)
+                #   call 2: spec-decode requests only, qq_bias=tree_bias
+                #           (seq_idx=0..num_spec-1)
+                if num_nonspec > 0:
+                    unified_attention(
+                        q=query[:ns_tokens],
+                        k=key_cache,
+                        v=value_cache,
+                        out=output[:ns_tokens],
+                        cu_seqlens_q=decode_meta.query_start_loc[: num_nonspec + 1],
+                        max_seqlen_q=N1 - 1,
+                        seqused_k=decode_meta.seq_lens[:num_nonspec],
+                        max_seqlen_k=decode_meta.max_seq_len,
+                        softmax_scale=self.scale,
+                        causal=True,
+                        alibi_slopes=self.alibi_slopes,
+                        window_size=self.sliding_window,
+                        block_table=decode_meta.block_table[:num_nonspec],
+                        softcap=self.logits_soft_cap,
+                        q_descale=None,
+                        k_descale=layer._k_scale.expand((num_nonspec, key.shape[1])),
+                        v_descale=layer._v_scale.expand((num_nonspec, key.shape[1])),
+                    )
+
+                # Spec-decode requests: adjust cu_seqlens_q to start from 0.
+                spec_cu_q = decode_meta.query_start_loc[num_nonspec:] - ns_tokens
+                unified_attention(
+                    q=query[ns_tokens:num_decode_tokens],
+                    k=key_cache,
+                    v=value_cache,
+                    out=output[ns_tokens:num_decode_tokens],
+                    cu_seqlens_q=spec_cu_q,
+                    max_seqlen_q=N1,
+                    seqused_k=decode_meta.seq_lens[num_nonspec:],
+                    max_seqlen_k=decode_meta.max_seq_len,
+                    softmax_scale=self.scale,
+                    causal=True,
+                    alibi_slopes=self.alibi_slopes,
+                    qq_bias=tree_bias,
+                    window_size=self.sliding_window,
+                    block_table=decode_meta.block_table[num_nonspec:],
+                    softcap=self.logits_soft_cap,
+                    q_descale=None,
+                    k_descale=layer._k_scale.expand((num_spec, key.shape[1])),
+                    v_descale=layer._v_scale.expand((num_spec, key.shape[1])),
+                )
+            else:
+                unified_attention(
+                    q=query[:num_decode_tokens],
+                    k=key_cache,
+                    v=value_cache,
+                    out=output[:num_decode_tokens],
+                    cu_seqlens_q=decode_meta.query_start_loc,
+                    max_seqlen_q=decode_meta.max_query_len,
+                    seqused_k=decode_meta.seq_lens,
+                    max_seqlen_k=decode_meta.max_seq_len,
+                    softmax_scale=self.scale,
+                    causal=decode_meta.causal,
+                    alibi_slopes=self.alibi_slopes,
+                    qq_bias=tree_bias,
+                    window_size=self.sliding_window,
+                    block_table=decode_meta.block_table,
+                    softcap=self.logits_soft_cap,
+                    q_descale=None,  # Not supported
+                    k_descale=layer._k_scale.expand(descale_shape),
+                    v_descale=layer._v_scale.expand(descale_shape),
+                )
         return output
