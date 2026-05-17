@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
+import vllm.utils.hashing as hashing
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.usage.usage_lib import UsageContext
@@ -68,6 +69,19 @@ def test_prefix_caching_xxhash_from_cli():
     args = parser.parse_args(["--prefix-caching-hash-algo", "xxhash_cbor"])
     vllm_config = EngineArgs.from_cli_args(args=args).create_engine_config()
     assert vllm_config.cache_config.prefix_caching_hash_algo == "xxhash_cbor"
+
+
+@pytest.mark.parametrize("hash_algo", ["xxhash", "xxhash_cbor"])
+def test_prefix_caching_xxhash_requires_xxhash_package_from_cli(
+    monkeypatch: pytest.MonkeyPatch, hash_algo: str
+):
+    monkeypatch.setattr(hashing, "_xxhash", None)
+
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(["--prefix-caching-hash-algo", hash_algo])
+
+    with pytest.raises(ModuleNotFoundError, match="pip install xxhash"):
+        EngineArgs.from_cli_args(args=args).create_engine_config()
 
 
 def test_mm_prefix_lm_raises_batched_tokens_floor():
