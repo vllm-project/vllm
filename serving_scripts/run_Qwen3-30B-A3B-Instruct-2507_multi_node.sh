@@ -214,9 +214,10 @@ echo "NSYS_TRACE=${NSYS_TRACE}"
 echo "NSYS_DELAY=${NSYS_DELAY}"
 echo "NSYS_PROFILE_VLLM=${NSYS_PROFILE_VLLM}"
 echo "NSYS_PROFILE_RAY=${NSYS_PROFILE_RAY}"
+echo "RAY_TMP_ROOT=${RAY_TMP_ROOT}"
+echo "RAY_TMP_LINK_BASE=${RAY_TMP_LINK_BASE}"
 echo "nsys path: $(command -v nsys || echo '<not found>')"
 nsys --version || true
-
 
 if [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
   REPO_ROOT="${SLURM_SUBMIT_DIR}"
@@ -318,7 +319,6 @@ cleanup() {
     fi
   done
 }
-
 trap cleanup EXIT
 
 collect_ray_logs() {
@@ -354,6 +354,172 @@ collect_ray_logs() {
 
   echo "Ray log archives:"
   find "${out}" -type f -printf "%p %s bytes\n" 2>/dev/null || true
+}
+
+print_ray_log_locations_from_node() {
+  local NODE="$1"
+  echo "Printing Ray log locations from ${NODE}"
+
+  srun \
+    --overlap \
+    --nodelist "${NODE}" \
+    --nodes=1 \
+    --ntasks=1 \
+    --ntasks-per-node=1 \
+    --cpus-per-task=1 \
+    --mem=1G \
+    bash -lc "
+      set +e
+      shopt -s nullglob
+
+      echo '===== Ray log locations on ${NODE} ====='
+      echo \"hostname=\$(hostname)\"
+
+      CANDIDATE_ROOTS=(
+        /tmp/ray
+        ${RAY_TMP_LINK_BASE}-${NODE}
+        ${RAY_TMP_ROOT}/${NODE}
+      )
+
+      for root in \"\${CANDIDATE_ROOTS[@]}\"; do
+        echo
+        echo \"Ray temp root candidate: \${root}\"
+
+        if [ ! -e \"\${root}\" ]; then
+          echo \"  missing\"
+          continue
+        fi
+
+        real_root=\$(readlink -f \"\${root}\" 2>/dev/null || echo \"\${root}\")
+        echo \"  resolved root: \${real_root}\"
+
+        if [ -e \"\${root}/session_latest\" ]; then
+          session=\$(readlink -f \"\${root}/session_latest\" 2>/dev/null || true)
+          echo \"  session_latest: \${session}\"
+          echo \"  logs dir:       \${session}/logs\"
+          echo \"  nsight dir:     \${session}/logs/nsight\"
+
+          echo \"  current nsight files:\"
+          find \"\${session}/logs/nsight\" \
+            -maxdepth 1 \
+            -type f \
+            -printf '    %p %s bytes\n' 2>/dev/null || true
+        else
+          echo \"  no session_latest yet\"
+          echo \"  recent session dirs:\"
+          find \"\${root}\" \
+            -maxdepth 2 \
+            -type d \
+            -name 'session_*' \
+            -printf '    %p\n' 2>/dev/null | tail -10 || true
+        fi
+      done
+    " || true
+}
+
+copy_ray_nsight_from_node() {
+  local NODE="$1"
+  echo "Copying Ray worker Nsight reports from ${NODE}"
+
+  srun \
+    --overlap \
+    --nodelist "${NODE}" \
+    --nodes=1 \
+    --ntasks=1 \
+    --ntasks-per-node=1 \
+    --cpus-per-task=1 \
+    --mem=1G \
+    bash -lc "
+      set +e
+      shopt -s nullglob
+
+      mkdir -p '${TRACE_RUN_DIR}/ray_worker_nsight/${NODE}'
+
+      echo 'Checking Nsight locations on ${NODE}...'
+
+      CANDIDATE_DIRS=(
+        /tmp/ray/session_latest/logs/nsight
+        /tmp/ray/session_*/logs/nsight
+        ${RAY_TMP_LINK_BASE}-${NODE}/session_latest/logs/nsight
+        ${RAY_TMP_LINK_BASE}-${NODE}/session_*/logs/nsight
+        ${RAY_TMP_ROOT}/${NODE}/session_latest/logs/nsight
+        ${RAY_TMP_ROOT}/${NODE}/session_*/logs/nsight
+      )
+
+      found_rep=0
+      found_any=0
+
+      for d in \"\${CANDIDATE_DIRS[@]}\"; do
+        for expanded in \${d}; do
+          [ -d \"\${expanded}\" ] || continue
+
+          echo \"DIR: \${expanded}\"
+          find \"\${expanded}\" -maxdepth 1 -type f -printf '%p %s bytes\n' 2>/dev/null || true
+
+          for report in \"\${expanded}\"/*.nsys-rep; do
+            [ -e \"\${report}\" ] || continue
+            found_any=1
+            size=\$(stat -c '%s' \"\${report}\" 2>/dev/null || echo 0)
+            echo \"Found nsys-rep: \${report} \${size} bytes\"
+
+            if [ \"\${size}\" = \"0\" ]; then
+              echo \"Skipping zero-byte nsys-rep: \${report}\"
+              continue
+            fi
+
+            found_rep=1
+            cp -v \"\${report}\" '${TRACE_RUN_DIR}/ray_worker_nsight/${NODE}/' || true
+          done
+
+          for qdstrm in \"\${expanded}\"/*.qdstrm; do
+            [ -e \"\${qdstrm}\" ] || continue
+            found_any=1
+            size=\$(stat -c '%s' \"\${qdstrm}\" 2>/dev/null || echo 0)
+            echo \"Found qdstrm: \${qdstrm} \${size} bytes\"
+            cp -v \"\${qdstrm}\" '${TRACE_RUN_DIR}/ray_worker_nsight/${NODE}/' || true
+          done
+        done
+      done
+
+      if [ \"\${found_any}\" = \"0\" ]; then
+        echo 'No Nsight report files found on ${NODE}. Searching wider under /tmp and custom Ray temp root...'
+        find /tmp -maxdepth 5 \\( -name '*.nsys-rep' -o -name '*.qdstrm' \\) -printf '%p %s bytes\n' 2>/dev/null || true
+        find '${RAY_TMP_ROOT}/${NODE}' -maxdepth 8 \\( -name '*.nsys-rep' -o -name '*.qdstrm' \\) -printf '%p %s bytes\n' 2>/dev/null || true
+      elif [ \"\${found_rep}\" = \"0\" ]; then
+        echo 'Nsight files were found on ${NODE}, but no non-empty .nsys-rep was copied.'
+      fi
+    " || true
+}
+
+copy_ray_nsight_from_shared_root() {
+  echo "Collecting any Nsight reports directly from shared Ray temp root..."
+  mkdir -p "${TRACE_RUN_DIR}/ray_worker_nsight"
+
+  echo "Looking for Nsight reports under ${RAY_TMP_ROOT}:"
+  find "${RAY_TMP_ROOT}" \
+    -type f \( -name "*.nsys-rep" -o -name "*.qdstrm" \) \
+    -printf "%p %s bytes\n" 2>/dev/null || true
+
+  find "${RAY_TMP_ROOT}" \
+    -type f \( -name "*.nsys-rep" -o -name "*.qdstrm" \) -print0 2>/dev/null \
+    | while IFS= read -r -d '' report; do
+        rel="${report#${RAY_TMP_ROOT}/}"
+        node="${rel%%/*}"
+
+        if [ -z "${node}" ] || [ "${node}" = "${rel}" ]; then
+          node="unknown"
+        fi
+
+        mkdir -p "${TRACE_RUN_DIR}/ray_worker_nsight/${node}"
+
+        size="$(stat -c '%s' "${report}" 2>/dev/null || echo 0)"
+        if [[ "${report}" == *.nsys-rep ]] && [ "${size}" = "0" ]; then
+          echo "Skipping zero-byte nsys-rep: ${report}"
+          continue
+        fi
+
+        cp -v "${report}" "${TRACE_RUN_DIR}/ray_worker_nsight/${node}/" || true
+      done
 }
 
 echo "=== Ray head (background srun) ==="
@@ -494,6 +660,14 @@ for node in nodes:
         f"resources={node.get('Resources')}"
     )
 PY
+
+echo "=== Ray log locations ==="
+print_ray_log_locations_from_node "${HEAD_NODE}"
+
+for WORKER in ${WORKER_NODES}; do
+  print_ray_log_locations_from_node "${WORKER}"
+done
+
 echo "=== vLLM api_server (background process) ==="
 echo "Starting vLLM server on head node..."
 
@@ -511,7 +685,10 @@ fi
 
 if [ "${NSYS_ENABLE}" = "1" ] && [ "${NSYS_PROFILE_VLLM}" = "1" ]; then
   echo "Starting vLLM server with Ray worker Nsight profiling enabled"
-  echo "Ray worker Nsight reports should appear under ${RAY_TMP_ROOT}/<node>/session_*/logs/nsight"
+  echo "Ray worker Nsight reports may appear under:"
+  echo "  /tmp/ray/session_*/logs/nsight"
+  echo "  ${RAY_TMP_ROOT}/<node>/session_*/logs/nsight"
+
   python -m vllm.entrypoints.openai.api_server \
     --model "${MODEL_ID}" \
     --host "${HOST}" \
@@ -523,7 +700,7 @@ if [ "${NSYS_ENABLE}" = "1" ] && [ "${NSYS_PROFILE_VLLM}" = "1" ]; then
     --enforce-eager \
     "${VLLM_TRACE_FLAGS[@]}" \
     --disable-custom-all-reduce &
-  else
+else
   python -m vllm.entrypoints.openai.api_server \
     --model "${MODEL_ID}" \
     --host "${HOST}" \
@@ -547,13 +724,13 @@ until curl -fsS "http://${HEAD_NODE_IP}:${PORT}/health" >/dev/null 2>&1; do
     exit 1
   fi
   _health_wait_n=$((_health_wait_n + 1))
-  # Every ~60s by default; every loop if DEBUG_SLURM_SCRIPT=1
   if [ "${DEBUG_SLURM_SCRIPT}" = "1" ] || [ "$((_health_wait_n % 12))" -eq 0 ]; then
     echo "Still waiting for http://${HEAD_NODE_IP}:${PORT}/health (attempt ${_health_wait_n}) ..."
   fi
   sleep 5
 done
 unset _health_wait_n
+
 echo "Server is healthy. Running ${SERVE_SCRIPT} ..."
 echo "SP=${SP} SD=${SD}"
 HOST="${HEAD_NODE_IP}" PORT="${PORT}" MODEL_ID="${MODEL_ID}" \
@@ -561,6 +738,7 @@ HOST="${HEAD_NODE_IP}" PORT="${PORT}" MODEL_ID="${MODEL_ID}" \
   HEAD_NODE_IP="${HEAD_NODE_IP}" \
   GPUS_PER_NODE="${GPUS_PER_NODE}" CPUS_PER_TASK="${CPUS_PER_TASK}" \
   RAY_PORT="${RAY_PORT}" bash "${SERVE_SCRIPT}" "${SLURM_JOB_ID}" "${HEAD_NODE}"
+
 echo "Workload finished. Stopping vLLM/Nsight server process cleanly..."
 if [ -n "${SERVER_STEP_PID}" ] && kill -0 "${SERVER_STEP_PID}" 2>/dev/null; then
   kill -INT "${SERVER_STEP_PID}" 2>/dev/null || true
@@ -568,7 +746,30 @@ if [ -n "${SERVER_STEP_PID}" ] && kill -0 "${SERVER_STEP_PID}" 2>/dev/null; then
   SERVER_STEP_PID=""
 fi
 
-echo "Stopping Ray background srun steps so Nsight worker reports finalize..."
+echo "Waiting briefly for Ray worker Nsight reports to flush..."
+sleep 30
+
+echo "=== Ray log locations after workload ==="
+print_ray_log_locations_from_node "${HEAD_NODE}"
+
+for WORKER in ${WORKER_NODES}; do
+  print_ray_log_locations_from_node "${WORKER}"
+done
+
+echo "Copying Ray worker Nsight reports before stopping Ray background steps..."
+mkdir -p "${TRACE_RUN_DIR}/ray_worker_nsight"
+
+copy_ray_nsight_from_node "${HEAD_NODE}"
+
+for WORKER in ${WORKER_NODES}; do
+  copy_ray_nsight_from_node "${WORKER}"
+done
+
+copy_ray_nsight_from_shared_root
+
+collect_ray_logs
+
+echo "Stopping Ray background srun steps after collecting reports..."
 
 if [ -n "${HEAD_RAY_PID}" ] && kill -0 "${HEAD_RAY_PID}" 2>/dev/null; then
   kill -TERM "${HEAD_RAY_PID}" 2>/dev/null || true
@@ -583,28 +784,6 @@ for pid in ${WORKER_RAY_PIDS}; do
   fi
 done
 WORKER_RAY_PIDS=""
-
-echo "Waiting briefly for Ray/Nsight files to flush..."
-sleep 30
-
-collect_ray_logs
-
-echo "Collecting Ray worker Nsight reports from shared Ray temp dir..."
-mkdir -p "${TRACE_RUN_DIR}/ray_worker_nsight"
-
-echo "Looking for Nsight reports under ${RAY_TMP_ROOT}:"
-find "${RAY_TMP_ROOT}" \
-  -type f -name "*.nsys-rep" \
-  -printf "%p %s bytes\n" 2>/dev/null || true
-
-find "${RAY_TMP_ROOT}" \
-  -type f -name "*.nsys-rep" -print0 2>/dev/null \
-  | while IFS= read -r -d '' report; do
-      rel="${report#${RAY_TMP_ROOT}/}"
-      node="${rel%%/*}"
-      mkdir -p "${TRACE_RUN_DIR}/ray_worker_nsight/${node}"
-      cp -v "${report}" "${TRACE_RUN_DIR}/ray_worker_nsight/${node}/" || true
-    done
 
 echo "Trace files:"
 find "${TRACE_RUN_DIR}" -maxdepth 5 -type f -printf "%p %s bytes\n" 2>/dev/null || true
