@@ -232,10 +232,13 @@ def _run_vllm_dp_server(
     """
     from vllm.entrypoints.openai.api_server import run_server
 
-    rank = child_args.data_parallel_rank
+    # Create a fresh process group for the vLLM DP Server.
+    os.setpgrp()
+
+    name = f"APIServer_DP{child_args.data_parallel_rank}"
     update_environment_variables(env_updates)
-    set_process_title("DPRank", str(rank))
-    decorate_logs(f"DPRank_{rank}")
+    set_process_title(name)
+    decorate_logs(name)
     uvloop.run(run_server(child_args))
 
 
@@ -266,6 +269,7 @@ class DPSupervisor:
 
         # Launch DPSupervisor Server.
         app = _build_dp_supervisor_app(self)
+        decorate_logs("DPSupervisor")
         host = self.args.host or "0.0.0.0"
         config = uvicorn.Config(
             app,
@@ -276,7 +280,7 @@ class DPSupervisor:
         supervisor_server = uvicorn.Server(config)
         supervisor_server_task = asyncio.create_task(
             supervisor_server.serve(),
-            name="multi-port-external-lb-supervisor",
+            name="dp-supervisor",
         )
 
         def _set_shutdown_event(_task: asyncio.Task[None]) -> None:
@@ -318,7 +322,7 @@ class DPSupervisor:
 
         self._shutdown_signal = signal.Signals(signum)
         logger.info(
-            "DPSupervisor received signal %d, starting shutdown.", self._shutdown_signal
+            "DPSupervisor received signal %s, starting shutdown.", self._shutdown_signal
         )
 
         self._shutdown_event.set()
@@ -333,7 +337,7 @@ class DPSupervisor:
             child_env = _build_vllm_dp_server_env(self.args, local_rank)
             process = context.Process(
                 target=_run_vllm_dp_server,
-                name=f"DPRank_{child_args.data_parallel_rank}",
+                name=f"APIServer_DPRank_{child_args.data_parallel_rank}",
                 args=(child_args, child_env),
             )
             process.start()
@@ -393,7 +397,7 @@ class DPSupervisor:
 
         try:
             logger.info(
-                "Forwarding signal %d to %d vLLM DP servers.",
+                "Forwarding signal %s to %d vLLM DP Servers.",
                 self._shutdown_signal,
                 len(self._processes),
             )
