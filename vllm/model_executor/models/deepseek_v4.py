@@ -1287,9 +1287,9 @@ class DeepseekV4DecoderLayer(nn.Module):
         x: torch.Tensor,
         positions: torch.Tensor,
         input_ids: torch.Tensor | None,
-        post_mix: torch.Tensor | None,
-        res_mix: torch.Tensor | None,
-        residual: torch.Tensor | None,
+        post_mix: torch.Tensor | None = None,
+        res_mix: torch.Tensor | None = None,
+        residual: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if current_platform.is_rocm():
             return self._forward_rocm(

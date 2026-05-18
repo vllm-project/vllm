@@ -235,7 +235,7 @@ class DeepSeekV4MultiTokenPredictor(nn.Module):
         hidden_states = hidden_states.view(
             -1, mtp_layer.hc_mult, mtp_layer.config.hidden_size
         )
-        hidden_states = self.hc_head_op(
+        hidden_states = mtp_layer.hc_head_op(
             hidden_states,
             mtp_layer.hc_head_fn,
             mtp_layer.hc_head_scale,

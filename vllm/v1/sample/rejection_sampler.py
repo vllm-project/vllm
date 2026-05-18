@@ -131,6 +131,7 @@ class RejectionSampler(nn.Module):
             sampling_metadata=replace(
                 sampling_metadata,
                 max_num_logprobs=-1,
+                logprob_token_ids=None,
             ),
             predict_bonus_token=True,
             # Override the logprobs mode to return logits because they are
@@ -187,6 +188,7 @@ class RejectionSampler(nn.Module):
                 target_logits if self.is_processed_logprobs_mode else raw_target_logits,
                 bonus_sampler_output.logprobs_tensors.logprobs,
                 output_token_ids,
+                sampling_metadata.logprob_token_ids,
             )
 
         return SamplerOutput(
@@ -202,6 +204,7 @@ class RejectionSampler(nn.Module):
         target_logits: torch.Tensor,
         bonus_logits: torch.Tensor,
         sampled_token_ids: torch.Tensor,
+        logprob_token_ids: dict[int, list[int]] | None,
     ) -> LogprobsTensors:
         cu_num_sampled_tokens = torch.zeros_like(metadata.cu_num_sampled_tokens)
         cu_num_sampled_tokens[1:] = metadata.cu_num_sampled_tokens[:-1]
@@ -237,10 +240,61 @@ class RejectionSampler(nn.Module):
             if self.is_logits_logprobs_mode
             else self.sampler.compute_logprobs(accepted_logits)
         )
+        if logprob_token_ids:
+            return self._gather_specific_logprobs(
+                accepted_logits,
+                accepted_logprobs,
+                logprob_token_ids,
+                sampled_token_ids.shape[-1],
+                accepted_tokens.to(torch.int64),
+            )
         return self.sampler.gather_logprobs(
             accepted_logprobs,
             max_num_logprobs,
             accepted_tokens.to(torch.int64),
+        )
+
+    @staticmethod
+    def _gather_specific_logprobs(
+        logits: torch.Tensor,
+        logprobs: torch.Tensor,
+        logprob_token_ids: dict[int, list[int]],
+        num_positions_per_req: int,
+        sampled_token_ids: torch.Tensor,
+    ) -> LogprobsTensors:
+        num_positions = logprobs.shape[0]
+        max_num_token_ids = max(
+            len(token_ids) for token_ids in logprob_token_ids.values()
+        )
+
+        token_ids_cpu = torch.zeros(
+            (num_positions, max_num_token_ids + 1), dtype=torch.int64
+        )
+        valid_mask_cpu = torch.zeros_like(token_ids_cpu, dtype=torch.bool)
+        valid_mask_cpu[:, 0] = True
+        for req_idx, token_ids in logprob_token_ids.items():
+            start = req_idx * num_positions_per_req
+            end = min(start + num_positions_per_req, num_positions)
+            num_token_ids = len(token_ids)
+            token_ids_cpu[start:end, 1 : num_token_ids + 1] = torch.as_tensor(
+                token_ids, dtype=torch.int64
+            )
+            valid_mask_cpu[start:end, 1 : num_token_ids + 1] = True
+
+        token_ids = token_ids_cpu.to(logprobs.device, non_blocking=True)
+        valid_mask = valid_mask_cpu.to(logprobs.device, non_blocking=True)
+        token_ids[:, 0] = sampled_token_ids
+
+        selected_logprobs = logprobs.gather(-1, token_ids)
+        selected_logprobs.masked_fill_(~valid_mask, float("-inf"))
+
+        sampled_logits = logits.gather(-1, sampled_token_ids.unsqueeze(-1))
+        sampled_token_ranks = (logits > sampled_logits).sum(dim=-1)
+
+        return LogprobsTensors(
+            logprob_token_ids=token_ids.to(torch.int32),
+            logprobs=selected_logprobs,
+            selected_token_ranks=sampled_token_ranks,
         )
 
     @staticmethod

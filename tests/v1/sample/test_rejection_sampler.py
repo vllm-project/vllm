@@ -82,6 +82,8 @@ def create_sampling_metadata(
     repetition_penalties: list[float] | None = None,
     bad_words_token_ids: dict[int, list[list[int]]] | None = None,
     allowed_token_ids_mask: torch.Tensor | None = None,
+    max_num_logprobs: int | None = None,
+    logprob_token_ids: dict[int, list[int]] | None = None,
 ) -> SamplingMetadata:
     """Create a v1 sampling metadata object with all_greedy set
     to the given value. Either all greedy or all random sampling
@@ -115,7 +117,7 @@ def create_sampling_metadata(
         top_p=top_p,
         top_k=top_k,
         generators=generators,
-        max_num_logprobs=None,
+        max_num_logprobs=max_num_logprobs,
         no_penalties=no_penalties,
         prompt_token_ids=prompt_token_ids,
         frequency_penalties=frequency_penalties,
@@ -126,6 +128,7 @@ def create_sampling_metadata(
         allowed_token_ids_mask=allowed_token_ids_mask,
         bad_words_token_ids={} if bad_words_token_ids is None else bad_words_token_ids,
         logitsprocs=LogitsProcessors(),
+        logprob_token_ids=logprob_token_ids,
     )
 
 
@@ -303,6 +306,54 @@ def test_parametrized_cases(rejection_sampler, spec_tokens, output_tokens, expec
     )
     expected_tensor = torch.tensor(expected, dtype=torch.int, device=logits.device)
     assert torch.equal(output.sampled_token_ids, expected_tensor)
+
+
+def test_specific_logprob_token_ids_with_bonus_logits():
+    """Spec decode should keep full bonus logits and return requested token logprobs."""
+    vocab_size = 10
+    spec_tokens = [[1], [2]]
+    sampled_tokens = [1, 5, 2, 6]
+    logits = torch.full((4, vocab_size), -10.0, device=DEVICE_TYPE)
+    for row, token_id in enumerate(sampled_tokens):
+        logits[row, token_id] = 10.0
+    logits[:, 7] = 3.0
+    logits[:, 8] = 4.0
+
+    metadata = SpecDecodeMetadata.make_dummy(spec_tokens, device=logits.device)
+    metadata.target_logits_indices = torch.tensor([0, 2], device=logits.device)
+    metadata.bonus_logits_indices = torch.tensor([1, 3], device=logits.device)
+    sampling_metadata = create_sampling_metadata(
+        all_greedy=True,
+        max_num_logprobs=2,
+        logprob_token_ids={0: [5, 7], 1: [6, 8]},
+    )
+
+    rejection_sampler = RejectionSampler(Sampler())
+    output = rejection_sampler(
+        metadata,
+        draft_probs=None,
+        logits=logits,
+        sampling_metadata=sampling_metadata,
+    )
+
+    expected_tokens = torch.tensor([[1, 5], [2, 6]], device=logits.device)
+    assert torch.equal(output.sampled_token_ids, expected_tokens)
+
+    assert output.logprobs_tensors is not None
+    expected_logprob_token_ids = torch.tensor(
+        [[1, 5, 7], [5, 5, 7], [2, 6, 8], [6, 6, 8]],
+        dtype=torch.int32,
+        device=logits.device,
+    )
+    assert torch.equal(
+        output.logprobs_tensors.logprob_token_ids, expected_logprob_token_ids
+    )
+
+    final_logits = torch.stack((logits[0], logits[1], logits[2], logits[3]))
+    expected_logprobs = final_logits.log_softmax(dim=-1).gather(
+        -1, expected_logprob_token_ids.to(torch.int64)
+    )
+    torch.testing.assert_close(output.logprobs_tensors.logprobs, expected_logprobs)
 
 
 ########################### Tests for Random Sampling ###################
