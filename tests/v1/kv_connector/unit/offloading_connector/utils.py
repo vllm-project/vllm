@@ -348,10 +348,11 @@ class RequestRunner:
     def _parse_transfers(self):
         for transfer_spec in self.offloading_spec.get_flushed_transfers():
             src_spec, dst_spec = transfer_spec
-            assert isinstance(src_spec, GPULoadStoreSpec)
-
-            for block_id in src_spec.block_ids:
-                self.flushed_gpu_blocks.add(self.gpu_blocks[block_id.item()])
+            if isinstance(src_spec, GPULoadStoreSpec):
+                # store flush
+                for block_id in src_spec.block_ids:
+                    self.flushed_gpu_blocks.add(self.gpu_blocks[block_id.item()])
+            # load flush: no block tracking needed
 
         block_size_factor = self.block_size_factor
 
