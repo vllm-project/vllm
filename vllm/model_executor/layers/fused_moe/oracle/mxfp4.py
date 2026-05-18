@@ -1567,7 +1567,12 @@ def make_mxfp4_moe_quant_config(
         )
 
         assert isinstance(layer, FusedMoE)
-        return get_humming_moe_quant_config(layer)
+        return get_humming_moe_quant_config(
+            layer,
+            gemm1_alpha=gemm1_alpha,
+            gemm1_beta=gemm1_beta,
+            gemm1_clamp_limit=swiglu_limit,
+        )
     else:
         return ocp_mx_moe_quant_config(
             quant_dtype="mxfp4",
