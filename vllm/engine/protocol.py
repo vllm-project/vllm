@@ -161,8 +161,18 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def sleep(self, level: int = 1, mode: "PauseMode" = "abort") -> None:
-        """Sleep the engine"""
+    async def sleep(
+        self,
+        level: int = 1,
+        mode: "PauseMode" = "abort",
+        offload_tags: list[str] | None = None,
+    ) -> None:
+        """Sleep the engine.
+
+        See :py:meth:`vllm.LLM.sleep` for a description of ``offload_tags``
+        and the tag-wise selective offload semantics used to support
+        hybrid co-location with partial rollout.
+        """
         ...
 
     @abstractmethod

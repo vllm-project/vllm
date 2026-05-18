@@ -767,6 +767,9 @@ class AsyncLLM(EngineClient):
                   (default).
                 - ``"wait"``: Wait for in-flight requests to complete.
                 - ``"keep"``: Freeze requests in queue; they resume on
+                  :meth:`resume_generation` with existing KV cache.
+                - ``"recompute"``: Freeze requests in queue and release their
+                  KV cache; they recompute prompt+generated tokens on
                   :meth:`resume_generation`.
             wait_for_inflight_requests: DEPRECATED: use mode argument.
             clear_cache: Whether to clear KV cache and prefix cache after
@@ -926,11 +929,20 @@ class AsyncLLM(EngineClient):
     async def reset_encoder_cache(self) -> None:
         await self.engine_core.reset_encoder_cache_async()
 
-    async def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
-        await self.engine_core.sleep_async(level, mode)
+    async def sleep(
+        self,
+        level: int = 1,
+        mode: PauseMode = "abort",
+        offload_tags: list[str] | None = None,
+    ) -> None:
+        await self.engine_core.sleep_async(level, mode, offload_tags=offload_tags)
 
         if self.logger_manager is not None:
-            self.logger_manager.record_sleep_state(1, level)
+            from vllm.v1.engine.llm_engine import _effective_sleep_level
+
+            self.logger_manager.record_sleep_state(
+                1, _effective_sleep_level(level, offload_tags)
+            )
 
     async def wake_up(self, tags: list[str] | None = None) -> None:
         await self.engine_core.wake_up_async(tags)

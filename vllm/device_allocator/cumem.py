@@ -47,12 +47,24 @@ except ModuleNotFoundError:
 # py_device, py_alignedSize, py_d_mem, py_p_memHandle
 HandleType = tuple[int, int, int, int]
 
+# The set of tags that vLLM's sleep/wake plumbing knows about. Selective
+# sleep callers must use only these tags; anything else is rejected up
+# front (see ``EngineCore.sleep``) so the engine never enters a half-
+# sleep state with a bogus tag recorded.
+KNOWN_SLEEP_TAGS: tuple[str, ...] = ("weights", "kv_cache")
+
 
 @dataclasses.dataclass
 class AllocationData:
     handle: HandleType
     tag: str
     cpu_backup_tensor: torch.Tensor | None = None
+    # Whether the underlying CUDA virtual address is currently mapped to
+    # physical memory. This is True at allocation time and stays True
+    # across sleep() for any allocation whose tag is in `keep_tags`.
+    # It is set to False when the allocation is unmapped during sleep,
+    # and back to True when wake_up() remaps it.
+    is_mapped: bool = True
 
 
 def create_and_map(allocation_handle: HandleType) -> None:
@@ -168,14 +180,37 @@ class CuMemAllocator:
         )
         return data.handle
 
-    def sleep(self, offload_tags: tuple[str, ...] | str | None = None) -> None:
+    def sleep(
+        self,
+        offload_tags: tuple[str, ...] | str | None = None,
+        keep_tags: tuple[str, ...] | str | None = None,
+    ) -> None:
         """
         Put the allocator in sleep mode.
-        All data in the memory allocation with the specified tag will be
-        offloaded to CPU memory, and others will be discarded.
 
-        :param offload_tags: The tags of the memory allocation that will be
-            offloaded. The rest of the memory allocation will be discarded.
+        Each allocation in the memory pool falls into one of three buckets,
+        determined by its tag:
+
+        1. **Offload** — allocations whose tag is in ``offload_tags`` are
+           backed up to pinned CPU memory and their GPU mapping is released.
+        2. **Keep**  — allocations whose tag is in ``keep_tags`` are left
+           fully mapped on GPU and untouched. This is what enables
+           hybrid co-location with partial rollout: e.g. offload weights to
+           CPU while keeping the KV cache live on the GPU so that an
+           in-flight generation can be resumed after a training step.
+        3. **Discard** — allocations whose tag is in neither set have their
+           GPU mapping released without a CPU backup. ``wake_up`` will
+           re-map fresh empty memory at the same address.
+
+        :param offload_tags: Tags whose allocations should be copied to CPU
+            and unmapped from GPU. If ``None``, defaults to
+            ``(CuMemAllocator.default_tag,)`` for backward compatibility.
+            A bare string is normalized to a 1-tuple.
+        :param keep_tags: Tags whose allocations should be preserved on GPU
+            in their entirety. Allocations with these tags are skipped
+            completely — no CPU copy, no unmap. Defaults to an empty tuple.
+            A bare string is normalized to a 1-tuple. ``keep_tags`` and
+            ``offload_tags`` must be disjoint.
         """
         if offload_tags is None:
             # by default, allocated tensors are offloaded
@@ -184,14 +219,38 @@ class CuMemAllocator:
         elif isinstance(offload_tags, str):
             offload_tags = (offload_tags,)
 
+        if keep_tags is None:
+            keep_tags = ()
+        elif isinstance(keep_tags, str):
+            keep_tags = (keep_tags,)
+
         assert isinstance(offload_tags, tuple)
+        assert isinstance(keep_tags, tuple)
+
+        overlap = set(offload_tags) & set(keep_tags)
+        assert not overlap, (
+            f"offload_tags and keep_tags must be disjoint, got overlap: {overlap}"
+        )
 
         total_bytes = 0
         backup_bytes = 0
+        kept_bytes = 0
 
         for ptr, data in self.pointer_to_data.items():
+            if not data.is_mapped:
+                # Already offloaded by a prior selective sleep. Re-running
+                # cudaMemcpy on the source pointer or unmap_and_release on
+                # the handle would corrupt the allocator state, so we skip
+                # entirely. A later wake_up will remap and restore from
+                # any existing cpu_backup_tensor.
+                continue
             handle = data.handle
             total_bytes += handle[1]
+            if data.tag in keep_tags:
+                # Allocation stays fully mapped on GPU. Do not back it up
+                # to CPU and do not release the device mapping.
+                kept_bytes += handle[1]
+                continue
             if data.tag in offload_tags:
                 backup_bytes += handle[1]
                 size_in_bytes = handle[1]
@@ -205,14 +264,16 @@ class CuMemAllocator:
                 libcudart.cudaMemcpy(cpu_ptr, ptr, size_in_bytes)
                 data.cpu_backup_tensor = cpu_backup_tensor
             unmap_and_release(handle)
+            data.is_mapped = False
 
+        freed_bytes = total_bytes - kept_bytes
         logger.info(
-            "CuMemAllocator: sleep freed %.2f GiB memory in total, of which "
-            "%.2f GiB is backed up in CPU and the rest %.2f GiB is discarded "
-            "directly.",
-            total_bytes / 1024**3,
+            "CuMemAllocator: sleep freed %.2f GiB GPU memory (%.2f GiB "
+            "backed up to CPU, %.2f GiB discarded), kept %.2f GiB on GPU.",
+            freed_bytes / 1024**3,
             backup_bytes / 1024**3,
-            (total_bytes - backup_bytes) / 1024**3,
+            (freed_bytes - backup_bytes) / 1024**3,
+            kept_bytes / 1024**3,
         )
 
         gc.collect()
@@ -221,26 +282,38 @@ class CuMemAllocator:
     def wake_up(self, tags: list[str] | None = None) -> None:
         """
         Wake up the allocator from sleep mode.
-        All data that is previously offloaded will be loaded back to GPU
-        memory, and the rest of the data will have empty memory.
+
+        Allocations that were unmapped during sleep are remapped on GPU.
+        Those that had a CPU backup are restored from it; those that were
+        discarded are left as empty memory at the same address.
+
+        Allocations that were preserved on GPU during sleep (via
+        ``keep_tags`` on :py:meth:`sleep`) are skipped — they are still
+        live and must not be remapped.
 
         :param tags: The tags of the memory allocation that will be loaded
-            back to GPU memory. If None, all memory allocation will be loaded
-            back to GPU memory.
+            back to GPU memory. If None, all memory allocation will be
+            loaded back to GPU memory.
         """
         for ptr, data in self.pointer_to_data.items():
-            if tags is None or data.tag in tags:
-                handle = data.handle
-                create_and_map(handle)
-                if data.cpu_backup_tensor is not None:
-                    cpu_backup_tensor = data.cpu_backup_tensor
-                    if cpu_backup_tensor is not None:
-                        size_in_bytes = (
-                            cpu_backup_tensor.numel() * cpu_backup_tensor.element_size()
-                        )
-                        cpu_ptr = cpu_backup_tensor.data_ptr()
-                        libcudart.cudaMemcpy(ptr, cpu_ptr, size_in_bytes)
-                        data.cpu_backup_tensor = None
+            if tags is not None and data.tag not in tags:
+                continue
+            if data.is_mapped:
+                # Allocation was preserved on GPU during sleep (via
+                # `keep_tags`). Nothing to remap or restore.
+                continue
+            handle = data.handle
+            create_and_map(handle)
+            data.is_mapped = True
+            if data.cpu_backup_tensor is not None:
+                cpu_backup_tensor = data.cpu_backup_tensor
+                if cpu_backup_tensor is not None:
+                    size_in_bytes = (
+                        cpu_backup_tensor.numel() * cpu_backup_tensor.element_size()
+                    )
+                    cpu_ptr = cpu_backup_tensor.data_ptr()
+                    libcudart.cudaMemcpy(ptr, cpu_ptr, size_in_bytes)
+                    data.cpu_backup_tensor = None
 
     @contextmanager
     def use_memory_pool(self, tag: str | None = None):

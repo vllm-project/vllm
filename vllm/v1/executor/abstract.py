@@ -319,17 +319,37 @@ class Executor(ABC):
         """Reset the encoder cache in each worker to clear cached encoder outputs."""
         self.collective_rpc("reset_encoder_cache")
 
-    def sleep(self, level: int = 1):
+    def sleep(
+        self,
+        level: int = 1,
+        offload_tags: list[str] | None = None,
+    ):
         if self.is_sleeping:
+            # Already sleeping under some configuration. Refuse a second
+            # sleep — the new tag set might disagree with what's already
+            # offloaded, and we don't have a safe merge semantics.
             logger.warning("Executor is already sleeping.")
             return
         time_before_sleep = time.perf_counter()
-        self.collective_rpc("sleep", kwargs=dict(level=level))
+        self.collective_rpc(
+            "sleep", kwargs=dict(level=level, offload_tags=offload_tags)
+        )
         time_after_sleep = time.perf_counter()
-        self.sleeping_tags = {"weights", "kv_cache"}
+        # Only the tags that were actually offloaded need a wake_up. Tags
+        # that were kept on GPU (because they're not in offload_tags) are
+        # still live and should not appear in `sleeping_tags`.
+        if offload_tags is None:
+            # Legacy: level 1 offloads weights (kv discarded but tracked
+            # the same way for wake_up purposes); level 2 offloads nothing
+            # but discards everything — wake_up still needs to remap both.
+            self.sleeping_tags = {"weights", "kv_cache"}
+        else:
+            self.sleeping_tags = set(offload_tags)
         self.is_sleeping = True
         logger.info(
-            "It took %.6f seconds to fall asleep.", time_after_sleep - time_before_sleep
+            "It took %.6f seconds to fall asleep (sleeping_tags=%s).",
+            time_after_sleep - time_before_sleep,
+            sorted(self.sleeping_tags),
         )
 
     def wake_up(self, tags: list[str] | None = None):
