@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from vllm.config import VllmConfig
-from vllm.distributed.kv_events import KVCacheEvent
+from vllm.distributed.kv_events import BlockStored, KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.utils import yield_req_data
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
@@ -17,6 +17,7 @@ from vllm.v1.core.kv_cache_coordinator import (
     KVCacheCoordinator,
     get_kv_cache_coordinator,
 )
+from vllm.v1.core.kv_cache_utils import get_block_hash, maybe_convert_block_hash
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -103,7 +104,7 @@ class SimpleCPUOffloadScheduler:
             "lazy" if lazy_offload else "eager",
         )
 
-        # TODO (yifan): maybe need to enable kv_cache_events and metrics_collector here.
+        # TODO (yifan): maybe need to enable metrics_collector here.
         dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
         pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
         assert dcp_world_size == 1 and pcp_world_size == 1
@@ -121,6 +122,7 @@ class SimpleCPUOffloadScheduler:
             hash_block_size=self.block_size,
         )
         self.cpu_block_pool: BlockPool = self.cpu_coordinator.block_pool
+        self.cpu_block_pool.medium = "CPU"
 
         # GPU block pool reference - bound after scheduler builds kv_cache_manager
         self._gpu_block_pool: BlockPool | None = None
@@ -645,6 +647,25 @@ class SimpleCPUOffloadScheduler:
             bhash = cpu_block.block_hash
             assert bhash is not None
             self.cpu_block_pool.cached_block_hash_to_block.insert(bhash, cpu_block)
+
+        if self.enable_kv_cache_events:
+            block_hashes = [
+                maybe_convert_block_hash(get_block_hash(b.block_hash))
+                for b in cpu_blocks
+                if b.block_hash is not None
+            ]
+            if block_hashes:
+                self.cpu_block_pool.kv_event_queue.append(
+                    BlockStored(
+                        block_hashes=block_hashes,
+                        parent_block_hash=None,
+                        token_ids=[],
+                        block_size=self.block_size,
+                        medium=self.cpu_block_pool.medium,
+                        lora_id=None,
+                        lora_name=None,
+                    )
+                )
 
         # Free CPU and GPU blocks' ref counts to turn them into prefix cache
         self.cpu_block_pool.free_blocks(cpu_blocks)

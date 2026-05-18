@@ -17,6 +17,8 @@ from vllm.config import (
     SchedulerConfig,
     VllmConfig,
 )
+from vllm.config.kv_events import KVEventsConfig
+from vllm.distributed.kv_events import BlockRemoved, BlockStored
 from vllm.utils.hashing import sha256
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -39,7 +41,10 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 from vllm.v1.simple_kv_offload.manager import SimpleCPUOffloadScheduler
-from vllm.v1.simple_kv_offload.metadata import SimpleCPUOffloadWorkerMetadata
+from vllm.v1.simple_kv_offload.metadata import (
+    INVALID_JOB_ID,
+    SimpleCPUOffloadWorkerMetadata,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -1241,3 +1246,122 @@ def test_partial_gpu_prefix_plus_cpu_load() -> None:
         assert bid in ext_block_ids, (
             f"Load GPU block {bid} should be an ext_comp block, not a comp or new block"
         )
+
+
+def make_scheduler_with_events(
+    num_cpu_blocks: int = 8,
+    num_gpu_blocks: int = 16,
+    num_groups: int = 1,
+    lazy: bool = False,
+) -> SchedulerFixture:
+    """Build a SimpleCPUOffloadScheduler with KV cache events enabled."""
+    kv_cache_config = _make_kv_cache_config(num_gpu_blocks, num_groups)
+    vllm_config = _make_vllm_config()
+    vllm_config.kv_events_config = KVEventsConfig(
+        enable_kv_cache_events=True,
+        publisher="null",
+    )
+    cpu_capacity_bytes = _BYTES_PER_BLOCK * num_cpu_blocks * num_groups
+
+    sched = SimpleCPUOffloadScheduler(
+        vllm_config=vllm_config,
+        kv_cache_config=kv_cache_config,
+        cpu_capacity_bytes=cpu_capacity_bytes,
+        lazy_offload=lazy,
+    )
+
+    gpu_block_pool = BlockPool(
+        num_gpu_blocks=num_gpu_blocks,
+        enable_caching=True,
+        hash_block_size=BLOCK_SIZE,
+    )
+    sched.bind_gpu_block_pool(gpu_block_pool)
+
+    return SchedulerFixture(
+        scheduler=sched,
+        gpu_block_pool=gpu_block_pool,
+        vllm_config=vllm_config,
+        kv_cache_config=kv_cache_config,
+        num_groups=num_groups,
+    )
+
+
+def test_cpu_block_pool_medium_is_cpu() -> None:
+    """CPU block pool should have medium='CPU'."""
+    fix = make_scheduler_with_events()
+    assert fix.scheduler.cpu_block_pool.medium == "CPU"
+
+
+def test_store_completion_emits_cpu_block_stored_event() -> None:
+    """Completing a store emits BlockStored with medium='CPU'."""
+    fix = make_scheduler_with_events(num_cpu_blocks=8, num_gpu_blocks=16)
+    sched = fix.scheduler
+
+    num_blocks = 2
+    req = make_request(num_blocks=num_blocks)
+    kv_blocks = _alloc_and_register(fix, req, num_blocks)
+    block_ids = kv_blocks.get_block_ids()
+
+    sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
+    so = make_scheduler_output(
+        {req.request_id: num_blocks * BLOCK_SIZE},
+        new_reqs={req.request_id: block_ids},
+    )
+    meta = sched.build_connector_meta(so)
+
+    # Complete the store
+    assert meta.store_event != INVALID_JOB_ID
+    simulate_store_completion(sched, meta.store_event)
+
+    events = list(sched.take_events())
+    stored = [e for e in events if isinstance(e, BlockStored)]
+    assert len(stored) == 1
+    assert stored[0].medium == "CPU"
+    assert stored[0].block_size == BLOCK_SIZE
+    assert len(stored[0].block_hashes) == num_blocks
+
+
+def test_cpu_eviction_emits_block_removed_with_cpu_medium() -> None:
+    """Evicting CPU blocks emits BlockRemoved with medium='CPU'."""
+    # 3 CPU blocks total — fill with 2 then store 3 more to force eviction
+    fix = make_scheduler_with_events(
+        num_cpu_blocks=3,
+        num_gpu_blocks=16,
+        lazy=False,
+    )
+    sched = fix.scheduler
+
+    # Store req0 (2 blocks) to fill most of CPU
+    req0 = make_request(num_blocks=2)
+    kv0 = _alloc_and_register(fix, req0, 2)
+    ids0 = kv0.get_block_ids()
+    sched.update_state_after_alloc(req0, kv0, num_external_tokens=0)
+    so0 = make_scheduler_output(
+        {req0.request_id: 2 * BLOCK_SIZE},
+        new_reqs={req0.request_id: ids0},
+    )
+    meta0 = sched.build_connector_meta(so0)
+    assert meta0.store_event != INVALID_JOB_ID
+    simulate_store_completion(sched, meta0.store_event)
+
+    # Drain the initial BlockStored events
+    list(sched.take_events())
+
+    # Store req1 (3 blocks) — CPU only has 1 free slot, must evict
+    req1 = make_request(num_blocks=3)
+    kv1 = _alloc_and_register(fix, req1, 3)
+    ids1 = kv1.get_block_ids()
+    sched.update_state_after_alloc(req1, kv1, num_external_tokens=0)
+    so1 = make_scheduler_output(
+        {req1.request_id: 3 * BLOCK_SIZE},
+        new_reqs={req1.request_id: ids1},
+    )
+    meta1 = sched.build_connector_meta(so1)
+    assert meta1.store_event != INVALID_JOB_ID
+    simulate_store_completion(sched, meta1.store_event)
+
+    events = list(sched.take_events())
+    removed = [e for e in events if isinstance(e, BlockRemoved)]
+    assert len(removed) > 0, "Expected CPU eviction events"
+    for event in removed:
+        assert event.medium == "CPU"
