@@ -190,7 +190,7 @@ __global__ void moe_wna16_gemm_kernel(
       dequant<scalar_t2, bit>(expert_qweight_tmp[tmp_k % 4], weight_half2);
 
       for (int m = 0; m < num_valid_tokens; m++) {
-        res2 = {};
+        res2 = scalar_t2{};
 
 #pragma unroll
         for (int i = 0; i < 16 / bit; i++) {
