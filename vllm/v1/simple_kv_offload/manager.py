@@ -359,12 +359,23 @@ class SimpleCPUOffloadScheduler:
             gpu_ext_start = n_computed_g - n_ext_g
             group_gpu_ids = block_ids_by_group[g]
 
+            # Build deduped load pairs for this group. SWA reuse can cause
+            # the same ``gpu_block_id`` to appear at multiple logical
+            # positions; keep the LAST occurrence (most recent CPU data)
+            # for each GPU block to avoid over-incrementing ``ref_cnt``
+            # and corrupting the free list (same defect class as #42085).
+            load_map: dict[int, tuple[int, KVCacheBlock]] = {}
             for i, cpu_blk in enumerate(cpu_blocks_g):
                 # Skip null blocks (e.g. sliding window or mamba padding).
                 if cpu_blk.is_null:
                     continue
-                gpu_block_ids.append(group_gpu_ids[gpu_ext_start + i])
-                cpu_block_ids.append(cpu_blk.block_id)
+                gpu_bid = group_gpu_ids[gpu_ext_start + i]
+                # Later occurrence overwrites earlier → keeps the last.
+                load_map[gpu_bid] = (cpu_blk.block_id, cpu_blk)
+
+            for gpu_bid, (cpu_bid, cpu_blk) in load_map.items():
+                gpu_block_ids.append(gpu_bid)
+                cpu_block_ids.append(cpu_bid)
                 cpu_blocks_to_touch.append(cpu_blk)
 
         # Touch CPU blocks to prevent eviction during async load.
