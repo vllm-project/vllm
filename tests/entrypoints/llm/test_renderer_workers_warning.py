@@ -24,8 +24,7 @@ def test_renderer_num_workers_warns_on_offline_llm(caplog):
 
     messages = [record.getMessage() for record in caplog.records]
     assert any(
-        "renderer_num_workers" in msg and "offline" in msg.lower()
-        for msg in messages
+        "renderer_num_workers" in msg and "offline" in msg.lower() for msg in messages
     ), (
         "Expected a warning about renderer_num_workers having no effect "
         f"on the offline LLM path; saw: {messages}"
