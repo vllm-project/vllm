@@ -90,7 +90,7 @@ _DTYPE = torch.float32
 # Unique prefix per test session so parallel runs don't collide
 _RUN_PREFIX = f"test/{uuid.uuid4().hex[:8]}"
 
-_CTX = ReqContext()
+_CTX = ReqContext(req_id="test-req")
 
 
 def key(n: int) -> OffloadKey:
@@ -307,13 +307,22 @@ class TestObjTierE2EWithPrimary:
         num_primary_blocks = 10
         prefix = f"{_RUN_PREFIX}/e2e/{uuid.uuid4().hex[:6]}"
 
-        primary_tier = CPUPrimaryTierOffloadingManager(num_blocks=num_primary_blocks)
-        cpu_tensor = torch.zeros(
-            (num_primary_blocks, _BLOCK_ELEMENTS), dtype=_DTYPE
+        cpu_tensor = torch.zeros((num_primary_blocks, _BLOCK_ELEMENTS), dtype=_DTYPE)
+        mmap_region = SimpleNamespace(
+            create_kv_memoryview=lambda: memoryview(cpu_tensor.numpy()),
+            cleanup=lambda: None,
         )
-        primary_tier.create_kv_memoryview = lambda: memoryview(cpu_tensor.numpy())
+        primary_tier = CPUPrimaryTierOffloadingManager(
+            num_blocks=num_primary_blocks,
+            mmap_region=mmap_region,
+        )
 
-        obj_tier = make_tier(key_prefix=prefix)
+        obj_tier = ObjectStoreSecondaryTierManager(
+            vllm_config=_VLLM_CONFIG,
+            primary_kv_view=memoryview(cpu_tensor.numpy()),
+            store_config=_STORE_CONFIG,
+            prefix=prefix,
+        )
 
         manager = TieringOffloadingManager(
             primary_tier=primary_tier,
