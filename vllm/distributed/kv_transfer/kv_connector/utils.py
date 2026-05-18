@@ -485,6 +485,15 @@ class TransferTopology:
         return self._cross_layers_blocks
 
     @property
+    def virtually_split_kv_in_blocks(self) -> bool:
+        # Whether to logically split each block into K and V halves.
+        # Applies when K/V are interleaved within each block (blocks-first),
+        # but NOT when cross-layer blocks are used — cross-layer blocks have
+        # per-layer K/V interleaving (L0_K, L0_V, L1_K, L1_V, ...) so a
+        # simple half-split does not separate K from V.
+        return self._is_kv_layout_blocks_first and not self._cross_layers_blocks
+
+    @property
     def split_k_and_v(self) -> bool:
         # Whether to register regions for K and V separately (when present).
         return not (
