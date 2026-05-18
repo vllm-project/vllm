@@ -19,9 +19,10 @@ torch::Tensor maybe_allocate_tensor(
     auto tensor = maybe_tensor.value();
     TORCH_CHECK(tensor.device() == device, name, " must be on the same device");
     TORCH_CHECK(tensor.scalar_type() == dtype, name, " has incorrect dtype");
+    TORCH_CHECK(tensor.is_contiguous(), name, " must be contiguous");
     TORCH_CHECK(tensor.numel() >= expected_numel, name,
                 " is too small for the requested shape");
-    auto flat_tensor = tensor.reshape({tensor.numel()});
+    auto flat_tensor = tensor.view({tensor.numel()});
     return flat_tensor.narrow(0, 0, expected_numel).view(expected_sizes);
   }
   return torch::empty(expected_sizes, torch::dtype(dtype).device(device));
