@@ -528,7 +528,7 @@ def _riscv_supports_rvv() -> bool:
             cpuinfo = f.read()
     except OSError:
         return False
-    return any(f"zvl{n}b" in cpuinfo for n in (128, 256))
+    return any(f"zvl{n}b" in cpuinfo for n in (128, 256)) and all(f"zvl{n}b" not in cpuinfo for n in (512, 1024))
 
 
 def _get_attn_isa(
