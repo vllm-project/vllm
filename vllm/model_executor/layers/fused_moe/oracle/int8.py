@@ -25,12 +25,14 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8DynamicTokenSym,
     kInt8StaticChannelSym,
 )
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
 
 class Int8MoeBackend(Enum):
     TRITON = "TRITON"
+    CPU = "CPU"
 
 
 def _get_priority_backends(
@@ -39,7 +41,18 @@ def _get_priority_backends(
     """
     Get available backends in priority order based on platform and config.
     """
-    return [Int8MoeBackend.TRITON]
+    _AVAILABLE_BACKENDS = [
+        Int8MoeBackend.TRITON,
+        Int8MoeBackend.CPU,
+    ]
+
+    def _move_to_front(backends: list[Int8MoeBackend], backend: Int8MoeBackend) -> None:
+        backends.insert(0, backends.pop(backends.index(backend)))
+
+    if current_platform.is_cpu():
+        _move_to_front(_AVAILABLE_BACKENDS, Int8MoeBackend.CPU)
+
+    return _AVAILABLE_BACKENDS
 
 
 def backend_to_kernel_cls(
@@ -51,6 +64,13 @@ def backend_to_kernel_cls(
         )
 
         return [TritonExperts]
+
+    elif backend == Int8MoeBackend.CPU:
+        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+            CPUExpertsInt8,
+        )
+
+        return [CPUExpertsInt8]
 
     else:
         raise ValueError(f"Unknown Int8 MoE backend: {backend.value}")
