@@ -792,6 +792,7 @@ class DeepseekV4Indexer(nn.Module):
         topk_indices_buffer: torch.Tensor | None,
         compress_ratio: int = 1,
         prefix: str = "",
+        aux_stream: torch.cuda.Stream | None = None,
     ):
         super().__init__()
         self.vllm_config = vllm_config
@@ -877,6 +878,13 @@ class DeepseekV4Indexer(nn.Module):
             use_fp4_cache=self.use_fp4_kv,
         )
 
+        # None on ROCm — maybe_execute_in_parallel falls back to sequential.
+        self.aux_stream = aux_stream
+        self.ln_events: list[torch.cuda.Event] = [
+            torch.cuda.Event(),
+            torch.cuda.Event(),
+        ]
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -886,17 +894,29 @@ class DeepseekV4Indexer(nn.Module):
         positions: torch.Tensor,
         rotary_emb: nn.Module,
     ) -> torch.Tensor:
-        # ReplicatedLinear returns (output, bias); bias is None.
-        q, _ = self.wq_b(qr)
-        q = q.view(-1, self.n_head, self.head_dim)
-        k = self.compressor(compressed_kv_score, positions, rotary_emb)
-        q_quant, weights = fused_indexer_q_rope_quant(
-            positions,
-            q,
-            rotary_emb.cos_sin_cache,
-            indexer_weights,
-            self.softmax_scale,
-            self.n_head**-0.5,
-            use_fp4=self.use_fp4_kv,
+        compressor = self.compressor
+
+        def wq_b_and_q_quant():
+            # ReplicatedLinear returns (output, bias); bias is None.
+            q, _ = self.wq_b(qr)
+            q = q.view(-1, self.n_head, self.head_dim)
+            return fused_indexer_q_rope_quant(
+                positions,
+                q,
+                rotary_emb.cos_sin_cache,
+                indexer_weights,
+                self.softmax_scale,
+                self.n_head**-0.5,
+                use_fp4=self.use_fp4_kv,
+            )
+
+        # compressor returns None and writes K to the indexer KV cache; the
+        # join orders that write before indexer_op (skip_k_cache_insert=True).
+        (q_quant, weights), k = maybe_execute_in_parallel(
+            wq_b_and_q_quant,
+            lambda: compressor(compressed_kv_score, positions, rotary_emb),
+            self.ln_events[0],
+            self.ln_events[1],
+            self.aux_stream,
         )
         return self.indexer_op(hidden_states, q_quant, k, weights)
