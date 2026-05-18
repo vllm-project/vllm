@@ -182,11 +182,6 @@ void swigluoai_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input,
 void gelu_new(torch::stable::Tensor& out, torch::stable::Tensor& input);
 void gelu_fast(torch::stable::Tensor& out, torch::stable::Tensor& input);
 void gelu_quick(torch::stable::Tensor& out, torch::stable::Tensor& input);
-void silu_and_mul_per_block_quant(
-    torch::stable::Tensor& out, torch::stable::Tensor const& input,
-    torch::stable::Tensor& scales, int64_t group_size,
-    std::optional<torch::stable::Tensor> const& scale_ub,
-    bool is_scale_transposed);
 
 // INT8 quantization kernels (shared CUDA/ROCm)
 void static_scaled_int8_quant(torch::stable::Tensor& out,

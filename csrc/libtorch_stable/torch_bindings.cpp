@@ -277,16 +277,6 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "silu_and_mul_with_clamp(Tensor! result, Tensor input, float limit) "
       "-> ()");
 
-  // Fused SiLU+Mul + per-block quantization
-  ops.def(
-      "silu_and_mul_per_block_quant("
-      "Tensor! out, "
-      "Tensor input, "
-      "Tensor! scales, "
-      "int group_size, "
-      "Tensor? scale_ub=None, "
-      "bool is_scale_transposed=False) -> ()");
-
   // Activation function used in GeGLU with `none` approximation.
   ops.def("gelu_and_mul(Tensor! out, Tensor input) -> ()");
 
@@ -437,9 +427,6 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("gelu_fast", TORCH_BOX(&gelu_fast));
   ops.impl("gelu_quick", TORCH_BOX(&gelu_quick));
   ops.impl("silu_and_mul_with_clamp", TORCH_BOX(&silu_and_mul_clamp));
-  ops.impl("silu_and_mul_per_block_quant",
-    TORCH_BOX(&silu_and_mul_per_block_quant));
-
 
   // INT8 quantization kernels
   ops.impl("static_scaled_int8_quant", TORCH_BOX(&static_scaled_int8_quant));
