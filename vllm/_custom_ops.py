@@ -2465,6 +2465,36 @@ def dsv3_router_gemm(
     return output
 
 
+def dsv4_norm_router_gemm(
+    x: torch.Tensor,
+    norm_weight: torch.Tensor,
+    gate_weight: torch.Tensor,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fused RMSNorm + router GEMV for DeepSeek V4.
+
+    Returns ``(normed_x, router_logits)`` where
+        normed_x[m,k]      = x[m,k] * rsqrt(mean(x[m]^2) + eps) * norm_weight[k]
+        router_logits[m,n] = sum_k(normed_x[m,k] * gate_weight[n,k])
+
+    DSV4-specific constraints (caller must check before dispatching here):
+      - x, norm_weight, gate_weight all bf16 contiguous
+      - x.shape == [num_tokens, 7168] with num_tokens in [1, 16]
+      - gate_weight.shape == [num_experts, 7168] with num_experts in {256, 384}
+      - SM 9.x or 10.x device
+
+    Logits output is fp32 (hard-coded by DSV4 router).
+    """
+    num_tokens, hidden = x.shape
+    num_experts = gate_weight.shape[0]
+    normed_x = torch.empty_like(x)
+    logits = torch.empty(num_tokens, num_experts, device=x.device, dtype=torch.float32)
+    torch.ops._moe_C.dsv4_norm_router_gemm(
+        logits, normed_x, x, norm_weight, gate_weight, float(eps)
+    )
+    return normed_x, logits
+
+
 def topk_softmax(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
