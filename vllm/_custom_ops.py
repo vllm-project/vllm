@@ -3195,6 +3195,7 @@ class CPUQuantMethod(IntEnum):
     INT8_W8A8 = 1
     FP8_W8A16 = 2
     INT4_W4A8 = 3
+    MXFP4 = 4
 
 
 if hasattr(torch.ops._C, "fused_experts_cpu"):
@@ -3213,6 +3214,10 @@ if hasattr(torch.ops._C, "fused_experts_cpu"):
         w1_zero: torch.Tensor | None,
         w2_zero: torch.Tensor | None,
         block_size: list[int] | None,
+        w1_bias: torch.Tensor | None,
+        w2_bias: torch.Tensor | None,
+        alpha: float | None,
+        limit: float | None,
         is_vnni: bool,
     ) -> torch.Tensor:
         return torch.empty_like(hidden_states)
@@ -3231,7 +3236,11 @@ def fused_experts_cpu(
     w1_zero: torch.Tensor | None,
     w2_zero: torch.Tensor | None,
     block_size: list[int] | None,
-    is_vnni: bool,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
+    alpha: float | None = None,
+    limit: float | None = None,
+    is_vnni: bool = True,
 ) -> torch.Tensor:
     return torch.ops._C.fused_experts_cpu(
         hidden_states,
@@ -3246,6 +3255,10 @@ def fused_experts_cpu(
         w1_zero,
         w2_zero,
         block_size,
+        w1_bias,
+        w2_bias,
+        alpha,
+        limit,
         is_vnni,
     )
 
