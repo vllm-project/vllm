@@ -1185,7 +1185,18 @@ __global__ void moe_wvSplitK_int4_hf_(
                 wave32/CU = 75% of peak.  Better latency hiding for   \
                 memory-bound kernels. */                              \
     {                                                                 \
-      if (K_in >= 1024)                                               \
+      if (is_gfx1x_int4() && K_in == 2048)                            \
+        /* gfx1151 K=2048 N=1 (Qwen3.5 MoE gate_up at M=1024,           \
+         * E=256): 4-axis sweep via                                     \
+         * benchmarks/kernels/sweep_int4g_moe_kernel.py finds           \
+         * (Y=4, U=4, W=32, AC=32) at 44.6 us vs the (Y=4, U=4,         \
+         * W=16, AC=16) default at 46.5 us -- ~1.04x.  Wider per-       \
+         * thread loads (AC=32) + max WG threads (W=32) amortize the    \
+         * per-row work the K=2048 case has plenty of.  Narrow guard:   \
+         * only swept at M~1024; other M at K=2048 may benefit too      \
+         * but were not measured. */                                    \
+        MOE_WVSPLIT_INT4G_GS_W_AC(4, 32, 32, 4, __N, _HAS_ZP)          \
+      else if (K_in >= 1024)                                           \
         MOE_WVSPLIT_INT4G_GS(4, 4, __N, _HAS_ZP)                      \
       else if (is_gfx1x_int4())                                       \
         MOE_WVSPLIT_INT4G_GS(4, 2, __N, _HAS_ZP)                      \
