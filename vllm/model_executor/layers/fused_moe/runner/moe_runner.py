@@ -396,7 +396,6 @@ class MoERunner(MoERunnerInterface):
             shared_output = tensor_model_parallel_all_reduce(shared_output)
         return shared_output
 
-    @torch.compiler.disable
     def _maybe_reduce_final_output(
         self,
         states: torch.Tensor,
@@ -408,10 +407,6 @@ class MoERunner(MoERunnerInterface):
         output was individually reduced, the combined sum is all-reduced
         here. Skipped when sequence-parallel is active (SP handles its
         own reduction) or when the early path already reduced both outputs.
-
-        Disabled from torch.compile to make the ``defer_allreduce`` decision
-        outside the compiled graph, so stale compilation caches cannot
-        bake in the wrong branch.
         """
         if (
             not self.moe_config.is_sequence_parallel
@@ -421,6 +416,13 @@ class MoERunner(MoERunnerInterface):
             # Defer the allreduce when requested by the model (e.g.
             # MiniMax-M2 decode with fuse_moe_allreduce). The model fuses
             # it with the next input_layernorm via trtllm_allreduce_fusion.
+            #
+            # NOTE: self.defer_allreduce is traced as a Dynamo constant.
+            # When True the AR branch is dead-code-eliminated from the
+            # compiled graph.  If a stale cache captured with defer=False
+            # is loaded, the AR remains.  Always clear the compile cache
+            # after changing the defer flag or toggling fuse_moe_allreduce:
+            #   rm -rf /root/.cache/vllm/torch_compile_cache/*
             if not (
                 self.defer_allreduce
                 and self.moe_config.ep_size <= 1
