@@ -185,11 +185,6 @@ class Glm4MoeModelToolParser(ToolParser):
                 # The tool_parser handles extraction from XML output.
                 if request.tool_choice != "none":
                     request.skip_special_tokens = False
-                # Override tool_choice to "auto" so the serving layer routes
-                # through extract_tool_calls() instead of bypassing the tool
-                # parser and passing raw model output as arguments.  GLM
-                # outputs XML tool calls that need parsing, not raw JSON.
-                request.tool_choice = "auto"
                 return request
         request = super().adjust_request(request)
         if request.tools and request.tool_choice != "none":
