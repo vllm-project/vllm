@@ -156,6 +156,9 @@ class DeepseekV4FP8Config(Fp8Config):
         # ``is_scale_e8m0`` is a property that resolves on first read,
         # by which time the current vllm_config has been set.
 
+        # implicitly ignored layers for DSV4
+        self.ignored_layers += ["weights_proj", "fused_wkv_wgate"]
+
     @property
     def expert_dtype(self) -> str:
         if self._resolved_expert_dtype is None:
@@ -1009,7 +1012,14 @@ class DeepseekV4Attention(nn.Module):
             prefix=f"{prefix}.wo_b",
         )
         self.softmax_scale = self.head_dim**-0.5
-        self.scale_fmt = config.quantization_config["scale_fmt"]
+        # scale_fmt is only used in the indexer (for C4A layers), not in
+        # the main attention. Default to "ue8m0" for compatibility.
+        self.scale_fmt = (
+            config.quantization_config.get("scale_fmt", "ue8m0")
+            if hasattr(config, "quantization_config")
+            and isinstance(config.quantization_config, dict)
+            else "ue8m0"
+        )
 
         self.rope_parameters = config.rope_scaling
 
@@ -1582,7 +1592,7 @@ class DeepseekV4Model(nn.Module):
         first_layer = next(iter(islice(self.layers, self.start_layer, self.end_layer)))
         if first_layer.ffn.use_mega_moe:
             return make_deepseek_v4_expert_params_mapping(self.config.n_routed_experts)
-        # Params for weights, fp8 weight scales, fp8 activation scales
+        # Params for unfused moe weights
         # (param_name, weight_name, expert_id, shard_id)
         return FusedMoE.make_expert_params_mapping(
             self,

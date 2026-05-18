@@ -17,6 +17,7 @@ import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from vllm.utils.deep_gemm import fp8_einsum
@@ -281,6 +282,17 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
                 k_cache_prefix=self.mla_attn.prefix,
             )
 
+        # For now, model requires fp8 quantization for attention
+        # assume that there exists a `wo` weight scale
+        if hasattr(self.wo_a, "weight_scale_inv"):
+            self.wo_scale_name = "weight_scale_inv"
+        elif hasattr(self.wo_a, "weight_scale"):
+            self.wo_scale_name = "weight_scale"
+        else:
+            raise NotImplementedError(
+                "DeepSeekV4 requires FP8 quantization of `attn.wo_a.weight`"
+            )
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -331,7 +343,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         )
 
         wo_a_fp8 = self.wo_a.weight
-        wo_a_scale = self.wo_a.weight_scale_inv
+        wo_a_scale = getattr(self.wo_a, self.wo_scale_name)
 
         z = torch.empty(
             (num_tokens, self.n_local_groups, self.o_lora_rank),
@@ -1112,6 +1124,8 @@ class DeepseekV4Indexer(nn.Module):
             prefix=f"{prefix}.weights_proj",
         )
         self.softmax_scale = self.head_dim**-0.5
+        if not isinstance(self.weights_proj.quant_method, UnquantizedLinearMethod):
+            raise NotImplementedError("Quantization of `attn.indexer.weights_proj`")
 
         self.scale_fmt = "ue8m0"
         self.quant_block_size = 128  # TODO: get from config

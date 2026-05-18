@@ -13,6 +13,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -226,6 +227,11 @@ class DeepseekCompressor(nn.Module):
             prefix=f"{prefix}.fused_wkv_wgate",
         )
         self.norm = RMSNorm(self.head_dim, self.rms_norm_eps)
+        if not isinstance(self.fused_wkv_wgate.quant_method, UnquantizedLinearMethod):
+            raise NotImplementedError(
+                "Quantization of `indexer.compressor.wkv/wgate` is not supported "
+                "due to accuracy concerns. See #42001."
+            )
 
         self.state_cache = CompressorStateCache(
             state_dim=2 * self.coff * self.head_dim,  # kv_state + score_state
