@@ -17,6 +17,8 @@ Before you begin, ensure that you have the following:
 
 ## Installing the chart
 
+This guide uses the Helm chart at [examples/deployment/chart-helm](../../../examples/deployment/chart-helm).
+
 To install the chart with the release name `test-vllm`:
 
 ```bash

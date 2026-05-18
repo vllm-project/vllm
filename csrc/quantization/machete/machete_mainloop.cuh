@@ -154,6 +154,7 @@ struct MacheteCollectiveMma {
   struct DispatchPolicy {
     constexpr static int Stages = PipelineStages;
     using ClusterShape = ClusterShape_MNK;
+    using ArchTag = arch::Sm90;
     using Schedule = KernelScheduleType;
   };
 

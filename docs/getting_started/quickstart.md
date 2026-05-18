@@ -10,6 +10,9 @@ This guide will help you quickly get started with vLLM to perform:
 - OS: Linux
 - Python: 3.10 -- 3.13
 
+!!! note
+    vLLM also works on macOS with [vLLM-Metal](https://github.com/vllm-project/vllm-metal) for Apple Silicon GPU acceleration. See the [GPU installation guide](installation/gpu.md) and select the "Apple Silicon" tab.
+
 ## Installation
 
 === "NVIDIA CUDA"
@@ -56,8 +59,11 @@ This guide will help you quickly get started with vLLM to perform:
     !!! note
         It currently supports Python 3.12, ROCm 7.0 and `glibc >= 2.35`.
 
-    !!! note    
+    !!! note
         Note that, previously, docker images were published using AMD's docker release pipeline and were located `rocm/vllm-dev`. This is being deprecated by using vLLM's docker release pipeline.
+
+    !!! tip
+        A nightly Docker image is also available as [vllm/vllm-openai-rocm:nightly](https://hub.docker.com/r/vllm/vllm-openai-rocm/tags) for testing the latest development builds.
 
 === "Google TPU"
 
@@ -69,6 +75,18 @@ This guide will help you quickly get started with vLLM to perform:
 
     !!! note
         For more detailed instructions, including Docker, installing from source, and troubleshooting, please refer to the [vLLM on TPU documentation](https://docs.vllm.ai/projects/tpu/en/latest/).
+
+=== "Apple Silicon (Mac)"
+
+    If you are using Apple Silicon Macs, you can use vLLM-Metal for GPU-accelerated inference via Apple's Metal framework.
+
+    Follow the installation instructions in the [vLLM-Metal documentation](https://github.com/vllm-project/vllm-metal#installation).
+
+    !!! note
+        vLLM-Metal uses MLX instead of PyTorch as the compute backend and requires MLX-optimized models from the [mlx-community](https://huggingface.co/mlx-community) on Hugging Face.
+
+    !!! tip
+        For more detailed instructions, please refer to the [GPU installation guide](installation/gpu.md) and select the "Apple Silicon" tab.
 
 !!! note
     For more detail and non-CUDA platforms, please refer to the [installation guide](installation/README.md) for specific instructions on how to install vLLM.

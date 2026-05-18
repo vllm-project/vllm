@@ -5,7 +5,7 @@
 import time
 from typing import Any, Literal
 
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class AnthropicError(BaseModel):
@@ -39,6 +39,7 @@ class AnthropicContentBlock(BaseModel):
         "image",
         "tool_use",
         "tool_result",
+        "tool_reference",
         "thinking",
         "redacted_thinking",
     ]
@@ -52,6 +53,8 @@ class AnthropicContentBlock(BaseModel):
     input: dict[str, Any] | None = None
     content: str | list[dict[str, Any]] | None = None
     is_error: bool | None = None
+    # For tool_reference content
+    tool_name: str | None = None
     # For thinking content
     thinking: str | None = None
     signature: str | None = None
@@ -72,6 +75,7 @@ class AnthropicTool(BaseModel):
     name: str
     description: str | None = None
     input_schema: dict[str, Any]
+    defer_loading: bool | None = None
 
     @field_validator("input_schema")
     @classmethod
@@ -111,6 +115,19 @@ class AnthropicMessagesRequest(BaseModel):
     tools: list[AnthropicTool] | None = None
     top_k: int | None = None
     top_p: float | None = None
+
+    # vLLM-specific fields that are not in Anthropic spec
+    kv_transfer_params: dict[str, Any] | None = Field(
+        default=None,
+        description="KVTransfer parameters used for disaggregated serving.",
+    )
+    chat_template_kwargs: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Additional keyword args to pass to the chat template renderer. "
+            "Will be accessible by the template."
+        ),
+    )
 
     @field_validator("model")
     @classmethod
@@ -181,6 +198,11 @@ class AnthropicMessagesResponse(BaseModel):
     stop_sequence: str | None = None
     usage: AnthropicUsage | None = None
 
+    # vLLM-specific fields that are not in Anthropic spec
+    kv_transfer_params: dict[str, Any] | None = Field(
+        default=None, description="KVTransfer parameters."
+    )
+
     def model_post_init(self, __context):
         if not self.id:
             self.id = f"msg_{int(time.time() * 1000)}"
@@ -200,6 +222,15 @@ class AnthropicCountTokensRequest(BaseModel):
     system: str | list[AnthropicContentBlock] | None = None
     tool_choice: AnthropicToolChoice | None = None
     tools: list[AnthropicTool] | None = None
+
+    # vLLM-specific fields that are not in Anthropic spec
+    chat_template_kwargs: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Additional keyword args to pass to the chat template renderer. "
+            "Will be accessible by the template."
+        ),
+    )
 
     @field_validator("model")
     @classmethod

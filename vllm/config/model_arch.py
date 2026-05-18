@@ -16,7 +16,7 @@ class ModelArchitectureConfig:
     Configuration for model architecture that required by vLLM runtime
     """
 
-    architectures: list[str] | None
+    architectures: list[str]
     """List of model architecture class names (e.g., ['LlamaForCausalLM']).
        It can be None upon calling `vllm_config.with_hf_config(config.text_config)`"""
 
@@ -52,6 +52,9 @@ class ModelArchitectureConfig:
 
     is_deepseek_mla: bool
     """Whether the model is a DeepSeek MLA model."""
+
+    is_mm_prefix_lm: bool
+    """Whether the model uses image bidirectional attention."""
 
     derived_max_model_len_and_key: tuple[float, str | None]
     """Derived maximum model length and key from the hf config."""

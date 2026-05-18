@@ -152,8 +152,8 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
                 param,
                 curr_expert_weight,
                 name,
-                shard_id,
-                expert_id,
+                shard_id=shard_id,
+                expert_id=expert_id,
                 return_success=True,
             )
             if success:
@@ -183,9 +183,12 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
         loaded_params: set[str] = set()
         expert_params_mapping = self.get_expert_mapping()
         is_fused_expert = False
+        base_layer = (
+            "base_layer." if any(".base_layer." in name for name in params_dict) else ""
+        )
         fused_expert_params_mapping = [
-            ("experts.w13_weight", "experts.gate_up_proj", 0, "w1"),
-            ("experts.w2_weight", "experts.down_proj", 0, "w2"),
+            (f"experts.{base_layer}w13_weight", "experts.gate_up_proj", 0, "w1"),
+            (f"experts.{base_layer}w2_weight", "experts.down_proj", 0, "w2"),
         ]
         num_experts = self.config.num_experts
         for name, loaded_weight in weights:
@@ -451,7 +454,7 @@ class Qwen3VLMoeForConditionalGeneration(
         if not get_pp_group().is_first_rank and hasattr(
             config.vision_config, "deepstack_visual_indexes"
         ):
-            assert self.language_model.start_layer >= len(
+            assert self.language_model.model.start_layer >= len(
                 config.vision_config.deepstack_visual_indexes
             ), (
                 "start_layer should be greater than or equal to "

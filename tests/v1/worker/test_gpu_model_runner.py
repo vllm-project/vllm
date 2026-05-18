@@ -1,10 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+from unittest.mock import Mock
+
 import numpy as np
 import pytest
 import torch
 
+import vllm.v1.worker.gpu_model_runner as gpu_model_runner_module
 from vllm.config import (
     AttentionConfig,
     CacheConfig,
@@ -30,19 +34,21 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.core.kv_cache_utils import estimate_max_model_len, get_kv_cache_configs
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
 )
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.worker.gpu_input_batch import InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-from vllm.v1.worker.utils import select_common_block_size
+from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
 
 BLOCK_SIZE = 16
 NUM_BLOCKS = 10
-DEVICE = current_platform.device_type
+DEVICE_TYPE = current_platform.device_type
 
 
 def initialize_kv_cache(runner: GPUModelRunner):
@@ -118,7 +124,7 @@ def model_runner():
         vllm_config.compilation_config.static_forward_context["layer.0"] = Attention(
             num_heads, head_size, 0.1
         )
-        runner = GPUModelRunner(vllm_config, DEVICE)
+        runner = GPUModelRunner(vllm_config, DEVICE_TYPE)
         initialize_kv_cache(runner)
         yield runner
 
@@ -151,6 +157,34 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
         scheduled_cached_reqs=CachedRequestData.make_empty(),
         num_scheduled_tokens=num_scheduled_tokens,
         total_num_scheduled_tokens=total_num_scheduled_tokens,
+        scheduled_spec_decode_tokens={},
+        scheduled_encoder_inputs={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+
+
+def _schedule_cached_requests(
+    req_ids: list[str],
+    num_scheduled_tokens: dict[str, int],
+    new_token_ids: list[list[int]],
+    num_computed_tokens: list[int],
+    num_output_tokens: list[int],
+) -> SchedulerOutput:
+    return SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData(
+            req_ids=req_ids,
+            resumed_req_ids=set(),
+            new_token_ids=new_token_ids,
+            all_token_ids={},
+            new_block_ids=[None] * len(req_ids),
+            num_computed_tokens=num_computed_tokens,
+            num_output_tokens=num_output_tokens,
+        ),
+        num_scheduled_tokens=num_scheduled_tokens,
+        total_num_scheduled_tokens=sum(num_scheduled_tokens.values()),
         scheduled_spec_decode_tokens={},
         scheduled_encoder_inputs={},
         num_common_prefix_blocks=[],
@@ -214,6 +248,58 @@ def test_select_common_block_size_uses_largest_shared_int():
 
     selected_size = select_common_block_size(256, [backend_a, backend_b])
     assert selected_size == 64
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    ("world_size", "is_last_rank", "expected_calls"),
+    [(1, True, 0), (2, True, 0), (2, False, 1)],
+)
+def test_sample_tokens_receives_pp_sampled_ids_only_on_non_last_rank(
+    monkeypatch: pytest.MonkeyPatch,
+    world_size: int,
+    is_last_rank: bool,
+    expected_calls: int,
+):
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.execute_model_state = None
+    runner.kv_connector_output = None
+    runner.use_async_scheduling = True
+    receive_calls = 0
+
+    def receive_prev_sampled_token_ids():
+        nonlocal receive_calls
+        receive_calls += 1
+
+    runner._pp_receive_prev_sampled_token_ids_to_input_batch = (
+        receive_prev_sampled_token_ids
+    )
+    monkeypatch.setattr(
+        gpu_model_runner_module,
+        "get_pp_group",
+        lambda: SimpleNamespace(world_size=world_size, is_last_rank=is_last_rank),
+    )
+
+    assert GPUModelRunner.sample_tokens(runner, None) is None
+    assert receive_calls == expected_calls
+
+
+@pytest.mark.skip_global_cleanup
+def test_sample_tokens_skips_pp_group_lookup_without_async_scheduling(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.execute_model_state = None
+    runner.kv_connector_output = None
+    runner.use_async_scheduling = False
+
+    monkeypatch.setattr(
+        gpu_model_runner_module,
+        "get_pp_group",
+        pytest.fail,
+    )
+
+    assert GPUModelRunner.sample_tokens(runner, None) is None
 
 
 def test_select_common_block_size_no_valid_option():
@@ -337,7 +423,7 @@ def test_get_nans_in_logits(model_runner, dist_init):
             [1.0, 2.0, 3.0],
             [3.0, 2.0, 1.0],
         ],
-        device=DEVICE,
+        device=DEVICE_TYPE,
     )
     result = model_runner._get_nans_in_logits(logits)
     assert result == {"req_0": 0, "req_1": 0}
@@ -347,7 +433,7 @@ def test_get_nans_in_logits(model_runner, dist_init):
             [1.0, float("nan"), 3.0],
             [4.0, float("nan"), float("nan")],
         ],
-        device=DEVICE,
+        device=DEVICE_TYPE,
     )
     result = model_runner._get_nans_in_logits(logits)
     assert result == {"req_0": 1, "req_1": 2}
@@ -357,7 +443,7 @@ def test_get_nans_in_logits(model_runner, dist_init):
             [1.0, 2.0, 3.0],
             [4.0, float("nan"), float("nan")],
         ],
-        device=DEVICE,
+        device=DEVICE_TYPE,
     )
     result = model_runner._get_nans_in_logits(logits)
     assert result == {"req_0": 0, "req_1": 2}
@@ -369,7 +455,7 @@ def test_get_nans_in_logits(model_runner, dist_init):
         [
             [1.0, float("nan"), 3.0],
         ],
-        device=DEVICE,
+        device=DEVICE_TYPE,
     )
     result = model_runner._get_nans_in_logits(logits)
     assert result == {"req_0": 1, "req_1": 0}
@@ -380,7 +466,7 @@ def test_get_nans_in_logits(model_runner, dist_init):
             [1.0, 2.0, 3.0],
             [float("nan"), 2.0, 3.0],
         ],
-        device=DEVICE,
+        device=DEVICE_TYPE,
     )
     result = model_runner._get_nans_in_logits(logits)
     assert result == {"req_0": 2, "req_1": 0}
@@ -452,6 +538,135 @@ def test_update_states_request_unscheduled(model_runner, dist_init):
 
     assert _is_req_added(model_runner, req_ids[1])
     assert not _is_req_scheduled(model_runner, req_ids[1])
+
+
+def test_update_states_pp_non_async_multi_request_keeps_token_buffers_consistent(
+    model_runner, model_runner_2, dist_init, monkeypatch
+):
+    req_ids = ["req_0", "req_1"]
+    non_last_runner = model_runner
+    last_runner = model_runner_2
+    non_last_runner.use_async_scheduling = False
+    last_runner.use_async_scheduling = False
+
+    # Both ranks start from the same request set.
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu_model_runner.get_pp_group",
+        lambda: SimpleNamespace(is_last_rank=False, world_size=2),
+    )
+    non_last_runner._update_states(_schedule_new_request(*req_ids))
+    last_runner._update_states(_schedule_new_request(*req_ids))
+
+    sampled_by_last_rank = {req_ids[0]: 101, req_ids[1]: 201}
+    # Emulate last-rank bookkeeping result from previous step:
+    # sampled tokens already cached in CPU token buffers.
+    for req_id, token_id in sampled_by_last_rank.items():
+        req_index = last_runner.input_batch.req_id_to_index[req_id]
+        start_idx = int(last_runner.input_batch.num_tokens_no_spec[req_index])
+        end_idx = start_idx + 1
+        last_runner.input_batch.token_ids_cpu[req_index, start_idx:end_idx] = [token_id]
+        last_runner.input_batch.is_token_ids[req_index, start_idx:end_idx] = True
+        last_runner.input_batch.num_tokens_no_spec[req_index] = end_idx
+        last_runner.requests[req_id].output_token_ids.append(token_id)
+
+    scheduler_output = _schedule_cached_requests(
+        req_ids=req_ids,
+        num_scheduled_tokens={req_ids[0]: 1, req_ids[1]: 1},
+        new_token_ids=[[101], [201]],
+        num_computed_tokens=[3, 3],  # prompt tokens only
+        num_output_tokens=[1, 1],
+    )
+    # non-last rank appends new_token_ids in _update_states.
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu_model_runner.get_pp_group",
+        lambda: SimpleNamespace(is_last_rank=False, world_size=2),
+    )
+    non_last_runner._update_states(scheduler_output)
+    # last rank should keep its already-bookkept CPU buffers unchanged.
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu_model_runner.get_pp_group",
+        lambda: SimpleNamespace(is_last_rank=True, world_size=2),
+    )
+    last_runner._update_states(scheduler_output)
+
+    # Verify consistency between PP ranks after _update_states.
+    for req_id in req_ids:
+        non_last_idx = non_last_runner.input_batch.req_id_to_index[req_id]
+        last_idx = last_runner.input_batch.req_id_to_index[req_id]
+        non_last_len = int(non_last_runner.input_batch.num_tokens_no_spec[non_last_idx])
+        last_len = int(last_runner.input_batch.num_tokens_no_spec[last_idx])
+        assert non_last_len == last_len
+        assert (
+            non_last_runner.input_batch.token_ids_cpu[
+                non_last_idx, :non_last_len
+            ].tolist()
+            == last_runner.input_batch.token_ids_cpu[last_idx, :last_len].tolist()
+        )
+
+
+def test_update_states_pp_async_multi_request_keeps_rank_state_consistent(
+    model_runner, model_runner_2, dist_init, monkeypatch
+):
+    req_ids = ["req_0", "req_1"]
+    non_last_runner = model_runner
+    last_runner = model_runner_2
+    non_last_runner.use_async_scheduling = True
+    last_runner.use_async_scheduling = True
+
+    # Both ranks start from the same request set.
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu_model_runner.get_pp_group",
+        lambda: SimpleNamespace(is_last_rank=False, world_size=2),
+    )
+    non_last_runner._update_states(_schedule_new_request(*req_ids))
+    last_runner._update_states(_schedule_new_request(*req_ids))
+
+    # Simulate async previous-step sampled tokens known on both ranks.
+    # non-last rank may receive them via PP communication; last rank has
+    # them from local sampling/bookkeeping.
+    sampled_by_last_rank = {req_ids[0]: 111, req_ids[1]: 222}
+    for runner in (non_last_runner, last_runner):
+        for req_id, token_id in sampled_by_last_rank.items():
+            req_index = runner.input_batch.req_id_to_index[req_id]
+            start_idx = int(runner.input_batch.num_tokens_no_spec[req_index])
+            end_idx = start_idx + 1
+            runner.input_batch.token_ids_cpu[req_index, start_idx:end_idx] = [token_id]
+            runner.input_batch.is_token_ids[req_index, start_idx:end_idx] = True
+            runner.input_batch.num_tokens_no_spec[req_index] = end_idx
+            runner.requests[req_id].output_token_ids.append(token_id)
+
+    scheduler_output = _schedule_cached_requests(
+        req_ids=req_ids,
+        num_scheduled_tokens={req_ids[0]: 1, req_ids[1]: 1},
+        new_token_ids=[],
+        num_computed_tokens=[4, 4],
+        num_output_tokens=[1, 1],
+    )
+    # non-last rank: async PP branch (new_token_ids empty).
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu_model_runner.get_pp_group",
+        lambda: SimpleNamespace(is_last_rank=False, world_size=2),
+    )
+    non_last_runner._update_states(scheduler_output)
+    # last rank: keep already-bookkept state aligned with scheduler view.
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu_model_runner.get_pp_group",
+        lambda: SimpleNamespace(is_last_rank=True, world_size=2),
+    )
+    last_runner._update_states(scheduler_output)
+
+    for req_id in req_ids:
+        non_last_idx = non_last_runner.input_batch.req_id_to_index[req_id]
+        last_idx = last_runner.input_batch.req_id_to_index[req_id]
+        non_last_len = int(non_last_runner.input_batch.num_tokens_no_spec[non_last_idx])
+        last_len = int(last_runner.input_batch.num_tokens_no_spec[last_idx])
+        assert non_last_len == last_len
+        assert (
+            non_last_runner.input_batch.token_ids_cpu[
+                non_last_idx, :non_last_len
+            ].tolist()
+            == last_runner.input_batch.token_ids_cpu[last_idx, :last_len].tolist()
+        )
 
 
 def test_kv_cache_stride_order(monkeypatch, model_runner):
@@ -532,6 +747,39 @@ def test_load_model_weights_inplace(dist_init, model_runner, model_runner_2):
 def test_reload_weights_before_load_model(model_runner):
     with pytest.raises(ValueError):
         model_runner.reload_weights()
+
+
+def test_sample_passes_reordered_draft_probs_to_rejection_sampler():
+    runner = object.__new__(GPUModelRunner)
+    runner.use_async_scheduling = False
+    runner.input_batch = SimpleNamespace(
+        sampling_metadata=Mock(spec=SamplingMetadata),
+        update_async_output_token_ids=Mock(),
+        req_ids=["req_a", "req_b", "req_c"],
+    )
+    runner.rejection_sampler = Mock(return_value="sampler_output")
+    runner.sampler = Mock()
+    runner._draft_prob_req_ids = ["req_c", "req_a", "req_b"]
+    runner._draft_probs = torch.arange(3 * 3 * 4, dtype=torch.float32).reshape(3, 3, 4)
+
+    spec_decode_metadata = SpecDecodeMetadata.make_dummy(
+        [[1, 2], [], [3]],
+        device=torch.device("cpu"),
+    )
+    logits = torch.randn(6, 4)
+
+    output = GPUModelRunner._sample(runner, logits, spec_decode_metadata)
+
+    assert output == "sampler_output"
+    passed_draft_probs = runner.rejection_sampler.call_args.args[1]
+    expected_draft_probs = torch.cat(
+        [
+            runner._draft_probs[1, :2],
+            runner._draft_probs[0, :1],
+        ],
+        dim=0,
+    )
+    assert torch.equal(passed_draft_probs, expected_draft_probs)
 
 
 def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order(default_vllm_config):
@@ -640,7 +888,7 @@ def test_init_kv_cache_without_kv_sharing(default_vllm_config):
     # Set high context length to test max context length estimation
     vllm_config.model_config.max_model_len = 3_000_000
     vllm_ctx = vllm_config.compilation_config.static_forward_context
-    runner = GPUModelRunner(vllm_config, DEVICE)
+    runner = GPUModelRunner(vllm_config, DEVICE_TYPE)
     kv_cache_spec = runner.get_kv_cache_spec()
     assert len(kv_cache_spec) == 2
     assert len(runner.shared_kv_cache_layers) == 0
@@ -670,8 +918,8 @@ def test_init_kv_cache_without_kv_sharing(default_vllm_config):
 
     runner.initialize_kv_cache(kv_cache_config)
 
-    layer_0_kv = vllm_ctx[layer_0].kv_cache[0]
-    layer_1_kv = vllm_ctx[layer_1].kv_cache[0]
+    layer_0_kv = vllm_ctx[layer_0].kv_cache
+    layer_1_kv = vllm_ctx[layer_1].kv_cache
     # check layer 1 kv cache does NOT share memory with layer 0
     assert id(layer_1_kv) != id(layer_0_kv)
 
@@ -708,7 +956,7 @@ def test_init_kv_cache_with_kv_sharing_valid(default_vllm_config):
     # Set high context length to test max context length estimation
     vllm_config.model_config.max_model_len = 3_000_000
     vllm_ctx = vllm_config.compilation_config.static_forward_context
-    runner = GPUModelRunner(vllm_config, DEVICE)
+    runner = GPUModelRunner(vllm_config, DEVICE_TYPE)
     kv_cache_spec = runner.get_kv_cache_spec()
     assert len(kv_cache_spec) == 1
     assert layer_0 in kv_cache_spec
@@ -740,8 +988,8 @@ def test_init_kv_cache_with_kv_sharing_valid(default_vllm_config):
     runner.initialize_kv_cache(kv_cache_config)
     kv_cache_config_after_init = runner.kv_cache_config
 
-    layer_0_kv = vllm_ctx[layer_0].kv_cache[0]
-    layer_1_kv = vllm_ctx[layer_1].kv_cache[0]
+    layer_0_kv = vllm_ctx[layer_0].kv_cache
+    layer_1_kv = vllm_ctx[layer_1].kv_cache
     # check layer 1 kv cache shares memory with layer 0
     assert id(layer_1_kv) == id(layer_0_kv)
 
@@ -847,7 +1095,8 @@ def test_hybrid_attention_mamba_tensor_shapes():
         assert fwd_context is not None
         vllm_ctx = vllm_config.compilation_config.static_forward_context
 
-        runner = GPUModelRunner(vllm_config, DEVICE)
+        runner = GPUModelRunner(vllm_config, DEVICE_TYPE)
+        current_platform.update_block_size_for_backend(vllm_config)
         kv_cache_spec = runner.get_kv_cache_spec()
 
         available_memory = 5 * GiB_bytes
@@ -864,9 +1113,9 @@ def test_hybrid_attention_mamba_tensor_shapes():
     np.random.shuffle(ind)
     blocks0, blocks1 = ind[: (num_blocks // 2)], ind[(num_blocks // 2) :]
 
-    attn_shape = vllm_ctx[layer_0].kv_cache[0].shape
-    conv_shape = vllm_ctx[layer_2].kv_cache[0][0].shape
-    ssm_shape = vllm_ctx[layer_2].kv_cache[0][1].shape
+    attn_shape = vllm_ctx[layer_0].kv_cache.shape
+    conv_shape = vllm_ctx[layer_2].kv_cache[0].shape
+    ssm_shape = vllm_ctx[layer_2].kv_cache[1].shape
 
     # assert we are using FlashInfer
     assert attn_shape[0] % num_blocks == 0
@@ -892,34 +1141,34 @@ def test_hybrid_attention_mamba_tensor_shapes():
     ssm_constant_shape = ssm_shape[1:]
 
     attn_blocks_constant = torch.full(
-        (test_block_size, *attn_constant_shape), device=DEVICE, fill_value=3.33
+        (test_block_size, *attn_constant_shape), device=DEVICE_TYPE, fill_value=3.33
     )
     conv_blocks_constant = torch.full(
-        (test_block_size, *conv_constant_shape), device=DEVICE, fill_value=6.66
+        (test_block_size, *conv_constant_shape), device=DEVICE_TYPE, fill_value=6.66
     )
     ssm_blocks_constant = torch.full(
-        (test_block_size, *ssm_constant_shape), device=DEVICE, fill_value=9.99
+        (test_block_size, *ssm_constant_shape), device=DEVICE_TYPE, fill_value=9.99
     )
 
     # Fill attention blocks with constants using kv block indices
     kernel_blocks_for_attention = kv_blocks_for_attention * block_split_ratio
 
     for layer in [layer_0, layer_1]:
-        # attention: kv_cache[0][kernel_block_idx, kv_idx, ...]
+        # attention: kv_cache[kernel_block_idx, kv_idx, ...]
         for i, kernel_block in enumerate(kernel_blocks_for_attention):
-            vllm_ctx[layer].kv_cache[0][kernel_block, :] = attn_blocks_constant[i]
+            vllm_ctx[layer].kv_cache[kernel_block, :] = attn_blocks_constant[i]
 
     # fill mamba blocks with constants using kernel block indices
     for layer in [layer_2, layer_3, layer_4, layer_5]:
-        # mamba: kv_cache[0][component][kernel_block_idx, ...]
+        # mamba: kv_cache[component][kernel_block_idx, ...]
         for i, kv_block in enumerate(kv_blocks_for_mamba):
-            vllm_ctx[layer].kv_cache[0][0][kv_block, :] = conv_blocks_constant[i]
-            vllm_ctx[layer].kv_cache[0][1][kv_block, :] = ssm_blocks_constant[i]
+            vllm_ctx[layer].kv_cache[0][kv_block, :] = conv_blocks_constant[i]
+            vllm_ctx[layer].kv_cache[1][kv_block, :] = ssm_blocks_constant[i]
 
     # verify attention and mamba contents are correct
     for layer in [layer_0, layer_1]:
         for i, kernel_block in enumerate(kernel_blocks_for_attention):
-            actual_kv = vllm_ctx[layer].kv_cache[0][kernel_block, :]
+            actual_kv = vllm_ctx[layer].kv_cache[kernel_block, :]
             expected = attn_blocks_constant[i]
 
             # Check K and V separately
@@ -928,8 +1177,8 @@ def test_hybrid_attention_mamba_tensor_shapes():
 
     for layer in [layer_2, layer_3, layer_4, layer_5]:
         for i, kv_block in enumerate(kv_blocks_for_mamba):
-            actual_conv = vllm_ctx[layer].kv_cache[0][0][kv_block, :]
-            actual_ssm = vllm_ctx[layer].kv_cache[0][1][kv_block, :]
+            actual_conv = vllm_ctx[layer].kv_cache[0][kv_block, :]
+            actual_ssm = vllm_ctx[layer].kv_cache[1][kv_block, :]
             expected_conv = conv_blocks_constant[i]
             expected_ssm = ssm_blocks_constant[i]
 
@@ -938,12 +1187,39 @@ def test_hybrid_attention_mamba_tensor_shapes():
 
     for layer in [layer_2, layer_3, layer_4, layer_5]:
         for i, kv_block in enumerate(kv_blocks_for_mamba):
-            actual_conv = vllm_ctx[layer].kv_cache[0][0][kv_block, :]
-            actual_ssm = vllm_ctx[layer].kv_cache[0][1][kv_block, :]
+            actual_conv = vllm_ctx[layer].kv_cache[0][kv_block, :]
+            actual_ssm = vllm_ctx[layer].kv_cache[1][kv_block, :]
             expected_conv = conv_blocks_constant[i]
             expected_ssm = ssm_blocks_constant[i]
             assert torch.equal(actual_conv, expected_conv)
             assert torch.equal(actual_ssm, expected_ssm)
+
+
+def test_update_hybrid_attention_mamba_layout_with_num_block_2_rewrites_stride():
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+
+    ambiguous_cache = torch.empty((2, 2, BLOCK_SIZE, 1, 8), dtype=torch.float16)
+    """Ambiguous, because both dims[0=kv_dim] and dims[1=num_blocks] == 2"""
+    hidden_size = ambiguous_cache.shape[2:].numel()
+    assert ambiguous_cache.stride()[:2] == (2 * hidden_size, hidden_size)
+
+    attention_spec = AttentionSpec(
+        block_size=BLOCK_SIZE, num_kv_heads=1, head_size=8, dtype=torch.float16
+    )
+    runner_stub = SimpleNamespace(
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        _kv_cache_spec_attn_group_iterator=lambda: iter(
+            [AttentionGroup(FlashAttentionBackend, ["attn"], attention_spec, 0)]
+        ),
+    )
+    GPUModelRunner._update_hybrid_attention_mamba_layout(
+        runner_stub, {"attn": ambiguous_cache}, [BLOCK_SIZE]
+    )
+
+    assert ambiguous_cache.stride()[:2] == (hidden_size, 2 * hidden_size), """\
+        We expect _update_hybrid_attention_mamba_layout to re-stride the cache from:
+        (2, num_blocks) -> (num_blocks, 2), even when num_blocks==2, 
+        which was ambiguous before get_kv_cache_block_dim was used"""
 
 
 def test_hybrid_block_table_initialization():
@@ -966,7 +1242,7 @@ def test_hybrid_block_table_initialization():
         max_num_blocks_per_req=max_num_blocks_per_req,
         max_num_batched_tokens=max_num_batched_tokens,
         pin_memory=False,
-        device=torch.device(DEVICE),
+        device=torch.device(DEVICE_TYPE),
         kernel_block_size=kernel_block_sizes[0],
         cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
     )
@@ -1005,7 +1281,7 @@ def test_input_batch_with_kernel_block_sizes():
     max_num_reqs = 10
     max_model_len = 512
     max_num_batched_tokens = 512
-    device = torch.device(DEVICE)
+    device = torch.device(DEVICE_TYPE)
     pin_memory = False
     vocab_size = 50272
 
@@ -1052,7 +1328,7 @@ def test_hybrid_cache_integration(default_vllm_config, dist_init):
         num_heads, head_size, 0.1
     )
 
-    runner = GPUModelRunner(vllm_config, DEVICE)
+    runner = GPUModelRunner(vllm_config, DEVICE_TYPE)
 
     # Initialize KV cache with configuration
     attn_spec = FullAttentionSpec(
@@ -1191,9 +1467,9 @@ def test_is_uniform_decode() -> None:
     current_platform.is_rocm(),
     reason="Attention backend FLASHINFER is not supported on ROCm.",
 )
-def test_cudagraph_sizes_capped_for_mamba_cache():
-    """Test that cudagraph capture sizes are capped to num_blocks for
-    hybrid models with Mamba layers.
+def test_mamba_cache_raises_when_max_num_seqs_exceeds_blocks():
+    """Test that a ValueError is raised when max_num_seqs exceeds the
+    available Mamba cache blocks for hybrid models with FULL cudagraphs.
 
     See: https://github.com/vllm-project/vllm/issues/34094
     """
@@ -1275,7 +1551,8 @@ def test_cudagraph_sizes_capped_for_mamba_cache():
             )
         assert fwd_context is not None
 
-        runner = GPUModelRunner(vllm_config, DEVICE)
+        runner = GPUModelRunner(vllm_config, DEVICE_TYPE)
+        current_platform.update_block_size_for_backend(vllm_config)
         kv_cache_spec = runner.get_kv_cache_spec()
 
         available_memory = 5 * GiB_bytes
@@ -1284,23 +1561,8 @@ def test_cudagraph_sizes_capped_for_mamba_cache():
         )[0]
         num_blocks = kv_cache_config.num_blocks
 
-        # Set max_cudagraph_capture_size to a value larger than num_blocks
-        # to trigger the Mamba capping logic.
-        large_max = num_blocks + 100
-        compilation_config = vllm_config.compilation_config
-        compilation_config.max_cudagraph_capture_size = large_max
-        compilation_config.cudagraph_capture_sizes = [
-            s for s in [1, 2, 4, 8, 16, 32, 64, 128, 256, 512] if s <= large_max
-        ]
+        # Force max_num_seqs to exceed num_blocks so the check triggers.
+        runner.max_num_reqs = num_blocks + 100
 
-        runner.initialize_kv_cache(kv_cache_config)
-
-    # After initialization, cudagraph sizes should be capped
-    assert compilation_config.max_cudagraph_capture_size <= num_blocks
-    assert all(s <= num_blocks for s in compilation_config.cudagraph_capture_sizes)
-    # Invariant: last element == max
-    if compilation_config.cudagraph_capture_sizes:
-        assert (
-            compilation_config.cudagraph_capture_sizes[-1]
-            == compilation_config.max_cudagraph_capture_size
-        )
+        with pytest.raises(ValueError, match="max_num_seqs"):
+            runner.initialize_kv_cache(kv_cache_config)

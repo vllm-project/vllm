@@ -6,6 +6,7 @@ from transformers import AutoModel
 
 from tests.models.utils import check_embeddings_close
 from vllm import TokensPrompt
+from vllm.config import PoolerConfig
 
 
 @pytest.mark.parametrize(
@@ -21,6 +22,7 @@ def test_embed_models(hf_runner, vllm_runner, model: str):
     with vllm_runner(
         model,
         runner="pooling",
+        pooler_config=PoolerConfig(task="token_embed"),
         max_model_len=128,
         max_num_batched_tokens=chunk_size,
         enforce_eager=True,

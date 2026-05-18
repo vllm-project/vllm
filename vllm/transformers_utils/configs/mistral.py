@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
+from packaging.version import Version
 from transformers import PretrainedConfig, WhisperConfig
+from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.logger import init_logger
 
@@ -134,6 +136,10 @@ def _remap_mistral_yarn_args(config: dict) -> dict:
             # Cast to remove Transformers > v5 type warnings
             config["rope_parameters"][new_name] = cast(yarn_config.pop(old_name))
 
+    # Ignore apply_yarn_scaling in Transformers > v5 RoPE validation to remove warnings
+    if Version(TRANSFORMERS_VERSION) >= Version("5.3.0.dev0"):
+        config["ignore_keys_at_rope_validation"] = {"apply_yarn_scaling"}
+
     assert len(yarn_config) == 0, f"Unparsed yarn config: {yarn_config}"
 
     return config
@@ -257,7 +263,6 @@ def _remap_mistral_audio_args(config: dict) -> dict:
             encoder_attention_heads=encoder_args["n_heads"],
             encoder_head_dim=encoder_args["head_dim"],
             vocab_size=encoder_args["vocab_size"],
-            max_source_positions=encoder_args["max_source_positions"],
             is_encoder_decoder=False,  # Override WhisperConfig default
             is_causal=encoder_args.get("causal", False),
             sliding_window=encoder_args.get("sliding_window", None),
@@ -270,6 +275,10 @@ def _remap_mistral_audio_args(config: dict) -> dict:
             max_position_embeddings=block_pool_size * config["max_position_embeddings"],
         ),
     }
+    # Sometimes max_source_positions is explicitly set to None in params.json but this
+    # is not a valid value for WhisperConfig (or downstream code that uses it).
+    if (max_source_positions := encoder_args.get("max_source_positions")) is not None:
+        config["audio_config"].max_source_positions = max_source_positions
     if quant_config:
         config["quantization_config"] = quant_config
     return config

@@ -40,6 +40,14 @@ class DeepSeekV3ReasoningParser(ReasoningParser):
         else:
             self._parser = IdentityReasoningParser(tokenizer, *args, **kwargs)
 
+    @property
+    def reasoning_start_str(self) -> str | None:
+        return self._parser.reasoning_start_str
+
+    @property
+    def reasoning_end_str(self) -> str | None:
+        return self._parser.reasoning_end_str
+
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         return self._parser.is_reasoning_end(input_ids)
 

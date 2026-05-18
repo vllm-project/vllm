@@ -10,6 +10,7 @@ import torch
 
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
+from vllm.config.kv_events import KVEventsConfig
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -42,10 +43,16 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
+    KVCacheSpecKind,
     KVCacheTensor,
+    MambaSpec,
     MLAAttentionSpec,
+    SinkFullAttentionSpec,
+    SlidingWindowMLASpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
+    get_kv_cache_spec_kind,
+    get_kv_cache_spec_sliding_window,
 )
 from vllm.v1.metrics.stats import CachingMetrics, PrefixCacheStats
 from vllm.v1.request import Request
@@ -154,6 +161,24 @@ def new_chunked_local_attention_spec(
         dtype=dtype,
         page_size_padded=page_size_padded,
         attention_chunk_size=attention_chunk_size,
+    )
+
+
+def new_mamba_spec(
+    block_size=16,
+    shapes=((2, 512), (3, 32, 32)),
+    dtypes=(torch.float32, torch.float32),
+    num_speculative_blocks=2,
+    mamba_cache_mode="none",
+    page_size_padded=None,
+):
+    return MambaSpec(
+        block_size=block_size,
+        shapes=shapes,
+        dtypes=dtypes,
+        page_size_padded=page_size_padded,
+        mamba_cache_mode=mamba_cache_mode,
+        num_speculative_blocks=num_speculative_blocks,
     )
 
 
@@ -428,12 +453,12 @@ def test_generate_block_hash_extra_keys():
 
     # Test with no extra keys
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request, 0, 5, 0)
-    assert extra_keys == ("hash1",)
+    assert extra_keys == (("hash1", 0),)
     assert next_mm_idx == 1
 
     # Test with partial overlap
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request, 3, 8, 0)
-    assert extra_keys == ("hash1",)
+    assert extra_keys == (("hash1", -3),)
     assert next_mm_idx == 1
 
     # Test with no overlap
@@ -443,7 +468,7 @@ def test_generate_block_hash_extra_keys():
 
     # Test with multiple extra keys
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request, 0, 15, 0)
-    assert extra_keys == ("hash1", "hash2")
+    assert extra_keys == (("hash1", 0), ("hash2", 10))
     assert next_mm_idx == 2
 
 
@@ -494,7 +519,7 @@ def test_generate_block_hash_extra_keys_cache_salt():
 
     # Test with no extra keys
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request_mm, 0, 5, 0)
-    assert extra_keys == ("hash1", "salt")
+    assert extra_keys == (("hash1", 0), "salt")
     assert next_mm_idx == 1
 
 
@@ -618,8 +643,10 @@ def test_request_block_hasher(hash_fn):
 
     block_hashes = request.block_hashes
     assert len(block_hashes) == 2
-    assert block_hashes[0] == hash_fn((kv_cache_utils.NONE_HASH, (0, 1, 2), ("hash1",)))
-    assert block_hashes[1] == hash_fn((block_hashes[0], (3, 4, 5), ("hash2",)))
+    assert block_hashes[0] == hash_fn(
+        (kv_cache_utils.NONE_HASH, (0, 1, 2), (("hash1", 0),))
+    )
+    assert block_hashes[1] == hash_fn((block_hashes[0], (3, 4, 5), (("hash2", 0),)))
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
@@ -1833,13 +1860,157 @@ def test_generate_scheduler_kv_cache_config():
 
 
 def new_mla_spec(cache_dtype_str=None):
+    # head_size = kv_lora_rank(512) + qk_rope_head_dim(64) = 576
     return MLAAttentionSpec(
         block_size=16,
-        num_kv_heads=16,
-        head_size=64,
+        num_kv_heads=1,
+        head_size=576,
         dtype=torch.float32,
         cache_dtype_str=cache_dtype_str,
     )
+
+
+def test_get_kv_cache_spec_kind_prefers_specific_attention_subclasses():
+    assert get_kv_cache_spec_kind(new_mla_spec()) == KVCacheSpecKind.MLA_ATTENTION
+
+    sliding_window_mla_spec = SlidingWindowMLASpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=576,
+        dtype=torch.float32,
+        sliding_window=128,
+    )
+    assert (
+        get_kv_cache_spec_kind(sliding_window_mla_spec)
+        == KVCacheSpecKind.SLIDING_WINDOW_MLA
+    )
+
+    sink_full_attention_spec = SinkFullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.float32,
+        sink_len=4,
+    )
+    assert (
+        get_kv_cache_spec_kind(sink_full_attention_spec)
+        == KVCacheSpecKind.SINK_FULL_ATTENTION
+    )
+
+
+def test_get_kv_cache_spec_kind_unwraps_uniform_type_specs():
+    uniform_mla_spec = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={
+            "layer_1": new_mla_spec(),
+            "layer_2": new_mla_spec(cache_dtype_str="fp8"),
+        },
+    )
+    assert get_kv_cache_spec_kind(uniform_mla_spec) == KVCacheSpecKind.MLA_ATTENTION
+
+    uniform_swa_mla_spec = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={
+            "layer_1": SlidingWindowMLASpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=576,
+                dtype=torch.float32,
+                sliding_window=128,
+            ),
+            "layer_2": SlidingWindowMLASpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=1024,
+                dtype=torch.float32,
+                sliding_window=128,
+            ),
+        },
+    )
+    assert (
+        get_kv_cache_spec_kind(uniform_swa_mla_spec)
+        == KVCacheSpecKind.SLIDING_WINDOW_MLA
+    )
+
+
+def test_get_kv_cache_spec_kind_unknown_for_mixed_uniform_type_specs():
+    uniform_mixed_spec = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={
+            "layer_1": new_mla_spec(),
+            "layer_2": SlidingWindowMLASpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=576,
+                dtype=torch.float32,
+                sliding_window=128,
+            ),
+        },
+    )
+    assert get_kv_cache_spec_kind(uniform_mixed_spec) == KVCacheSpecKind.UNKNOWN
+
+
+def test_get_kv_cache_spec_sliding_window_reads_windowed_specs():
+    full_attention_spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.float32,
+    )
+    sliding_window_spec = SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.float32,
+        sliding_window=128,
+    )
+
+    assert get_kv_cache_spec_sliding_window(full_attention_spec) is None
+    assert get_kv_cache_spec_sliding_window(sliding_window_spec) == 128
+
+
+def test_get_kv_cache_spec_sliding_window_unwraps_uniform_type_specs():
+    uniform_window_spec = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={
+            "layer_1": SlidingWindowSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=64,
+                dtype=torch.float32,
+                sliding_window=128,
+            ),
+            "layer_2": SlidingWindowSpec(
+                block_size=16,
+                num_kv_heads=2,
+                head_size=64,
+                dtype=torch.float32,
+                sliding_window=128,
+            ),
+        },
+    )
+    mixed_window_spec = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={
+            "layer_1": SlidingWindowSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=64,
+                dtype=torch.float32,
+                sliding_window=128,
+            ),
+            "layer_2": SlidingWindowSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=64,
+                dtype=torch.float32,
+                sliding_window=256,
+            ),
+        },
+    )
+
+    assert get_kv_cache_spec_sliding_window(uniform_window_spec) == 128
+    assert get_kv_cache_spec_sliding_window(mixed_window_spec) is None
 
 
 def test_merge_mla_spec():
@@ -1954,7 +2125,7 @@ def test_request_with_prompt_embeds_and_mm_inputs(hash_fn: Callable[[Any], bytes
         (
             kv_cache_utils.NONE_HASH,
             tuple(prompt_token_ids[:block_size]),
-            ("hash1", block1_embeds_hash),
+            (("hash1", 0), block1_embeds_hash),
         )
     )
     assert block_hashes[0] == expected_hash1
@@ -1966,7 +2137,7 @@ def test_request_with_prompt_embeds_and_mm_inputs(hash_fn: Callable[[Any], bytes
         (
             block_hashes[0],
             tuple(prompt_token_ids[block_size:num_tokens]),
-            ("hash2", block2_embeds_hash),
+            (("hash2", 0), block2_embeds_hash),
         )
     )
     assert block_hashes[1] == expected_hash2
@@ -2010,6 +2181,28 @@ def test_auto_fit_max_model_len():
     assert vllm_config.model_config.max_model_len > 0
 
 
+def test_auto_fit_max_model_len_with_hybrid():
+    """Test that auto-fit works with hybrid KV cache specs."""
+    # Create config with original_max_model_len=-1 to trigger auto-fit
+    model_config = ModelConfig(max_model_len=8192)
+    # Simulate the user passing -1 by setting original_max_model_len
+    model_config.original_max_model_len = -1
+    vllm_config = VllmConfig(model_config=model_config)
+
+    mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2  # 16KB per block per layer
+    gamma = 2
+    kv_cache_specs = {
+        "layer_1": new_mamba_spec(num_speculative_blocks=gamma),
+        "layer_2": new_kv_cache_spec(),
+    }
+
+    available_memory = mem_per_block_per_layer * (1024 // 16 + 1 + gamma)
+    _kv_cache_configs = get_kv_cache_configs(
+        vllm_config, [kv_cache_specs], [available_memory]
+    )
+    assert vllm_config.model_config.max_model_len == 1024
+
+
 def test_auto_fit_max_model_len_not_triggered():
     """Test that auto-fit is not triggered when original_max_model_len is not -1."""
     model_config = ModelConfig(max_model_len=16)
@@ -2027,6 +2220,54 @@ def test_auto_fit_max_model_len_not_triggered():
         vllm_config, [kv_cache_specs], [mem_per_block_per_layer * 2 * 32]
     )
     assert vllm_config.model_config.max_model_len == 16
+
+
+def test_auto_fit_max_model_len_respects_num_gpu_blocks_override():
+    """Auto-fit must size max_model_len against the override-clamped pool, not
+    the raw `available_memory`. Without this, auto-fit could pick a
+    max_model_len that no longer fits once `num_gpu_blocks_override` is applied.
+    """
+    model_config = ModelConfig(max_model_len=16384)
+    model_config.original_max_model_len = -1  # request auto-fit
+    vllm_config = VllmConfig(model_config=model_config)
+    # Cap the cache to 32 blocks regardless of available memory.
+    vllm_config.cache_config.num_gpu_blocks_override = 32
+
+    mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2
+    kv_cache_specs = {
+        "layer_1": new_kv_cache_spec(),  # block_size=16
+        "layer_2": new_kv_cache_spec(),
+    }
+    # Plenty of raw memory (1024 blocks per layer would fit max_model_len=16384).
+    large_available_memory = mem_per_block_per_layer * 2 * 1024
+
+    get_kv_cache_configs(vllm_config, [kv_cache_specs], [large_available_memory])
+
+    # 32 blocks * block_size 16 = 512 token slots, so max_model_len must
+    # auto-fit at or below that.
+    assert 0 < vllm_config.model_config.max_model_len <= 32 * 16
+
+
+def test_check_enough_kv_cache_memory_respects_num_gpu_blocks_override():
+    """Admission check must use the override-clamped pool size, not raw
+    `available_memory`. Without this, startup could accept a max_model_len
+    that does not actually fit in `num_gpu_blocks_override` blocks.
+    """
+    model_config = ModelConfig(max_model_len=16384)
+    vllm_config = VllmConfig(model_config=model_config)
+    # 32 blocks is far too small for max_model_len=16384 (would need 1024).
+    vllm_config.cache_config.num_gpu_blocks_override = 32
+
+    mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2
+    kv_cache_specs = {
+        "layer_1": new_kv_cache_spec(),
+        "layer_2": new_kv_cache_spec(),
+    }
+    # Plenty of raw memory: a bytes-only check against this would pass.
+    large_available_memory = mem_per_block_per_layer * 2 * 1024
+
+    with pytest.raises(ValueError, match="max seq len"):
+        get_kv_cache_configs(vllm_config, [kv_cache_specs], [large_available_memory])
 
 
 def test_unify_hybrid_kv_cache_specs():
@@ -2094,3 +2335,30 @@ def test_unify_hybrid_kv_cache_specs():
 
     with pytest.raises(ValueError):
         kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
+
+
+def test_hma_not_disabled_when_kv_events_enabled():
+    """
+    Test enabling KV events must not force disable_hybrid_kv_cache_manager to True.
+
+    This test guards against that regression by verifying that a VllmConfig
+    with kv_events_config set still resolves disable_hybrid_kv_cache_manager
+    to False (i.e. HMA remains enabled) when no other condition requires it
+    to be disabled.
+    """
+    model_config = ModelConfig(max_model_len=16)
+    kv_events_config = KVEventsConfig(
+        enable_kv_cache_events=True,
+        publisher="null",
+    )
+
+    # Leave disable_hybrid_kv_cache_manager as None (the default) so that
+    # VllmConfig.__post_init__ resolves it automatically.
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        kv_events_config=kv_events_config,
+    )
+
+    assert vllm_config.scheduler_config.disable_hybrid_kv_cache_manager is False, (
+        "kv_events_config must not force-disable the hybrid KV cache manager."
+    )

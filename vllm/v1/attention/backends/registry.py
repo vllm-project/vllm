@@ -63,6 +63,9 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     FLASHINFER_MLA = (
         "vllm.v1.attention.backends.mla.flashinfer_mla.FlashInferMLABackend"
     )
+    TOKENSPEED_MLA = (
+        "vllm.v1.attention.backends.mla.tokenspeed_mla.TokenspeedMLABackend"
+    )
     FLASHINFER_MLA_SPARSE = (
         "vllm.v1.attention.backends.mla.flashinfer_mla_sparse."
         "FlashInferMLASparseBackend"
@@ -76,12 +79,12 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     FLASH_ATTN_MLA = "vllm.v1.attention.backends.mla.flashattn_mla.FlashAttnMLABackend"
     NO_ATTENTION = "vllm.v1.attention.backends.no_attention.NoAttentionBackend"
     FLEX_ATTENTION = "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"
-    TREE_ATTN = "vllm.v1.attention.backends.tree_attn.TreeAttentionBackend"
     ROCM_AITER_UNIFIED_ATTN = (
         "vllm.v1.attention.backends.rocm_aiter_unified_attn."
         "RocmAiterUnifiedAttentionBackend"
     )
     CPU_ATTN = "vllm.v1.attention.backends.cpu_attn.CPUAttentionBackend"
+    TURBOQUANT = "vllm.v1.attention.backends.turboquant_attn.TurboQuantAttentionBackend"
     # Placeholder for third-party/custom backends - must be registered before use
     # set to None to avoid alias with other backend, whose value is an empty string
     CUSTOM = None
@@ -191,16 +194,6 @@ class MambaAttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     def clear_override(self) -> None:
         """Clear any override for this backend, reverting to the default."""
         _MAMBA_ATTN_OVERRIDES.pop(self, None)
-
-
-MAMBA_TYPE_TO_BACKEND_MAP = {
-    "mamba1": MambaAttentionBackendEnum.MAMBA1.name,
-    "mamba2": MambaAttentionBackendEnum.MAMBA2.name,
-    "short_conv": MambaAttentionBackendEnum.SHORT_CONV.name,
-    "linear_attention": MambaAttentionBackendEnum.LINEAR.name,
-    "gdn_attention": MambaAttentionBackendEnum.GDN_ATTN.name,
-    "custom": MambaAttentionBackendEnum.CUSTOM.name,
-}
 
 
 _ATTN_OVERRIDES: dict[AttentionBackendEnum, str] = {}
