@@ -247,6 +247,7 @@ class RejectionSampler(nn.Module):
                 logprob_token_ids,
                 sampled_token_ids.shape[-1],
                 accepted_tokens.to(torch.int64),
+                getattr(self.sampler, "pin_memory", False),
             )
         return self.sampler.gather_logprobs(
             accepted_logprobs,
@@ -261,6 +262,7 @@ class RejectionSampler(nn.Module):
         logprob_token_ids: dict[int, list[int]],
         num_positions_per_req: int,
         sampled_token_ids: torch.Tensor,
+        pin_memory: bool,
     ) -> LogprobsTensors:
         num_positions = logprobs.shape[0]
         max_num_token_ids = max(
@@ -268,9 +270,15 @@ class RejectionSampler(nn.Module):
         )
 
         token_ids_cpu = torch.zeros(
-            (num_positions, max_num_token_ids + 1), dtype=torch.int64
+            (num_positions, max_num_token_ids + 1),
+            dtype=torch.int64,
+            pin_memory=pin_memory,
         )
-        valid_mask_cpu = torch.zeros_like(token_ids_cpu, dtype=torch.bool)
+        valid_mask_cpu = torch.zeros(
+            (num_positions, max_num_token_ids + 1),
+            dtype=torch.bool,
+            pin_memory=pin_memory,
+        )
         valid_mask_cpu[:, 0] = True
         for req_idx, token_ids in logprob_token_ids.items():
             start = req_idx * num_positions_per_req
