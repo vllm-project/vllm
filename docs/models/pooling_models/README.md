@@ -131,24 +131,24 @@ enabling the corresponding APIs.
 
 ### `LLM.classify`
 
-The [classify][vllm.LLM.classify] method outputs a probability vector for each prompt.
+The [classify][vllm.entrypoints.pooling.offline.PoolingOfflineMixin.classify] method outputs a probability vector for each prompt.
 It is primarily designed for [classification models](classify.md).
 For more information about `LLM.embed`, see [this page](classify.md#offline-inference).
 
 ### `LLM.embed`
 
-The [embed][vllm.LLM.embed] method outputs an embedding vector for each prompt.
+The [embed][vllm.entrypoints.pooling.offline.PoolingOfflineMixin.embed] method outputs an embedding vector for each prompt.
 It is primarily designed for [embedding models](embed.md).
 For more information about `LLM.embed`, see [this page](embed.md#offline-inference).
 
 ### `LLM.score`
 
-The [score][vllm.LLM.score] method outputs similarity scores between sentence pairs.
+The [score][vllm.entrypoints.pooling.offline.PoolingOfflineMixin.score] method outputs similarity scores between sentence pairs.
 It is primarily designed for [score models](scoring.md).
 
 ### `LLM.encode`
 
-The [encode][vllm.LLM.encode] method is available to all pooling models in vLLM.
+The [encode][vllm.entrypoints.pooling.offline.PoolingOfflineMixin.encode] method is available to all pooling models in vLLM.
 
 Please use one of the more specific methods or set the task directly when using `LLM.encode`, refer to the [table above](#offline-apis-corresponding-to-pooling-usages).
 

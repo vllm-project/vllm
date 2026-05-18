@@ -1035,6 +1035,13 @@ class VllmConfig:
             )
             self.compilation_config.mode = CompilationMode.NONE
 
+        if envs.VLLM_USE_BREAKABLE_CUDAGRAPH:
+            logger.warning_once(
+                "VLLM_USE_BREAKABLE_CUDAGRAPH is set, disabling vLLM's "
+                "torch.compile pipeline. Equivalent to -cc.mode=none."
+            )
+            self.compilation_config.mode = CompilationMode.NONE
+
         if self.compilation_config.backend == "eager" or (
             self.compilation_config.mode is not None
             and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
@@ -1102,6 +1109,7 @@ class VllmConfig:
         if (
             self.compilation_config.cudagraph_mode.requires_piecewise_compilation()
             and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
+            and not envs.VLLM_USE_BREAKABLE_CUDAGRAPH
         ):
             logger.info(
                 "Cudagraph mode %s is not compatible with compilation mode %s."
@@ -1335,7 +1343,10 @@ class VllmConfig:
                 )
 
             if self.compilation_config.cudagraph_mode.requires_piecewise_compilation():
-                assert self.compilation_config.mode == CompilationMode.VLLM_COMPILE, (
+                assert (
+                    self.compilation_config.mode == CompilationMode.VLLM_COMPILE
+                    or envs.VLLM_USE_BREAKABLE_CUDAGRAPH
+                ), (
                     "Compilation mode should be CompilationMode.VLLM_COMPILE "
                     "when cudagraph_mode piecewise cudagraphs is used, "
                     f"cudagraph_mode={self.compilation_config.cudagraph_mode}"

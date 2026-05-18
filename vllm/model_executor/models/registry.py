@@ -1064,6 +1064,7 @@ class _ModelRegistry:
                         module,
                         model_config.model,
                         revision=model_config.revision,
+                        code_revision=model_config.code_revision,
                         trust_remote_code=model_config.trust_remote_code,
                         warn_on_fail=False,
                     )
@@ -1077,6 +1078,7 @@ class _ModelRegistry:
                         module,
                         model_config.model,
                         revision=model_config.revision,
+                        code_revision=model_config.code_revision,
                         trust_remote_code=model_config.trust_remote_code,
                         warn_on_fail=True,
                     )
