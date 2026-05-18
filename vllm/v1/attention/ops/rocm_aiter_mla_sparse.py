@@ -617,45 +617,6 @@ def rocm_fp8_mqa_logits(
         return fp8_mqa_logits_torch(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke)
 
 
-def _topk_indices_torch(
-    logits: torch.Tensor,
-    topk_tokens: int,
-    row_starts: torch.Tensor | None = None,
-) -> torch.Tensor:
-    k = min(topk_tokens, logits.shape[-1])
-    values, indices = torch.topk(logits, k=k, dim=-1)
-    indices = indices.to(torch.int32)
-    indices = torch.where(
-        values == float("-inf"),
-        torch.full_like(indices, -1, dtype=torch.int32),
-        indices,
-    )
-    if row_starts is not None:
-        # Match the CUDA top_k_per_row_prefill contract: indices are local to
-        # each row's valid [row_start, row_end) range, not columns in the
-        # concatenated chunk logits matrix.
-        starts = row_starts.to(dtype=torch.int32).view(-1, 1)
-        indices = torch.where(indices < 0, indices, indices - starts)
-    if k == topk_tokens:
-        return indices
-    padded = torch.full(
-        (logits.shape[0], topk_tokens),
-        -1,
-        dtype=torch.int32,
-        device=logits.device,
-    )
-    padded[:, :k] = indices
-    return padded
-
-
-def _has_vllm_topk_ops() -> bool:
-    return (
-        hasattr(torch.ops, "_C")
-        and hasattr(torch.ops._C, "top_k_per_row_prefill")
-        and hasattr(torch.ops._C, "top_k_per_row_decode")
-    )
-
-
 @triton.jit
 def _fill_prefill_topk_indices_kernel(
     row_starts_ptr,
@@ -762,74 +723,6 @@ def _fill_decode_topk_indices(
     return indices
 
 
-def _topk_indices_vllm_prefill(
-    logits: torch.Tensor,
-    topk_tokens: int,
-    row_starts: torch.Tensor,
-    row_ends: torch.Tensor,
-    out: torch.Tensor | None = None,
-) -> torch.Tensor:
-    if not _has_vllm_topk_ops():
-        indices = _topk_indices_torch(logits, topk_tokens, row_starts)
-        if out is not None:
-            out.copy_(indices)
-            return out
-        return indices
-
-    indices = out
-    if indices is None:
-        indices = torch.empty(
-            (logits.shape[0], topk_tokens),
-            dtype=torch.int32,
-            device=logits.device,
-        )
-    torch.ops._C.top_k_per_row_prefill(
-        logits,
-        row_starts,
-        row_ends,
-        indices,
-        logits.shape[0],
-        logits.stride(0),
-        logits.stride(1),
-        topk_tokens,
-    )
-    return indices
-
-
-def _topk_indices_vllm_decode(
-    logits: torch.Tensor,
-    topk_tokens: int,
-    next_n: int,
-    seq_lens: torch.Tensor,
-    out: torch.Tensor | None = None,
-) -> torch.Tensor:
-    if not _has_vllm_topk_ops():
-        indices = _topk_indices_torch(logits, topk_tokens)
-        if out is not None:
-            out.copy_(indices)
-            return out
-        return indices
-
-    indices = out
-    if indices is None:
-        indices = torch.empty(
-            (logits.shape[0], topk_tokens),
-            dtype=torch.int32,
-            device=logits.device,
-        )
-    torch.ops._C.top_k_per_row_decode(
-        logits,
-        next_n,
-        seq_lens,
-        indices,
-        logits.shape[0],
-        logits.stride(0),
-        logits.stride(1),
-        topk_tokens,
-    )
-    return indices
-
-
 def rocm_aiter_sparse_attn_indexer_fake(
     hidden_states: torch.Tensor,
     k_cache_prefix: LayerNameType,
@@ -859,9 +752,7 @@ def rocm_aiter_sparse_attn_indexer_fake(
     )
     device = hidden_states.device if k is None else k.device
     flattened_width = (
-        head_dim // 2 + head_dim // MXFP4_BLOCK_SIZE
-        if use_fp4_cache
-        else head_dim + 4
+        head_dim // 2 + head_dim // MXFP4_BLOCK_SIZE if use_fp4_cache else head_dim + 4
     )
     _flattened_kv = torch.empty(
         [total_seq_lens, flattened_width], device=device, dtype=torch.uint8
@@ -1055,7 +946,6 @@ def rocm_aiter_sparse_attn_indexer_native(
             weight_slice = weights[chunk.token_start : chunk.token_end]
             if use_fp4_cache:
                 assert q_scale is not None
-                use_vllm_topk = _has_vllm_topk_ops()
                 q_scale_slice = q_scale[chunk.token_start : chunk.token_end]
                 logits = rocm_fp4_mqa_logits(
                     (q_slice.view(torch.int8), q_scale_slice),
@@ -1066,7 +956,7 @@ def rocm_aiter_sparse_attn_indexer_native(
                     weight_slice,
                     chunk.cu_seqlen_ks,
                     chunk.cu_seqlen_ke,
-                    clean_logits=not use_vllm_topk,
+                    clean_logits=False,
                 )
             else:
                 logits = rocm_fp8_mqa_logits(
@@ -1076,22 +966,16 @@ def rocm_aiter_sparse_attn_indexer_native(
                     chunk.cu_seqlen_ks,
                     chunk.cu_seqlen_ke,
                 )
-            if use_fp4_cache:
-                _topk_indices_vllm_prefill(
-                    logits,
-                    topk_tokens,
-                    chunk.cu_seqlen_ks,
-                    chunk.cu_seqlen_ke,
-                    out=topk_indices,
-                )
-            else:
-                _topk_indices_vllm_prefill(
-                    logits,
-                    topk_tokens,
-                    chunk.cu_seqlen_ks,
-                    chunk.cu_seqlen_ke,
-                    out=topk_indices,
-                )
+            torch.ops._C.top_k_per_row_prefill(
+                logits,
+                chunk.cu_seqlen_ks,
+                chunk.cu_seqlen_ke,
+                topk_indices,
+                logits.shape[0],
+                logits.stride(0),
+                logits.stride(1),
+                topk_tokens,
+            )
 
     if has_decode:
         decode_metadata = layer_attn_metadata.decode
@@ -1169,7 +1053,6 @@ def rocm_aiter_sparse_attn_indexer_native(
                     out=topk_indices,
                 )
             else:
-                use_vllm_topk = _has_vllm_topk_ops()
                 active_paged_width = (
                     decode_metadata.block_table.shape[1] * kv_cache_decode.shape[1]
                 )
@@ -1185,14 +1068,17 @@ def rocm_aiter_sparse_attn_indexer_native(
                     decode_metadata.block_table,
                     decode_metadata.schedule_metadata,
                     max_model_len=logits_width,
-                    clean_logits=not use_vllm_topk,
+                    clean_logits=False,
                 )
-                _topk_indices_vllm_decode(
+                torch.ops._C.top_k_per_row_decode(
                     logits,
-                    topk_tokens,
                     next_n,
                     decode_metadata.seq_lens,
-                    out=topk_indices,
+                    topk_indices,
+                    logits.shape[0],
+                    logits.stride(0),
+                    logits.stride(1),
+                    topk_tokens,
                 )
         else:
             logits = rocm_fp8_paged_mqa_logits(
@@ -1204,12 +1090,15 @@ def rocm_aiter_sparse_attn_indexer_native(
                 decode_metadata.schedule_metadata,
                 max_model_len=max_model_len,
             )
-            _topk_indices_vllm_decode(
+            torch.ops._C.top_k_per_row_decode(
                 logits,
-                topk_tokens,
                 next_n,
                 decode_metadata.seq_lens,
-                out=topk_indices,
+                topk_indices,
+                logits.shape[0],
+                logits.stride(0),
+                logits.stride(1),
+                topk_tokens,
             )
 
         if decode_metadata.requires_padding:
