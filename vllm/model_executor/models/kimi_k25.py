@@ -339,9 +339,12 @@ class KimiK25ForConditionalGeneration(
                 quant_config=self._maybe_ignore_quant_config(quant_config),
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
-            self.vision_tower = self.vision_tower.to(
-                device=self.device, dtype=model_config.dtype
-            )
+            if self._maybe_ignore_quant_config(quant_config) is not None:
+                self.vision_tower = self.vision_tower.to(device=self.device)
+            else:
+                self.vision_tower = self.vision_tower.to(
+                    device=self.device, dtype=model_config.dtype
+                )
 
             self.mm_projector = KimiK25MultiModalProjector(
                 config=config.vision_config,
