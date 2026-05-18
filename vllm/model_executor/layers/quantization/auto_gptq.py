@@ -672,14 +672,12 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             w2_g_idx,
             w13_g_idx_sort_indices,
             w2_g_idx_sort_indices,
-            _w13_qzeros,
-            _w2_qzeros,
+            w13_qzeros,
+            w2_qzeros,
             w13_input_global_scale,
             w2_input_global_scale,
             w13_bias,
             w2_bias,
-            w13_zp,
-            w2_zp,
         ) = convert_to_wna16_moe_kernel_format(
             backend=self.wna16_moe_backend,
             layer=layer,
@@ -693,8 +691,8 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             w2_g_idx=layer.w2_g_idx,
             w13_bias=getattr(layer, "w13_bias", None),
             w2_bias=getattr(layer, "w2_bias", None),
-            w13_zp=getattr(layer, "w13_qzeros", None),
-            w2_zp=getattr(layer, "w2_qzeros", None),
+            w13_qzeros=getattr(layer, "w13_qzeros", None),
+            w2_qzeros=getattr(layer, "w2_qzeros", None),
         )
 
         replace_parameter(layer, "w13_qweight", w13)
@@ -709,8 +707,8 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
         replace_or_register("w2_input_global_scale", w2_input_global_scale)
         replace_or_register("w13_bias", w13_bias)
         replace_or_register("w2_bias", w2_bias)
-        replace_or_register("w13_zp", w13_zp)
-        replace_or_register("w2_zp", w2_zp)
+        replace_or_register("w13_zp", w13_qzeros)
+        replace_or_register("w2_zp", w2_qzeros)
 
         self._setup_kernel(layer)
 

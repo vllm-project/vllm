@@ -33,8 +33,8 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_act_int8_process_scales,
     marlin_moe_permute_scales,
     marlin_permute_bias,
-    moe_awq_to_marlin_zero_points,
     marlin_zero_points,
+    moe_awq_to_marlin_zero_points,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -302,8 +302,6 @@ def _process_weights_flashinfer(
     torch.Tensor | None,  # w2_input_global_scale
     torch.Tensor | None,  # w13_bias
     torch.Tensor | None,  # w2_bias
-    torch.Tensor | None,  # w13_zp
-    torch.Tensor | None,  # w2_zp
 ]:
     """Flashinfer (TRT-LLM MXINT4) weight post-processing.
 
@@ -358,8 +356,6 @@ def _process_weights_marlin(
     w2_qzeros: torch.Tensor | None = None,
     w13_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
-    w13_zp: torch.Tensor | None = None,
-    w2_zp: torch.Tensor | None = None,
 ) -> tuple[
     torch.Tensor,  # w13_qweight
     torch.Tensor,  # w2_qweight
@@ -375,8 +371,6 @@ def _process_weights_marlin(
     torch.Tensor | None,  # w2_input_global_scale
     torch.Tensor | None,  # w13_bias
     torch.Tensor | None,  # w2_bias
-    torch.Tensor | None,  # w13_zp
-    torch.Tensor | None,  # w2_zp
 ]:
     """Standard Marlin weight post-processing shared by MARLIN and
     BATCHED_MARLIN backends.
@@ -401,8 +395,8 @@ def _process_weights_marlin(
     w2_input_global_scale: torch.Tensor | None = None
     w13_bias_out: torch.Tensor | None = None
     w2_bias_out: torch.Tensor | None = None
-    w13_zp_out: torch.Tensor | None = None
-    w2_zp_out: torch.Tensor | None = None
+    w13_qzeros_out: torch.Tensor | None = None
+    w2_qzeros_out: torch.Tensor | None = None
 
     # --- FP8 weight / scale adjustment ---
     if input_dtype == torch.float8_e4m3fn:
@@ -503,20 +497,20 @@ def _process_weights_marlin(
         w2_bias_out = marlin_permute_bias(w2_bias)
 
     # TODO: not sure about shapes here
-    if w13_zp is not None:
-        w13_zp_out = marlin_zero_points(
-            w13_zp,
+    if w13_qzeros is not None:
+        w13_qzeros_out = marlin_zero_points(
+            w13_qzeros,
             size_k=layer.intermediate_size_per_partition,
-            size_n=w13_zp.shape[2],
+            size_n=w13_qzeros.shape[2],
             num_bits=num_bits,
             is_a_8bit=is_a_8bit,
         )
 
-    if w2_zp is not None:
-        w2_zp_out = marlin_zero_points(
-            w2_zp,
-            size_k=w2_zp.shape[1] * group_size_or_pack_factor,
-            size_n=w2_zp.shape[2],
+    if w2_qzeros is not None:
+        w2_qzeros_out = marlin_zero_points(
+            w2_qzeros,
+            size_k=w2_qzeros.shape[1] * group_size_or_pack_factor,
+            size_n=w2_qzeros.shape[2],
             num_bits=num_bits,
             is_a_8bit=is_a_8bit,
         )
@@ -530,8 +524,8 @@ def _process_weights_marlin(
         w2_g_idx,
         w13_g_idx_sort_indices,
         w2_g_idx_sort_indices,
-        w13_qzeros,
-        w2_qzeros,
+        w13_qzeros_out,
+        w2_qzeros_out,
         w13_input_global_scale,
         w2_input_global_scale,
         w13_bias_out,
@@ -681,8 +675,6 @@ def _process_awq_weights_marlin(
         w2_input_global_scale,
         w13_bias_out,
         w2_bias_out,
-        w13_zp_out,
-        w2_zp_out,
     )
 
 
@@ -701,8 +693,6 @@ def convert_to_wna16_moe_kernel_format(
     w2_qzeros: torch.Tensor | None = None,
     w13_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
-    w13_zp: torch.Tensor | None = None,
-    w2_zp: torch.Tensor | None = None,
 ) -> tuple[
     torch.Tensor,  # w13_qweight
     torch.Tensor,  # w2_qweight
@@ -718,8 +708,6 @@ def convert_to_wna16_moe_kernel_format(
     torch.Tensor | None,  # w2_input_global_scale
     torch.Tensor | None,  # w13_bias
     torch.Tensor | None,  # w2_bias
-    torch.Tensor | None,  # w13_zp
-    torch.Tensor | None,  # w2_zp
 ]:
     """Dispatch weight post-processing to the appropriate per-backend handler.
 
@@ -800,8 +788,6 @@ def convert_to_wna16_moe_kernel_format(
             w2_qzeros,
             w13_bias,
             w2_bias,
-            w13_zp,
-            w2_zp,
         )
     elif backend == WNA16MoEBackend.FLASHINFER_TRTLLM:
         return _process_weights_flashinfer(
@@ -811,22 +797,8 @@ def convert_to_wna16_moe_kernel_format(
             w2_scale,
             w13_g_idx,
             w2_g_idx,
-<<<<<<< variant A
             w13_bias,
             w2_bias,
->>>>>>> variant B
-            None,
-            None,
-            None,
-            None,
-####### Ancestor
-            None,
-            None,
-            None,
-            None,
-            w13_bias,
-            w2_bias,
-======= end
         )
     elif backend == WNA16MoEBackend.TRITON:
         # No processing needed for Triton.
@@ -839,12 +811,12 @@ def convert_to_wna16_moe_kernel_format(
             None,
             None,
             None,
+            w13_qzeros,
+            w2_qzeros,
             None,
             None,
             w13_bias,
             w2_bias,
-            w13_zp,
-            w2_zp,
         )
     else:
         raise ValueError(f"Unsupported wna16 MoE backend: {backend.value}")

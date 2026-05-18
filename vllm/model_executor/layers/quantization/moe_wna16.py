@@ -386,12 +386,12 @@ class MoeWNA16Method(FusedMoEMethodBase):
             w2_g_idx_processed,
             w13_g_idx_sort_indices,
             w2_g_idx_sort_indices,
+            w13_qzeros,
+            w2_qzeros,
             w13_input_global_scale,
             w2_input_global_scale,
-            _,
-            _,
-            w13_zp,
-            w2_zp,
+            _,  # w13_bias
+            _,  # w2_bias
         ) = convert_to_wna16_moe_kernel_format(
             backend=self.wna16_backend,
             layer=layer,
@@ -403,8 +403,8 @@ class MoeWNA16Method(FusedMoEMethodBase):
             w2_scale=layer.w2_weight_scale,
             w13_g_idx=layer.w13_weight_g_idx,
             w2_g_idx=layer.w2_weight_g_idx,
-            w13_zp=layer.w13_qzeros if has_zp else None,
-            w2_zp=layer.w2_qzeros if has_zp else None,
+            w13_qzeros=layer.w13_qzeros if has_zp else None,
+            w2_qzeros=layer.w2_qzeros if has_zp else None,
         )
 
         # Replace common parameters
@@ -414,9 +414,9 @@ class MoeWNA16Method(FusedMoEMethodBase):
         replace_parameter(layer, "w2_weight_scale", w2_scales)
 
         if has_zp:
-            assert w13_zp is not None and w2_zp is not None
-            replace_parameter(layer, "w13_qzeros", w13_zp)
-            replace_parameter(layer, "w2_qzeros", w2_zp)
+            assert w13_qzeros is not None and w2_qzeros is not None
+            replace_parameter(layer, "w13_qzeros", w13_qzeros)
+            replace_parameter(layer, "w2_qzeros", w2_qzeros)
 
         # Marlin-specific parameters (not needed for Flashinfer)
         if self.wna16_backend != WNA16MoEBackend.FLASHINFER:

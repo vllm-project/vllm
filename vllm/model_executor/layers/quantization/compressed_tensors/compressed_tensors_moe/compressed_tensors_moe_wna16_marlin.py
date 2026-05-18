@@ -342,8 +342,6 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             w2_input_global_scale,
             _,  # w13_bias
             _,  # w2_bias
-            _,  # w13_zp
-            _,  # w2_zp
         ) = convert_to_wna16_moe_kernel_format(
             backend=self.wna16_backend,
             layer=layer,
