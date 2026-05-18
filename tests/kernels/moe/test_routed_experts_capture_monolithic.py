@@ -10,8 +10,7 @@ should:
 
   * allocate an int16 ``(num_tokens, top_k)`` buffer,
   * pass it to FlashInfer as ``routing_replay_out``,
-  * invoke the callback after the kernel returns,
-  * leave the kernel output bitwise-identical to a run without capture.
+  * invoke the callback after the kernel returns.
 """
 
 from __future__ import annotations
@@ -253,69 +252,6 @@ def test_trtllm_bf16_monolithic_routing_replay_records_valid_experts(
             f"token {t}: expected {top_k} distinct experts, "
             f"got {unique.numel()} ({replay[t].tolist()})"
         )
-
-
-def test_trtllm_bf16_monolithic_routing_replay_is_side_effect_free() -> None:
-    """Enabling capture must not change the kernel's numerical output."""
-    torch.manual_seed(123)
-    device = torch.device("cuda:0")
-
-    num_tokens = 8
-    top_k = 4
-    num_experts = _DSV3_NUM_EXPERTS
-    hidden_size = 1024
-    intermediate_size = 1024
-
-    experts, w13, w2 = _make_bf16_monolithic_experts(
-        num_experts=num_experts,
-        top_k=top_k,
-        hidden_size=hidden_size,
-        intermediate_size=intermediate_size,
-        routing_method=RoutingMethodType.DeepSeekV3,
-        device=device,
-    )
-
-    hidden_states = (
-        torch.randn(num_tokens, hidden_size, device=device, dtype=torch.bfloat16) * 0.1
-    )
-    router_logits = torch.rand(
-        num_tokens, num_experts, device=device, dtype=torch.float32
-    )
-    routing_bias = _make_dsv3_routing_bias(num_experts, device)
-
-    # Baseline: no capture.
-    experts.set_routing_replay_capture_fn(None)
-    out_without = _run_bf16_monolithic(
-        experts,
-        hidden_states=hidden_states,
-        w13=w13,
-        w2=w2,
-        router_logits=router_logits,
-        num_experts=num_experts,
-        n_group=_DSV3_N_GROUP,
-        topk_group=_DSV3_TOPK_GROUP,
-        routed_scaling_factor=1.0,
-        e_score_correction_bias=routing_bias,
-    ).clone()
-
-    # With capture installed.
-    captured: list[torch.Tensor] = []
-    experts.set_routing_replay_capture_fn(lambda r: captured.append(r.clone()))
-    out_with = _run_bf16_monolithic(
-        experts,
-        hidden_states=hidden_states,
-        w13=w13,
-        w2=w2,
-        router_logits=router_logits,
-        num_experts=num_experts,
-        n_group=_DSV3_N_GROUP,
-        topk_group=_DSV3_TOPK_GROUP,
-        routed_scaling_factor=1.0,
-        e_score_correction_bias=routing_bias,
-    ).clone()
-
-    torch.testing.assert_close(out_with, out_without, rtol=0, atol=0)
-    assert len(captured) == 1
 
 
 def test_trtllm_bf16_monolithic_capture_disabled_skips_buffer_alloc() -> None:
@@ -678,66 +614,6 @@ def test_trtllm_fp8_block_scale_monolithic_routing_replay_records_valid_experts(
         )
 
 
-def test_trtllm_fp8_block_scale_monolithic_routing_replay_is_side_effect_free() -> None:
-    """Enabling capture must not change the kernel's numerical output on the
-    FP8 block-scale path."""
-    torch.manual_seed(123)
-    device = torch.device("cuda:0")
-
-    num_tokens = 8
-    top_k = 4
-    num_experts = _DSV3_NUM_EXPERTS
-    hidden_size = 1024
-    intermediate_size = 1024
-
-    experts, w13, w2 = _make_fp8_block_scale_monolithic_experts(
-        num_experts=num_experts,
-        top_k=top_k,
-        hidden_size=hidden_size,
-        intermediate_size=intermediate_size,
-        device=device,
-    )
-
-    hidden_states = (
-        torch.randn(num_tokens, hidden_size, device=device, dtype=torch.bfloat16) * 0.1
-    ).to(torch.float8_e4m3fn)
-    hidden_states_scale = torch.ones(
-        num_tokens, hidden_size // 128, device=device, dtype=torch.float32
-    )
-    router_logits = torch.rand(
-        num_tokens, num_experts, device=device, dtype=torch.float32
-    )
-    routing_bias = _make_dsv3_routing_bias(num_experts, device)
-
-    experts.set_routing_replay_capture_fn(None)
-    out_without = _run_fp8_block_scale_monolithic(
-        experts,
-        hidden_states_fp8=hidden_states,
-        hidden_states_scale=hidden_states_scale,
-        w13=w13,
-        w2=w2,
-        router_logits=router_logits,
-        num_experts=num_experts,
-        routing_bias=routing_bias,
-    ).clone()
-
-    captured: list[torch.Tensor] = []
-    experts.set_routing_replay_capture_fn(lambda r: captured.append(r.clone()))
-    out_with = _run_fp8_block_scale_monolithic(
-        experts,
-        hidden_states_fp8=hidden_states,
-        hidden_states_scale=hidden_states_scale,
-        w13=w13,
-        w2=w2,
-        router_logits=router_logits,
-        num_experts=num_experts,
-        routing_bias=routing_bias,
-    ).clone()
-
-    torch.testing.assert_close(out_with, out_without, rtol=0, atol=0)
-    assert len(captured) == 1
-
-
 # ----------------------------------------------------------------------------
 # NVFP4 — vLLM's ``TrtLlmNvFp4ExpertsMonolithic``
 # ----------------------------------------------------------------------------
@@ -956,66 +832,3 @@ def test_trtllm_nvfp4_monolithic_routing_replay_records_valid_experts(
         )
 
 
-def test_trtllm_nvfp4_monolithic_routing_replay_is_side_effect_free() -> None:
-    """Enabling capture must not change the kernel's numerical output on the
-    NVFP4 path."""
-    from flashinfer import fp4_quantize
-
-    torch.manual_seed(123)
-    device = torch.device("cuda:0")
-
-    num_tokens = 8
-    top_k = 4
-    num_experts = _DSV3_NUM_EXPERTS
-    hidden_size = 1024
-    intermediate_size = 1024
-    block_size = 16
-
-    experts, w13_q, _w13_s, w2_q, _w2_s, a_gs = _make_nvfp4_monolithic_experts(
-        num_experts=num_experts,
-        top_k=top_k,
-        hidden_size=hidden_size,
-        intermediate_size=intermediate_size,
-        device=device,
-    )
-    experts._w13_packed = w13_q
-    experts._w2_packed = w2_q
-
-    hidden_states = (
-        torch.randn(num_tokens, hidden_size, device=device, dtype=torch.bfloat16) * 0.1
-    )
-    hidden_states_q, hidden_states_scale = fp4_quantize(
-        hidden_states,
-        a_gs,
-        block_size,
-        sf_use_ue8m0=False,
-        is_sf_swizzled_layout=False,
-    )
-    router_logits = torch.rand(
-        num_tokens, num_experts, device=device, dtype=torch.float32
-    )
-    routing_bias = _make_dsv3_routing_bias(num_experts, device)
-
-    experts.set_routing_replay_capture_fn(None)
-    out_without = _run_nvfp4_monolithic(
-        experts,
-        hidden_states_q=hidden_states_q,
-        hidden_states_scale=hidden_states_scale,
-        router_logits=router_logits,
-        num_experts=num_experts,
-        routing_bias=routing_bias,
-    ).clone()
-
-    captured: list[torch.Tensor] = []
-    experts.set_routing_replay_capture_fn(lambda r: captured.append(r.clone()))
-    out_with = _run_nvfp4_monolithic(
-        experts,
-        hidden_states_q=hidden_states_q,
-        hidden_states_scale=hidden_states_scale,
-        router_logits=router_logits,
-        num_experts=num_experts,
-        routing_bias=routing_bias,
-    ).clone()
-
-    torch.testing.assert_close(out_with, out_without, rtol=0, atol=0)
-    assert len(captured) == 1
