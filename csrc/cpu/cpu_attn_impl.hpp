@@ -459,7 +459,7 @@ class AttentionScheduler {
     const int64_t kv_len_per_thread =
         (((total_kv_len / thread_num) + kv_len_alignment - 1) /
          kv_len_alignment) *
-        kv_len_alignment * (use_gqa ? input.num_heads_kv : input.num_heads_q);
+        kv_len_alignment;
     std::vector<AttentionWorkItemGroup> workitems;
     std::vector<ReductionWorkItemGroup> reduce_workitems;
     workitems.reserve(1024);
