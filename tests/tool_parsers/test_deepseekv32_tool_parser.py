@@ -278,6 +278,163 @@ class TestExtractToolCalls:
         args = json.loads(result.tool_calls[0].function.arguments)
         assert args == {"location": "Beijing"}
 
+    def test_object_and_array_params(self):
+        """Object and array schema types must be JSON-parsed, not left as strings."""
+        tool = ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="update",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "tags": {"type": "array"},
+                        "meta": {"type": "object"},
+                    },
+                },
+            ),
+        )
+        parser = make_parser(tools=[tool])
+        model_output = (
+            f"{FC_START}\n"
+            f'{INV_START}update">\n'
+            f'{PARAM_START}tags" string="false">["a", "b"]{PARAM_END}\n'
+            f'{PARAM_START}meta" string="false">{{"k": 1}}{PARAM_END}\n'
+            f"{INV_END}\n"
+            f"{FC_END}"
+        )
+        result = parser.extract_tool_calls(model_output, None)
+        assert result.tools_called
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args["tags"] == ["a", "b"]
+        assert isinstance(args["tags"], list)
+        assert args["meta"] == {"k": 1}
+        assert isinstance(args["meta"], dict)
+
+    def test_number_param(self):
+        """Number (float) schema type must be converted correctly."""
+        tool = ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="measure",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "ratio": {"type": "number"},
+                        "whole": {"type": "number"},
+                    },
+                },
+            ),
+        )
+        parser = make_parser(tools=[tool])
+        model_output = (
+            f"{FC_START}\n"
+            f'{INV_START}measure">\n'
+            f'{PARAM_START}ratio" string="false">3.14{PARAM_END}\n'
+            f'{PARAM_START}whole" string="false">5.0{PARAM_END}\n'
+            f"{INV_END}\n"
+            f"{FC_END}"
+        )
+        result = parser.extract_tool_calls(model_output, None)
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args["ratio"] == pytest.approx(3.14)
+        assert args["whole"] == 5
+        assert isinstance(args["whole"], int)
+
+    def test_multi_typed_schema(self):
+        """Schema with type: ["integer", "null"] must handle both cases."""
+        tool = ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="set_val",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "count": {"type": ["integer", "null"]},
+                        "label": {"type": ["string", "null"]},
+                    },
+                },
+            ),
+        )
+        parser = make_parser(tools=[tool])
+        model_output = (
+            f"{FC_START}\n"
+            f'{INV_START}set_val">\n'
+            f'{PARAM_START}count" string="false">42{PARAM_END}\n'
+            f'{PARAM_START}label" string="false">hello{PARAM_END}\n'
+            f"{INV_END}\n"
+            f"{FC_END}"
+        )
+        result = parser.extract_tool_calls(model_output, None)
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args["count"] == 42
+        assert isinstance(args["count"], int)
+        assert args["label"] == "hello"
+
+    def test_multi_typed_null_value(self):
+        """Literal 'null' must become None when the schema includes 'null'."""
+        tool = ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="clear",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": ["integer", "null"]},
+                    },
+                },
+            ),
+        )
+        parser = make_parser(tools=[tool])
+        model_output = (
+            f"{FC_START}\n"
+            f'{INV_START}clear">\n'
+            f'{PARAM_START}value" string="false">null{PARAM_END}\n'
+            f"{INV_END}\n"
+            f"{FC_END}"
+        )
+        result = parser.extract_tool_calls(model_output, None)
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args["value"] is None
+
+    def test_null_not_coerced_without_null_in_schema(self):
+        """Literal 'null' must stay as a string when the schema is just 'string'."""
+        tool = ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="echo",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string"},
+                    },
+                },
+            ),
+        )
+        parser = make_parser(tools=[tool])
+        model_output = (
+            f"{FC_START}\n"
+            f'{INV_START}echo">\n'
+            f'{PARAM_START}text" string="false">null{PARAM_END}\n'
+            f"{INV_END}\n"
+            f"{FC_END}"
+        )
+        result = parser.extract_tool_calls(model_output, None)
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args["text"] == "null"
+        assert isinstance(args["text"], str)
+
+    def test_no_schema_keeps_strings(self):
+        """Without a tool schema, all string='false' params default to string."""
+        parser = make_parser(tools=None)
+        model_output = (
+            f"{FC_START}\n"
+            f'{INV_START}unknown_fn">\n'
+            f'{PARAM_START}count" string="false">42{PARAM_END}\n'
+            f'{PARAM_START}flag" string="false">true{PARAM_END}\n'
+            f"{INV_END}\n"
+            f"{FC_END}"
+        )
+        result = parser.extract_tool_calls(model_output, None)
+        assert result.tools_called
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args["count"] == "42"
+        assert args["flag"] == "true"
+
 
 # ---------------------------------------------------------------------------
 # Tests: extract_tool_calls_streaming
@@ -659,6 +816,110 @@ class TestExtractToolCallsStreaming:
         deltas = self._stream_chunked(parser, full_text, chunk_size=3)
         content = "".join(d.content for d in deltas if d.content is not None)
         assert content == full_text
+
+    def test_object_and_array_params_streaming(self):
+        """Streaming: object/array params must be JSON-parsed."""
+        tool = ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="update",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "tags": {"type": "array"},
+                        "meta": {"type": "object"},
+                    },
+                },
+            ),
+        )
+        parser = make_parser(tools=[tool])
+        full_text = (
+            f"{FC_START}\n"
+            f'{INV_START}update">\n'
+            f'{PARAM_START}tags" string="false">["a", "b"]{PARAM_END}\n'
+            f'{PARAM_START}meta" string="false">{{"k": 1}}{PARAM_END}\n'
+            f"{INV_END}\n"
+            f"{FC_END}"
+        )
+        deltas = self._stream(parser, full_text)
+        args = json.loads(self._reconstruct_args(deltas))
+        assert args["tags"] == ["a", "b"]
+        assert args["meta"] == {"k": 1}
+
+    def test_multi_typed_schema_streaming(self):
+        """Streaming: type: ["integer", "null"] must coerce correctly."""
+        tool = ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="set_val",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "count": {"type": ["integer", "null"]},
+                    },
+                },
+            ),
+        )
+        parser = make_parser(tools=[tool])
+        full_text = (
+            f"{FC_START}\n"
+            f'{INV_START}set_val">\n'
+            f'{PARAM_START}count" string="false">42{PARAM_END}\n'
+            f"{INV_END}\n"
+            f"{FC_END}"
+        )
+        deltas = self._stream(parser, full_text)
+        args = json.loads(self._reconstruct_args(deltas))
+        assert args["count"] == 42
+        assert isinstance(args["count"], int)
+
+    def test_multi_typed_null_streaming(self):
+        """Streaming: 'null' with ["integer", "null"] schema must become None."""
+        tool = ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="clear",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": ["integer", "null"]},
+                    },
+                },
+            ),
+        )
+        parser = make_parser(tools=[tool])
+        full_text = (
+            f"{FC_START}\n"
+            f'{INV_START}clear">\n'
+            f'{PARAM_START}value" string="false">null{PARAM_END}\n'
+            f"{INV_END}\n"
+            f"{FC_END}"
+        )
+        deltas = self._stream(parser, full_text)
+        args = json.loads(self._reconstruct_args(deltas))
+        assert args["value"] is None
+
+    def test_number_param_streaming(self):
+        """Streaming: number type must be converted."""
+        tool = ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="measure",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "ratio": {"type": "number"},
+                    },
+                },
+            ),
+        )
+        parser = make_parser(tools=[tool])
+        full_text = (
+            f"{FC_START}\n"
+            f'{INV_START}measure">\n'
+            f'{PARAM_START}ratio" string="false">3.14{PARAM_END}\n'
+            f"{INV_END}\n"
+            f"{FC_END}"
+        )
+        deltas = self._stream(parser, full_text)
+        args = json.loads(self._reconstruct_args(deltas))
+        assert args["ratio"] == pytest.approx(3.14)
 
 
 class TestDelimiterPreservation:
