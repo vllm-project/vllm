@@ -132,6 +132,20 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "Tensor norm_weight, Tensor gate_weight, float eps) -> ()");
   // conditionally compiled so impl registration is in source file
 #endif
+
+  // FP8 TMA warp-specialized persistent SiLU+Mul+FP8Quant kernel
+  m.def(
+      "silu_mul_fp8_quant_tma_ws_persistent("
+      "Tensor input, "
+      "Tensor input_scales, "
+      "Tensor! output, "
+      "Tensor! output_scales, "
+      "Tensor n_tokens, "
+      "int n_compute, "
+      "int batch_size, "
+      "bool use_tanh_silu) -> ()");
+  m.impl("silu_mul_fp8_quant_tma_ws_persistent", torch::kCUDA,
+         &silu_mul_fp8_quant_tma_ws_persistent);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

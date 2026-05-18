@@ -68,7 +68,7 @@ def benchmark_kernel(
     n_tokens = torch.tensor([N], dtype=torch.int32, device="cuda")
 
     for _ in range(warmup):
-        torch.ops._C.silu_mul_fp8_quant_tma_ws_persistent(
+        torch.ops._moe_C.silu_mul_fp8_quant_tma_ws_persistent(
             input_fp8,
             input_scales,
             output,
@@ -84,7 +84,7 @@ def benchmark_kernel(
     end = torch.accelerator.Event(enable_timing=True)
     start.record()
     for _ in range(iters):
-        torch.ops._C.silu_mul_fp8_quant_tma_ws_persistent(
+        torch.ops._moe_C.silu_mul_fp8_quant_tma_ws_persistent(
             input_fp8,
             input_scales,
             output,

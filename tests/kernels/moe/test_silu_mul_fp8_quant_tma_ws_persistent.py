@@ -129,7 +129,7 @@ def test_silu_mul_fp8_quant_tma_ws_persistent(
 
     n_tokens = torch.tensor([N], dtype=torch.int32, device="cuda")
 
-    torch.ops._C.silu_mul_fp8_quant_tma_ws_persistent(
+    torch.ops._moe_C.silu_mul_fp8_quant_tma_ws_persistent(
         input_fp8,
         input_scales,
         output,
