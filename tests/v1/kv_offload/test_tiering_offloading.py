@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Unit tests for TieringOffloadingManager and ExampleSecondaryTier.
+Unit tests for TieringOffloadingManager and ExampleSecondaryTierManager.
 
 These tests verify:
 1. Basic tiered offloading operations (store, load, lookup)
@@ -22,7 +22,7 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     make_offload_key,
 )
-from vllm.v1.kv_offload.tiering.example.manager import ExampleSecondaryTier
+from vllm.v1.kv_offload.tiering.example.manager import ExampleSecondaryTierManager
 from vllm.v1.kv_offload.tiering.manager import (
     CPUPrimaryTierOffloadingManager,
     TieringOffloadingManager,
@@ -61,13 +61,13 @@ def count_hits(manager, keys: list[OffloadKey]) -> int | None:
     return count
 
 
-class TestExampleSecondaryTier:
-    """Tests for ExampleSecondaryTier implementation."""
+class TestExampleSecondaryTierManager:
+    """Tests for ExampleSecondaryTierManager implementation."""
 
     def test_basic_store_and_lookup(self):
         """Test basic store and lookup operations."""
         mock_view = memoryview(torch.zeros((10, 16), dtype=torch.int8).numpy())
-        tier = ExampleSecondaryTier(
+        tier = ExampleSecondaryTierManager(
             vllm_config=_MOCK_VLLM_CONFIG,
             primary_kv_view=mock_view,
             tier_type="example",
@@ -104,12 +104,12 @@ class TestTieringOffloadingManager:
         mock_view = mock_region.create_kv_memoryview()
 
         # Create secondary tiers with the primary view
-        self.secondary_tier1 = ExampleSecondaryTier(
+        self.secondary_tier1 = ExampleSecondaryTierManager(
             vllm_config=_MOCK_VLLM_CONFIG,
             primary_kv_view=mock_view,
             tier_type="example",
         )
-        self.secondary_tier2 = ExampleSecondaryTier(
+        self.secondary_tier2 = ExampleSecondaryTierManager(
             vllm_config=_MOCK_VLLM_CONFIG,
             primary_kv_view=mock_view,
             tier_type="example",

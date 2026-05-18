@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-ExampleSecondaryTier: A simple in-memory secondary tier.
+ExampleSecondaryTierManager: A simple in-memory secondary tier.
 
 This implementation provides a minimal secondary tier that stores blocks
 in memory (using a dictionary) with immediate completion. It serves as a
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 
-class ExampleSecondaryTier(SecondaryTierManager):
+class ExampleSecondaryTierManager(SecondaryTierManager):
     """
     A simple in-memory secondary tier.
 
@@ -55,7 +55,7 @@ class ExampleSecondaryTier(SecondaryTierManager):
         )
 
         logger.info(
-            "ExampleSecondaryTier initialized with custom_param=%d", custom_param
+            "ExampleSecondaryTierManager initialized with custom_param=%d", custom_param
         )
 
         # key -> True (only care about presence)
