@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
 
-import numpy as np
 import torch
 
 from vllm.triton_utils import tl, triton
@@ -18,14 +17,12 @@ class BlockTables:
         max_num_batched_tokens: int,
         max_num_blocks_per_group: list[int],
         device: torch.device,
-        kernel_block_sizes: list[int] | None = None,
+        kernel_block_sizes: list[int],
         cp_size: int = 1,
         cp_rank: int = 0,
         cp_interleave: int = 1,
     ):
         self.block_sizes = block_sizes
-        if kernel_block_sizes is None:
-            kernel_block_sizes = block_sizes
         self.kernel_block_sizes = kernel_block_sizes
         self.max_num_reqs = max_num_reqs
         self.max_num_batched_tokens = max_num_batched_tokens
@@ -109,7 +106,7 @@ class BlockTables:
             block_ids = new_block_ids[i]
             bpk = self.blocks_per_kv_block[i]
             if bpk > 1:
-                block_ids = _expand_to_kernel_blocks(block_ids, bpk)
+                block_ids = [b * bpk + k for b in block_ids for k in range(bpk)]
             self.block_tables[i].stage_write(req_index, start, block_ids)
             self.num_blocks.np[i, req_index] = start + len(block_ids)
 
@@ -184,22 +181,6 @@ class BlockTables:
         # with the same memory address as that used during the model's forward pass,
         # rather than allocating a new tensor.
         return self.slot_mappings[:, :num_tokens]
-
-
-def _expand_to_kernel_blocks(
-    block_ids: list[int],
-    blocks_per_kv_block: int,
-) -> list[int]:
-    """Expand scheduler block IDs to kernel block IDs.
-
-    Each scheduler block of size B maps to `blocks_per_kv_block` kernel blocks
-    of size B/blocks_per_kv_block.  E.g. scheduler block 3 with ratio 2
-    becomes kernel blocks [6, 7].
-    """
-    arr = np.array(block_ids, dtype=np.int32)
-    arange = np.arange(blocks_per_kv_block, dtype=np.int32)
-    expanded = (arr.reshape(-1, 1) * blocks_per_kv_block + arange).reshape(-1)
-    return expanded.tolist()
 
 
 @triton.jit(do_not_specialize=["num_reqs"])
