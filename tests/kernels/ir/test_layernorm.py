@@ -13,16 +13,14 @@ from tests.ir.ir_test_utils import (
     supported_providers,
 )
 from tests.kernels.allclose_default import get_default_rtol
+from tests.utils import requires_platform
 from vllm import ir
 from vllm.platforms import current_platform
 
 rms_norm_native = ir.ops.rms_norm.impls["native"].impl_fn
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike() and not current_platform.is_xpu(),
-    reason="Currently only kernels on CUDA, ROCm and XPU",
-)
+@requires_platform("gpu")
 def test_rms_norm_registration():
     expected = {
         "native": True,
@@ -45,10 +43,7 @@ def test_rms_norm_registration():
 @pytest.mark.parametrize("n_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", COMMON_HIDDEN_SIZES)
 @pytest.mark.parametrize("epsilon", [1e-6, 1e-5])
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike() and not current_platform.is_xpu(),
-    reason="Currently only kernels on CUDA, ROCm and XPU",
-)
+@requires_platform("gpu")
 class TestRMSNorm:
     @classmethod
     def setup_class(cls, **kwargs):
@@ -144,10 +139,7 @@ def test_aiter_rejects_unsupported_dtypes():
 fused_add_rms_norm_native = ir.ops.fused_add_rms_norm.impls["native"].impl_fn
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike() and not current_platform.is_xpu(),
-    reason="Currently only kernels on CUDA, ROCm and XPU",
-)
+@requires_platform("gpu")
 def test_fused_add_rms_norm_registration():
     expected = {
         "native": True,
@@ -171,10 +163,7 @@ def test_fused_add_rms_norm_registration():
 @pytest.mark.parametrize("n_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", COMMON_HIDDEN_SIZES)
 @pytest.mark.parametrize("epsilon", [1e-6, 1e-5])
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike() and not current_platform.is_xpu(),
-    reason="Currently only kernels on CUDA, ROCm and XPU",
-)
+@requires_platform("gpu")
 class TestFusedAddRMSNorm:
     @classmethod
     def setup_class(cls, **kwargs):
