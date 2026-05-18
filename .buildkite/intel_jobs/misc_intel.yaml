@@ -97,7 +97,7 @@ steps:
 
 - label: Metrics, Tracing (2 GPUs)
   key: metrics-tracing-2-gpus
-  timeout_in_minutes: 20
+  timeout_in_minutes: 30
   num_devices: 2
   device: intel_gpu
   no_plugin: true
@@ -123,6 +123,41 @@ steps:
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'pip install "opentelemetry-sdk>=1.26.0" "opentelemetry-api>=1.26.0" "opentelemetry-exporter-otlp>=1.26.0" "opentelemetry-semantic-conventions-ai>=0.4.1" &&
+    'pip install opentelemetry-sdk\>=1.26.0 opentelemetry-api\>=1.26.0 opentelemetry-exporter-otlp\>=1.26.0 opentelemetry-semantic-conventions-ai\>=0.4.1 &&
     cd tests &&
     pytest -v -s v1/tracing'
+
+- label: Async Engine, Inputs, Utils, Worker
+  key: async-engine-inputs-utils-worker
+  timeout_in_minutes: 30
+  device: intel_gpu
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+  - vllm/assets/
+  - vllm/config/
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/inputs/
+  - vllm/model_executor/
+  - vllm/multimodal/
+  - vllm/platforms/
+  - vllm/sampling_params.py
+  - vllm/tokenizers/
+  - vllm/transformers_utils/
+  - vllm/utils/
+  - vllm/v1/
+  - tests/detokenizer
+  - tests/multimodal
+  - tests/utils_
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -v -s detokenizer &&
+    pytest -v -s -m "not cpu_test" multimodal &&
+    pytest -v -s utils_'
