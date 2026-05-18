@@ -98,6 +98,45 @@ at::Tensor int4_scaled_mm_cpu(at::Tensor& x, at::Tensor& w, at::Tensor& w_zeros,
                               at::Tensor& w_scales,
                               std::optional<at::Tensor> bias);
 
+// Adapted from sglang: GDN
+std::tuple<at::Tensor, at::Tensor> chunk_gated_delta_rule_cpu(
+    const at::Tensor& query, const at::Tensor& key, const at::Tensor& value,
+    const at::Tensor& g, const at::Tensor& beta,
+    const at::Tensor& initial_state, bool output_final_state,
+    const at::Tensor& cu_seqlens, bool head_first, bool use_qk_l2norm_in_kernel,
+    double eps = 1e-5);
+
+at::Tensor fused_sigmoid_gating_delta_rule_update_cpu(
+    const at::Tensor& A_log, const at::Tensor& dt_bias, const at::Tensor& q,
+    const at::Tensor& k, const at::Tensor& v, const at::Tensor& a,
+    const at::Tensor& b, at::Tensor& initial_state_source,
+    const at::Tensor& initial_state_indices, const at::Tensor& cu_seqlens,
+    bool use_qk_l2norm_in_kernel, double softplus_beta = 1.0,
+    double softplus_threshold = 20.0);
+
+std::tuple<at::Tensor, at::Tensor> fused_gdn_gating_cpu(
+    const at::Tensor& A_log, const at::Tensor& a, const at::Tensor& b,
+    const at::Tensor& dt_bias);
+
+// Adapted from sglang: casual_conv1d kernels
+at::Tensor causal_conv1d_weight_pack(const at::Tensor& weight);
+
+at::Tensor causal_conv1d_fwd_cpu(
+    const at::Tensor& x, const at::Tensor& weight,
+    const std::optional<at::Tensor>& bias,
+    const std::optional<at::Tensor>& conv_states,
+    const std::optional<at::Tensor>& query_start_loc,
+    const std::optional<at::Tensor>& cache_indices,
+    const std::optional<at::Tensor>& has_initial_state, bool silu_activation,
+    int64_t pad_slot_id, bool is_vnni);
+
+at::Tensor causal_conv1d_update_cpu(
+    const at::Tensor& x, const at::Tensor& conv_states,
+    const at::Tensor& weight, const std::optional<at::Tensor>& bias,
+    bool silu_activation, const std::optional<at::Tensor>& cache_seqlens,
+    const std::optional<at::Tensor>& conv_state_indices, int64_t pad_slot_id,
+    bool is_vnni);
+
 void activation_lut_bf16(torch::Tensor& out, torch::Tensor& input,
                          const std::string& activation);
 
@@ -397,6 +436,47 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "scales2, SymInt[] block_size, Tensor? bias, ScalarType out_dtype, "
       "bool is_vnni) -> Tensor");
   ops.impl("fp8_scaled_mm_cpu", torch::kCPU, &fp8_scaled_mm_cpu);
+
+  // Adapted from sglang: GDN kernels
+  ops.def(
+      "chunk_gated_delta_rule_cpu(Tensor query, Tensor key, Tensor value, "
+      "Tensor g, Tensor beta, "
+      "Tensor initial_state, bool output_final_state, Tensor cu_seqlens, bool "
+      "head_first, "
+      "bool use_qk_l2norm_in_kernel, float eps=1e-5) -> (Tensor, Tensor)");
+  ops.impl("chunk_gated_delta_rule_cpu", torch::kCPU,
+           &chunk_gated_delta_rule_cpu);
+  ops.def(
+      "fused_sigmoid_gating_delta_rule_update_cpu(Tensor A_log, Tensor "
+      "dt_bias, Tensor q, Tensor k, Tensor v, Tensor "
+      "a, Tensor b, Tensor(a!) initial_state_source, Tensor "
+      "initial_state_indices, Tensor cu_seqlens, bool "
+      "use_qk_l2norm_in_kernel, float softplus_beta=1.0, float "
+      "softplus_threshold=20.0) -> Tensor");
+  ops.impl("fused_sigmoid_gating_delta_rule_update_cpu", torch::kCPU,
+           &fused_sigmoid_gating_delta_rule_update_cpu);
+  ops.def(
+      "fused_gdn_gating_cpu(Tensor A_log, Tensor a, Tensor b, Tensor dt_bias) "
+      "-> (Tensor, Tensor)");
+  ops.impl("fused_gdn_gating_cpu", torch::kCPU, &fused_gdn_gating_cpu);
+
+  // Adapted from sglang: casual_conv1d kernels
+  ops.def("causal_conv1d_weight_pack(Tensor weight) -> Tensor");
+  ops.impl("causal_conv1d_weight_pack", torch::kCPU,
+           &causal_conv1d_weight_pack);
+  ops.def(
+      "causal_conv1d_fwd_cpu(Tensor x, Tensor weight, Tensor? bias, Tensor? "
+      "conv_states, Tensor? query_start_loc,"
+      "Tensor? cache_indices, Tensor? has_initial_state, bool silu_activation, "
+      "int pad_slot_id, bool is_vnni) -> "
+      "Tensor");
+  ops.impl("causal_conv1d_fwd_cpu", torch::kCPU, &causal_conv1d_fwd_cpu);
+  ops.def(
+      "causal_conv1d_update_cpu(Tensor x, Tensor(a!) conv_states, Tensor "
+      "weight, Tensor? bias, bool silu_activation,"
+      "Tensor? cache_seqlens, Tensor? conv_state_indices, int pad_slot_id, "
+      "bool is_vnni) -> Tensor");
+  ops.impl("causal_conv1d_update_cpu", torch::kCPU, &causal_conv1d_update_cpu);
 #endif
 
   // CPU attention kernels
