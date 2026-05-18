@@ -1436,6 +1436,7 @@ class EngineCoreProc(EngineCore):
             ready_response = EngineCoreReadyResponse(
                 max_model_len=self.vllm_config.model_config.max_model_len,
                 num_gpu_blocks=self.vllm_config.cache_config.num_gpu_blocks or 0,
+                block_size=self.vllm_config.cache_config.block_size,
                 dp_stats_address=self.frontend_stats_publish_address,
             )
             ready_payload = msgspec.msgpack.encode(ready_response)
