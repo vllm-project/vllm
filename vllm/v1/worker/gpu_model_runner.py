@@ -887,7 +887,7 @@ class GPUModelRunner(
         self.execute_model_state: ExecuteModelState | None = None
         self.kv_connector_output: KVConnectorOutput | None = None
         self.mamba_state_idx: dict[str, int] = {}
-        self._mamba_copy_bufs: mamba_utils.MambaCopyBuffers | None = None
+        self._mamba_bufs: mamba_utils.MambaBuffers | None = None
         self.mamba_prev_last_scheduled_idx: CpuGpuBuffer | None = None
         if self.cache_config.mamba_cache_mode == "all" and self.num_spec_tokens > 0:
             self.mamba_prev_last_scheduled_idx = self._make_buffer(
@@ -992,15 +992,23 @@ class GPUModelRunner(
             with_numpy=numpy,
         )
 
-    def _get_mamba_copy_bufs(self) -> mamba_utils.MambaCopyBuffers:
-        if self._mamba_copy_bufs is None:
-            self._mamba_copy_bufs = mamba_utils.MambaCopyBuffers.create(
-                self.max_num_reqs,
-                self.kv_cache_config,
-                self.model.get_mamba_state_copy_func(),
-                self._make_buffer,
+    def _get_mamba_bufs(self) -> mamba_utils.MambaBuffers:
+        # Only reachable on the ``mamba_cache_mode == "align"`` path.
+        # The postprocess sub-object is additionally gated on spec
+        # decode + hybrid model.
+        assert self.cache_config.mamba_cache_mode == "align"
+        if self._mamba_bufs is None:
+            self._mamba_bufs = mamba_utils.MambaBuffers.create(
+                max_num_reqs=self.max_num_reqs,
+                kv_cache_config=self.kv_cache_config,
+                copy_funcs=self.model.get_mamba_state_copy_func(),
+                make_buffer=self._make_buffer,
+                device=self.device,
+                with_postprocess=(
+                    self.speculative_config is not None and self.model_config.is_hybrid
+                ),
             )
-        return self._mamba_copy_bufs
+        return self._mamba_bufs
 
     def _init_model_kwargs(self):
         model_kwargs = dict[str, Any]()
@@ -1489,45 +1497,53 @@ class GPUModelRunner(
         if not self.speculative_config or not self.model_config.is_hybrid:
             return
 
-        # TODO: Remove .cpu() sync to enable fully async for hybrid model;
-        # Use num_computed_tokens.gpu instead of req.num_computed_tokens to
-        # support aligned mamba cache mode.
         # Count the number of accepted tokens for each sequence.
         # Valid tokens are contiguous from position 0, so counting non-(-1)
         # tokens gives us the first -1 position (i.e., number of accepted).
         num_reqs = output_token_ids.size(0)
         self.num_accepted_tokens.gpu[:num_reqs] = (output_token_ids != -1).sum(dim=1)
 
-        is_align = self.cache_config.mamba_cache_mode == "align"
-        if is_align:
-            for i, num_tokens in enumerate(
-                self.num_accepted_tokens.gpu[:num_reqs].cpu().numpy()
-            ):
-                self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
+        if self.cache_config.mamba_cache_mode == "align":
+            # Fused GPU postprocess: state copies + per-request accepted-token
+            # update without CPU-GPU sync. The metadata
+            # (num_scheduled_tokens, num_draft_tokens, num_computed_tokens) is
+            # pre-staged to GPU buffers in _prepare_inputs.
+            mamba_utils.postprocess_mamba_gpu(
+                bufs=self._get_mamba_bufs(),
+                num_reqs=num_reqs,
+                num_accepted_tokens_gpu=self.num_accepted_tokens.gpu,
+                num_accepted_tokens_cpu_tensor=(
+                    self.input_batch.num_accepted_tokens_cpu_tensor
+                ),
+                input_batch=self.input_batch,
+                kv_cache_config=self.kv_cache_config,
+                forward_context=self.compilation_config.static_forward_context,
+                mamba_state_copy_funcs=self.model.get_mamba_state_copy_func(),
+            )
         else:
+            # Simply copies the accepted token counts to CPU
+            # asynchronously for use in the next iteration's preprocessing.
             self.input_batch.num_accepted_tokens_cpu_tensor[:num_reqs].copy_(
                 self.num_accepted_tokens.gpu[:num_reqs], non_blocking=True
             )
-            assert self.num_accepted_tokens_event is not None
-            self.num_accepted_tokens_event.record()
+            # Python postprocess: anchors mamba_state_idx for the
+            # "all" + spec-decode path (#41233). No-op for plain "all".
+            mamba_utils.postprocess_mamba(
+                scheduler_output,
+                self.kv_cache_config,
+                self.cache_config,
+                self.input_batch,
+                self.requests,
+                self.mamba_state_idx,
+                self.num_spec_tokens,
+                num_reqs,
+            )
 
-        mamba_utils.postprocess_mamba(
-            scheduler_output,
-            self.kv_cache_config,
-            self.cache_config,
-            self.input_batch,
-            self.requests,
-            self.mamba_state_idx,
-            self.num_spec_tokens,
-            num_reqs,
-            forward_context=(
-                self.compilation_config.static_forward_context if is_align else None
-            ),
-            mamba_state_copy_funcs=(
-                self.model.get_mamba_state_copy_func() if is_align else None
-            ),
-            copy_bufs=self._get_mamba_copy_bufs() if is_align else None,
-        )
+        # In both cases we do a non-blocking copy of results to CPU for next iteration's
+        # preprocess (self.input_batch.num_accepted_tokens_cpu_tensor). So we need to
+        # record the event for proper synchronization.
+        assert self.num_accepted_tokens_event is not None
+        self.num_accepted_tokens_event.record()
 
     def _update_streaming_request(
         self, req_id: str, new_req_data: NewRequestData
@@ -4101,6 +4117,7 @@ class GPUModelRunner(
                 if deferred_state_corrections_fn:
                     deferred_state_corrections_fn()
                     deferred_state_corrections_fn = None
+                mamba_bufs = self._get_mamba_bufs()
                 mamba_utils.preprocess_mamba(
                     scheduler_output,
                     self.kv_cache_config,
@@ -4110,7 +4127,7 @@ class GPUModelRunner(
                     self.requests,
                     self.compilation_config.static_forward_context,
                     self.model.get_mamba_state_copy_func(),
-                    self._get_mamba_copy_bufs(),
+                    mamba_bufs.preprocess,
                 )
                 # preprocess_mamba resets num_accepted_tokens_cpu to 1
                 # for requests whose state was copied to a new block.
@@ -4120,6 +4137,21 @@ class GPUModelRunner(
                     self.input_batch.num_accepted_tokens_cpu[:num_reqs]
                 )
                 self.num_accepted_tokens.copy_to_gpu(num_reqs)
+
+                # Stage per-request inputs for the fused postprocess kernel
+                # only when that kernel will actually run. The kernel is
+                # gated on spec-decode + hybrid (see MambaBuffers.create);
+                # without it, ``mamba_bufs.postprocess`` is None and the
+                # staging buffers don't exist.
+                if mamba_bufs.postprocess is not None:
+                    mamba_utils.stage_postprocess_inputs_to_gpu(
+                        mamba_bufs.postprocess,
+                        scheduler_output,
+                        self.input_batch.req_ids,
+                        num_reqs,
+                        self.requests,
+                        self.mamba_state_idx,
+                    )
 
             use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
             ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
@@ -7105,7 +7137,7 @@ class GPUModelRunner(
         """
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
-        self._mamba_copy_bufs = None
+        self._mamba_bufs = None
         self.may_add_encoder_only_layers_to_kv_cache_config()
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         self.initialize_attn_backend(kv_cache_config, is_profiling=is_profiling)
