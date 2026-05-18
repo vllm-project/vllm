@@ -915,8 +915,8 @@ class Qwen2_5_VisionTransformer(nn.Module):
                     )
                 )
 
-        cu_seqlens_np = cu_seqlens.numpy()
-        cu_window_seqlens_np = cu_window_seqlens.numpy()
+        cu_seqlens_np = cu_seqlens.cpu().numpy()
+        cu_window_seqlens_np = cu_window_seqlens.cpu().numpy()
 
         # FlashInfer needs the real per-sequence lengths in addition to
         # cu_seqlens. For other backends this returns None and is ignored.
