@@ -472,6 +472,8 @@ class OpenAIServingResponses(OpenAIServing):
                         available_tools=available_tools,
                         chat_template=self.chat_template,
                         chat_template_content_format=self.chat_template_content_format,
+                        enable_auto_tools=self.enable_auto_tools,
+                        tool_call_id_type=self.tool_call_id_type,
                     )
                 else:
                     context = SimpleContext()

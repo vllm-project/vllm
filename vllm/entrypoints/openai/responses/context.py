@@ -276,6 +276,8 @@ class ParsableContext(ConversationContext):
         available_tools: list[str] | None,
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
+        enable_auto_tools: bool = False,
+        tool_call_id_type: str = "random",
     ):
         self.num_prompt_tokens = 0
         self.num_output_tokens = 0
@@ -291,6 +293,8 @@ class ParsableContext(ConversationContext):
             request=request,
             chat_template=chat_template,
             chat_template_content_format=chat_template_content_format,
+            enable_auto_tools=enable_auto_tools,
+            tool_call_id_type=tool_call_id_type,
         )
         self.parser_cls = parser_cls
         self.request = request

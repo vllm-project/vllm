@@ -37,6 +37,8 @@ class ResponsesParser:
         request: ResponsesRequest,
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
+        enable_auto_tools: bool = False,
+        tool_call_id_type: str = "random",
     ):
         self.response_messages: list[ResponseInputOutputItem] = (
             # TODO: initial messages may not be properly typed
@@ -60,6 +62,9 @@ class ResponsesParser:
                 chat_template_kwargs=chat_template_kwargs,
             )
 
+        self.enable_auto_tools = enable_auto_tools
+        self.tool_call_id_type = tool_call_id_type
+
         # Store the last finish_reason to determine response status
         self.finish_reason: str | None = None
 
@@ -72,7 +77,8 @@ class ResponsesParser:
                 model_output=output.text,
                 model_output_token_ids=output.token_ids,
                 request=self.request,
-                enable_auto_tools=True,
+                enable_auto_tools=self.enable_auto_tools,
+                tool_call_id_type=self.tool_call_id_type,
             )
             self.response_messages.extend(output_items)
         else:
@@ -137,6 +143,8 @@ def get_responses_parser_for_simple_context(
     request: ResponsesRequest,
     chat_template: str | None,
     chat_template_content_format: ChatTemplateContentFormatOption,
+    enable_auto_tools: bool = False,
+    tool_call_id_type: str = "random",
 ) -> ResponsesParser:
     """Factory function to create a ResponsesParser with
     optional unified parser.
@@ -151,6 +159,8 @@ def get_responses_parser_for_simple_context(
         request=request,
         chat_template=chat_template,
         chat_template_content_format=chat_template_content_format,
+        enable_auto_tools=enable_auto_tools,
+        tool_call_id_type=tool_call_id_type,
     )
 
 
