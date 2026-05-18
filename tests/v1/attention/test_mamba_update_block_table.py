@@ -80,10 +80,7 @@ def test_update_block_table_copies_block_idx_to_persistent_buffers():
     num_reqs = 4
     device = torch.device("cpu")
 
-    vllm_config = _make_vllm_config(
-        max_model_len,
-        num_reqs,
-    )
+    vllm_config = _make_vllm_config(max_model_len, num_reqs)
 
     spec = MambaSpec(
         block_size=block_size,
@@ -331,9 +328,7 @@ def test_block_idx_prev_step_persistent_buffer_skipped_without_spec_decode():
     device = torch.device("cpu")
 
     vllm_config = _make_vllm_config(
-        max_model_len,
-        max_num_seqs,
-        num_speculative_tokens=0,
+        max_model_len, max_num_seqs, num_speculative_tokens=0
     )
     spec = MambaSpec(
         block_size=block_size,
