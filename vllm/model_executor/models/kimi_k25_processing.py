@@ -3,32 +3,51 @@
 """
 Standalone multi-modal preprocessing for Kimi-K2.5.
 
-EDITING THIS FILE
------------------
-This is intentionally a *single file* that bundles together every step of
-Kimi-K2.5's vision preprocessing pipeline:
+DESIGN GOAL
+-----------
+Make it possible for algorithm engineers to change Kimi-K2.5's vision
+preprocessing by editing **this file only**, without having to learn or
+subclass any of vLLM's multi-modal abstractions.
 
-  1. Loading per-model media-processing configuration
-     (`load_media_proc_cfg`, `DEFAULT_MEDIA_PROC_CFG`).
-  2. Pure NumPy / PIL image and video math
-     (`navit_resize_image`, `navit_resize_video`, `patchify_image`,
-     `normalize_image`, `image_to_resized_padded_np`, ...).
-  3. Per-media token-count and tensor builders
-     (`count_media_tokens`, `process_single_media`,
-     `preprocess_media_batch`).
-  4. Prompt-side token expansion (`expand_media_tokens_in_input_ids`).
-  5. The thin glue that plugs into vLLM's serving runtime
-     (`KimiK25ProcessingInfo`, `KimiK25DummyInputsBuilder`,
-     `KimiK25MultiModalProcessor`).
+To that end, the three "glue" classes that plug into vLLM's serving
+runtime — `KimiK25ProcessingInfo`, `KimiK25DummyInputsBuilder`,
+`KimiK25MultiModalProcessor` — are all *plain* Python classes (MRO is
+just `[Class, object]`). They satisfy the registry's contract by **duck
+typing** the small set of attributes/methods that vLLM core actually
+reads, not by inheriting from `BaseProcessingInfo`,
+`BaseDummyInputsBuilder`, or `BaseMultiModalProcessor`.
 
-Most of the math here is a direct Python port of the upstream Hugging Face
-`KimiK25VisionProcessor`. The intent is that algorithm engineers can change
-preprocessing behaviour by modifying *only this file*, without having to
-study or override vLLM's multi-modal abstractions.
+The only vLLM types this file touches are data containers that AsyncLLM
+expects on the input/output boundary (`MultiModalInput`,
+`MultiModalKwargsItems`, `MultiModalFieldConfig`, `PlaceholderRange`,
+`ProcessorInputs`, ...) plus two thin context objects handed in by the
+registry factory (`InputProcessingContext`, `MultiModalDataParser`).
+
+FILE LAYOUT
+-----------
+  - Section A: per-model preprocessing config from `preprocessor_config.json`
+    (`load_media_proc_cfg`, `DEFAULT_MEDIA_PROC_CFG`).
+  - Section B: pure NumPy / PIL image and video math
+    (`navit_resize_image`, `navit_resize_video`, `patchify_image`,
+    `normalize_image`, `image_to_resized_padded_np`, ...).
+  - Section C: per-media token-count and tensor builders
+    (`count_media_tokens`, `process_single_media`,
+    `preprocess_media_batch`).
+  - Section D: prompt-side token expansion
+    (`expand_media_tokens_in_input_ids`).
+  - Section E: model-facing input schema (`KimiK25MediaPixelInputs`).
+  - Section F: dummy-input dimensions used for profiling
+    (`MaxImageTokenMeta`).
+  - Section G: vLLM glue (`KimiK25ProcessingInfo`,
+    `KimiK25DummyInputsBuilder`, `KimiK25MultiModalProcessor`).
+
+Most of the math in B/C is a direct Python port of the upstream Hugging
+Face `KimiK25VisionProcessor`; modifying preprocessing behaviour usually
+means editing only sections B, C, or D.
 
 The model definition in
-[`kimi_k25.py`][vllm.model_executor.models.kimi_k25] imports the three glue
-classes from this file and registers them via
+[`kimi_k25.py`][vllm.model_executor.models.kimi_k25] imports the three
+glue classes from Section G and registers them via
 `MULTIMODAL_REGISTRY.register_processor`; nothing else in vLLM needs to
 know about Kimi-K2.5 preprocessing.
 """
@@ -38,7 +57,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 import numpy as np
 import torch
@@ -46,21 +65,23 @@ from PIL import Image
 from transformers import BatchFeature
 
 from vllm.config.multimodal import BaseDummyOptions
-from vllm.inputs import MultiModalDataDict
+from vllm.inputs import MultiModalDataDict, MultiModalInput, mm_input
 from vllm.logger import init_logger
-from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
-from vllm.multimodal.parse import MultiModalDataItems
-from vllm.multimodal.processing import (
-    BaseDummyInputsBuilder,
-    BaseMultiModalProcessor,
-    BaseProcessingInfo,
-    InputProcessingContext,
-    PromptReplacement,
-    PromptUpdate,
+from vllm.multimodal.inputs import (
+    MultiModalFieldConfig,
+    MultiModalKwargsItems,
+    PlaceholderRange,
 )
+from vllm.multimodal.parse import MultiModalDataParser
+from vllm.multimodal.processing.context import InputProcessingContext
+from vllm.multimodal.processing.inputs import ProcessorInputs
 from vllm.transformers_utils.configs.kimi_k25 import KimiK25Config
 from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+
+if TYPE_CHECKING:
+    from vllm.multimodal.cache import BaseMultiModalProcessorCache
+    from vllm.multimodal.processing import TimingContext
 
 logger = init_logger(__name__)
 
@@ -444,26 +465,74 @@ class KimiK25MediaPixelInputs(TensorSchema):
 
 @dataclass
 class MaxImageTokenMeta:
+    """Resolution used by `KimiK25DummyInputsBuilder` when building the
+    worst-case dummy image/video for memory profiling. Picked large enough
+    that the NaViT resize hits the per-side patch limit."""
+
     width: int = 3000
     height: int = 3000
 
 
 # ---------------------------------------------------------------------------
-# Section G. vLLM glue (intentionally thin)
+# Section G. vLLM glue
 # ---------------------------------------------------------------------------
+#
+# These three classes are what vLLM's multi-modal registry instantiates and
+# calls into. They are intentionally plain Python classes:
+#
+#     class KimiK25ProcessingInfo:        # not BaseProcessingInfo
+#     class KimiK25DummyInputsBuilder:    # not BaseDummyInputsBuilder
+#     class KimiK25MultiModalProcessor:   # not BaseMultiModalProcessor
+#
+# vLLM resolves them by duck typing -- it never does `isinstance(...)`
+# checks against the base classes -- so we only need to expose the
+# specific attribute names and method signatures the runtime reads.
+# Each class's docstring lists exactly which of those it implements.
+#
+# The wiring is in `kimi_k25.py`:
+#
+#     @MULTIMODAL_REGISTRY.register_processor(
+#         KimiK25MultiModalProcessor,
+#         info=KimiK25ProcessingInfo,
+#         dummy_inputs=KimiK25DummyInputsBuilder,
+#     )
+#     class KimiK25ForConditionalGeneration(...): ...
+#
+# Adding a new modality, changing the placeholder token, or wiring up a
+# new preprocessing knob is done by editing the classes below; nothing
+# in vLLM core needs to be touched.
 
 
-class KimiK25ProcessingInfo(BaseProcessingInfo):
-    """Model-level metadata vLLM needs to build the multi-modal pipeline.
+class KimiK25ProcessingInfo:
+    """Model-level metadata for Kimi-K2.5.
 
-    Everything here is read once at engine startup; the hot path lives in
-    :class:`KimiK25MultiModalProcessor` below.
+    Standalone — does **not** inherit from `BaseProcessingInfo`. The vLLM
+    registry only reads a small set of attributes/methods off
+    `processor.info`; those are exposed directly here.
+
+    Surface area used by vLLM core (matched by attribute name / method
+    signature, not by isinstance):
+
+      - `ctx` (set by the registry's factory)
+      - `model_id`, `get_tokenizer()`
+      - `data_parser`
+      - `skip_prompt_length_check`
+      - `supported_mm_limits`, `allowed_mm_limits`, `validate_num_items`
+      - `get_mm_max_tokens_per_item(seq_len, mm_counts)`
+      - `parse_mm_data(mm_data, validate=True)`
+
+    Everything else is Kimi-K2.5 specific glue (media token id, config).
     """
 
+    # Per-modality input-count limit. `None` means "unbounded by the model;
+    # only the user's `--limit-mm-per-prompt` applies". Consumed by both
+    # `supported_mm_limits` and `validate_num_items`.
+    _SUPPORTED_MM_LIMITS: Mapping[str, int | None] = {"vision_chunk": None}
+
     def __init__(self, ctx: InputProcessingContext) -> None:
-        super().__init__(ctx)
-        self.hf_config = self.get_hf_config()
-        tokenizer = self.get_tokenizer()
+        self.ctx = ctx
+        self.hf_config: KimiK25Config = ctx.get_hf_config(KimiK25Config)
+        tokenizer = ctx.get_tokenizer()
 
         # Resolve <|media_pad|> token id. Prefer the tokenizer mapping, which
         # is authoritative across transformers v4/v5 retokenization changes,
@@ -486,7 +555,7 @@ class KimiK25ProcessingInfo(BaseProcessingInfo):
             self.media_token_id = resolved_token_id
         else:
             self.media_token_id = config_token_id
-        self.media_token = tokenizer.decode(self.media_token_id)
+        self.media_token: str = tokenizer.decode(self.media_token_id)
 
         # Read preprocessor_config.json directly so we don't trigger HF's
         # `trust_remote_code` path.
@@ -494,68 +563,296 @@ class KimiK25ProcessingInfo(BaseProcessingInfo):
             ctx.model_config.model, revision=ctx.model_config.revision
         )
 
-    def get_hf_config(self) -> KimiK25Config:
-        return self.ctx.get_hf_config(KimiK25Config)
+        self.data_parser = MultiModalDataParser()
 
-    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        return {"vision_chunk": None}
+    # ----- attributes exposed to vLLM core -----------------------------------
+
+    @property
+    def model_id(self) -> str:
+        return self.ctx.model_config.model
+
+    def get_tokenizer(self):  # -> TokenizerLike
+        return self.ctx.get_tokenizer()
+
+    @property
+    def skip_prompt_length_check(self) -> bool:
+        return False
+
+    @property
+    def supported_mm_limits(self) -> Mapping[str, int | None]:
+        return self._SUPPORTED_MM_LIMITS
+
+    @property
+    def allowed_mm_limits(self) -> Mapping[str, int]:
+        """Intersect `supported_mm_limits` with the user's `--limit-mm-per-prompt`."""
+        mm_config = self.ctx.get_mm_config()
+        allowed = {}
+        for modality, supported in self.supported_mm_limits.items():
+            user_limit = mm_config.get_limit_per_prompt(modality)
+            allowed[modality] = (
+                user_limit if supported is None else min(user_limit, supported)
+            )
+        return allowed
+
+    def validate_num_items(self, modality: str, num_items: int) -> None:
+        supported = self.supported_mm_limits.get(modality, 0)
+        allowed = self.allowed_mm_limits.get(modality, 0)
+        if supported is None:
+            supported = allowed
+        limit = min(supported, allowed)
+        if num_items > limit:
+            msg = f"At most {limit} {modality}(s) may be provided in one prompt."
+            if num_items <= supported:
+                msg += " Set `--limit-mm-per-prompt` to increase this limit."
+            raise ValueError(msg)
+
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int] | None:
+        # Returning `None` makes vLLM fall back to running dummy inputs through
+        # `apply()` to discover the real max-tokens-per-item.
+        return None
+
+    def parse_mm_data(self, mm_data, *, validate: bool = True):
+        mm_items = self.data_parser.parse_mm_data(mm_data)
+        if validate:
+            for modality, items in mm_items.items():
+                self.validate_num_items(modality, len(items))
+        return mm_items
+
+    # ----- Kimi-K2.5 specific accessors --------------------------------------
 
     @property
     def num_frames_per_chunk(self) -> int:
         return int(self.media_proc_cfg["temporal_merge_kernel_size"])
 
 
-class KimiK25DummyInputsBuilder(BaseDummyInputsBuilder[KimiK25ProcessingInfo]):
-    """Builds the dummy inputs used by vLLM during profiling."""
+class KimiK25DummyInputsBuilder:
+    """Builds the dummy inputs used by vLLM during profiling.
 
-    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
-        return self.info.media_token * mm_counts.get("vision_chunk", 0)
+    Standalone — does **not** inherit from `BaseDummyInputsBuilder`. The
+    registry only calls `get_dummy_processor_inputs(seq_len, mm_counts,
+    mm_options)`, which we implement directly.
+    """
+
+    def __init__(self, info: KimiK25ProcessingInfo) -> None:
+        self.info = info
 
     def _largest_dummy_item(self) -> dict[str, Any]:
         meta = MaxImageTokenMeta()
-        dummy_frames = self._get_dummy_images(
-            height=meta.height,
-            width=meta.width,
-            num_images=self.info.num_frames_per_chunk,
-        )
+        # `Image.new` returns a single PIL image filled with white. We list-
+        # multiply to get `num_frames_per_chunk` identical frames for the
+        # video-chunk path.
+        frame = Image.new("RGB", (meta.width, meta.height), color=255)
+        dummy_frames = [frame] * self.info.num_frames_per_chunk
+
         video_item = {"type": "video_chunk", "video_chunk": dummy_frames}
         video_tokens = count_media_tokens(video_item, self.info.media_proc_cfg)
 
-        image_item = {
-            "type": "image",
-            "image": self._get_dummy_images(
-                height=meta.height, width=meta.width, num_images=1
-            )[0],
-        }
+        image_item = {"type": "image", "image": frame}
         image_tokens = count_media_tokens(image_item, self.info.media_proc_cfg)
         return video_item if video_tokens >= image_tokens else image_item
 
-    def get_dummy_mm_data(
+    def get_dummy_processor_inputs(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions],
-    ) -> MultiModalDataDict:
-        return {"vision_chunk": [self._largest_dummy_item()]}
+    ) -> ProcessorInputs:
+        """Construct the largest-possible dummy input for memory profiling."""
+        dummy_text = self.info.media_token * mm_counts.get("vision_chunk", 0)
+        dummy_mm_data: MultiModalDataDict = {
+            "vision_chunk": [self._largest_dummy_item()]
+        }
+        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data, validate=False)
+        return ProcessorInputs(
+            prompt=dummy_text,
+            mm_data_items=dummy_mm_items,
+            tokenization_kwargs={"truncation": False},
+        )
 
 
-class KimiK25MultiModalProcessor(BaseMultiModalProcessor[KimiK25ProcessingInfo]):
-    """Multi-modal processor that *fully* bypasses HF's image processor.
+def _find_placeholder_ranges(
+    input_ids: list[int],
+    media_token_id: int,
+    num_tokens_per_media: list[int],
+) -> list[PlaceholderRange]:
+    """Locate the per-item placeholder blocks in an expanded `input_ids`.
 
-    The override of `_call_hf_processor` is the single integration point
-    with vLLM's runtime: it takes the prompt text and a list of media
-    dicts, and returns a `BatchFeature` with the expanded `input_ids`
-    plus the model-side tensors (`pixel_values`, `grid_thws`).
+    Pure helper. Called right after `expand_media_tokens_in_input_ids`,
+    so each `<|media_pad|>` block is already `num_tokens_per_media[i]`
+    tokens long; we just walk the list once and record the start offset
+    of each block as a `PlaceholderRange`. Raises if the number of
+    blocks we find disagrees with `num_tokens_per_media` (which would
+    indicate that `apply()` and the expansion helper are out of sync).
     """
+    ranges: list[PlaceholderRange] = []
+    i = 0
+    while i < len(input_ids):
+        if (
+            input_ids[i] == media_token_id
+            and len(ranges) < len(num_tokens_per_media)
+        ):
+            n = num_tokens_per_media[len(ranges)]
+            ranges.append(PlaceholderRange(offset=i, length=n, is_embed=None))
+            i += n
+        else:
+            i += 1
+    if len(ranges) != len(num_tokens_per_media):
+        raise RuntimeError(
+            f"Expected {len(num_tokens_per_media)} placeholder ranges, "
+            f"found {len(ranges)}; expansion is out of sync with input_ids."
+        )
+    return ranges
+
+
+class KimiK25MultiModalProcessor:
+    """Standalone multi-modal processor for Kimi-K2.5.
+
+    This class **does not inherit from `BaseMultiModalProcessor`** and
+    deliberately reimplements `apply()` end-to-end instead of plugging
+    into vLLM's `_call_hf_processor` / `_get_prompt_updates` /
+    `_find_mm_placeholders` machinery. The body of `apply()` is the
+    entire preprocessing pipeline you would otherwise have to chase
+    across half a dozen base-class hooks.
+
+    Surface area used by vLLM core (matched by attribute name / method
+    signature, never by `isinstance`):
+
+      - constructor: `(info, dummy_inputs, *, cache=None)`
+      - `apply(inputs, timing_ctx) -> MultiModalInput`
+      - `info`, `dummy_inputs`, `data_parser`, `cache` attributes
+      - `_get_mm_fields_config(hf_inputs, kwargs)`
+        -- also read by `entrypoints/chat_utils.py` when merging
+        pre-computed embeddings from multiple requests
+
+    Caching note: this prototype does **not** consult `self.cache`, so
+    identical media items submitted across requests are re-preprocessed
+    every time. To opt in, look up `inputs.get_mm_hashes(self.info.model_id)`
+    in `self.cache` before running the pure-Python pipeline and reuse the
+    stored `MultiModalKwargsItem`s on hits.
+    """
+
+    def __init__(
+        self,
+        info: KimiK25ProcessingInfo,
+        dummy_inputs: KimiK25DummyInputsBuilder,
+        *,
+        cache: BaseMultiModalProcessorCache | None = None,
+    ) -> None:
+        self.info = info
+        self.dummy_inputs = dummy_inputs
+        self.cache = cache
+        self.data_parser = info.data_parser
+
+    def apply(
+        self,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
+    ) -> MultiModalInput:
+        """End-to-end preprocessing: prompt + media -> MultiModalInput.
+
+        Four straight-line steps, each wrapped in `timing_ctx.record(...)`
+        so that `--observability-config.enable-mm-processor-stats` reports
+        the same per-stage breakdown as `BaseMultiModalProcessor`:
+
+        1. Tokenize the prompt (a `list[int]` prompt is passed through
+           unchanged). ["apply_hf_processor"]
+        2. Run the pure-Python media pipeline -- per-item token counts
+           plus the flat `(pixel_values, grid_thws)` tensors, packed into
+           `MultiModalKwargsItems`. ["apply_hf_processor"]
+        3. Splice the expanded `<|media_pad|>` runs into `input_ids` and
+           record one `PlaceholderRange` per item.
+           ["apply_prompt_updates"]
+        4. Hash the raw media items (for downstream caching) and bundle
+           everything into the `MultiModalInput` dict that AsyncLLM
+           expects. ["get_mm_hashes"]
+        """
+        cfg = self.info.media_proc_cfg
+        tokenizer = self.info.get_tokenizer()
+        media_token_id = self.info.media_token_id
+        model_dtype = self.info.ctx.model_config.dtype
+
+        # Step 1: extract raw media list (parsed from `{"vision_chunk": [...]}`
+        # by `MultiModalDataParser` at the registry boundary) and tokenize.
+        # `timing_ctx.record(...)` is a no-op unless
+        # `--observability-config.enable-mm-processor-stats` is set; stage
+        # names mirror the upstream `BaseMultiModalProcessor` so existing
+        # dashboards keep working.
+        with timing_ctx.record("apply_hf_processor"):
+            medias_items = inputs.mm_data_items
+            medias: list[Mapping[str, Any]] = (
+                list(medias_items["vision_chunk"].get_all())
+                if "vision_chunk" in medias_items
+                else []
+            )
+            if isinstance(inputs.prompt, str):
+                input_ids: list[int] = list(tokenizer(inputs.prompt)["input_ids"])
+            else:
+                input_ids = list(inputs.prompt)
+
+            mm_placeholders: dict[str, list[PlaceholderRange]] = {}
+            mm_kwargs: MultiModalKwargsItems
+
+            if medias:
+                # Step 2: pure-Python preprocessing -- token counts and tensors.
+                num_tokens_per_media = [count_media_tokens(m, cfg) for m in medias]
+                pixel_values, grid_thws = preprocess_media_batch(medias, cfg)
+                # `BatchFeature` would cast floats to the model dtype
+                # automatically; mirror that here since we bypassed
+                # `info.ctx.call_hf_processor`.
+                pixel_values = pixel_values.to(dtype=model_dtype)
+
+                hf_inputs = BatchFeature(
+                    data={"pixel_values": pixel_values, "grid_thws": grid_thws},
+                    tensor_type="pt",
+                )
+                mm_kwargs = MultiModalKwargsItems.from_hf_inputs(
+                    hf_inputs, self._get_mm_fields_config(hf_inputs, {})
+                )
+            else:
+                num_tokens_per_media = []
+                mm_kwargs = MultiModalKwargsItems({})
+
+        # Step 3: expand `<|media_pad|>` runs in the token list and record one
+        # placeholder range per media item.
+        if medias:
+            with timing_ctx.record("apply_prompt_updates"):
+                input_ids = expand_media_tokens_in_input_ids(
+                    input_ids, num_tokens_per_media, media_token_id
+                )
+                mm_placeholders["vision_chunk"] = _find_placeholder_ranges(
+                    input_ids, media_token_id, num_tokens_per_media
+                )
+
+        # Step 4: hash inputs (for downstream caching) and assemble the
+        # `MultiModalInput` dict that AsyncLLM consumes.
+        with timing_ctx.record("get_mm_hashes"):
+            mm_hashes = inputs.get_mm_hashes(self.info.model_id)
+        return mm_input(
+            prompt_token_ids=input_ids,
+            mm_kwargs=mm_kwargs,
+            mm_hashes=mm_hashes,
+            mm_placeholders=mm_placeholders,
+        )
 
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        # `pixel_values` is a flat concatenation of every media item's
-        # patches; `grid_thws[i] = (T, Hp, Wp)` tells vLLM how many of
-        # those patches belong to media item `i`.
+        """Per-item slicing rules for `pixel_values` and `grid_thws`.
+
+        `pixel_values` is a flat concatenation of every media item's
+        patches (shape `(sum(T*Hp*Wp), 3, ps, ps)`); `grid_thws[i] =
+        (T, Hp, Wp)` lets vLLM compute how many of those patches belong
+        to media item `i`. The framework uses these field configs both
+        to build `MultiModalKwargsItems` here in `apply()` and -- via
+        `entrypoints/chat_utils.py` -- to detect how to merge
+        pre-computed multi-modal embeddings across requests.
+        """
         grid_thws = hf_inputs.get("grid_thws", torch.empty((0, 3)))
         grid_sizes = grid_thws.prod(-1)
         return dict(
@@ -564,71 +861,3 @@ class KimiK25MultiModalProcessor(BaseMultiModalProcessor[KimiK25ProcessingInfo])
             ),
             grid_thws=MultiModalFieldConfig.batched("vision_chunk"),
         )
-
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        # The framework hands us `mm_data["vision_chunks"]` (plural follows
-        # the modality name; see `ProcessorBatchItems.get_processor_data`).
-        medias: list[Mapping[str, Any]] = list(mm_data.get("vision_chunks", []) or [])
-        cfg = self.info.media_proc_cfg
-        tokenizer = self.info.get_tokenizer()
-        media_token_id = self.info.media_token_id
-        model_dtype = self.info.ctx.model_config.dtype
-
-        token_inputs = tokenizer(prompt)
-        input_ids: list[int] = list(token_inputs["input_ids"])
-
-        if medias:
-            num_tokens_per_media = [count_media_tokens(m, cfg) for m in medias]
-            input_ids = expand_media_tokens_in_input_ids(
-                input_ids, num_tokens_per_media, media_token_id
-            )
-            pixel_values, grid_thws = preprocess_media_batch(medias, cfg)
-            # `transformers.BatchFeature` would normally cast floats to the
-            # model dtype for us; we mirror that here since we sidestepped
-            # `info.ctx.call_hf_processor`.
-            pixel_values = pixel_values.to(dtype=model_dtype)
-            data: dict[str, Any] = {
-                "input_ids": [input_ids],
-                "pixel_values": pixel_values,
-                "grid_thws": grid_thws,
-            }
-        else:
-            data = {"input_ids": [input_ids]}
-
-        # Mirror the behaviour of `info.ctx.call_hf_processor`, which always
-        # sets `return_tensors="pt"`. This converts our list-of-lists
-        # `input_ids` into a (1, L) tensor that the base class will then
-        # unpack into a single prompt.
-        return BatchFeature(
-            data=data, tensor_type=tok_kwargs.get("return_tensors", "pt")
-        )
-
-    def _get_prompt_updates(
-        self,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, Any],
-        out_mm_kwargs: MultiModalKwargsItems,
-    ) -> Sequence[PromptUpdate]:
-        media_token_id = self.info.media_token_id
-        cfg = self.info.media_proc_cfg
-        # `mm_items["vision_chunk"]` is a `VisionChunkProcessorItems` wrapping
-        # the raw media dicts; `.get(i)` returns the i-th dict back.
-        medias = mm_items.get("vision_chunk") if "vision_chunk" in mm_items else None
-
-        def get_replacement(item_idx: int):
-            assert medias is not None
-            return [media_token_id] * count_media_tokens(medias.get(item_idx), cfg)
-
-        return [
-            PromptReplacement(
-                modality="vision_chunk",
-                target=[media_token_id],
-                replacement=get_replacement,
-            ),
-        ]
