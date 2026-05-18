@@ -46,6 +46,31 @@ static inline unsigned long long my_min(unsigned long long a,
   return a < b ? a : b;
 }
 
+static CUresult cycle_reserved_address(CUdeviceptr d_mem, ssize_t size) {
+  // ROCm workaround: hipMemRelease does not return physical VRAM to the free
+  // pool while the virtual-address reservation is still held. During sleep we
+  // need to keep the same VA available for wake_up, so free and re-reserve it.
+  CUresult status = cuMemAddressFree(d_mem, size);
+  if (status != CUresult(0)) {
+    return status;
+  }
+
+  CUdeviceptr d_mem_new = 0;
+  status = cuMemAddressReserve(&d_mem_new, size, 0, d_mem, 0);
+  if (status != CUresult(0)) {
+    return status;
+  }
+
+  if (d_mem_new != d_mem) {
+    cuMemAddressFree(d_mem_new, size);
+    std::cerr << "ROCm: VA re-reserve got " << (void*)d_mem_new
+              << " instead of " << (void*)d_mem << std::endl;
+    return CUresult(1);
+  }
+
+  return CUresult(0);
+}
+
 static const char* PYARGS_PARSE = "KKKO";
 #endif
 
@@ -647,6 +672,13 @@ static PyObject* python_unmap_and_release(PyObject* self, PyObject* args) {
 
   unmap_and_release(recv_device, recv_size, d_mem_ptr, p_memHandle, chunk_sizes,
                     num_chunks);
+
+  if (error_code == no_error) {
+    CUresult status = cycle_reserved_address(d_mem_ptr, recv_size);
+    if (status != no_error) {
+      CUDA_CHECK(status);
+    }
+  }
 
   free(p_memHandle);
   free(chunk_sizes);
