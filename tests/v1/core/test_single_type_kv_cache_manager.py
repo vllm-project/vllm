@@ -481,3 +481,74 @@ def test_predictor_matches_allocator_blocks_calculation_with_admission_cap():
             f"but allocator pulled {len(new_blocks)}"
         )
         total_computed = num_tokens
+
+
+def test_sliding_window_strided_probe_stress():
+    """Stress test with large N and low hit rate for strided probe."""
+    block_size = 4
+    sliding_window_spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=32,
+    )
+    W = 8  # ceil((32-1)/4)
+
+    block_pool = BlockPool(
+        num_gpu_blocks=2000, enable_caching=True, hash_block_size=block_size
+    )
+    manager = get_sliding_window_manager(sliding_window_spec, block_pool)
+
+    def run_case(block_is_cached, expected_length):
+        block_hash_list = [
+            BlockHash(str(i).encode()) for i in range(len(block_is_cached))
+        ]
+        block_pool.cached_block_hash_to_block._cache.clear()
+
+        for i, (block_hash, is_cached) in enumerate(
+            zip(block_hash_list, block_is_cached)
+        ):
+            if is_cached:
+                block_pool.cached_block_hash_to_block.insert(
+                    make_block_hash_with_group_id(block_hash, 0),
+                    block_pool.blocks[i + 10],
+                )
+
+        computed_blocks = manager.find_longest_cache_hit(
+            block_hashes=block_hash_list,
+            max_length=len(block_is_cached) * block_size,
+            kv_cache_group_ids=[0],
+            block_pool=block_pool,
+            kv_cache_spec=sliding_window_spec,
+            use_eagle=False,
+            alignment_tokens=block_size,
+        )[0]
+        assert len(computed_blocks) == expected_length
+
+    N = 1000
+
+    run_case([False] * N, 0)
+
+    pattern = [False] * (N - W) + [True] * W
+    run_case(pattern, N)
+
+    mid = N // 2
+    pattern = [False] * mid + [True] * W + [False] * (N - mid - W)
+    run_case(pattern, mid + W)
+
+    pattern = [True] * (W - 1) + [False] * (N - W + 1)
+    run_case(pattern, W - 1)
+
+    random.seed(42)
+    pattern = [False] * N
+    for i in range(0, N, W + 1):
+        pattern[i] = True
+    run_case(pattern, 1)
+
+    pattern = [False] * N
+    pattern[100 : 100 + W] = [True] * W
+    pattern[800 : 800 + W] = [True] * W
+    run_case(pattern, 800 + W)
+
+    run_case([True] * N, N)
