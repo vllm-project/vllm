@@ -373,10 +373,16 @@ class SimpleCPUOffloadScheduler:
                 # Later occurrence overwrites earlier → keeps the last.
                 load_map[gpu_bid] = (cpu_blk.block_id, cpu_blk)
 
+            seen_cpu_block_ids: set[int] = set()
             for gpu_bid, (cpu_bid, cpu_blk) in load_map.items():
                 gpu_block_ids.append(gpu_bid)
                 cpu_block_ids.append(cpu_bid)
-                cpu_blocks_to_touch.append(cpu_blk)
+                # Dedup CPU blocks for resource management (touch/free).
+                # Different GPU blocks can map to the same CPU block when
+                # distinct logical positions share identical content.
+                if cpu_bid not in seen_cpu_block_ids:
+                    seen_cpu_block_ids.add(cpu_bid)
+                    cpu_blocks_to_touch.append(cpu_blk)
 
         # Touch CPU blocks to prevent eviction during async load.
         self.cpu_block_pool.touch(cpu_blocks_to_touch)
@@ -824,16 +830,19 @@ class SimpleCPUOffloadScheduler:
                     self._load_event_to_reqs.pop(state.load_event, None)
 
         if state.transfer_meta is not None:
-            # Free CPU touch refs
+            # Free CPU touch refs. Dedup to avoid double-free: the
+            # transfer pairs may repeat the same CPU block when
+            # different GPU blocks share identical content.
             self.cpu_block_pool.free_blocks(
                 self.cpu_block_pool.blocks[bid]
-                for bid in state.transfer_meta.cpu_block_ids
+                for bid in dict.fromkeys(state.transfer_meta.cpu_block_ids)
             )
-            # Free GPU touch refs
+            # Free GPU touch refs (defensive dedup; gpu_block_ids
+            # already deduped in update_state_after_alloc).
             assert self._gpu_block_pool is not None
             self._gpu_block_pool.free_blocks(
                 self._gpu_block_pool.blocks[bid]
-                for bid in state.transfer_meta.gpu_block_ids
+                for bid in dict.fromkeys(state.transfer_meta.gpu_block_ids)
             )
 
     def _cleanup_store_request(self, req_id: str) -> None:
