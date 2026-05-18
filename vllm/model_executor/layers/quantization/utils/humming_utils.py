@@ -8,13 +8,30 @@ from humming.layer import HummingInputSchema, HummingMethod
 from humming.schema import BaseWeightSchema
 
 from vllm import envs
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     FusedMoEQuantDesc,
 )
-from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+
+
+def humming_choose_hadamard_block_size(
+    weight_scale_group_size: int | None,
+    input_scale_group_size: int | None,
+    shape_k: int,
+) -> int:
+    block_size = 256
+    if weight_scale_group_size:
+        block_size = min(block_size, weight_scale_group_size)
+    if input_scale_group_size:
+        block_size = min(block_size, input_scale_group_size)
+
+    while shape_k % block_size > 0:
+        block_size = block_size // 2
+
+    return block_size
 
 
 def humming_is_layer_skipped(config: dict[str, Any], prefix: str):
