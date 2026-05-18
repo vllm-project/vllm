@@ -145,7 +145,11 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         assert device_communicator is not None
         all2all_manager = device_communicator.all2all_manager
         assert isinstance(all2all_manager, NixlEPAll2AllManager)
-        all2all_manager.commit_staged_ep_size()
+        # maybe_make_prepare_finalize(..., eep_stage=True) initializes self.buffer
+        # with get_handle(..., stage=True), which stages global NIXL state for the
+        # new config but leaves it inactive while the old config remains active.
+        # When EEP commit switches to this P/F, this P/F needs to commit that state.
+        all2all_manager.commit_staged_state()
 
     def topk_indices_dtype(self) -> torch.dtype | None:
         return torch.int64
