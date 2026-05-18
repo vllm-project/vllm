@@ -1,6 +1,6 @@
 {%- if tools %}
-    {%- if messages[0]['role'] != 'system' %}
-        {{- '<|start_of_role|>system<|end_of_role|>You are a helpful AI assistant with access to the following tools. Use US state abbreviations in tool arguments. When a tool is required to answer the user query, respond with <|tool_call|> followed by a JSON list of tools used.<|end_of_text|>
+    {%- if messages and messages[0]['role'] != 'system' %}
+        {{- '<|start_of_role|>system<|end_of_role|>You are a helpful AI assistant with access to the following tools. When a tool is required to answer the user query, respond with <|tool_call|> followed by a JSON list of tools used.<|end_of_text|>
 ' }}
     {%- endif %}
     {{- '<|start_of_role|>available_tools<|end_of_role|>
