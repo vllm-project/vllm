@@ -90,6 +90,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1, SupportsHMA):
         super().__init__(
             vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config
         )
+        self.kv_cache_config = kv_cache_config
         assert vllm_config.kv_transfer_config is not None
         use_native = vllm_config.kv_transfer_config.get_from_extra_config(
             "use_native", False
@@ -114,12 +115,6 @@ class LMCacheConnectorV1(KVConnectorBase_V1, SupportsHMA):
         self._lmcache_engine = cls(vllm_config, role, self)
 
         self._kv_cache_events: LMCacheKVEvents | None = None
-
-    def get_lmcache_kv_cache_config(self) -> "KVCacheConfig | None":
-        """
-        Return the vLLM KV cache config for LMCache's integration adapter.
-        """
-        return self._kv_cache_config
 
     # ==============================
     # Worker-side methods
