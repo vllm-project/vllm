@@ -7,7 +7,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=512G
-#SBATCH --time=00:30:00
+#SBATCH --time=00:35:00
 #SBATCH --signal=B:TERM@180
 #SBATCH --output=results/%x-%j.out
 #SBATCH --error=results/%x-%j.err
@@ -188,6 +188,14 @@ mkdir -p "${TRACE_RUN_DIR}/nsight"
 mkdir -p "${TRACE_RUN_DIR}/nccl_logs"
 mkdir -p "${TRACE_RUN_DIR}/ray_worker_nsight"
 mkdir -p "${TRACE_RUN_DIR}/ray_step_logs"
+mkdir -p "${TRACE_RUN_DIR}/server"
+mkdir -p "${TRACE_RUN_DIR}/slurm_logs"
+
+# Mirror all subsequent job stdout/stderr into the trace directory as well.
+# The #SBATCH output/error files still exist, but the self-contained copy lives here.
+if [ "${MIRROR_STDOUT_TO_TRACE:-1}" = "1" ]; then
+  exec > >(tee -a "${TRACE_RUN_DIR}/slurm_logs/job.out") 2> >(tee -a "${TRACE_RUN_DIR}/slurm_logs/job.err" >&2)
+fi
 
 # === Nsight Systems ===
 export NSYS_ENABLE="${NSYS_ENABLE:-1}"
@@ -307,6 +315,7 @@ CPUS_PER_TASK="${CPUS_PER_TASK:-${SLURM_CPUS_PER_TASK:-1}}"
 SERVE_SCRIPT="${REPO_ROOT}/serving_scripts/serve_ShareGPT_multi_node.sh"
 
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-900}"
+RAY_READY_TIMEOUT="${RAY_READY_TIMEOUT:-600}"
 SERVER_SHUTDOWN_TIMEOUT="${SERVER_SHUTDOWN_TIMEOUT:-600}"
 WORKER_REPORT_FLUSH_SLEEP="${WORKER_REPORT_FLUSH_SLEEP:-90}"
 NODE_COPY_INTERVAL="${NODE_COPY_INTERVAL:-20}"
@@ -316,6 +325,7 @@ echo "MODEL_ID=${MODEL_ID} HOST=${HOST} PORT=${PORT} TP=${TP} PP=${PP} EP=${EP}"
 echo "GPUS_PER_NODE=${GPUS_PER_NODE} NUM_NODES=${NUM_NODES} CPUS_PER_TASK=${CPUS_PER_TASK}"
 echo "MAX_MODEL_LEN=${MAX_MODEL_LEN}"
 echo "HEALTH_TIMEOUT=${HEALTH_TIMEOUT}"
+echo "RAY_READY_TIMEOUT=${RAY_READY_TIMEOUT}"
 echo "SERVER_SHUTDOWN_TIMEOUT=${SERVER_SHUTDOWN_TIMEOUT}"
 echo "WORKER_REPORT_FLUSH_SLEEP=${WORKER_REPORT_FLUSH_SLEEP}"
 echo "NODE_COPY_INTERVAL=${NODE_COPY_INTERVAL}"
@@ -645,14 +655,22 @@ fi"
   sleep 20
 fi
 
-echo "=== ray status ==="
-"${RAY_BIN}" status --address="${RAY_ADDRESS}" || echo "Warning: ray status failed; continuing with Python Ray node check."
+echo "=== waiting for Ray cluster ==="
+echo "Waiting for Ray to show ${NUM_NODES} GPUs at ${RAY_ADDRESS}..."
 
-python - <<PY
+RAY_READY_START="$(date +%s)"
+RAY_READY_ATTEMPT=0
+
+while true; do
+  RAY_READY_ATTEMPT=$((RAY_READY_ATTEMPT + 1))
+
+  if python - <<PY
 import ray
-
 ray.init(address="${RAY_ADDRESS}", ignore_reinit_error=True)
 nodes = ray.nodes()
+resources = ray.cluster_resources()
+available = ray.available_resources()
+print("attempt ${RAY_READY_ATTEMPT}")
 print("Ray nodes:")
 for node in nodes:
     print(
@@ -660,10 +678,47 @@ for node in nodes:
         f"alive={node.get('Alive')} "
         f"resources={node.get('Resources')}"
     )
-print("cluster_resources:", ray.cluster_resources())
-print("available_resources:", ray.available_resources())
+print("cluster_resources:", resources)
+print("available_resources:", available)
 ray.shutdown()
+assert resources.get("GPU", 0) >= ${NUM_NODES}
 PY
+  then
+    echo "Ray cluster is ready with ${NUM_NODES} GPUs."
+    break
+  fi
+
+  now="$(date +%s)"
+  if [ $((now - RAY_READY_START)) -gt "${RAY_READY_TIMEOUT}" ]; then
+    echo "ERROR: Ray cluster did not reach ${NUM_NODES} GPUs within ${RAY_READY_TIMEOUT}s." >&2
+
+    echo "--- head ${HEAD_NODE} out tail ---"
+    tail -n 120 "${TRACE_RUN_DIR}/ray_step_logs/ray_head_${HEAD_NODE}.out" 2>/dev/null || true
+    echo "--- head ${HEAD_NODE} err tail ---"
+    tail -n 120 "${TRACE_RUN_DIR}/ray_step_logs/ray_head_${HEAD_NODE}.err" 2>/dev/null || true
+
+    for WORKER in ${WORKER_NODES}; do
+      echo "--- worker ${WORKER} out tail ---"
+      tail -n 120 "${TRACE_RUN_DIR}/ray_step_logs/ray_worker_${WORKER}.out" 2>/dev/null || true
+      echo "--- worker ${WORKER} err tail ---"
+      tail -n 120 "${TRACE_RUN_DIR}/ray_step_logs/ray_worker_${WORKER}.err" 2>/dev/null || true
+    done
+
+    copy_worker_reports_from_shared_dest
+    exit 1
+  fi
+
+  echo "Ray cluster not ready yet; sleeping 5s."
+
+  for WORKER in ${WORKER_NODES}; do
+    echo "--- worker ${WORKER} out tail ---"
+    tail -n 30 "${TRACE_RUN_DIR}/ray_step_logs/ray_worker_${WORKER}.out" 2>/dev/null || true
+    echo "--- worker ${WORKER} err tail ---"
+    tail -n 30 "${TRACE_RUN_DIR}/ray_step_logs/ray_worker_${WORKER}.err" 2>/dev/null || true
+  done
+
+  sleep 5
+done
 
 echo "=== vLLM api_server (background process) ==="
 echo "Starting vLLM server on head node..."
@@ -688,6 +743,7 @@ if [ "${NSYS_ENABLE}" = "1" ] && [ "${NSYS_PROFILE_SERVER}" = "1" ]; then
     --force-overwrite=true \
     --trace="${NSYS_TRACE}" \
     --sample=none \
+    --cuda-event-trace=false \
     --delay="${NSYS_DELAY}" \
     --output="${NSYS_DIR}/vllm_api_server_${HEAD_NODE}" \
     python -m vllm.entrypoints.openai.api_server \
@@ -700,7 +756,8 @@ if [ "${NSYS_ENABLE}" = "1" ] && [ "${NSYS_PROFILE_SERVER}" = "1" ]; then
       --max-model-len "${MAX_MODEL_LEN}" \
       --enforce-eager \
       "${VLLM_TRACE_FLAGS[@]}" \
-      --disable-custom-all-reduce &
+      --disable-custom-all-reduce \
+      > "${TRACE_RUN_DIR}/server/vllm_server.log" 2>&1 &
 else
   echo "Starting API server without server-level Nsight profile"
   echo "Ray-worker Nsight output should be copied continuously to: ${TRACE_RUN_DIR}/ray_worker_nsight/<node>/"
@@ -715,7 +772,8 @@ else
     --max-model-len "${MAX_MODEL_LEN}" \
     --enforce-eager \
     "${VLLM_TRACE_FLAGS[@]}" \
-    --disable-custom-all-reduce &
+    --disable-custom-all-reduce \
+    > "${TRACE_RUN_DIR}/server/vllm_server.log" 2>&1 &
 fi
 
 SERVER_STEP_PID=$!
@@ -783,6 +841,9 @@ stop_ray_steps
 
 echo "Worker report copies after Ray shutdown:"
 copy_worker_reports_from_shared_dest
+
+echo "Server log:"
+find "${TRACE_RUN_DIR}/server" -maxdepth 1 -type f -printf "%p %s bytes\n" 2>/dev/null | sort || true
 
 echo "Server Nsight reports:"
 find "${NSYS_DIR}" -maxdepth 1 -type f -printf "%p %s bytes\n" 2>/dev/null | sort || true
