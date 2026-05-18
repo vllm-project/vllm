@@ -19,7 +19,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheLayout,
     KVCacheSpec,
-    MambaSpec,
     UniformTypeKVCacheSpecs,
     reshape_kv_cache,
 )
@@ -149,7 +148,6 @@ def _allocate_and_reshape_kv_cache(
 
     # Allocate, reshape by unique spec, and distribute views.
     kv_caches: dict[str, Any] = {}
-    has_attn, has_mamba = False, False
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
         num_layer_slots = len(kv_cache_tensor.shared_by)
         assert num_layer_slots > 0
@@ -162,8 +160,6 @@ def _allocate_and_reshape_kv_cache(
                 spec = spec_for_layer[layer_name]
                 key = id(spec)
                 if key not in seen_specs:
-                    has_attn = has_attn or isinstance(spec, AttentionSpec)
-                    has_mamba = has_mamba or isinstance(spec, MambaSpec)
                     seen_specs[key] = reshape_kv_cache(
                         buf,
                         spec,
@@ -173,37 +169,7 @@ def _allocate_and_reshape_kv_cache(
                     )
                 kv_caches[layer_name] = seen_specs[key][slot_idx]
 
-    if has_attn and has_mamba:
-        _update_hybrid_attention_layout(kv_caches, kv_cache_config)
-
     return kv_caches
-
-
-def _update_hybrid_attention_layout(
-    kv_caches: dict[str, Any],
-    kv_cache_config: KVCacheConfig,
-) -> None:
-    for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
-        for layer_name in kv_cache_group_spec.layer_names:
-            kv_cache_spec = kv_cache_group_spec.kv_cache_spec
-            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-                kv_cache_spec = kv_cache_spec.kv_cache_specs[layer_name]
-            if not isinstance(kv_cache_spec, AttentionSpec):
-                continue
-            kv_cache = kv_caches[layer_name]
-            if kv_cache.shape[0] == 2:
-                assert kv_cache.shape[1] != 2, (
-                    f"Cannot determine layout for tensor of shape {kv_cache.shape}"
-                )
-                hidden_size = kv_cache.shape[2:].numel()
-                kv_cache.as_strided_(
-                    size=kv_cache.shape,
-                    stride=(
-                        hidden_size,
-                        2 * hidden_size,
-                        *kv_cache.stride()[2:],
-                    ),
-                )
 
 
 def init_kv_cache(
