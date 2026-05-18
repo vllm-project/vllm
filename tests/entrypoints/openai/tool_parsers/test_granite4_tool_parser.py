@@ -173,7 +173,7 @@ def get_args(client: openai.OpenAI, _tools, _messages, _stop):
     )
 
     if not response.choices:
-        return  # pact: guard empty choices list
+        raise ValueError("LLM returned empty response")  # pact: guard empty choices list
     return response.choices[0].message.tool_calls[0].function.arguments
 
 

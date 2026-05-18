@@ -64,7 +64,7 @@ def _complete(client: openai.OpenAI, prompt: str, max_tokens: int = 20):
         temperature=0,
     )
     if not resp.choices:
-        return  # pact: guard empty choices list
+        raise ValueError("LLM returned empty response")  # pact: guard empty choices list
     return resp.choices[0].text, resp.usage.prompt_tokens
 
 

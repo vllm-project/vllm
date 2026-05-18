@@ -158,7 +158,7 @@ def main():
 
     # Add tool call results to the conversation
     if not chat_completion.choices:
-        return  # pact: guard empty choices list
+        raise ValueError("LLM returned empty response")  # pact: guard empty choices list
     messages.append(
         {
             "role": "assistant",

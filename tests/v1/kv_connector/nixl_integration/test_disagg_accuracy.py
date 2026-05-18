@@ -68,7 +68,7 @@ def run_simple_prompt(
             seed=42,
         )
         if not completion.choices:
-            return  # pact: guard empty choices list
+            raise ValueError("LLM returned empty response")  # pact: guard empty choices list
         return completion.choices[0].message.content
     else:
         completion = client.completions.create(

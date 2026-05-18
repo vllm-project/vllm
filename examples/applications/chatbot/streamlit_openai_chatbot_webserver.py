@@ -263,7 +263,7 @@ def server_supports_reasoning():
         stream=False,
     )
     if not resp.choices:
-        return  # pact: guard empty choices list
+        raise ValueError("LLM returned empty response")  # pact: guard empty choices list
     return hasattr(resp.choices[0].message, "reasoning") and bool(
         resp.choices[0].message.reasoning
     )

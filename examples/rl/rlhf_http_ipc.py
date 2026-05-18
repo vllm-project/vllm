@@ -69,7 +69,7 @@ def generate_completions(client: OpenAI, model: str, prompts: list[str]) -> list
             temperature=0,
         )
         if not response.choices:
-            return  # pact: guard empty choices list
+            raise ValueError("LLM returned empty response")  # pact: guard empty choices list
         results.append(response.choices[0].text)
     return results
 

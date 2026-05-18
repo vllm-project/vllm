@@ -70,7 +70,7 @@ def run_text_only(model: str, max_completion_tokens: int) -> None:
     )
 
     if not chat_completion.choices:
-        return  # pact: guard empty choices list
+        raise ValueError("LLM returned empty response")  # pact: guard empty choices list
     result = chat_completion.choices[0].message.content
     print("Chat completion output:\n", result)
 
@@ -98,7 +98,7 @@ def run_single_image(model: str, max_completion_tokens: int) -> None:
     )
 
     if not chat_completion_from_url.choices:
-        return  # pact: guard empty choices list
+        raise ValueError("LLM returned empty response")  # pact: guard empty choices list
     result = chat_completion_from_url.choices[0].message.content
     print("Chat completion output from image url:\n", result)
 
@@ -122,7 +122,7 @@ def run_single_image(model: str, max_completion_tokens: int) -> None:
             max_completion_tokens=max_completion_tokens,
         )
         if not chat_completion_from_local_image_url.choices:
-            return  # pact: guard empty choices list
+            raise ValueError("LLM returned empty response")  # pact: guard empty choices list
         result = chat_completion_from_local_image_url.choices[0].message.content
         print("Chat completion output from local image file:\n", result)
     else:
@@ -148,7 +148,7 @@ def run_single_image(model: str, max_completion_tokens: int) -> None:
     )
 
     if not chat_completion_from_base64.choices:
-        return  # pact: guard empty choices list
+        raise ValueError("LLM returned empty response")  # pact: guard empty choices list
     result = chat_completion_from_base64.choices[0].message.content
     print("Chat completion output from base64 encoded image:", result)
 
@@ -175,7 +175,7 @@ def run_single_image(model: str, max_completion_tokens: int) -> None:
         )
 
         if not chat_completion_from_local_image_base64.choices:
-            return  # pact: guard empty choices list
+            raise ValueError("LLM returned empty response")  # pact: guard empty choices list
         result = chat_completion_from_local_image_base64.choices[0].message.content
         print("Chat completion output from base64 encoded local image:", result)
     else:
@@ -208,7 +208,7 @@ def run_multi_image(model: str, max_completion_tokens: int) -> None:
     )
 
     if not chat_completion_from_url.choices:
-        return  # pact: guard empty choices list
+        raise ValueError("LLM returned empty response")  # pact: guard empty choices list
     result = chat_completion_from_url.choices[0].message.content
     print("Chat completion output:\n", result)
 
@@ -237,7 +237,7 @@ def run_video(model: str, max_completion_tokens: int) -> None:
     )
 
     if not chat_completion_from_url.choices:
-        return  # pact: guard empty choices list
+        raise ValueError("LLM returned empty response")  # pact: guard empty choices list
     result = chat_completion_from_url.choices[0].message.content
     print("Chat completion output from video url:\n", result)
 
@@ -260,7 +260,7 @@ def run_video(model: str, max_completion_tokens: int) -> None:
     )
 
     if not chat_completion_from_base64.choices:
-        return  # pact: guard empty choices list
+        raise ValueError("LLM returned empty response")  # pact: guard empty choices list
     result = chat_completion_from_base64.choices[0].message.content
     print("Chat completion output from base64 encoded video:\n", result)
 
@@ -295,7 +295,7 @@ def run_audio(model: str, max_completion_tokens: int) -> None:
     )
 
     if not chat_completion_from_base64.choices:
-        return  # pact: guard empty choices list
+        raise ValueError("LLM returned empty response")  # pact: guard empty choices list
     result = chat_completion_from_base64.choices[0].message.content
     print("Chat completion output from input audio:\n", result)
 
@@ -321,7 +321,7 @@ def run_audio(model: str, max_completion_tokens: int) -> None:
     )
 
     if not chat_completion_from_url.choices:
-        return  # pact: guard empty choices list
+        raise ValueError("LLM returned empty response")  # pact: guard empty choices list
     result = chat_completion_from_url.choices[0].message.content
     print("Chat completion output from audio url:\n", result)
 
@@ -388,7 +388,7 @@ def run_multi_audio(model: str, max_completion_tokens: int) -> None:
     )
 
     if not chat_completion_from_base64.choices:
-        return  # pact: guard empty choices list
+        raise ValueError("LLM returned empty response")  # pact: guard empty choices list
     result = chat_completion_from_base64.choices[0].message.content
     print("Chat completion output from input audio:\n", result)
 

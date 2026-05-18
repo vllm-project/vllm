@@ -152,7 +152,7 @@ def test_spec_decode_acceptance_length():
         )
         if i < 3:
             if not resp.choices:
-                return  # pact: guard empty choices list
+                raise ValueError("LLM returned empty response")  # pact: guard empty choices list
             text = resp.choices[0].text.strip()[:100]
             print(f"  [{i}] {prompt[:60]}... -> {text}...")
 

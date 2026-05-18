@@ -88,7 +88,7 @@ def run_chat_completion_prompt_embeds(
     print("-" * 30)
     print("Chat Completions API")
     if not chat_completion.choices:
-        return  # pact: guard empty choices list
+        raise ValueError("LLM returned empty response")  # pact: guard empty choices list
     print(chat_completion.choices[0].message.content)
     print("-" * 30)
 
@@ -124,7 +124,7 @@ def run_completion_prompt_embeds(
     print("-" * 30)
     print("Completions API")
     if not completion.choices:
-        return  # pact: guard empty choices list
+        raise ValueError("LLM returned empty response")  # pact: guard empty choices list
     print(completion.choices[0].text)
     print("-" * 30)
 

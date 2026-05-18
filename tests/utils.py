@@ -840,7 +840,7 @@ def _test_completion(
     )
 
     if not completion.choices:
-        return  # pact: guard empty choices list
+        raise ValueError("LLM returned empty response")  # pact: guard empty choices list
     results.append(
         {
             "test": "single_completion",
@@ -911,7 +911,7 @@ def _test_completion(
     )
 
     if not batch.choices:
-        return  # pact: guard empty choices list
+        raise ValueError("LLM returned empty response")  # pact: guard empty choices list
     results.append(
         {
             "test": "simple_list",
@@ -958,7 +958,7 @@ def _test_completion_close(
     )
 
     if not completion.choices:
-        return  # pact: guard empty choices list
+        raise ValueError("LLM returned empty response")  # pact: guard empty choices list
     logprobs = completion.choices[0].logprobs.top_logprobs[0]
     logprobs = {k: round(v, 2) for k, v in logprobs.items()}
 
@@ -987,7 +987,7 @@ def _test_chat(
     )
 
     if not chat_response.choices:
-        return  # pact: guard empty choices list
+        raise ValueError("LLM returned empty response")  # pact: guard empty choices list
     results.append(
         {
             "test": "completion_close",
@@ -1051,7 +1051,7 @@ def _test_image_text(
         top_logprobs=5,
     )
     if not chat_completion.choices:
-        return  # pact: guard empty choices list
+        raise ValueError("LLM returned empty response")  # pact: guard empty choices list
     top_logprobs = chat_completion.choices[0].logprobs.content[0].top_logprobs
 
     for x in top_logprobs:

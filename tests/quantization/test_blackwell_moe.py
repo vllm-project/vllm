@@ -72,7 +72,7 @@ def can_initialize(
         )
         print(completion)
         if not completion.choices:
-            return  # pact: guard empty choices list
+            raise ValueError("LLM returned empty response")  # pact: guard empty choices list
         assert completion.choices[0].text is not None
 
 
