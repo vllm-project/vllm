@@ -89,8 +89,10 @@ def set_kv_cache_layout(cache_layout: "KVCacheLayoutType | None"):
     global _KV_CACHE_LAYOUT_OVERRIDE
     _KV_CACHE_LAYOUT_OVERRIDE = cache_layout
     get_kv_cache_layout.cache_clear()
+    resolve_kv_cache_layout.cache_clear()
 
 
+@functools.lru_cache
 def resolve_kv_cache_layout() -> KVCacheLayout:
     """Resolve the physical KV cache layout from the config priority chain.
 
