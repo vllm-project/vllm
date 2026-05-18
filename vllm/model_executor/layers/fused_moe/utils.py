@@ -376,17 +376,166 @@ def disable_inplace() -> bool:
     return is_torch_equal_or_newer("2.9")
 
 
-@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
+@triton.jit
+def _pack_topk_flashinfer_kernel(
+    topk_ids_ptr,
+    topk_weights_ptr,
+    packed_ptr,
+    stride_im: tl.constexpr,
+    stride_ik: tl.constexpr,
+    stride_wm: tl.constexpr,
+    stride_wk: tl.constexpr,
+    stride_pm: tl.constexpr,
+    stride_pk: tl.constexpr,
+    TOPK: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offs_k = tl.arange(0, BLOCK_K)
+    mask_k = offs_k < TOPK
+
+    ids = tl.load(
+        topk_ids_ptr + pid * stride_im + offs_k * stride_ik,
+        mask=mask_k,
+        other=0,
+    ).to(tl.int32)
+    weights = tl.load(
+        topk_weights_ptr + pid * stride_wm + offs_k * stride_wk,
+        mask=mask_k,
+        other=0.0,
+    ).to(tl.float32)
+
+    weights_bits = weights.to(tl.bfloat16).to(tl.int16, bitcast=True).to(tl.int32)
+    packed = (ids << 16) | weights_bits
+
+    tl.store(
+        packed_ptr + pid * stride_pm + offs_k * stride_pk,
+        packed,
+        mask=mask_k,
+    )
+
+
 def trtllm_moe_pack_topk_ids_weights(
     topk_ids: torch.Tensor, topk_weights: torch.Tensor
 ) -> torch.Tensor:
-    """
-    Pack topk_ids and topk_weights into a single int32 tensor.
-    Format: (expert_id << 16) | weight_bf16.view(int16)
-    """
-    return (topk_ids.to(torch.int32) << 16) | topk_weights.to(torch.bfloat16).view(
-        torch.int16
+    assert topk_ids.shape == topk_weights.shape
+    num_tokens, topk = topk_ids.shape
+    packed = torch.empty(
+        (num_tokens, topk), dtype=torch.int32, device=topk_ids.device
     )
+    if num_tokens == 0:
+        return packed
+
+    block_k = triton.next_power_of_2(topk)
+    _pack_topk_flashinfer_kernel[(num_tokens,)](
+        topk_ids,
+        topk_weights,
+        packed,
+        stride_im=topk_ids.stride(0),
+        stride_ik=topk_ids.stride(1),
+        stride_wm=topk_weights.stride(0),
+        stride_wk=topk_weights.stride(1),
+        stride_pm=packed.stride(0),
+        stride_pk=packed.stride(1),
+        TOPK=topk,
+        BLOCK_K=block_k,
+        num_warps=1,
+    )
+    return packed
+
+
+@triton.jit
+def _fused_topk_softmax_pack_flashinfer_kernel(
+    gating_ptr,
+    packed_ptr,
+    stride_gm: tl.constexpr,
+    stride_gn: tl.constexpr,
+    stride_pm: tl.constexpr,
+    stride_pk: tl.constexpr,
+    N_EXPERTS: tl.constexpr,
+    TOPK: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    RENORMALIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+
+    offs_n = tl.arange(0, BLOCK_N)
+    mask_n = offs_n < N_EXPERTS
+
+    row = tl.load(
+        gating_ptr + pid * stride_gm + offs_n * stride_gn,
+        mask=mask_n,
+        other=-float("inf"),
+    ).to(tl.float32)
+
+    topk_vals = tl.full((BLOCK_K,), -float("inf"), dtype=tl.float32)
+    topk_ids = tl.full((BLOCK_K,), 0, dtype=tl.int32)
+    ks = tl.arange(0, BLOCK_K)
+
+    cur_row = row
+    for k in tl.static_range(TOPK):
+        cur_max = tl.max(cur_row, axis=0)
+        cur_arg = tl.argmax(cur_row, axis=0).to(tl.int32)
+        topk_vals = tl.where(ks == k, cur_max, topk_vals)
+        topk_ids = tl.where(ks == k, cur_arg, topk_ids)
+        cur_row = tl.where(offs_n == cur_arg, -float("inf"), cur_row)
+
+    valid_k = ks < TOPK
+    if RENORMALIZE:
+        masked = tl.where(valid_k, topk_vals, -float("inf"))
+        v_max = tl.max(masked, axis=0)
+        ev = tl.where(valid_k, tl.exp(masked - v_max), 0.0)
+        ev_sum = tl.sum(ev, axis=0)
+        topk_weights = ev / ev_sum
+    else:
+        topk_weights = topk_vals
+
+    weights_bf16 = topk_weights.to(tl.bfloat16)
+    weights_bits = weights_bf16.to(tl.int16, bitcast=True).to(tl.int32)
+    packed = (topk_ids << 16) | weights_bits
+
+    tl.store(
+        packed_ptr + pid * stride_pm + ks * stride_pk,
+        packed,
+        mask=valid_k,
+    )
+
+
+def fused_topk_softmax_pack_flashinfer(
+    gating_output: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+) -> torch.Tensor:
+    assert gating_output.dim() == 2
+    num_tokens, num_experts = gating_output.shape
+    assert 0 < topk <= num_experts
+
+    packed = torch.empty(
+        (num_tokens, topk), dtype=torch.int32, device=gating_output.device
+    )
+    if num_tokens == 0:
+        return packed
+
+    block_n = triton.next_power_of_2(num_experts)
+    block_k = triton.next_power_of_2(topk)
+    num_warps = 4 if block_n <= 256 else 8
+
+    _fused_topk_softmax_pack_flashinfer_kernel[(num_tokens,)](
+        gating_output,
+        packed,
+        stride_gm=gating_output.stride(0),
+        stride_gn=gating_output.stride(1),
+        stride_pm=packed.stride(0),
+        stride_pk=packed.stride(1),
+        N_EXPERTS=num_experts,
+        TOPK=topk,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+        RENORMALIZE=renormalize,
+        num_warps=num_warps,
+    )
+    return packed
 
 
 @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
