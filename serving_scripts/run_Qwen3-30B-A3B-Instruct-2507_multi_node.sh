@@ -7,7 +7,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=512G
-#SBATCH --time=00:30:00
+#SBATCH --time=01:00:00
 #SBATCH --output=results/%x-%j.out
 #SBATCH --error=results/%x-%j.err
 #SBATCH --mail-user=jason.miller@eng.ox.ac.uk
@@ -19,7 +19,7 @@ set -euo pipefail
 
 SCRIPT_VERSION="arc-ray-qwen3-30b-a3b-instruct"
 
-# Set DEBUG_SLURM_SCRIPT=1 for extra diagnostics (DNS probes, PATH, ray location).
+# Set DEBUG_SLURM_SCRIPT=1 for extra diagnostics.
 DEBUG_SLURM_SCRIPT="${DEBUG_SLURM_SCRIPT:-0}"
 slurm_debug() {
   if [ "${DEBUG_SLURM_SCRIPT}" = "1" ]; then
@@ -33,8 +33,11 @@ SP="${SP:-128}"
 SD="${SD:-128}"
 export NSYS_ENABLE="${NSYS_ENABLE:-1}"
 
-export HEAD_NODE=$(scontrol show hostnames $SLURM_NODELIST | head -n1)
-export WORKER_NODES=$(scontrol show hostnames $SLURM_NODELIST | tail -n+2)
+export HEAD_NODE
+HEAD_NODE=$(scontrol show hostnames "${SLURM_NODELIST}" | head -n1)
+
+export WORKER_NODES
+WORKER_NODES=$(scontrol show hostnames "${SLURM_NODELIST}" | tail -n+2)
 
 echo "=== vLLM multi-node host job ==="
 echo "SCRIPT_VERSION=${SCRIPT_VERSION}"
@@ -63,10 +66,12 @@ resolve_host_ip() {
   if [ -n "${ip}" ]; then
     method="dig_ipv4"
   fi
+
   if [ -z "${ip}" ]; then
     ip=$(getent hosts "${nodename}" 2>/dev/null | awk '{print $1}' | pick_ipv4 || true)
     [ -n "${ip}" ] && method="getent_ipv4"
   fi
+
   if [ -z "${ip}" ]; then
     ip=$(
       srun --nodelist="${nodename}" --nodes=1 --ntasks=1 \
@@ -132,9 +137,11 @@ configure_socket_ifnames() {
     echo "Ignoring GLOO_SOCKET_IFNAME=${iface}; it does not own ${target_ip} on $(hostname)." >&2
     iface=""
   fi
+
   if [ -z "${iface}" ]; then
     iface="$(interface_for_ip "${target_ip}")"
   fi
+
   if [ -z "${iface}" ]; then
     echo "Error: could not find a network interface for ${target_ip} on $(hostname)." >&2
     ip -o -4 addr show >&2 || true
@@ -142,6 +149,7 @@ configure_socket_ifnames() {
   fi
 
   export GLOO_SOCKET_IFNAME="${iface}"
+
   if [ "${set_nccl}" = "1" ]; then
     local nccl_iface="${NCCL_SOCKET_IFNAME:-}"
     if [ -n "${nccl_iface}" ] && ! interface_has_ip "${nccl_iface}" "${target_ip}"; then
@@ -151,16 +159,19 @@ configure_socket_ifnames() {
     export NCCL_SOCKET_IFNAME="${nccl_iface:-${iface}}"
   fi
 
-  echo "Socket interface for ${target_ip} on $(hostname): GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME} NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNA
-ME:-<unset>}"
+  echo "Socket interface for ${target_ip} on $(hostname): GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME} NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-<unset>}"
 }
 
-export HEAD_NODE_IP="$(resolve_host_ip "${HEAD_NODE}")"
+export HEAD_NODE_IP
+HEAD_NODE_IP="$(resolve_host_ip "${HEAD_NODE}")"
+
 if [ -z "${HEAD_NODE_IP}" ]; then
   echo "Error: could not resolve an IPv4 address for head node ${HEAD_NODE}." >&2
   exit 1
 fi
+
 echo "HEAD_NODE_IP=${HEAD_NODE_IP}"
+
 export VLLM_HOST_IP="${HEAD_NODE_IP}"
 echo "VLLM_HOST_IP=${VLLM_HOST_IP}"
 configure_socket_ifnames "${HEAD_NODE_IP}" 0
@@ -217,12 +228,12 @@ echo "Expected copied Ray worker Nsight destination: ${TRACE_RUN_DIR}/ray_worker
 echo "nsys path: $(command -v nsys || echo '<not found>')"
 nsys --version || true
 
-
 if [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
   REPO_ROOT="${SLURM_SUBMIT_DIR}"
 else
   REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fi
+
 VENV_DIR="${REPO_ROOT}/.venv"
 echo "REPO_ROOT=${REPO_ROOT}"
 echo "VENV_DIR=${VENV_DIR}"
@@ -230,11 +241,13 @@ echo "VENV_DIR=${VENV_DIR}"
 if [ ! -d "${VENV_DIR}" ]; then
   python3 -m venv "${VENV_DIR}"
 fi
+
 source "${VENV_DIR}/bin/activate"
 
 PYTHON_PATH="$(command -v python)"
 EXPECTED_PYTHON="${VENV_DIR}/bin/python"
 echo "Using python: ${PYTHON_PATH}"
+
 if [ "${PYTHON_PATH}" != "${EXPECTED_PYTHON}" ]; then
   echo "Error: python did not resolve to venv interpreter." >&2
   echo "Expected: ${EXPECTED_PYTHON}" >&2
@@ -249,9 +262,11 @@ slurm_debug "pip install starting (cuda + build + editable vllm)..."
 python -m pip install -U pip
 python -m pip install -r "${REPO_ROOT}/requirements/cuda.txt"
 python -m pip install -r "${REPO_ROOT}/requirements/build/cuda.txt"
+
 RAY_REQUIREMENT="${RAY_REQUIREMENT:-ray[cgraph]>=2.48.0}"
 echo "Installing Ray requirement: ${RAY_REQUIREMENT}"
 python -m pip install "${RAY_REQUIREMENT}"
+
 (
   cd "${REPO_ROOT}" || exit 1
   export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED:-1}"
@@ -264,6 +279,7 @@ if [ ! -x "${RAY_BIN}" ]; then
   echo "Hint: source \"${VENV_DIR}/bin/activate\" && python -m pip install ray" >&2
   exit 1
 fi
+
 echo "Using RAY_BIN=${RAY_BIN}"
 echo "Ray binary for head/workers: ${RAY_BIN}"
 echo "Ray address for workers: ${RAY_ADDRESS}"
@@ -294,11 +310,13 @@ echo "NCCL_IB_DISABLE=${NCCL_IB_DISABLE} NCCL_NET=${NCCL_NET} NCCL_IB_HCA=${NCCL
 echo "NCCL_SOCKET_FAMILY=${NCCL_SOCKET_FAMILY} NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME}"
 echo "NCCL_DEBUG=${NCCL_DEBUG} NCCL_DEBUG_SUBSYS=${NCCL_DEBUG_SUBSYS}"
 echo "SERVE_SCRIPT=${SERVE_SCRIPT}"
+
 if [ -n "${HF_TOKEN:-}" ]; then
   echo "HF_TOKEN is set"
 else
   echo "HF_TOKEN is not set"
 fi
+
 slurm_debug "VLLM_TARGET_DEVICE=${VLLM_TARGET_DEVICE} VLLM_USE_DEEP_GEMM=${VLLM_USE_DEEP_GEMM}"
 
 SERVER_STEP_PID=""
@@ -310,10 +328,12 @@ cleanup() {
     kill "${SERVER_STEP_PID}" 2>/dev/null || true
     wait "${SERVER_STEP_PID}" 2>/dev/null || true
   fi
+
   if [ -n "${HEAD_RAY_PID}" ] && kill -0 "${HEAD_RAY_PID}" 2>/dev/null; then
     kill "${HEAD_RAY_PID}" 2>/dev/null || true
     wait "${HEAD_RAY_PID}" 2>/dev/null || true
   fi
+
   for pid in ${WORKER_RAY_PIDS}; do
     if kill -0 "${pid}" 2>/dev/null; then
       kill "${pid}" 2>/dev/null || true
@@ -327,6 +347,7 @@ echo "=== Ray head (background srun) ==="
 echo "Starting head node ${HEAD_NODE} (HEAD_RAY_PID will be set)..."
 echo "Head Ray node ${HEAD_NODE} expected session root: /tmp/ray/session_latest"
 echo "Head Ray node ${HEAD_NODE} expected Nsight worker log dir: /tmp/ray/session_latest/logs/nsight"
+
 RAY_HEAD_CMD="$(
   declare -f interface_for_ip
   declare -f interface_has_ip
@@ -336,6 +357,7 @@ source \"${VENV_DIR}/bin/activate\"
 unset GLOO_SOCKET_IFNAME
 export VLLM_HOST_IP=${HEAD_NODE_IP}
 configure_socket_ifnames \"${HEAD_NODE_IP}\" 0
+
 echo \"Ray head host: \$(hostname) node=${HEAD_NODE} VLLM_HOST_IP=\${VLLM_HOST_IP}\"
 echo \"Ray head TMPDIR=\${TMPDIR:-<unset>} RAY_TMPDIR=\${RAY_TMPDIR:-<unset>}\"
 echo \"Ray head expected session root: /tmp/ray/session_latest\"
@@ -366,6 +388,7 @@ else
     --num-gpus=${GPUS_PER_NODE} \\
     --num-cpus=${CPUS_PER_TASK}
 fi"
+
 srun \
   --nodelist "${HEAD_NODE}" \
   --nodes=1 \
@@ -374,6 +397,7 @@ srun \
   --gpus-per-task="${GPUS_PER_NODE}" \
   --cpus-per-task="${CPUS_PER_TASK}" \
   bash -lc "${RAY_HEAD_CMD}" &
+
 HEAD_RAY_PID=$!
 echo "HEAD_RAY_PID=${HEAD_RAY_PID}"
 sleep 20
@@ -381,15 +405,19 @@ sleep 20
 if [ -n "${WORKER_NODES}" ]; then
   echo "=== Ray workers ==="
   echo "Starting worker nodes..."
+
   for WORKER in ${WORKER_NODES}; do
     WORKER_IP="$(resolve_host_ip "${WORKER}")"
+
     if [ -z "${WORKER_IP}" ]; then
       echo "Error: could not resolve IP for worker ${WORKER}." >&2
       exit 1
     fi
+
     echo "Starting worker node: ${WORKER} with IP ${WORKER_IP}"
     echo "Worker Ray node ${WORKER} expected session root: /tmp/ray/session_latest"
     echo "Worker Ray node ${WORKER} expected Nsight worker log dir: /tmp/ray/session_latest/logs/nsight"
+
     RAY_WORKER_CMD="$(
       declare -f interface_for_ip
       declare -f interface_has_ip
@@ -399,6 +427,7 @@ source \"${VENV_DIR}/bin/activate\"
 unset GLOO_SOCKET_IFNAME
 export VLLM_HOST_IP=${WORKER_IP}
 configure_socket_ifnames \"${WORKER_IP}\" 0
+
 echo \"Ray worker host: \$(hostname) node=${WORKER} VLLM_HOST_IP=\${VLLM_HOST_IP}\"
 echo \"Ray worker TMPDIR=\${TMPDIR:-<unset>} RAY_TMPDIR=\${RAY_TMPDIR:-<unset>}\"
 echo \"Ray worker expected session root: /tmp/ray/session_latest\"
@@ -427,6 +456,7 @@ else
     --num-gpus=${GPUS_PER_NODE} \\
     --num-cpus=${CPUS_PER_TASK}
 fi"
+
     srun \
       --nodelist "${WORKER}" \
       --nodes=1 \
@@ -435,15 +465,18 @@ fi"
       --gpus-per-task="${GPUS_PER_NODE}" \
       --cpus-per-task="${CPUS_PER_TASK}" \
       bash -lc "${RAY_WORKER_CMD}" &
+
     WORKER_RAY_PIDS="${WORKER_RAY_PIDS} $!"
     echo "Worker Ray step pid: $! (WORKER_RAY_PIDS=${WORKER_RAY_PIDS})"
   done
+
   sleep 20
 fi
 
 echo "=== ray status ==="
 echo "Checking cluster status..."
 "${RAY_BIN}" status || echo "Warning: ray status failed; continuing with Python Ray node check."
+
 python - <<'PY'
 import ray
 
@@ -457,6 +490,7 @@ for node in nodes:
         f"resources={node.get('Resources')}"
     )
 PY
+
 echo "=== vLLM api_server (background process) ==="
 echo "Starting vLLM server on head node..."
 
@@ -468,6 +502,7 @@ if [ "${NSYS_ENABLE}" = "1" ] && [ "${NSYS_PROFILE_SERVER}" = "1" ]; then
     --enable-logging-iteration-details
   )
 fi
+
 echo "VLLM_TRACE_FLAGS=${VLLM_TRACE_FLAGS[*]:-<none>}"
 echo "When --ray-workers-use-nsight is active, check Ray worker Nsight logs under /tmp/ray/session_latest/logs/nsight on htc-g059 and htc-g060"
 
@@ -515,16 +550,20 @@ until curl -fsS "http://${HEAD_NODE_IP}:${PORT}/health" >/dev/null 2>&1; do
     wait "${SERVER_STEP_PID}" || true
     exit 1
   fi
+
   _health_wait_n=$((_health_wait_n + 1))
-  # Every ~60s by default; every loop if DEBUG_SLURM_SCRIPT=1
+
   if [ "${DEBUG_SLURM_SCRIPT}" = "1" ] || [ "$((_health_wait_n % 12))" -eq 0 ]; then
     echo "Still waiting for http://${HEAD_NODE_IP}:${PORT}/health (attempt ${_health_wait_n}) ..."
   fi
+
   sleep 5
 done
 unset _health_wait_n
+
 echo "Server is healthy. Running ${SERVE_SCRIPT} ..."
 echo "SP=${SP} SD=${SD}"
+
 HOST="${HEAD_NODE_IP}" PORT="${PORT}" MODEL_ID="${MODEL_ID}" \
   SP="${SP}" SD="${SD}" \
   HEAD_NODE_IP="${HEAD_NODE_IP}" \
@@ -546,6 +585,7 @@ copy_ray_nsight_from_node() {
   local NODE="$1"
   echo "Probing ${NODE} for Ray worker Nsight logs at /tmp/ray/session_latest/logs/nsight"
   echo "Destination for ${NODE}: ${TRACE_RUN_DIR}/ray_worker_nsight/${NODE}"
+
   srun \
     --nodelist "${NODE}" \
     --overlap \
@@ -555,11 +595,14 @@ copy_ray_nsight_from_node() {
     --cpus-per-task=1 \
     bash -lc "
       mkdir -p '${TRACE_RUN_DIR}/ray_worker_nsight/${NODE}'
+
       echo 'Ray Nsight probe node ${NODE}: host='\"\$(hostname)\"
       echo 'Ray Nsight probe node ${NODE}: source=/tmp/ray/session_latest/logs/nsight'
       echo 'Ray Nsight probe node ${NODE}: destination=${TRACE_RUN_DIR}/ray_worker_nsight/${NODE}'
+
       if [ -d /tmp/ray/session_latest/logs/nsight ]; then
         echo 'Found /tmp/ray/session_latest/logs/nsight on ${NODE}'
+        find /tmp/ray/session_latest/logs/nsight -maxdepth 1 -type f -printf '%p %s bytes\n' 2>/dev/null || true
         cp -v /tmp/ray/session_latest/logs/nsight/*.nsys-rep \
           '${TRACE_RUN_DIR}/ray_worker_nsight/${NODE}/' 2>/dev/null || true
       else
@@ -579,6 +622,7 @@ echo "Recursive /tmp/ray listings from Ray nodes..."
 print_tmp_ray_from_node() {
   local NODE="$1"
   echo "Printing recursive /tmp/ray listing from ${NODE}"
+
   srun \
     --nodelist "${NODE}" \
     --overlap \
@@ -588,6 +632,7 @@ print_tmp_ray_from_node() {
     --cpus-per-task=1 \
     bash -lc "
       echo '=== /tmp/ray recursive listing on ${NODE} host='\"\$(hostname)\"' ==='
+
       if [ -d /tmp/ray ]; then
         find /tmp/ray -printf '%M %u %g %s bytes %TY-%Tm-%Td %TH:%TM:%TS %p\n' 2>/dev/null | sort || true
       else
