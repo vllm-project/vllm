@@ -1167,7 +1167,12 @@ def _sparse_attn_decode_ragged_kernel(
     NOPE_DIM: tl.constexpr,
     NOPE_BLOCK: tl.constexpr,
     ROPE_DIM: tl.constexpr,
-    IS_FNUZ: tl.constexpr,
+    # `main_cache` is the SWA K-cache (written by the C++ encoder, FNUZ on
+    # gfx942 / OCP on gfx950). `extra_cache` is the compressed K-cache
+    # (Triton encoder, OCP on every platform). Reading both with the same
+    # `IS_FNUZ` would mis-decode one of them by the FNUZ/OCP scale ratio.
+    IS_FNUZ_MAIN: tl.constexpr,
+    IS_FNUZ_EXTRA: tl.constexpr,
     BLOCK_H: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
@@ -1224,7 +1229,7 @@ def _sparse_attn_decode_ragged_kernel(
             mask=valid[:, None] & nope_mask[None, :],
             other=0,
         )
-        if IS_FNUZ:
+        if IS_FNUZ_MAIN:
             x_fp8 = x_uint8.to(tl.float8e4b8, bitcast=True)
         else:
             x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
@@ -1292,7 +1297,7 @@ def _sparse_attn_decode_ragged_kernel(
                 mask=valid[:, None] & nope_mask[None, :],
                 other=0,
             )
-            if IS_FNUZ:
+            if IS_FNUZ_EXTRA:
                 x_fp8 = x_uint8.to(tl.float8e4b8, bitcast=True)
             else:
                 x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
@@ -1570,7 +1575,12 @@ def _rocm_sparse_attn_decode_ragged_triton(
         NOPE_DIM=nope_head_dim,
         NOPE_BLOCK=triton.next_power_of_2(nope_head_dim),
         ROPE_DIM=rope_head_dim,
-        IS_FNUZ=current_platform.is_fp8_fnuz(),
+        # main_cache = swa_k_cache (C++ encoder, FNUZ on gfx942 / OCP on gfx950).
+        # extra_cache = compressed kv_cache (Triton encoder, OCP everywhere).
+        # Reading both with a single IS_FNUZ would mis-decode one of them by
+        # the FNUZ/OCP scale ratio (~1.87×).
+        IS_FNUZ_MAIN=current_platform.is_fp8_fnuz(),
+        IS_FNUZ_EXTRA=False,
         BLOCK_H=block_h,
         BLOCK_K=block_k,
         num_warps=8,

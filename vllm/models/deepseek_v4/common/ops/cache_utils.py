@@ -369,7 +369,28 @@ def dequantize_and_gather_k_cache(
     block_table: torch.Tensor,
     block_size: int,
     offset: int,
+    use_fnuz: bool = False,
 ) -> None:
+    """Dequantize and gather a paged DSv4 K cache.
+
+    ``use_fnuz`` selects which Triton FP8 dtype is used to bitcast the stored
+    bytes back to floats. It MUST match the encoder that wrote into this
+    particular cache:
+
+    * ``compressed_k_cache``: Triton encoders in ``cache_utils.py`` /
+      ``fused_compress_quant_cache.py`` always use ``tl.float8e4nv`` (OCP,
+      bias 7, FP8_MAX=448) regardless of platform, so the reader must use
+      ``use_fnuz=False`` everywhere.
+    * ``swa_k_cache``: written by the C++ kernel
+      ``fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert``. After PR #42893
+      that kernel encodes FNUZ E4M3 on gfx942 (MI300X, FP8_MAX=240) and OCP
+      on gfx950, so the reader must use
+      ``use_fnuz=current_platform.is_fp8_fnuz()``.
+
+    Mismatching the two -- e.g. reading FNUZ bytes as OCP -- silently
+    rescales every K vector by ~448/240 ≈ 1.87 and produces gibberish in
+    sparse attention.
+    """
     if has_cutedsl():
         # lazily import, otherwise some tests fail due to CUDA driver init failure.
         from vllm.models.deepseek_v4.nvidia.ops.dequant_gather_k_cutedsl import (
@@ -382,7 +403,14 @@ def dequantize_and_gather_k_cache(
         return
 
     dequantize_and_gather_k_cache_triton(
-        out, k_cache, seq_lens, gather_lens, block_table, block_size, offset
+        out,
+        k_cache,
+        seq_lens,
+        gather_lens,
+        block_table,
+        block_size,
+        offset,
+        use_fnuz=use_fnuz,
     )
 
 
