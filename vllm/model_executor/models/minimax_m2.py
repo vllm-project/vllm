@@ -37,7 +37,6 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_reduce,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
@@ -312,23 +311,15 @@ class MiniMaxM2DecoderLayer(nn.Module):
         residual: torch.Tensor | None,
     ) -> torch.Tensor:
         # Deferred AR: the previous MoE skipped cross_device_reduce_1stage,
-        # so hidden_states is partial.  Do the TP allreduce here right
-        # before input_layernorm, so torch.compile Pattern 1
-        # (AllReduceFusedAddRMSNormPattern) can fuse AR + residual + RMSNorm
-        # into trtllm_allreduce_fusion(kARResidualRMSNorm).
+        # so hidden_states is partial.  Use forward_with_allreduce_fusion to
+        # fuse AR + residual + RMSNorm directly via FlashInfer, bypassing
+        # torch.compile pattern matching (which breaks when fused_add_rms_norm
+        # is decomposed to native ops, e.g. under rms_norm=['native'] priority).
         if self._defer_ar and residual is not None and hidden_states.shape[0] <= 128:
-            hidden_states = tensor_model_parallel_all_reduce(hidden_states)
-            if not torch.compiler.is_compiling():
-                logger.info_once(
-                    "MoE deferred AR in decoder layer %s: allreduce before "
-                    "input_layernorm, num_tokens=%s",
-                    self.layer_idx,
-                    hidden_states.shape[0],
-                    scope="moe_defer_layer_forward",
-                )
-
-        # Self Attention
-        if residual is None:
+            hidden_states, residual = self.input_layernorm.forward_with_allreduce_fusion(
+                hidden_states, residual
+            )
+        elif residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
@@ -458,16 +449,17 @@ class MiniMaxM2Model(nn.Module, EagleModelMixin):
             and get_pp_group().is_last_rank
         )
         if last_layer_fused:
-            # Do the deferred allreduce before self.norm; Pattern 1
-            # fuses allreduce + fused_add_rms_norm into a single kernel.
-            hidden_states = tensor_model_parallel_all_reduce(hidden_states)
+            hidden_states, _ = self.norm.forward_with_allreduce_fusion(
+                hidden_states, residual
+            )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
 
-        hidden_states, _ = self.norm(hidden_states, residual)
+        if not last_layer_fused:
+            hidden_states, _ = self.norm(hidden_states, residual)
 
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states

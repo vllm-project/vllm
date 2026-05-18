@@ -122,6 +122,76 @@ class RMSNorm(CustomOp):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         return self.forward_cuda(x, residual)
 
+    @torch.compiler.disable
+    def forward_with_allreduce_fusion(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Fuse TP allreduce + residual add + RMSNorm into one Lamport kernel.
+
+        Directly calls FlashInfer trtllm allreduce_fusion, bypassing
+        torch.compile pattern matching. Required when ``fused_add_rms_norm``
+        is decomposed to native ops (e.g. ``rms_norm=['native']`` priority),
+        which prevents Pattern 1 from matching in the Inductor pass.
+
+        Falls back to explicit allreduce + forward_native when FlashInfer is
+        unavailable, tp_size <= 1, or workspace allocation fails.
+        """
+        try:
+            import flashinfer.comm as fi_comm
+        except ImportError:
+            return self._allreduce_then_norm(x, residual)
+
+        from vllm.distributed import (
+            get_tensor_model_parallel_rank,
+            get_tensor_model_parallel_world_size,
+        )
+        from vllm.distributed.device_communicators.flashinfer_all_reduce import (
+            get_fi_ar_workspace,
+        )
+        from vllm.distributed.parallel_state import get_tp_group
+
+        tp_size = get_tensor_model_parallel_world_size()
+        if tp_size <= 1:
+            return self._allreduce_then_norm(x, residual)
+
+        workspace = get_fi_ar_workspace(
+            world_size=tp_size,
+            rank=get_tensor_model_parallel_rank(),
+            max_token_num=x.shape[0],
+            hidden_dim=self.hidden_size,
+            dtype=x.dtype,
+            group=get_tp_group().device_group,
+        )
+        if workspace is None:
+            return self._allreduce_then_norm(x, residual)
+
+        fi_comm.allreduce_fusion(
+            input=x,
+            workspace=workspace,
+            pattern=fi_comm.AllReduceFusionPattern.kARResidualRMSNorm,
+            launch_with_pdl=True,
+            use_oneshot=True,
+            fp32_acc=True,
+            residual_in=residual,
+            residual_out=residual,
+            norm_out=x,
+            rms_gamma=self.weight.data,
+            rms_eps=self.variance_epsilon,
+        )
+        return x, residual
+
+    def _allreduce_then_norm(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        from vllm.distributed import tensor_model_parallel_all_reduce
+
+        x = tensor_model_parallel_all_reduce(x)
+        return self.forward_native(x, residual)
+
     def extra_repr(self) -> str:
         s = f"hidden_size={self.weight.data.size(0)}"
         s += f", eps={self.variance_epsilon}"
