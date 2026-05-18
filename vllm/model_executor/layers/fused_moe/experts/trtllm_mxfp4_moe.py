@@ -343,6 +343,7 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
             # the TRTLLM C++ kernel supports.
             "routing_method_type": RoutingMethodType.Renormalize,
             "do_finalize": True,
+            "enable_pdl": True,
             "output": output,
             "tune_max_num_tokens": max(self.max_capture_size, 1),
         }
