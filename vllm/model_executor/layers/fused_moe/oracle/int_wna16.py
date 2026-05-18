@@ -27,7 +27,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 
 if TYPE_CHECKING:
-    from vllm.model_executor.layers.quantization.gptq_marlin import GPTQMarlinConfig
+    from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 
 logger = init_logger(__name__)
 
@@ -154,7 +154,6 @@ def make_wna16_moe_kernel(
     w13_g_idx_sort_indices: torch.Tensor | None,
     w2_g_idx_sort_indices: torch.Tensor | None,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    shared_experts: torch.nn.Module | None = None,
 ) -> mk.FusedMoEKernel:
     # Currently, we only support MarlinExperts and BatchedMarlinExperts
     assert experts_cls in (MarlinExperts, BatchedMarlinExperts)
@@ -202,7 +201,6 @@ def make_wna16_moe_kernel(
     return mk.FusedMoEKernel(
         prepare_finalize,
         experts,
-        shared_experts=shared_experts,
         inplace=not moe_config.disable_inplace,
     )
 
@@ -214,7 +212,7 @@ def make_wna16_moe_kernel(
 
 def _process_weights_marlin(
     layer: torch.nn.Module,
-    quant_config: "GPTQMarlinConfig",
+    quant_config: "AutoGPTQConfig",
     input_dtype: torch.dtype | None,
     w13_qweight: torch.Tensor,
     w2_qweight: torch.Tensor,
@@ -419,13 +417,13 @@ def convert_to_wna16_moe_kernel_format(
         WNA16MoEBackend.MARLIN,
         WNA16MoEBackend.BATCHED_MARLIN,
     ):
-        from vllm.model_executor.layers.quantization.gptq_marlin import (
-            GPTQMarlinConfig,
+        from vllm.model_executor.layers.quantization.auto_gptq import (
+            AutoGPTQConfig,
         )
 
-        if not isinstance(quant_config, GPTQMarlinConfig):
+        if not isinstance(quant_config, AutoGPTQConfig):
             raise TypeError(
-                "Marlin WNA16 MoE backend requires GPTQMarlinConfig, got "
+                "Marlin WNA16 MoE backend requires AutoGPTQConfig, got "
                 f"{type(quant_config).__name__}."
             )
         return _process_weights_marlin(

@@ -258,9 +258,12 @@ def test_concurrent_lookups_of_the_same_prefix(request_runner, async_scheduling:
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output(keys)
     )
+    # With sync scheduling, all-finished flush fires within this run.
+    # With async scheduling, the finish is delayed so flush fires later.
     runner.run(
         decoded_tokens=[EOS_TOKEN_ID],
         expected_stored=(0, 1, 2),
+        expected_flushed=(0, 1, 2) if not async_scheduling else (),
     )
 
     # start a request to load the first block, but don't complete
@@ -325,6 +328,7 @@ def test_abort_loading_requests(request_runner, async_scheduling: bool):
     runner.run(
         decoded_tokens=[EOS_TOKEN_ID],
         expected_stored=(0, 1, 2),
+        expected_flushed=(0, 1, 2) if not async_scheduling else (),
     )
 
     # start a request to load the first block, but don't complete
@@ -351,6 +355,7 @@ def test_abort_loading_requests(request_runner, async_scheduling: bool):
     runner.run(
         decoded_tokens=[],
         expected_loaded=(0, 1, 2),
+        expected_flushed=(0, 1, 2),
     )
 
     # assert request is deleted
@@ -627,7 +632,7 @@ def _make_scheduler_with_lookup(
     return scheduler
 
 
-_EMPTY_REQ_CTX = ReqContext()
+_EMPTY_REQ_CTX = ReqContext(req_id="")
 
 
 class TestMaximalPrefixLookup:
@@ -766,7 +771,11 @@ def test_do_remote_decode_stores_all_blocks(request_runner, async_scheduling: bo
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output(keys)
     )
-    runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_stored=(0, 1, 2))
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored=(0, 1, 2),
+        expected_flushed=(0, 1, 2) if not async_scheduling else (),
+    )
 
     # Reset GPU prefix cache so the next request must load from CPU.
     runner.scheduler.reset_prefix_cache()
@@ -831,8 +840,13 @@ def test_fence_at_update_state_after_alloc(request_runner):
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output(keys)
     )
-    runner.run(decoded_tokens=[EOS_TOKEN_ID], complete_transfers=False)
-    assert runner.connector_scheduler._block_id_to_pending_jobs
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        complete_transfers=False,
+        expected_stored=(0,),
+        expected_flushed=(0,),
+    )
+    assert runner.connector_scheduler._block_id_to_pending_jobs == {}
 
     runner.scheduler.reset_prefix_cache()
     runner.new_request(token_ids=[0] * 4)
@@ -843,8 +857,6 @@ def test_fence_at_update_state_after_alloc(request_runner):
     runner.run(
         decoded_tokens=[],
         complete_transfers=False,
-        expected_stored=(0,),
-        expected_flushed=(0,),
     )
     assert runner.connector_scheduler._block_id_to_pending_jobs == {}
 
@@ -864,8 +876,13 @@ def test_fence_at_build_store_jobs(request_runner):
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output(keys)
     )
-    runner.run(decoded_tokens=[EOS_TOKEN_ID], complete_transfers=False)
-    assert runner.connector_scheduler._block_id_to_pending_jobs
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        complete_transfers=False,
+        expected_stored=(0,),
+        expected_flushed=(0,),
+    )
+    assert runner.connector_scheduler._block_id_to_pending_jobs == {}
 
     runner.scheduler.reset_prefix_cache()
     runner.new_request(token_ids=[1] * 4)
@@ -875,8 +892,6 @@ def test_fence_at_build_store_jobs(request_runner):
     )
     runner.run(
         decoded_tokens=[EOS_TOKEN_ID],
-        expected_stored=(0,),
-        expected_flushed=(0,),
     )
     assert runner.connector_scheduler._block_id_to_pending_jobs == {}
 
@@ -919,3 +934,110 @@ def test_complete_store_called_per_job(request_runner, async_scheduling: bool):
     # Finish: no store pending -> no further call.
     runner.run(decoded_tokens=[EOS_TOKEN_ID])
     assert runner.manager.complete_store.call_count == 0
+
+
+def test_flush_all_jobs_when_no_requests_remain(request_runner):
+    """When all tracked requests are finished, build_connector_meta flushes
+    all pending jobs since there will be no future step to complete them."""
+    block_size = 4
+    block_size_factor = 1
+    offloaded_block_size = block_size * block_size_factor
+
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=100,
+        async_scheduling=False,
+        block_size_factor=block_size_factor,
+    )
+
+    runner.new_request(token_ids=[0] * offloaded_block_size)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        complete_transfers=False,
+        expected_stored=(0,),
+        expected_flushed=(0,),
+    )
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_reset_cache(request_runner, async_scheduling: bool):
+    """reset_cache flushes in-flight loads, calls manager.reset_cache(), resets
+    next_stored_block_idx for active requests and clears job tracking."""
+    block_size = 4
+    block_size_factor = 3
+    offloaded_block_size = block_size * block_size_factor
+    num_gpu_blocks = 100
+
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=num_gpu_blocks,
+        async_scheduling=async_scheduling,
+        block_size_factor=block_size_factor,
+    )
+
+    # Store 1 offloaded block (3 GPU blocks) to CPU.
+    runner.new_request(token_ids=[0] * offloaded_block_size)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored=(0, 1, 2),
+        expected_flushed=(0, 1, 2) if not async_scheduling else (),
+    )
+
+    # Reset GPU prefix cache then start a request that loads from CPU.
+    # Leave the load in-flight so that reset_cache must flush it.
+    runner.scheduler.reset_prefix_cache()
+    runner.new_request(token_ids=[0] * offloaded_block_size)
+    runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context: 1
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output([])
+    )
+    runner.run(decoded_tokens=[], complete_transfers=False)
+
+    # Capture in-flight load job IDs before reset.
+    load_job_ids = {
+        jid
+        for jid, status in runner.connector_scheduler._jobs.items()
+        if not status.is_store
+    }
+    assert load_job_ids, "expected in-flight load jobs before reset"
+
+    # Record job counter to verify the reset counter is set correctly.
+    job_counter_before_reset = runner.connector_scheduler._job_counter
+
+    # After update_state_after_alloc, next_stored_block_idx is advanced to
+    # skip the loaded prefix; reset_cache must bring it back to 0.
+    for req_status in runner.connector_scheduler._req_status.values():
+        for group_state in req_status.group_states:
+            assert group_state.next_stored_block_idx > 0
+
+    # Reset the cache
+    runner.connector_scheduler.reset_cache()
+
+    # manager.reset_cache() must be called exactly once.
+    runner.manager.reset_cache.assert_called_once()
+
+    # In-flight load jobs must be queued for flushing to prevent CUDA stream
+    # races between old loads and new post-reset stores.
+    assert load_job_ids <= runner.connector_scheduler._current_batch_jobs_to_flush
+
+    # All internal job tracking must be cleared.
+    assert not runner.connector_scheduler._jobs
+    assert not runner.connector_scheduler._block_id_to_pending_jobs
+    if runner.connector_scheduler._blocks_being_loaded is not None:
+        assert not runner.connector_scheduler._blocks_being_loaded
+
+    # Job reset counter must equal the job counter so that completions for
+    # pre-reset jobs arriving from workers are silently discarded.
+    assert runner.connector_scheduler._stale_job_threshold == job_counter_before_reset
+
+    # next_stored_block_idx must be reset to 0 for every active request so
+    # that post-reset stores restart from block 0.
+    for req_status in runner.connector_scheduler._req_status.values():
+        for group_state in req_status.group_states:
+            assert group_state.next_stored_block_idx == 0

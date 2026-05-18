@@ -213,7 +213,7 @@ struct tinygemm_kernel<at::BFloat16, K, BLOCK_N, has_bias, has_silu> {
       weight + nb_start * width,                                                             \
       out + bs * seqlen * dim + mb_start * dim + nb_start,                                   \
       has_bias ? bias + nb_start : nullptr,                                                  \
-      has_conv_states ? conv_states + conv_state_index * (K - 1) * dim + nb_start : nullptr, \
+      has_conv_states ? conv_states + conv_state_index * conv_state_slot_stride + nb_start : nullptr, \
       has_initial_states_value,                                                              \
       mb_size,                                                                               \
       dim,                                                                                   \
@@ -233,7 +233,8 @@ void causal_conv1d_fwd_kernel_impl(
     int64_t dim,
     int64_t seqlen,
     int64_t width,
-    int64_t num_seq_blocks) {
+    int64_t num_seq_blocks,
+    int64_t conv_state_slot_stride) {
   // handle 32 x 64 per block
   constexpr int64_t BLOCK_M = block_size_m();
   constexpr int64_t BLOCK_N = block_size_n() * 2;
@@ -282,7 +283,7 @@ void causal_conv1d_fwd_kernel_impl(
     at::parallel_for(0, batch, 0, [&](int64_t begin, int64_t end) {
       for (int64_t bs = begin; bs < end; ++bs) {
         update_conv_state(
-            conv_states + bs * (width - 1) * dim, input + bs * seqlen * dim, width, dim, seqlen, has_initial_state[bs]);
+            conv_states + bs * conv_state_slot_stride, input + bs * seqlen * dim, width, dim, seqlen, has_initial_state[bs]);
       }
     });
   }
@@ -316,7 +317,8 @@ void causal_conv1d_fwd_varlen_kernel_impl(
     int64_t batch,
     int64_t dim,
     int64_t width,
-    int64_t num_seq_blocks) {
+    int64_t num_seq_blocks,
+    int64_t conv_state_slot_stride) {
   // handle 32 x 64 per block
   constexpr int64_t BLOCK_M = block_size_m();
   constexpr int64_t BLOCK_N = block_size_n() * 2;
@@ -366,7 +368,7 @@ void causal_conv1d_fwd_varlen_kernel_impl(
         int32_t seqlen = query_start_loc[bs + 1] - query_start_loc[bs];
         int32_t batch_offset = query_start_loc[bs];
         update_conv_state(
-            conv_states + conv_state_index * (width - 1) * dim,
+            conv_states + conv_state_index * conv_state_slot_stride,
             input + batch_offset * dim,
             width,
             dim,
@@ -389,7 +391,8 @@ void causal_conv1d_update_kernel_impl(
     int64_t batch,
     int64_t dim,
     int64_t seqlen,
-    int64_t width) {
+    int64_t width,
+    int64_t conv_state_slot_stride) {
   // handle 32 x 64 per block
   constexpr int64_t BLOCK_M = block_size_m();
   constexpr int64_t BLOCK_N = block_size_n() * 2;
@@ -430,7 +433,7 @@ void causal_conv1d_update_kernel_impl(
     });
   });
 
-#define CONV_STATE_INDEXR(w) conv_states + conv_state_index*(width - 1) * dim + (w) * dim
+#define CONV_STATE_INDEXR(w) conv_states + conv_state_index*conv_state_slot_stride + (w) * dim
 
   // update conv_states
   at::parallel_for(0, batch, 0, [&](int64_t begin, int64_t end) {
@@ -592,6 +595,9 @@ at::Tensor causal_conv1d_fwd_cpu(
     }
   }
 
+// IMPORTANT: To make the kernal compatible with vLLM KV cache layout 
+  int64_t conv_state_slot_stride = conv_states->stride(0);
+
   // block size for sequence blocks, 32
   constexpr int64_t BLOCK_M = block_size_m();
 
@@ -618,7 +624,8 @@ at::Tensor causal_conv1d_fwd_cpu(
           batch,
           dim,
           width,
-          num_seq_blocks);
+          num_seq_blocks,
+          conv_state_slot_stride);
     } else {
       causal_conv1d_fwd_kernel_impl<scalar_t>(
           out.data_ptr<scalar_t>(),
@@ -633,7 +640,8 @@ at::Tensor causal_conv1d_fwd_cpu(
           dim,
           seqlen,
           width,
-          num_seq_blocks);
+          num_seq_blocks,
+          conv_state_slot_stride);
     }
   });
   return out;
@@ -690,6 +698,8 @@ at::Tensor causal_conv1d_update_cpu(
     conv_states.copy_(conv_states_copy);
   }
 
+  // IMPORTANT: To make the kernal compatible with vLLM KV cache layout 
+  int64_t conv_state_slot_stride = conv_states.stride(0);
   at::Tensor out = at::empty_like(x);
   AT_DISPATCH_REDUCED_FLOATING_TYPES(scalar_type, "causal_conv1d_update_kernel_impl", [&] {
     causal_conv1d_update_kernel_impl<scalar_t>(
@@ -703,7 +713,8 @@ at::Tensor causal_conv1d_update_cpu(
         batch,
         dim,
         seqlen,
-        width);
+        width,
+        conv_state_slot_stride);
   });
   return out;
 }
