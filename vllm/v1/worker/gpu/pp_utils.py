@@ -149,7 +149,9 @@ class PPHandler:
         # of these slots is detectable at consume time.
         gen_at_receive_np = self.slot_gen_np[idx_mapping_np]
 
-        # Allocate receive tensors on the main stream.
+        # Allocate receive tensors on the main stream. We retain refs to these for
+        # pp_size + 1 steps, after which we can be sure that the broadcast stream
+        # will be finished with them (avoiding need for tensor.record_stream).
         num_reqs = idx_mapping.shape[0]
         sampled_tokens = torch.empty(
             num_reqs, self.max_sample_len, dtype=torch.int64, device=self.device
