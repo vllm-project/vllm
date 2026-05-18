@@ -17,6 +17,7 @@ steps:
     torch_nightly: {}
 
 - label: Language Models Tests (Extra Standard) %N
+  device: h200_35gb
   key: language-models-tests-extra-standard
   timeout_in_minutes: 45
   source_file_dependencies:
@@ -34,6 +35,7 @@ steps:
     torch_nightly: {}
 
 - label: Language Models Tests (Hybrid) %N
+  device: h200_35gb
   key: language-models-tests-hybrid
   timeout_in_minutes: 75
   source_file_dependencies:
@@ -59,6 +61,7 @@ steps:
       - pytest -v -s models/language/generation -m hybrid_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 - label: Language Models Test (Extended Generation) # 80min
+  device: h200_35gb
   key: language-models-test-extended-generation
   timeout_in_minutes: 110
   optional: true
@@ -84,6 +87,7 @@ steps:
     - pytest -v -s models/language/generation_ppl_test
 
 - label: Language Models Test (Extended Pooling)  # 36min
+  device: h200_35gb
   key: language-models-test-extended-pooling
   timeout_in_minutes: 50
   optional: true

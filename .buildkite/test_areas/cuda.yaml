@@ -18,6 +18,7 @@ steps:
     - pytest -v -s cuda/test_platform_no_cuda_init.py
 
 - label: Cudagraph
+  device: h200_35gb
   key: cudagraph
   timeout_in_minutes: 20
   source_file_dependencies:
