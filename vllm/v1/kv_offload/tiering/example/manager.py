@@ -114,6 +114,9 @@ class ExampleSecondaryTier(SecondaryTierManager):
 
         for key in keys:
             if key not in self.blocks:
+                self.completed_jobs.append(
+                    JobResult(job_id=job_metadata.job_id, success=False)
+                )
                 return
 
         self.completed_jobs.append(JobResult(job_id=job_metadata.job_id, success=True))
