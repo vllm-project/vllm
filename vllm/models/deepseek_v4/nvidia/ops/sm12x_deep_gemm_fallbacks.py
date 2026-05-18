@@ -10,6 +10,7 @@ from vllm.platforms import current_platform
 logger = init_logger(__name__)
 
 _SM120_MQA_LOGITS_MAX_SCORE_BYTES = 64 * 1024 * 1024
+_SM120_MQA_TRITON_TOPK_MAX_LOGITS_BYTES = 512 * 1024 * 1024
 _SM120_PAGED_MQA_TOPK_CHUNK_SIZE = 8192
 
 
@@ -209,6 +210,41 @@ def _fp8_mqa_logits_topk_torch(
     return out
 
 
+def _fp8_mqa_logits_topk_triton(
+    q: tuple[torch.Tensor, torch.Tensor | None],
+    kv: tuple[torch.Tensor, torch.Tensor],
+    weights: torch.Tensor,
+    cu_seqlen_ks: torch.Tensor,
+    cu_seqlen_ke: torch.Tensor,
+    out: torch.Tensor,
+) -> bool:
+    q_values, q_scale = q
+    k_values, _ = kv
+    if not (q_scale is None and q_values.dim() == 3 and k_values.dim() == 2):
+        return False
+
+    logits_bytes = q_values.shape[0] * k_values.shape[0] * torch.float32.itemsize
+    if logits_bytes > _SM120_MQA_TRITON_TOPK_MAX_LOGITS_BYTES:
+        return False
+
+    from vllm.v1.attention.ops.deepseek_v4_ops.sm12x_mqa import (
+        fp8_mqa_logits_triton,
+    )
+
+    logits = fp8_mqa_logits_triton(q_values, kv, weights, cu_seqlen_ks, cu_seqlen_ke)
+    topk_tokens = out.shape[1]
+    select_k = min(topk_tokens, logits.shape[1])
+    out.fill_(-1)
+    if select_k == 0:
+        return True
+
+    values, indices = torch.topk(logits, select_k, dim=1)
+    selected = out[:, :select_k]
+    selected.copy_(indices.to(torch.int32))
+    selected.masked_fill_(~torch.isfinite(values), -1)
+    return True
+
+
 def fp8_fp4_mqa_topk_indices(
     q: tuple[torch.Tensor, torch.Tensor | None],
     kv: tuple[torch.Tensor, torch.Tensor],
@@ -224,6 +260,15 @@ def fp8_fp4_mqa_topk_indices(
         and q[1] is None
     ):
         return False
+    if _fp8_mqa_logits_topk_triton(
+        q,
+        kv,
+        weights,
+        cu_seqlen_ks,
+        cu_seqlen_ke,
+        topk_indices,
+    ):
+        return True
     _fp8_mqa_logits_topk_torch(
         q,
         kv,
