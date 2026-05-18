@@ -8,6 +8,7 @@
 
 #ifndef USE_ROCM
   #include "persistent_topk.cuh"
+  #include "cluster_topk.cuh"
 #endif
 
 namespace {
@@ -224,6 +225,73 @@ void launch_persistent_topk(const torch::Tensor& logits,
 }
 #endif
 
+
+// ============================================================================
+// Cluster-persistent TopK launcher (K=1024, SM90+)
+// Uses CUDA cluster launch with DSMEM histogram reduce + TMA streaming.
+// Falls back to persistent_topk on pre-SM90 hardware.
+// ============================================================================
+void launch_cluster_topk_1024(const torch::Tensor& logits,
+                               const torch::Tensor& lengths,
+                               torch::Tensor& output,
+                               torch::Tensor& workspace) {
+  namespace ct = cluster_topk;
+
+  const int64_t num_rows = logits.size(0);
+  const int64_t stride = logits.stride(0);
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  static int num_sms = 0;
+  if (num_sms == 0) {
+    int device;
+    cudaGetDevice(&device);
+    cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, device);
+  }
+
+  constexpr uint32_t CS = 4;
+  const uint32_t max_clusters = num_sms / CS;
+  const uint32_t num_clusters =
+      std::min(max_clusters, static_cast<uint32_t>(num_rows));
+
+  size_t state_bytes = num_clusters * sizeof(ct::ClusterState);
+  TORCH_CHECK(workspace.size(0) >= static_cast<int64_t>(state_bytes),
+              "workspace too small for cluster_topk, need ", state_bytes);
+
+  ct::Params params;
+  params.input = logits.data_ptr<float>();
+  params.output = output.data_ptr<int32_t>();
+  params.lengths = lengths.data_ptr<int32_t>();
+  params.states =
+      reinterpret_cast<ct::ClusterState*>(workspace.data_ptr<uint8_t>());
+  params.num_rows = static_cast<uint32_t>(num_rows);
+  params.stride = static_cast<uint32_t>(stride);
+
+  auto kernel = &ct::cluster_persistent_topk_impl<CS>;
+
+  static bool smem_set = false;
+  if (!smem_set) {
+    cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                         ct::kSmemSize4);
+    smem_set = true;
+  }
+
+  cudaLaunchConfig_t config = {};
+  config.gridDim = dim3(num_clusters, CS);
+  config.blockDim = dim3(ct::kBlockSize);
+  config.dynamicSmemBytes = ct::kSmemSize4;
+  config.stream = stream;
+
+  cudaLaunchAttribute attrs[1];
+  attrs[0].id = cudaLaunchAttributeClusterDimension;
+  attrs[0].val.clusterDim = {1, CS, 1};
+  config.numAttrs = 1;
+  config.attrs = attrs;
+
+  cudaError_t err = cudaLaunchKernelEx(&config, kernel, params);
+  TORCH_CHECK(err == cudaSuccess,
+              "cluster_topk launch failed: ", cudaGetErrorString(err));
+}
+
 }  // anonymous namespace
 
 void persistent_topk(const torch::Tensor& logits, const torch::Tensor& lengths,
@@ -255,8 +323,18 @@ void persistent_topk(const torch::Tensor& logits, const torch::Tensor& lengths,
     launch_persistent_topk<512>(logits, lengths, output, workspace,
                                 max_seq_len);
   } else if (k == 1024) {
-    launch_persistent_topk<1024>(logits, lengths, output, workspace,
-                                 max_seq_len);
+    static int cc = 0;
+    if (cc == 0) {
+      int device;
+      cudaGetDevice(&device);
+      cudaDeviceGetAttribute(&cc, cudaDevAttrComputeCapabilityMajor, device);
+    }
+    if (cc >= 9) {
+      launch_cluster_topk_1024(logits, lengths, output, workspace);
+    } else {
+      launch_persistent_topk<1024>(logits, lengths, output, workspace,
+                                   max_seq_len);
+    }
   } else {
     launch_persistent_topk<2048>(logits, lengths, output, workspace,
                                  max_seq_len);
