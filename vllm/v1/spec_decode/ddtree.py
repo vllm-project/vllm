@@ -55,7 +55,8 @@ def build_ddtree_tree(
         node_depths:    int64[num_nodes] — 1-based depth (root=0, children=1, …).
         node_ranks:     int64[num_nodes] — top-k rank at each node's depth position.
         parents:    list[num_nodes+1] — parent index per node; parents[0]==-1 (root).
-        child_maps: list[num_nodes+1] of dicts — child_maps[i][token_id] = child index.
+        child_maps: list[num_nodes+1] of dicts —
+            ``child_maps[i][token_id]`` = child index.
         visibility:     bool[num_nodes+1, num_nodes+1] — ancestor-only attention mask.
     """
     if budget <= 0 or draft_logits.shape[0] == 0:
