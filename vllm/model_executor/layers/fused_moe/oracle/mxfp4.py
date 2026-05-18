@@ -244,7 +244,7 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
         ],
         "aiter_mxfp4_fp8": [Mxfp4MoeBackend.AITER_MXFP4_FP8],
         "xpu": [Mxfp4MoeBackend.XPU],
-        "cpu": Mxfp4MoeBackend.CPU,
+        "cpu": [Mxfp4MoeBackend.CPU],
         "emulation": [Mxfp4MoeBackend.EMULATION],
     }
     if backends := mapping.get(runner_backend):
