@@ -114,6 +114,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 # currently be an MI300 series.
                 self.qr_comm = QuickAllReduce(group=self.cpu_group, device=self.device)
 
+        if self.world_size > 1:
+            self._log_all_reduce_backend_selection()
+
         if self.use_all2all:
             if self.all2all_backend in ("naive", "allgather_reducescatter"):
                 from .all2all import AgRsAll2AllManager
@@ -170,6 +173,51 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 self.all2all_manager.__class__.__name__,
                 scope="global",
             )
+
+    def _log_all_reduce_backend_selection(self) -> None:
+        """Log the all-reduce backends that are active for this group.
+
+        The dispatch chain in ``all_reduce`` tries backends in this order and
+        falls through to the next one if the current backend rejects the
+        input (size/dtype gates) or is disabled. The list of "enabled"
+        backends below is the subset of potential backends that may be
+        chosen at dispatch time for this group; the actual per-call choice
+        depends on the input tensor.
+        """
+        all_potential_ar_backends = [
+            "NCCL_SYMM_MEM",
+            "QUICK_REDUCE",
+            "FLASHINFER",
+            "CUSTOM",
+            "SYMM_MEM",
+            "PYNCCL",
+        ]
+        enabled_ar_backends: list[str] = []
+        if (
+            self.pynccl_comm is not None
+            and not self.pynccl_comm.disabled
+            and is_symmetric_memory_enabled()
+        ):
+            enabled_ar_backends.append("NCCL_SYMM_MEM")
+        if self.qr_comm is not None and not self.qr_comm.disabled:
+            enabled_ar_backends.append("QUICK_REDUCE")
+        if self.fi_ar_comm is not None and not self.fi_ar_comm.disabled:
+            enabled_ar_backends.append("FLASHINFER")
+        if self.ca_comm is not None and not self.ca_comm.disabled:
+            enabled_ar_backends.append("CUSTOM")
+        if self.symm_mem_comm is not None and not self.symm_mem_comm.disabled:
+            enabled_ar_backends.append("SYMM_MEM")
+        if self.pynccl_comm is not None and not self.pynccl_comm.disabled:
+            enabled_ar_backends.append("PYNCCL")
+
+        logger.info_once(
+            "Using %s all-reduce backends (in dispatch order) for group "
+            "'%s' out of potential backends: %s.",
+            "[" + ", ".join(f"'{b}'" for b in enabled_ar_backends) + "]",
+            self.unique_name or "<unnamed>",
+            "[" + ", ".join(f"'{b}'" for b in all_potential_ar_backends) + "]",
+            scope="local",
+        )
 
     def all_reduce(self, input_):
         # since currently we perform copy input -> symm_input -> out-of-place AR
