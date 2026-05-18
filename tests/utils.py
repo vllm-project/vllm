@@ -1721,6 +1721,74 @@ requires_fp8 = pytest.mark.skipif(
     "Ada architecture, compute capability 8.9+)",
 )
 
+# ---------------------------------------------------------------------------
+# Unified platform-aware skip helpers (RFC #39158)
+# ---------------------------------------------------------------------------
+# Accepted platform names for requires_platform().
+_PLATFORM_CHECKS: dict[str, Callable[[], bool]] = {
+    "cuda": current_platform.is_cuda,
+    "rocm": current_platform.is_rocm,
+    "cpu": current_platform.is_cpu,
+    "xpu": current_platform.is_xpu,
+    "tpu": current_platform.is_tpu,
+    "gpu": current_platform.is_cuda_alike,
+}
+
+
+def requires_platform(*platforms: str) -> pytest.MarkDecorator:
+    """Return a pytest mark that skips the test unless the current platform
+    matches at least one of the given names.
+
+    Accepted values: "cuda", "rocm", "cpu", "xpu", "tpu", "gpu"
+    ("gpu" matches both CUDA and ROCm).
+
+    Example::
+
+        @requires_platform("cuda")
+        def test_cutlass_scaled_mm(): ...
+
+
+        @requires_platform("cuda", "rocm")
+        def test_paged_attention(): ...
+
+
+        # Module-level — skip the whole file on non-CUDA platforms
+        pytestmark = requires_platform("cuda")
+    """
+    unknown = set(platforms) - _PLATFORM_CHECKS.keys()
+    if unknown:
+        raise ValueError(
+            f"requires_platform: unknown platform(s) {unknown}. "
+            f"Accepted: {set(_PLATFORM_CHECKS)}"
+        )
+    match = any(_PLATFORM_CHECKS[p]() for p in platforms)
+    return pytest.mark.skipif(
+        not match,
+        reason=(
+            f"Requires platform(s) {platforms}, "
+            f"current platform is {current_platform._enum.name}"
+        ),
+    )
+
+
+def requires_capability(min_capability: int) -> pytest.MarkDecorator:
+    """Return a pytest mark that skips the test unless the device has compute
+    capability >= *min_capability*.
+
+    *min_capability* is an integer where, e.g., ``80`` means SM 8.0 (A100)
+    and ``90`` means SM 9.0 (H100).
+
+    Example::
+
+        @requires_platform("cuda", "rocm")
+        @requires_capability(90)
+        def test_fp8_marlin(): ...
+    """
+    return pytest.mark.skipif(
+        not current_platform.has_device_capability(min_capability),
+        reason=f"Requires compute capability >= {min_capability}",
+    )
+
 
 def large_gpu_test(*, min_gb: int):
     """
