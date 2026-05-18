@@ -402,7 +402,7 @@ if current_platform.is_cuda():
     )
     + list(flat_product(BACKENDS_MLA_FP4, PATTERN_TEST_MODELS_MLA_FP4, [""])),
 )
-@requires_platform("gpu")
+@requires_platform("cuda_alike")
 @pytest.mark.skipif(not current_platform.supports_fp8(), reason="Need FP8")
 def test_mla_attention_quant_pattern(
     num_heads: int,

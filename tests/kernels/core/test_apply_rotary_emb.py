@@ -185,7 +185,7 @@ def run_dispatch_test(
             apply_rotary_emb.forward = original_forward
 
 
-@requires_platform("gpu")
+@requires_platform("cuda_alike")
 @pytest.mark.parametrize("test_case", get_test_cases(), ids=lambda tc: tc.name)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_rotary_embedding_dispatch(

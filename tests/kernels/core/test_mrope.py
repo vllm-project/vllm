@@ -56,7 +56,7 @@ MODELS_TO_TEST = [
 num_tokens_list = [11, 8192]
 
 
-@requires_platform("gpu")
+@requires_platform("cuda_alike")
 @pytest.mark.parametrize(
     "model_info, model_name",
     [
@@ -124,7 +124,7 @@ def test_mrope(
     torch.testing.assert_close(key_native, key_cuda, atol=atol, rtol=rtol)
 
 
-@requires_platform("gpu")
+@requires_platform("cuda_alike")
 @pytest.mark.parametrize(
     "model_info, model_name",
     [

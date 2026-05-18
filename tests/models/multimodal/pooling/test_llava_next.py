@@ -5,10 +5,8 @@ import pytest
 import torch.nn.functional as F
 from transformers import AutoModelForImageTextToText
 
-from vllm.platforms import current_platform
-
 from ....conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
-from ....utils import large_gpu_test
+from ....utils import large_gpu_test, requires_platform
 from ...utils import check_embeddings_close
 
 # Llava Next embedding implementation is only supported by CUDA.
@@ -22,10 +20,7 @@ from ...utils import check_embeddings_close
 #    RuntimeError: Calling torch.linalg.cholesky on a CPU tensor
 #    requires compiling PyTorch with LAPACK. Please use PyTorch
 #    built with LAPACK support.
-pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="Llava Next model uses op that is only supported in CUDA",
-)
+pytestmark = requires_platform("cuda")
 
 llama3_template = "<|start_header_id|>user<|end_header_id|>\n\n{}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n \n"  # noqa: E501
 

@@ -37,9 +37,7 @@ from .models import (
     qwen3_a3b_fp8,
 )
 
-pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="Only test CUDA/ROCm"
-)
+pytestmark = requires_platform("cuda_alike")
 
 
 @multi_gpu_test(num_gpus=2)
@@ -195,7 +193,7 @@ def test_tp2_ar_rms_fp4_fusions(
 @pytest.mark.parametrize("n_layers", [4])
 @pytest.mark.parametrize("custom_ops", tuple(custom_ops_combos("rms_norm")))
 @pytest.mark.parametrize("inductor_graph_partition", INDUCTOR_GRAPH_PARTITION)
-@requires_platform("gpu")
+@requires_platform("cuda_alike")
 def test_tp2_ar_rms_fusions(
     model_name: str,
     matches_fn: Callable[[int], Matches],

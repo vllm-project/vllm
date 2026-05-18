@@ -272,7 +272,7 @@ elif current_platform.is_rocm():
     # quant_fp4 only has the custom impl
     + list(flat_product(BACKENDS_FP4, PATTERN_TEST_MODELS_FP4, [""])),
 )
-@requires_platform("gpu")
+@requires_platform("cuda_alike")
 @pytest.mark.skipif(not current_platform.supports_fp8(), reason="Need FP8")
 def test_attention_quant_pattern(
     num_qo_heads: int,

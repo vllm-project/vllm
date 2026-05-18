@@ -1731,7 +1731,8 @@ _PLATFORM_CHECKS: dict[str, Callable[[], bool]] = {
     "cpu": current_platform.is_cpu,
     "xpu": current_platform.is_xpu,
     "tpu": current_platform.is_tpu,
-    "gpu": current_platform.is_cuda_alike,
+    "cuda_alike": current_platform.is_cuda_alike,
+    "gpu": lambda: current_platform.is_cuda_alike() or current_platform.is_xpu(),
 }
 
 
@@ -1739,8 +1740,8 @@ def requires_platform(*platforms: str) -> pytest.MarkDecorator:
     """Return a pytest mark that skips the test unless the current platform
     matches at least one of the given names.
 
-    Accepted values: "cuda", "rocm", "cpu", "xpu", "tpu", "gpu"
-    ("gpu" matches both CUDA and ROCm).
+    Accepted values: "cuda", "rocm", "cpu", "xpu", "tpu", "gpu", "cuda_alike"
+    ("gpu" matches CUDA, ROCm, and XPU; "cuda_alike" matches CUDA and ROCm).
 
     Example::
 

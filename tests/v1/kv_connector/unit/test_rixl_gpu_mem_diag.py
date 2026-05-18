@@ -12,12 +12,9 @@ import gc
 import pytest
 import torch
 
-from vllm.platforms import current_platform
+from tests.utils import requires_platform
 
-pytestmark = pytest.mark.skipif(
-    not current_platform.is_rocm(),
-    reason="ROCm platform required",
-)
+pytestmark = requires_platform("rocm")
 
 
 def _mb(b: int) -> float:

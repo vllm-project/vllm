@@ -77,7 +77,7 @@ def vllm_config():
     )
 
 
-@requires_platform("gpu")
+@requires_platform("cuda_alike")
 def test_register_tracks_patterns(vllm_config):
     """register() appends each VllmPatternReplacement to _pattern_replacements."""
     with vllm.config.set_current_vllm_config(vllm_config):
@@ -88,7 +88,7 @@ def test_register_tracks_patterns(vllm_config):
     assert len(two._pattern_replacements) == 2
 
 
-@requires_platform("gpu")
+@requires_platform("cuda_alike")
 def test_uuid_stable(vllm_config):
     """Two instances of the same pass class produce identical uuids."""
     with vllm.config.set_current_vllm_config(vllm_config):
@@ -101,7 +101,7 @@ def test_uuid_stable(vllm_config):
     assert p2.uuid() != p3.uuid()
 
 
-@requires_platform("gpu")
+@requires_platform("cuda_alike")
 @pytest.mark.parametrize("N", [1, 2, 4])
 def test_matched_count_and_match_table(vllm_config, N):
     """matched_count and match_table reflect the number of matched patterns."""

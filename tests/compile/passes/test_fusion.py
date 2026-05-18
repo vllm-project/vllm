@@ -294,7 +294,7 @@ def _run_fusion_test(
 @pytest.mark.parametrize("kernel_groupshape", KERNEL_GROUPSHAPE_COMBINATIONS)
 @pytest.mark.parametrize("enable_rms_norm_custom_op", [True, False])
 @pytest.mark.parametrize("enable_quant_fp8_custom_op", [True, False])
-@requires_platform("gpu")
+@requires_platform("cuda_alike")
 def test_fusion_rmsnorm_quant(
     dtype,
     hidden_size,
