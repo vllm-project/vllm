@@ -23,10 +23,10 @@ from vllm.v1.kv_cache_interface import MambaSpec
 
 
 def _make_vllm_config(
-    block_size: int,
     max_model_len: int,
     max_num_seqs: int,
     num_speculative_tokens: int = 0,
+    block_size: int | None = None,
 ):
     """Create a minimal mock VllmConfig with only the fields the builder
     accesses, avoiding any model download / HF config inspection."""
@@ -57,7 +57,7 @@ def _make_vllm_config(
 
 def test_mamba_single_token_prompt_runs_as_prefill():
     seq_lens = [8, 9, 1]
-    config = _make_vllm_config(16, 256, len(seq_lens))
+    config = _make_vllm_config(256, len(seq_lens), block_size=16)
     metadata = MockMambaBuilder.build_mamba_metadata(
         config,
         seq_lens=seq_lens,
@@ -81,7 +81,6 @@ def test_update_block_table_copies_block_idx_to_persistent_buffers():
     device = torch.device("cpu")
 
     vllm_config = _make_vllm_config(
-        block_size,
         max_model_len,
         num_reqs,
     )
@@ -192,7 +191,6 @@ def test_state_indices_tensor_d_includes_num_speculative_blocks():
     device = torch.device("cpu")
 
     vllm_config = _make_vllm_config(
-        block_size,
         max_model_len,
         max_num_seqs,
         num_speculative_tokens=num_speculative_tokens,
@@ -226,7 +224,6 @@ def test_block_idx_cudagraph_capture_padded_by_num_reqs():
     device = torch.device("cpu")
 
     vllm_config = _make_vllm_config(
-        block_size,
         max_model_len,
         max_num_seqs,
         num_speculative_tokens=num_speculative_tokens,
@@ -307,7 +304,6 @@ def test_block_idx_prev_step_persistent_buffer_allocated():
     device = torch.device("cpu")
 
     vllm_config = _make_vllm_config(
-        block_size,
         max_model_len,
         max_num_seqs,
         num_speculative_tokens=num_speculative_tokens,
@@ -335,7 +331,6 @@ def test_block_idx_prev_step_persistent_buffer_skipped_without_spec_decode():
     device = torch.device("cpu")
 
     vllm_config = _make_vllm_config(
-        block_size,
         max_model_len,
         max_num_seqs,
         num_speculative_tokens=0,
@@ -363,7 +358,6 @@ def test_block_idx_prev_step_cudagraph_capture_uses_persistent_buffer():
     device = torch.device("cpu")
 
     vllm_config = _make_vllm_config(
-        block_size,
         max_model_len,
         max_num_seqs,
         num_speculative_tokens=num_speculative_tokens,
