@@ -4,6 +4,7 @@
 Core abstractions for KV cache offloading in vLLM v1.
 """
 
+import math
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable, Iterator, Sequence
 from dataclasses import dataclass
@@ -348,23 +349,43 @@ class OffloadingSpec(ABC):
             * parallel_config.prefill_context_parallel_size
         )
 
-        # block size used by vLLM for hashing request tokens for the sake
-        # of enabling prefix caching
-        self.hash_block_size = (
-            vllm_config.cache_config.block_size * context_parallel_factor
-        )
         # gpu block size per group
         self.gpu_block_size: tuple[int, ...] = tuple(
             kv_cache_group.kv_cache_spec.block_size * context_parallel_factor
             for kv_cache_group in kv_cache_config.kv_cache_groups
         )
 
+        # block size used by vLLM for hashing request tokens for the sake
+        # of enabling prefix caching.  Must evenly divide every gpu_block_size.
+        #
+        # We intentionally derive this from the actual kv_cache_spec block
+        # sizes rather than from vllm_config.cache_config.block_size, because
+        # the engine process updates cache_config.block_size to the minimum
+        # group block size after memory profiling (engine/core.py), but that
+        # mutation is not propagated to worker processes.  Using the
+        # user-specified --block-size value here can therefore cause the
+        # assertion below to fail for models whose attention backends enforce a
+        # smaller block size than the user-specified value (e.g. MLA / DeepSeek
+        # models with FlashMLA backend that only supports block_size=64).
+        #
+        # The hash_block_size is computed as the GCD of all group block sizes
+        # so that every group's block size is divisible by it, matching the
+        # scheduler's resolve_kv_cache_block_sizes logic in kv_cache_utils.py.
+        # An explicit cache_config.hash_block_size override is respected.
+        _requested = vllm_config.cache_config.hash_block_size
+        if _requested is not None:
+            self.hash_block_size = _requested * context_parallel_factor
+        elif self.gpu_block_size:
+            self.hash_block_size = math.gcd(*self.gpu_block_size)
+        else:
+            self.hash_block_size = (
+                vllm_config.cache_config.block_size * context_parallel_factor
+            )
+
         for block_size in self.gpu_block_size:
             assert block_size % self.hash_block_size == 0, (
                 f"gpu_block_size={block_size} not divisible by "
-                f"hash_block_size={self.hash_block_size}. "
-                f"Hybrid models (e.g. Mamba+Attention) need "
-                f"--enable-prefix-caching to align block sizes."
+                f"hash_block_size={self.hash_block_size}."
             )
 
         # offloaded_block_size / gpu_block_size
@@ -374,15 +395,32 @@ class OffloadingSpec(ABC):
         if offloaded_block_size is not None:
             offloaded_block_size_int = int(offloaded_block_size)
             gpu_block_sizes = set(self.gpu_block_size)
-            assert len(gpu_block_sizes) == 1, (
-                "If 'block_size' is specified in kv_connector_extra_config, "
-                "there must be at least one KV cache group, "
-                "and all groups must have the same block size."
-            )
-            gpu_block_size = gpu_block_sizes.pop()
-
-            assert offloaded_block_size_int % gpu_block_size == 0
-            self.block_size_factor = offloaded_block_size_int // gpu_block_size
+            if len(gpu_block_sizes) > 1:
+                # Hybrid models (e.g. DeepSeek-V4-Flash) have multiple KV cache
+                # groups with different block sizes (e.g. full-MLA=256, SWA=64).
+                # A single global block_size_factor cannot correctly represent
+                # the per-group offloading granularity, so we fall back to
+                # factor=1 (one CPU block per GPU block per group) and ignore
+                # the "block_size" hint.  This is always correct; the only
+                # trade-off is that I/O is issued at GPU-block granularity
+                # rather than being batched into larger offloaded blocks.
+                logger.warning(
+                    "kv_connector_extra_config 'block_size'=%d is ignored "
+                    "because KV cache groups have heterogeneous GPU block "
+                    "sizes %s.  block_size_factor will be 1 (one CPU block "
+                    "per GPU block).  Remove 'block_size' from "
+                    "kv_connector_extra_config to silence this warning.",
+                    offloaded_block_size_int,
+                    sorted(gpu_block_sizes),
+                )
+            else:
+                gpu_block_size = gpu_block_sizes.pop()
+                assert offloaded_block_size_int % gpu_block_size == 0, (
+                    f"kv_connector_extra_config 'block_size'="
+                    f"{offloaded_block_size_int} must be divisible by "
+                    f"gpu_block_size={gpu_block_size}."
+                )
+                self.block_size_factor = offloaded_block_size_int // gpu_block_size
 
     @abstractmethod
     def get_manager(self) -> OffloadingManager:
