@@ -7,6 +7,7 @@ from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
 from vllm.distributed.device_communicators.all_reduce_utils import (
+    NCCL_SYMM_MEM_ALL_REDUCE_CONFIG,
     should_nccl_symm_mem_allreduce,
 )
 from vllm.distributed.device_communicators.pynccl import register_nccl_symmetric_ops
@@ -193,10 +194,16 @@ class CudaCommunicator(DeviceCommunicatorBase):
             "PYNCCL",
         ]
         enabled_ar_backends: list[str] = []
+        # Mirror the static preconditions of `should_nccl_symm_mem_allreduce`:
+        # VLLM_BATCH_INVARIANT off, NCCL symm mem enabled, and world_size meets
+        # NCCL_SYMM_MEM_ALL_REDUCE_CONFIG["min_world_size"]. The per-tensor-size
+        # check inside that function stays as a runtime decision.
         if (
             self.pynccl_comm is not None
             and not self.pynccl_comm.disabled
             and is_symmetric_memory_enabled()
+            and not envs.VLLM_BATCH_INVARIANT
+            and self.world_size >= NCCL_SYMM_MEM_ALL_REDUCE_CONFIG["min_world_size"]
         ):
             enabled_ar_backends.append("NCCL_SYMM_MEM")
         if self.qr_comm is not None and not self.qr_comm.disabled:
