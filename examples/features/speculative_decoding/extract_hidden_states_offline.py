@@ -18,7 +18,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
 with tempfile.TemporaryDirectory() as tmpdirname:
     llm = LLM(
         model="Qwen/Qwen3-8B",  # Your target model
-        enable_chunked_prefill=False,  # required
         speculative_config={
             "method": "extract_hidden_states",
             "num_speculative_tokens": 1,

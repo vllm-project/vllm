@@ -19,7 +19,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
 with tempfile.TemporaryDirectory() as tmpdir:
     llm = LLM(
         model="Qwen/Qwen3-8B",
-        enable_chunked_prefill=False,
         speculative_config={
             "method": "extract_hidden_states",
             "num_speculative_tokens": 1,
@@ -59,8 +58,7 @@ For improved performance, it is recommended to use a RAM-mounted file system suc
 ```bash
 vllm serve Qwen/Qwen3-8B \
     --speculative_config '{"method": "extract_hidden_states", "num_speculative_tokens": 1, "draft_model_config": {"hf_config": {"eagle_aux_hidden_state_layer_ids": [1, 2, 3, 4]}}}' \
-    --kv_transfer_config '{"kv_connector": "ExampleHiddenStatesConnector", "kv_role": "kv_producer", "kv_connector_extra_config": {"shared_storage_path": "/dev/shm/hidden_states"}}' \
-    --no-enable-chunked-prefill
+    --kv_transfer_config '{"kv_connector": "ExampleHiddenStatesConnector", "kv_role": "kv_producer", "kv_connector_extra_config": {"shared_storage_path": "/dev/shm/hidden_states"}}'
 ```
 
 ## Configuration
