@@ -364,6 +364,10 @@ def test_reshape_and_cache_flash(
             )
 
         # Permute to HNC if needed for the dequant utility.
+        assert nvfp4_key_data is not None
+        assert key_scale_cache is not None
+        assert nvfp4_value_data is not None
+        assert value_scale_cache is not None
         if kv_cache_layout == "NHC":
             nvfp4_key_data = nvfp4_key_data.permute(0, 2, 1, 3)
             key_scale_cache = key_scale_cache.permute(0, 2, 1, 3)

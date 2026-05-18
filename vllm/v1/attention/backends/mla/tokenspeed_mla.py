@@ -125,7 +125,7 @@ class TokenspeedMLABackend(MLACommonBackend):
 
     @classmethod
     def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
-        return "HND"
+        return "HNC"
 
 
 class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
