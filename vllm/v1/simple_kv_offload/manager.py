@@ -131,10 +131,15 @@ class SimpleCPUOffloadScheduler:
         # the worker reports completions by event index, not request id.
         self._load_event_to_reqs: dict[int, list[str]] = {}
 
-        # Pending CPU hits from get_num_new_matched_tokens() awaiting
-        # consumption in update_state_after_alloc(). Found blocks are
-        # temporarily pinned via touch() while pending, preventing LRU eviction
-        # in the window between the two scheduler phases.
+        # Pending CPU hits keyed by request_id, awaiting consumption in
+        # update_state_after_alloc(). Found blocks are temporarily pinned
+        # via touch() to survive LRU eviction in the window between the two
+        # scheduler phases. Value layout:
+        #   (cpu_hit_blocks, hit_length_tokens)
+        # where cpu_hit_blocks is the per-group structure returned by
+        # find_longest_cache_hit (outer tuple = kv cache groups, inner list =
+        # consecutive blocks per group, possibly with null_block sentinels);
+        # hit_length_tokens is the block-aligned token count of the match.
         self._pending_cpu_hits: dict[
             str, tuple[tuple[list[KVCacheBlock], ...], int]
         ] = {}
@@ -226,9 +231,10 @@ class SimpleCPUOffloadScheduler:
         The temporary pin is released in update_state_after_alloc() once the
         persistent load pin takes over, or in request_finished() if the request
         never reaches update_state_after_alloc().
+
+        Defensively drops any pin recorded by an earlier call on the same
+        request (e.g., retry after allocate_slots failure).
         """
-        # Release any stale pin from a prior
-        # get_num_new_matched_tokens() call on this request
         stale = self._pending_cpu_hits.pop(request.request_id, None)
         if stale is not None:
             self._free_pending_cpu_hit(stale)
@@ -294,7 +300,14 @@ class SimpleCPUOffloadScheduler:
             return
 
         if pending is None:
-            return  # graceful fallback instead of assert
+            logger.warning(
+                "SimpleCPUOffloadScheduler: update_state_after_alloc called "
+                "for req_id=%s with num_external_tokens=%d but no pending "
+                "CPU hit from get_num_new_matched_tokens(); skipping load.",
+                req_id,
+                num_external_tokens,
+            )
+            return
 
         cpu_hit_blocks_full, _ = pending
 
@@ -316,6 +329,10 @@ class SimpleCPUOffloadScheduler:
         cpu_hit_blocks: list[list[KVCacheBlock]] = []
         for g in range(num_groups):
             g_block_size = kv_cache_groups[g].kv_cache_spec.block_size
+            assert num_external_tokens % g_block_size == 0, (
+                f"num_external_tokens={num_external_tokens} not aligned to "
+                f"group {g} block_size={g_block_size}"
+            )
             n_take_g = num_external_tokens // g_block_size
             cpu_hit_blocks.append(cpu_hit_blocks_full[g][:n_take_g])
 
