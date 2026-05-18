@@ -195,15 +195,27 @@ class CudaCommunicator(DeviceCommunicatorBase):
         ]
         enabled_ar_backends: list[str] = []
         # Mirror the static preconditions of `should_nccl_symm_mem_allreduce`:
-        # VLLM_BATCH_INVARIANT off, NCCL symm mem enabled, and world_size meets
-        # NCCL_SYMM_MEM_ALL_REDUCE_CONFIG["min_world_size"]. The per-tensor-size
-        # check inside that function stays as a runtime decision.
+        # VLLM_BATCH_INVARIANT off, NCCL symm mem enabled, world_size meets
+        # min_world_size, and world_size either has a tuned entry in
+        # `custom_ar_preferred_ranges` or is greater than
+        # `always_use_above_world_size`. World sizes that fail the latter (e.g.
+        # 5/6/7 with the default config) never dispatch NCCL symm mem
+        # regardless of input. The per-tensor-size check inside the function
+        # stays as a runtime decision.
+        nccl_symm_ws_ok = self.world_size >= NCCL_SYMM_MEM_ALL_REDUCE_CONFIG[
+            "min_world_size"
+        ] and (
+            self.world_size
+            in NCCL_SYMM_MEM_ALL_REDUCE_CONFIG["custom_ar_preferred_ranges"]
+            or self.world_size
+            > NCCL_SYMM_MEM_ALL_REDUCE_CONFIG["always_use_above_world_size"]
+        )
         if (
             self.pynccl_comm is not None
             and not self.pynccl_comm.disabled
             and is_symmetric_memory_enabled()
             and not envs.VLLM_BATCH_INVARIANT
-            and self.world_size >= NCCL_SYMM_MEM_ALL_REDUCE_CONFIG["min_world_size"]
+            and nccl_symm_ws_ok
         ):
             enabled_ar_backends.append("NCCL_SYMM_MEM")
         if self.qr_comm is not None and not self.qr_comm.disabled:
@@ -223,7 +235,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             "[" + ", ".join(f"'{b}'" for b in enabled_ar_backends) + "]",
             self.unique_name or "<unnamed>",
             "[" + ", ".join(f"'{b}'" for b in all_potential_ar_backends) + "]",
-            scope="local",
+            scope="global",
         )
 
     def all_reduce(self, input_):
