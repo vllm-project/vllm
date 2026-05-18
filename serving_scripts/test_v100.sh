@@ -7,7 +7,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
-#SBATCH --time=01:00:00
+#SBATCH --time=00:15:00
 #SBATCH --signal=B:TERM@120
 #SBATCH --output=results/%x-%j.out
 #SBATCH --error=results/%x-%j.err
