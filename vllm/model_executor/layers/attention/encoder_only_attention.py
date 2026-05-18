@@ -5,7 +5,6 @@ from copy import copy
 
 import torch
 
-from vllm.config import CacheConfig
 from vllm.config.vllm import VllmConfig
 from vllm.model_executor.layers.attention import Attention
 from vllm.v1.attention.backend import (
@@ -58,16 +57,13 @@ class EncoderOnlyAttention(Attention):
         num_heads: int,
         head_size: int,
         scale: float,
-        cache_config: CacheConfig | None = None,
+        vllm_config: VllmConfig,
         attn_type: str | None = None,
         **kwargs,
     ):
         dtype = torch.get_default_dtype()
 
-        if cache_config is not None:
-            kv_cache_dtype = cache_config.cache_dtype
-        else:
-            kv_cache_dtype = "auto"
+        kv_cache_dtype = vllm_config.cache_config.cache_dtype
 
         underlying_attn_backend = get_attn_backend(
             head_size,
@@ -84,10 +80,10 @@ class EncoderOnlyAttention(Attention):
             )
 
         super().__init__(
-            num_heads=num_heads,
-            head_size=head_size,
-            scale=scale,
-            cache_config=cache_config,
+            num_heads,
+            head_size,
+            scale,
+            vllm_config,
             attn_backend=attn_backend,
             attn_type=AttentionType.ENCODER_ONLY,
             **kwargs,

@@ -32,7 +32,7 @@ from torch import nn
 from transformers import GraniteConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
@@ -111,12 +111,12 @@ class GraniteAttention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         max_position_embeddings: int = 8192,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         bias: bool = False,
-        cache_config: CacheConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
@@ -167,9 +167,8 @@ class GraniteAttention(nn.Module):
             self.num_heads,
             self.head_dim,
             self.scaling,
+            vllm_config,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -190,11 +189,11 @@ class GraniteDecoderLayer(nn.Module):
     def __init__(
         self,
         config: GraniteConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = config.hidden_size
         self.residual_multiplier = config.residual_multiplier
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
@@ -211,9 +210,8 @@ class GraniteDecoderLayer(nn.Module):
                 config, "num_key_value_heads", config.num_attention_heads
             ),
             max_position_embeddings=max_position_embeddings,
-            quant_config=quant_config,
             bias=attention_bias,
-            cache_config=cache_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
         )
 
@@ -257,7 +255,6 @@ class GraniteModel(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
         self.config = config
@@ -277,8 +274,7 @@ class GraniteModel(nn.Module):
             config.num_hidden_layers,
             lambda prefix: GraniteDecoderLayer(
                 config=config,
-                cache_config=cache_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.layers",

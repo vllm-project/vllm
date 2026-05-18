@@ -33,7 +33,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -231,11 +231,11 @@ class Ernie4_5_MoeAttention(nn.Module):
         max_position_embeddings: int = 131072,
         rms_norm_eps: float = 1e-05,
         qkv_bias: bool = False,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         layer_idx = extract_layer_index(prefix) if len(prefix) > 0 else 0
         self.layer_idx = layer_idx
         self.hidden_size = hidden_size
@@ -289,9 +289,8 @@ class Ernie4_5_MoeAttention(nn.Module):
             self.num_heads,
             self.head_dim,
             self.scaling,
+            vllm_config,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -316,12 +315,12 @@ class Ernie4_5_MoeDecoderLayer(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
         enable_eplb: bool = False,
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = config.hidden_size
         set_default_rope_theta(config, default_theta=500000)
         max_position_embeddings = getattr(config, "max_position_embeddings", 131072)
@@ -334,8 +333,7 @@ class Ernie4_5_MoeDecoderLayer(nn.Module):
             max_position_embeddings=max_position_embeddings,
             rms_norm_eps=config.rms_norm_eps,
             qkv_bias=getattr(config, "use_bias", False),
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
         )
 
@@ -410,7 +408,6 @@ class Ernie4_5_MoeModel(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
         self.vocab_size = config.vocab_size
@@ -435,8 +432,7 @@ class Ernie4_5_MoeModel(nn.Module):
             config.num_hidden_layers,
             lambda prefix: Ernie4_5_MoeDecoderLayer(
                 config=config,
-                cache_config=cache_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=prefix,
                 enable_eplb=enable_eplb,
             ),

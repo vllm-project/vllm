@@ -184,7 +184,7 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         with self._mark_tower_model(vllm_config, "image"):
             self.vision_model = self._init_vision_model(
                 config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 is_mono=self.is_mono,
                 prefix=maybe_prefix(prefix, "vision_model"),
             )
@@ -221,7 +221,7 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
     def _init_vision_model(
         self,
         config: PretrainedConfig,
-        quant_config: QuantizationConfig | None,
+        vllm_config: VllmConfig | None,
         *,
         is_mono: bool,
         prefix: str,
@@ -237,7 +237,7 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
 
             return InternVisionModel(
                 config.vision_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 num_hidden_layers_override=num_hidden_layers,
                 prefix=prefix,
             )

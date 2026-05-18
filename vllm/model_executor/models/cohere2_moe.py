@@ -9,7 +9,7 @@ from torch import nn
 from transformers import CohereConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
@@ -147,11 +147,11 @@ class Cohere2MoeAttention(nn.Module):
     def __init__(
         self,
         config: CohereConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         tp_size = get_tensor_model_parallel_world_size()
         self.config = config
         self.layer_idx = extract_layer_index(prefix)
@@ -221,9 +221,8 @@ class Cohere2MoeAttention(nn.Module):
             self.num_heads,
             self.head_dim,
             self.scaling,
+            vllm_config,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
             per_layer_sliding_window=self.sliding_window,
             prefix=f"{prefix}.attn",
         )
@@ -327,19 +326,18 @@ class Cohere2MoeDecoderLayer(nn.Module):
     def __init__(
         self,
         config: CohereConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.config = config
         self.hidden_size = config.hidden_size
         self.layer_idx = extract_layer_index(prefix)
 
         self.self_attn = Cohere2MoeAttention(
             config,
-            cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
         )
 
@@ -388,8 +386,8 @@ class Cohere2MoeModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
-        config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
+        model_config = vllm_config.model_config
+        config = model_config.hf_config
         quant_config = vllm_config.quant_config
 
         self.config = config
@@ -402,7 +400,9 @@ class Cohere2MoeModel(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: Cohere2MoeDecoderLayer(
-                config, cache_config, quant_config, prefix=prefix
+                config,
+                vllm_config=vllm_config,
+                prefix=prefix,
             ),
             prefix=f"{prefix}.layers",
         )

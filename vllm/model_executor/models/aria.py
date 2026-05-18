@@ -84,10 +84,10 @@ class AriaVisionTransformer(Idefics3VisionTransformer, SupportsQuant):
     def __init__(
         self,
         config: Idefics2VisionConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
-        super().__init__(config, quant_config=quant_config, prefix=prefix)
+        super().__init__(config, vllm_config=vllm_config, prefix=prefix)
         # Unlike Idefics3VisionTransformer which uses LayerNorm after the
         # final layer, Aria omits this normalization, so we replace it with an
         # Identity layer
@@ -260,7 +260,7 @@ class AriaTextMoELayer(nn.Module):
     def __init__(
         self,
         config: AriaTextConfig,
-        quant_config: QuantizationConfig | None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -539,7 +539,7 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         with self._mark_tower_model(vllm_config, "image"):
             self.vision_tower = AriaVisionTransformer(
                 config.vision_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
             self.multi_modal_projector = AriaProjector(

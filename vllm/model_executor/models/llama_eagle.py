@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 from collections.abc import Iterable
 
 import torch
@@ -12,7 +13,6 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
@@ -38,6 +38,11 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         prefix: str = "",
         config: LlamaConfig | None = None,
     ) -> None:
+        draft_quant_config = get_draft_quant_config(vllm_config)
+        if draft_quant_config is not vllm_config.quant_config:
+            vllm_config = copy.copy(vllm_config)
+            vllm_config.quant_config = draft_quant_config
+
         super().__init__(vllm_config, prefix=prefix, config=config)
 
         # Skip the input_layernorm
@@ -45,10 +50,6 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         if disable_input_layernorm:
             del self.input_layernorm
             self.input_layernorm = nn.Identity()
-
-    def get_quant_config(self, vllm_config: VllmConfig) -> QuantizationConfig | None:
-        """Use drafter's quantization config instead of verifier's."""
-        return get_draft_quant_config(vllm_config)
 
 
 @support_torch_compile

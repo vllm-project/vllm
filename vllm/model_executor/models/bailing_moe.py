@@ -33,7 +33,7 @@ from torch import nn
 from transformers.configuration_utils import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -76,12 +76,12 @@ class BailingAttention(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         reduce_results: bool = True,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = config.hidden_size
         self.total_num_heads = config.num_attention_heads
         self.total_kv_heads = config.num_key_value_heads
@@ -144,8 +144,8 @@ class BailingAttention(nn.Module):
             self.num_heads,
             self.head_dim,
             self.scale,
+            vllm_config,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -324,11 +324,11 @@ class BailingMoeBlock(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         layer_idx = int(prefix.split(".")[-1])
         self.config = config
         hidden_size = config.hidden_size
@@ -336,7 +336,9 @@ class BailingMoeBlock(nn.Module):
 
         self.input_layernorm = RMSNorm(hidden_size, eps=config.rms_norm_eps)
         self.attention = BailingAttention(
-            config, cache_config, quant_config, prefix=f"{prefix}.attention"
+            config,
+            vllm_config=vllm_config,
+            prefix=f"{prefix}.attention",
         )
 
         self.post_attention_layernorm = RMSNorm(hidden_size, eps=config.rms_norm_eps)
@@ -382,7 +384,6 @@ class BailingMoeModel(nn.Module):
     ):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
         self.config = config
@@ -408,8 +409,7 @@ class BailingMoeModel(nn.Module):
             config.num_hidden_layers,
             lambda prefix: BailingMoeBlock(
                 config=config,
-                cache_config=cache_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.layers",

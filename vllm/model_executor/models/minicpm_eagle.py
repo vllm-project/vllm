@@ -32,10 +32,9 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -60,13 +59,14 @@ class EagleMiniCPMDecoderLayer(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        *,
+        vllm_config: VllmConfig,
         prefix: str = "",
     ) -> None:
         super().__init__()
         self.config = config
-        self.cache_config = cache_config
+        self.vllm_config = vllm_config
+        quant_config = vllm_config.quant_config
         self.quant_config = quant_config
         self.hidden_size = config.hidden_size
         self.max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
@@ -84,8 +84,7 @@ class EagleMiniCPMDecoderLayer(nn.Module):
             num_kv_heads=self.config.num_key_value_heads,
             rope_parameters=self.config.rope_parameters,
             max_position_embeddings=self.max_position_embeddings,
-            cache_config=self.cache_config,
-            quant_config=self.quant_config,
+            vllm_config=self.vllm_config,
             prefix=f"{self.prefix}.self_attn",
         )
 
@@ -147,12 +146,8 @@ class EagleMiniCPMModel(nn.Module):
         super().__init__()
 
         config = vllm_config.speculative_config.draft_model_config.hf_config
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
 
         self.config = config
-        self.cache_config = cache_config
-        self.quant_config = quant_config
 
         self.vocab_size = config.vocab_size
 
@@ -166,7 +161,12 @@ class EagleMiniCPMModel(nn.Module):
             config.hidden_size,
         )
         self.num_experts = getattr(self.config, "num_experts", 0)
-        self._init_layers(prefix, config, cache_config, quant_config, start_layer)
+        self._init_layers(
+            prefix,
+            config,
+            vllm_config=vllm_config,
+            start_layer=start_layer,
+        )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], self.config.hidden_size
@@ -176,17 +176,16 @@ class EagleMiniCPMModel(nn.Module):
         self,
         prefix: str,
         config: PretrainedConfig,
-        cache_config: CacheConfig | None,
-        quant_config: QuantizationConfig | None,
+        *,
+        vllm_config: VllmConfig,
         start_layer: int,
     ):
         self.eagle_layers = nn.ModuleList(
             [
                 EagleMiniCPMDecoderLayer(
                     config,
-                    cache_config,
-                    quant_config,
-                    f"{prefix}.eagle_layers.{i + start_layer}",
+                    vllm_config=vllm_config,
+                    prefix=f"{prefix}.eagle_layers.{i + start_layer}",
                 )
                 for i in range(self.config.num_hidden_layers)
             ]

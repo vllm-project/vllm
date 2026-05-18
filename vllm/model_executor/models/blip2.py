@@ -13,11 +13,10 @@ from transformers import (
     apply_chunking_to_forward,
 )
 
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -81,8 +80,7 @@ class Blip2QFormerMultiHeadAttention(nn.Module):
         self,
         config: Blip2QFormerConfig,
         *,
-        quant_config: QuantizationConfig | None,
-        cache_config: CacheConfig | None,
+        vllm_config: VllmConfig | None = None,
         is_cross_attention: bool = False,
         prefix: str = "",
     ) -> None:
@@ -182,8 +180,7 @@ class Blip2QFormerAttention(nn.Module):
         self,
         config: Blip2QFormerConfig,
         *,
-        quant_config: QuantizationConfig | None,
-        cache_config: CacheConfig | None,
+        vllm_config: VllmConfig | None = None,
         is_cross_attention: bool = False,
         prefix: str = "",
     ) -> None:
@@ -191,8 +188,7 @@ class Blip2QFormerAttention(nn.Module):
 
         self.attention = Blip2QFormerMultiHeadAttention(
             config,
-            quant_config=quant_config,
-            cache_config=cache_config,
+            vllm_config=vllm_config,
             is_cross_attention=is_cross_attention,
             prefix=f"{prefix}.attention",
         )
@@ -250,8 +246,7 @@ class Blip2QFormerLayer(nn.Module):
         self,
         config: Blip2QFormerConfig,
         *,
-        quant_config: QuantizationConfig | None,
-        cache_config: CacheConfig | None,
+        vllm_config: VllmConfig | None = None,
         layer_idx: int,
         prefix: str = "",
     ) -> None:
@@ -261,8 +256,7 @@ class Blip2QFormerLayer(nn.Module):
         self.seq_len_dim = 1
         self.attention = Blip2QFormerAttention(
             config,
-            quant_config=quant_config,
-            cache_config=cache_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attention",
         )
 
@@ -271,8 +265,7 @@ class Blip2QFormerLayer(nn.Module):
         if layer_idx % config.cross_attention_frequency == 0:
             self.crossattention = Blip2QFormerAttention(
                 config,
-                quant_config=quant_config,
-                cache_config=cache_config,
+                vllm_config=vllm_config,
                 is_cross_attention=True,
                 prefix=f"{prefix}.crossattention",
             )
@@ -343,8 +336,7 @@ class Blip2QFormerEncoder(nn.Module):
         self,
         config: Blip2QFormerConfig,
         *,
-        quant_config: QuantizationConfig | None,
-        cache_config: CacheConfig | None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -355,8 +347,7 @@ class Blip2QFormerEncoder(nn.Module):
             [
                 Blip2QFormerLayer(
                     config,
-                    quant_config=quant_config,
-                    cache_config=cache_config,
+                    vllm_config=vllm_config,
                     layer_idx=layer_idx,
                     prefix=f"{prefix}.layer.{layer_idx}",
                 )
@@ -388,8 +379,7 @@ class Blip2QFormerModel(nn.Module):
         self,
         config: Blip2QFormerConfig,
         *,
-        quant_config: QuantizationConfig | None,
-        cache_config: CacheConfig | None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -401,8 +391,7 @@ class Blip2QFormerModel(nn.Module):
 
         self.encoder = Blip2QFormerEncoder(
             config,
-            quant_config=quant_config,
-            cache_config=cache_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.encoder",
         )
 
@@ -536,8 +525,6 @@ class Blip2ForConditionalGeneration(
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.multimodal_config = multimodal_config
@@ -551,7 +538,7 @@ class Blip2ForConditionalGeneration(
         )
 
         with self._mark_tower_model(vllm_config, "image"):
-            self.vision_model = BlipVisionModel(vision_config, quant_config)
+            self.vision_model = BlipVisionModel(vision_config, vllm_config=vllm_config)
             self.query_tokens = nn.Parameter(
                 torch.zeros(
                     1, config.num_query_tokens, config.qformer_config.hidden_size
@@ -559,8 +546,7 @@ class Blip2ForConditionalGeneration(
             )
             self.qformer = Blip2QFormerModel(
                 config.qformer_config,
-                cache_config=cache_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "qformer"),
             )
             self.language_projection = nn.Linear(

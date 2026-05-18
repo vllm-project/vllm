@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -189,11 +189,11 @@ class Lfm2MoeAttention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         max_position_embeddings: int = 8192,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.layer_idx = layer_idx
         self.hidden_size = hidden_size
         self.num_kv_heads = num_kv_heads
@@ -244,8 +244,8 @@ class Lfm2MoeAttention(nn.Module):
             self.num_heads,
             self.head_dim,
             self.scaling,
+            vllm_config,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
             prefix=f"{prefix}.attn",
         )
         self.q_layernorm = RMSNorm(self.head_dim, eps=config.norm_eps)
@@ -276,13 +276,12 @@ class Lfm2MoeAttentionDecoderLayer(nn.Module):
         self,
         config: Lfm2MoeConfig,
         layer_idx: int,
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
         enable_eplb: bool = False,
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.prefix = prefix
         self.config = config
         self.layer_idx = layer_idx
@@ -296,8 +295,7 @@ class Lfm2MoeAttentionDecoderLayer(nn.Module):
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
             max_position_embeddings=max_position_embeddings,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
         )
 
@@ -341,13 +339,14 @@ class Lfm2MoeShortConvDecoderLayer(nn.Module):
         self,
         config: Lfm2MoeConfig,
         layer_idx: int,
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
         enable_eplb: bool = False,
     ) -> None:
         super().__init__()
+        model_config = vllm_config.model_config if vllm_config is not None else None
+        cache_config = vllm_config.cache_config if vllm_config is not None else None
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.layer_idx = layer_idx
         self.short_conv = ShortConv(
             config=config,
@@ -403,9 +402,6 @@ class Lfm2MoeModel(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
 
         parallel_config = vllm_config.parallel_config
         enable_eplb = parallel_config.enable_eplb
@@ -431,9 +427,7 @@ class Lfm2MoeModel(nn.Module):
             return layer_class(
                 config,
                 layer_idx,
-                model_config,
-                cache_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=prefix,
                 enable_eplb=enable_eplb,
             )

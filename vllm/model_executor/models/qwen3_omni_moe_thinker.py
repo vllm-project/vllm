@@ -634,7 +634,7 @@ class Qwen3_VisionBlock(nn.Module):
         mlp_hidden_dim: int,
         act_fn: Callable[[torch.Tensor], torch.Tensor] = F.silu,
         norm_layer: Callable[[int], nn.Module] | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -646,7 +646,7 @@ class Qwen3_VisionBlock(nn.Module):
             embed_dim=dim,
             num_heads=num_heads,
             projection_size=dim,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
         self.mlp = Qwen3_VisionMLP(
@@ -654,7 +654,6 @@ class Qwen3_VisionBlock(nn.Module):
             mlp_hidden_dim,
             act_fn=act_fn,
             bias=True,
-            quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
 
@@ -742,10 +741,11 @@ class Qwen3Omni_VisionTransformer(nn.Module):
         self,
         vision_config,
         norm_eps: float = 1e-6,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = vision_config.hidden_size
         self.num_heads = vision_config.num_heads
         self.image_size = vision_config.image_size
@@ -789,7 +789,7 @@ class Qwen3Omni_VisionTransformer(nn.Module):
                     mlp_hidden_dim=vision_config.intermediate_size,
                     act_fn=_ACTIVATION_REGISTRY[vision_config.hidden_act],
                     norm_layer=norm_layer,
-                    quant_config=quant_config,
+                    vllm_config=vllm_config,
                     prefix=f"{prefix}.blocks.{layer_idx}",
                 )
                 for layer_idx in range(vision_config.depth)
@@ -1740,7 +1740,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
             self.visual = Qwen3Omni_VisionTransformer(
                 vision_config=thinker_config.vision_config,
                 norm_eps=getattr(thinker_config.text_config, "rms_norm_eps", 1e-6),
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
 

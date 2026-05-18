@@ -9,7 +9,7 @@ import torch
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -231,11 +231,11 @@ class ArcticAttention(nn.Module):
     def __init__(
         self,
         config: ArcticConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.config = config
         self.hidden_size = config.hidden_size
 
@@ -285,9 +285,8 @@ class ArcticAttention(nn.Module):
             self.num_heads,
             self.head_dim,
             self.scaling,
+            vllm_config,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -308,8 +307,7 @@ class ArcticDecoderLayer(nn.Module):
     def __init__(
         self,
         config: ArcticConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -319,13 +317,11 @@ class ArcticDecoderLayer(nn.Module):
         self.use_residual = config.use_residual and is_moe_layer
         self.self_attn = ArcticAttention(
             config,
-            cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
         )
         self.block_sparse_moe = ArcticMoE(
             config,
-            quant_config=quant_config,
             reduce_results=(not self.use_residual),
             prefix=f"{prefix}.block_sparse_moe",
         )
@@ -382,8 +378,6 @@ class ArcticModel(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
 
         self.config = config
         self.vocab_size = config.vocab_size
@@ -393,7 +387,9 @@ class ArcticModel(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: ArcticDecoderLayer(
-                config, cache_config, quant_config, prefix=prefix
+                config,
+                vllm_config=vllm_config,
+                prefix=prefix,
             ),
             prefix=f"{prefix}.layers",
         )

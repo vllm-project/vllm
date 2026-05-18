@@ -16,7 +16,7 @@ from transformers import (
     ChameleonVQVAEConfig,
 )
 
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict
@@ -267,12 +267,12 @@ class ChameleonAttention(nn.Module):
         num_kv_heads: int,
         rope_parameters: dict[str, Any],
         max_position_embeddings: int = 4096,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         bias: bool = False,
-        cache_config: CacheConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
@@ -322,9 +322,8 @@ class ChameleonAttention(nn.Module):
             self.num_heads,
             self.head_dim,
             self.scaling,
+            vllm_config,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -359,11 +358,11 @@ class ChameleonDecoderLayer(nn.Module):
     def __init__(
         self,
         config: ChameleonConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = config.hidden_size
         max_position_embeddings = getattr(config, "max_position_embeddings", 4096)
 
@@ -375,9 +374,8 @@ class ChameleonDecoderLayer(nn.Module):
             ),
             rope_parameters=config.rope_parameters,
             max_position_embeddings=max_position_embeddings,
-            quant_config=quant_config,
             bias=False,
-            cache_config=cache_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
         )
         self.mlp = ChameleonMLP(
@@ -420,11 +418,11 @@ class ChameleonSwinDecoderLayer(nn.Module):
     def __init__(
         self,
         config: ChameleonConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = config.hidden_size
         max_position_embeddings = getattr(config, "max_position_embeddings", 4096)
 
@@ -436,9 +434,8 @@ class ChameleonSwinDecoderLayer(nn.Module):
             ),
             rope_parameters=config.rope_parameters,
             max_position_embeddings=max_position_embeddings,
-            quant_config=quant_config,
             bias=False,
-            cache_config=cache_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
         )
         self.mlp = ChameleonMLP(
@@ -830,8 +827,6 @@ class ChameleonModel(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
 
         self.config = config
         self.vocab_size = config.vocab_size
@@ -850,8 +845,7 @@ class ChameleonModel(nn.Module):
             config.num_hidden_layers,
             lambda prefix: decoder_layer(
                 config=config,
-                cache_config=cache_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.layers",

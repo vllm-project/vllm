@@ -20,7 +20,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from transformers import PretrainedConfig
 
-from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.config import VllmConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.intern_vit import (
     InternParallelAttention,
@@ -576,7 +576,7 @@ class RadioInternVisionModel(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,
         num_dummy_heads: int = 0,
@@ -607,7 +607,7 @@ class RadioInternVisionModel(nn.Module):
 
         self.encoder = RadioVisionEncoder(
             config=config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             num_hidden_layers_override=num_hidden_layers_override,
             num_dummy_heads=num_dummy_heads,
             prefix=f"{prefix}.encoder",
@@ -700,7 +700,7 @@ class RadioModel(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,
         num_dummy_heads: int = 0,
@@ -711,7 +711,7 @@ class RadioModel(nn.Module):
         self.config = config
         self.model = RadioInternVisionModel(
             config=config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             num_hidden_layers_override=num_hidden_layers_override,
             num_dummy_heads=num_dummy_heads,
             prefix=prefix,

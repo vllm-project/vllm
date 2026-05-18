@@ -140,10 +140,11 @@ class GlmAsrEncoderAttention(nn.Module):
     def __init__(
         self,
         config,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.config = config
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
@@ -300,7 +301,7 @@ class GlmAsrEncoderLayer(nn.Module):
     def __init__(
         self,
         config,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -308,13 +309,12 @@ class GlmAsrEncoderLayer(nn.Module):
 
         self.self_attn = GlmAsrEncoderAttention(
             config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
         )
 
         self.mlp = GlmAsrEncoderMLP(
             config,
-            quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
 
@@ -398,7 +398,7 @@ class GlmAsrEncoder(nn.Module):
     def __init__(
         self,
         config,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -424,7 +424,7 @@ class GlmAsrEncoder(nn.Module):
             [
                 GlmAsrEncoderLayer(
                     config,
-                    quant_config=quant_config,
+                    vllm_config=vllm_config,
                     prefix=f"{prefix}.layers.{layer_idx}",
                 )
                 for layer_idx in range(config.num_hidden_layers)
@@ -955,7 +955,7 @@ class GlmAsrForConditionalGeneration(
         with self._mark_tower_model(vllm_config, "audio"):
             self.audio_tower = GlmAsrEncoder(
                 config.audio_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "audio_tower"),
             )
             self.multi_modal_projector = GlmAsrMultiModalProjector(

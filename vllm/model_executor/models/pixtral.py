@@ -345,6 +345,7 @@ class PixtralForConditionalGeneration(
         with self._mark_tower_model(vllm_config, "image"):
             self.vision_encoder = VisionTransformer(
                 self.vision_args,
+                quant_config=vllm_config.quant_config,
                 prefix=maybe_prefix(prefix, "vision_encoder"),
             )
             self.pre_mm_projector_norm = (
@@ -792,7 +793,6 @@ class TransformerBlock(nn.Module):
         self.feed_forward = FeedForward(
             args.hidden_size,
             args.intermediate_size,
-            quant_config=quant_config,
             prefix=f"{prefix}.feed_forward",
             disable_tp=disable_tp,
         )
@@ -1276,7 +1276,6 @@ class PixtralHFTransformerBlock(nn.Module):
         )
         self.feed_forward = PixtralHFMLP(
             config,
-            quant_config=quant_config,
             prefix=f"{prefix}.feed_forward",
         )
         self.ffn_norm = RMSNorm(config.hidden_size, eps=1e-5)

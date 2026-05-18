@@ -72,7 +72,12 @@ class Olmo2Attention(nn.Module):
     (plus another skip connection).
     """
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+    ):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
         assert isinstance(self.config, (Olmo2Config, Olmo3Config))
@@ -130,9 +135,8 @@ class Olmo2Attention(nn.Module):
             self.num_heads,
             self.head_dim,
             self.scaling,
+            vllm_config,
             num_kv_heads=self.num_kv_heads,
-            cache_config=vllm_config.cache_config,
-            quant_config=vllm_config.quant_config,
             per_layer_sliding_window=sliding_window,
             prefix=f"{prefix}.attn",
         )
@@ -244,7 +248,8 @@ class Olmo2DecoderLayer(nn.Module):
         assert isinstance(config, (Olmo2Config, Olmo3Config))
         # Attention block.
         self.self_attn = Olmo2Attention(
-            vllm_config=vllm_config, prefix=f"{prefix}.self_attn"
+            vllm_config=vllm_config,
+            prefix=f"{prefix}.self_attn",
         )
 
         # MLP block.

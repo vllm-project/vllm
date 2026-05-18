@@ -6,7 +6,7 @@ from copy import copy
 import numpy as np
 import torch
 
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.utils.math_utils import cdiv
@@ -197,16 +197,13 @@ class CrossAttention(Attention):
         num_heads: int,
         head_size: int,
         scale: float,
-        cache_config: CacheConfig | None = None,
+        vllm_config: VllmConfig,
         attn_type: str | None = None,
         **kwargs,
     ):
         dtype = torch.get_default_dtype()
 
-        if cache_config is not None:
-            kv_cache_dtype = cache_config.cache_dtype
-        else:
-            kv_cache_dtype = "auto"
+        kv_cache_dtype = vllm_config.cache_config.cache_dtype
 
         if attn_type is not None:
             assert attn_type == AttentionType.ENCODER_DECODER, (
@@ -222,10 +219,10 @@ class CrossAttention(Attention):
         attn_backend = create_cross_attention_backend(underlying_attn_backend)
 
         super().__init__(
-            num_heads=num_heads,
-            head_size=head_size,
-            scale=scale,
-            cache_config=cache_config,
+            num_heads,
+            head_size,
+            scale,
+            vllm_config,
             attn_backend=attn_backend,
             attn_type=AttentionType.ENCODER_DECODER,
             **kwargs,

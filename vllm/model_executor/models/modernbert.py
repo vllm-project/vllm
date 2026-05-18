@@ -63,7 +63,11 @@ class ModernBertEmbeddings(nn.Module):
 
 class ModernBertAttention(nn.Module):
     def __init__(
-        self, config: ModernBertConfig, layer_id: int | None = None, prefix: str = ""
+        self,
+        config: ModernBertConfig,
+        layer_id: int | None = None,
+        vllm_config: VllmConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.config = config
@@ -115,6 +119,7 @@ class ModernBertAttention(nn.Module):
             self.num_heads,
             self.head_dim,
             self.scaling,
+            vllm_config,
             prefix=f"{layer_id}.attn",
             per_layer_sliding_window=sliding_window,
         )
@@ -161,7 +166,11 @@ class ModernBertMLP(nn.Module):
 
 class ModernBertLayer(nn.Module):
     def __init__(
-        self, config: ModernBertConfig, prefix: str = "", layer_id: int | None = None
+        self,
+        config: ModernBertConfig,
+        vllm_config: VllmConfig | None = None,
+        prefix: str = "",
+        layer_id: int | None = None,
     ):
         super().__init__()
         self.config = config
@@ -172,7 +181,10 @@ class ModernBertLayer(nn.Module):
                 config.hidden_size, eps=config.norm_eps, bias=config.norm_bias
             )
         self.attn = ModernBertAttention(
-            config=config, layer_id=layer_id, prefix=f"{prefix}.attn"
+            config=config,
+            layer_id=layer_id,
+            prefix=f"{prefix}.attn",
+            vllm_config=vllm_config,
         )
         self.mlp_norm = nn.LayerNorm(
             config.hidden_size, eps=config.norm_eps, bias=config.norm_bias
@@ -201,6 +213,7 @@ class ModernBertEncoderLayer(nn.Module):
             [
                 ModernBertLayer(
                     config=config,
+                    vllm_config=vllm_config,
                     layer_id=layer_id,
                     prefix=f"{prefix}.layers.{layer_id}",
                 )

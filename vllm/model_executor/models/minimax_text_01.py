@@ -15,7 +15,7 @@ from torch import nn
 from transformers import MiniMaxConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -198,12 +198,12 @@ class MiniMaxText01Attention(nn.Module):
         max_position: int = 4096 * 32,
         rope_parameters: dict | None = None,
         sliding_window: int | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         layer_idx: int = None,
-        cache_config: CacheConfig | None = None,
         prefix: str = "mha",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.layer_idx = layer_idx
 
         self.hidden_size = hidden_size
@@ -245,9 +245,8 @@ class MiniMaxText01Attention(nn.Module):
             self.num_heads,
             self.head_dim,
             self.scaling,
+            vllm_config,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
             prefix=f"{prefix}.attn",
         )
         self.rotary_emb = get_rope(
@@ -277,9 +276,7 @@ class MiniMaxText01DecoderLayer(nn.Module):
     def __init__(
         self,
         config: MiniMaxConfig,
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         expert_num: int = 1,
         layer_id: int = None,
         linear_layer_id: int | None = None,
@@ -289,6 +286,7 @@ class MiniMaxText01DecoderLayer(nn.Module):
         self._irank = get_tensor_model_parallel_rank()
         self.prefix = prefix
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
 
         self.hidden_size = config.hidden_size
         self.expert_num = expert_num
@@ -317,9 +315,7 @@ class MiniMaxText01DecoderLayer(nn.Module):
                 max_position=max_position_embeddings,
                 block_size=config.block if hasattr(config, "block") else 256,
                 num_hidden_layer=config.num_hidden_layers,
-                model_config=model_config,
-                cache_config=cache_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 layer_idx=self._ilayer,
                 linear_layer_idx=linear_layer_id,
                 prefix=prefix,
@@ -333,9 +329,8 @@ class MiniMaxText01DecoderLayer(nn.Module):
                 max_position=max_position_embeddings,
                 rope_parameters=config.rope_parameters,
                 sliding_window=config.sliding_window,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 layer_idx=self._ilayer,
-                cache_config=cache_config,
                 prefix=prefix,
             )
         else:
@@ -496,9 +491,6 @@ class MiniMaxText01Model(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config: MiniMaxConfig = vllm_config.model_config.hf_config
-        model_config = vllm_config.model_config
-        quant_config = vllm_config.quant_config
-        cache_config = vllm_config.cache_config
         scheduler_config = vllm_config.scheduler_config
         self.config = config
         self.CONCAT_FFN = True
@@ -541,10 +533,8 @@ class MiniMaxText01Model(nn.Module):
             layer_config.layer_idx = layer_idx
 
             decoder_kwargs = {
-                "quant_config": quant_config,
+                "vllm_config": vllm_config,
                 "layer_id": layer_idx,
-                "model_config": model_config,
-                "cache_config": cache_config,
             }
 
             if layer_config.attention_type == 0:

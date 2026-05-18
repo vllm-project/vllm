@@ -11,7 +11,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
+from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -95,11 +95,11 @@ class CohereASRAttention(nn.Module):
         num_heads: int,
         bias: bool = True,
         attn_type: AttentionType = AttentionType.DECODER,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.embed_dim = embed_dim
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
@@ -145,9 +145,8 @@ class CohereASRAttention(nn.Module):
                 self.num_heads,
                 self.head_dim,
                 self.scaling,
+                vllm_config,
                 num_kv_heads=self.num_kv_heads,
-                cache_config=cache_config,
-                quant_config=quant_config,
                 prefix=f"{prefix}.attn",
                 attn_type=self.attn_type,
             )
@@ -156,9 +155,8 @@ class CohereASRAttention(nn.Module):
                 self.num_heads,
                 self.head_dim,
                 self.scaling,
+                vllm_config,
                 num_kv_heads=self.num_kv_heads,
-                cache_config=cache_config,
-                quant_config=quant_config,
                 prefix=f"{prefix}.attn",
                 attn_type=self.attn_type,
             )
@@ -200,16 +198,14 @@ class CohereASRCrossAttention(CohereASRAttention):
         embed_dim: int,
         num_heads: int,
         bias: bool = True,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__(
             embed_dim=embed_dim,
             num_heads=num_heads,
             bias=bias,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=prefix,
             attn_type=AttentionType.ENCODER_DECODER,
         )
@@ -332,7 +328,6 @@ class CohereASRDecoderLayer(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config.transf_decoder["config_dict"]
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
         self.hidden_dim = config.get("hidden_size")
@@ -346,8 +341,7 @@ class CohereASRDecoderLayer(nn.Module):
             embed_dim=self.hidden_dim,
             num_heads=self.num_heads,
             attn_type=AttentionType.DECODER,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.first_sub_layer",
         )
 
@@ -356,8 +350,7 @@ class CohereASRDecoderLayer(nn.Module):
         self.second_sub_layer = CohereASRCrossAttention(
             embed_dim=self.hidden_dim,
             num_heads=self.num_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.second_sub_layer",
         )
 

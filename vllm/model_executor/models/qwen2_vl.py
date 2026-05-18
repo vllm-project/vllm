@@ -282,10 +282,11 @@ class Qwen2VisionAttention(nn.Module):
         embed_dim: int,
         num_heads: int,
         projection_size: int,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         # Per attention head and per partition values.
         use_data_parallel = is_vit_use_data_parallel()
         self.tp_size = (
@@ -400,6 +401,7 @@ class Qwen2VisionBlock(nn.Module):
         mlp_ratio: float,
         act_layer: type[nn.Module] = QuickGELU,
         norm_layer: Callable[[int], nn.Module] | None = None,
+        vllm_config: VllmConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
@@ -414,14 +416,13 @@ class Qwen2VisionBlock(nn.Module):
             embed_dim=dim,
             num_heads=num_heads,
             projection_size=dim,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
         self.mlp = Qwen2VisionMLP(
             dim,
             mlp_hidden_dim,
             act_layer=act_layer,
-            quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
 
@@ -1284,8 +1285,8 @@ class Qwen2VLForConditionalGeneration(
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config: Qwen2VLConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
+        config: Qwen2VLConfig = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.multimodal_config
         self.model_config = vllm_config.model_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"

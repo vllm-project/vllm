@@ -25,7 +25,7 @@ from torch import nn
 from transformers import Llama4TextConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import (
     get_ep_group,
     get_tensor_model_parallel_world_size,
@@ -46,7 +46,6 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
     RowParallelLinear,
 )
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
@@ -173,13 +172,13 @@ class Llama4Attention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         max_position_embeddings: int = 8192,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         bias: bool = False,
         bias_o_proj: bool = False,
-        cache_config: CacheConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.layer_idx = extract_layer_index(prefix)
         self.hidden_size = hidden_size
         self.no_rope_layers = config.no_rope_layers
@@ -253,21 +252,25 @@ class Llama4Attention(nn.Module):
         )
 
         use_chunked_local_attn = not self.nope and config.attention_chunk_size
-        attn_cls = ChunkedLocalAttention if use_chunked_local_attn else Attention
-        self.attn = attn_cls(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
-            num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.attn",
-            **(
-                {"attention_chunk_size": config.attention_chunk_size}
-                if use_chunked_local_attn
-                else {}
-            ),
-        )
+        if use_chunked_local_attn:
+            self.attn = ChunkedLocalAttention(
+                self.num_heads,
+                self.head_dim,
+                self.scaling,
+                config.attention_chunk_size,
+                vllm_config,
+                num_kv_heads=self.num_kv_heads,
+                prefix=f"{prefix}.attn",
+            )
+        else:
+            self.attn = Attention(
+                self.num_heads,
+                self.head_dim,
+                self.scaling,
+                vllm_config,
+                num_kv_heads=self.num_kv_heads,
+                prefix=f"{prefix}.attn",
+            )
 
     def _get_attn_scale(self, positions: torch.Tensor) -> torch.Tensor:
         floor = torch.floor((positions + 1.0) / self.floor_scale)
@@ -321,7 +324,6 @@ class Llama4DecoderLayer(nn.Module):
         super().__init__()
 
         config = config or vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
         self.layer_idx = extract_layer_index(prefix)
@@ -335,10 +337,9 @@ class Llama4DecoderLayer(nn.Module):
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
             max_position_embeddings=max_position_embeddings,
-            quant_config=quant_config,
             bias=False,
             bias_o_proj=False,
-            cache_config=cache_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
         )
         is_moe_layer = (

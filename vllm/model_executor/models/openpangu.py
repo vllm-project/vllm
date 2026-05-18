@@ -30,7 +30,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ParallelConfig, VllmConfig
+from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -261,11 +261,11 @@ class OpenPanguMLAAttention(nn.Module):
         q_lora_rank: int | None,
         kv_lora_rank: int,
         max_position_embeddings: int = 8192,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.qk_nope_head_dim = qk_nope_head_dim
@@ -385,9 +385,8 @@ class OpenPanguMLAAttention(nn.Module):
             self.q_lora_rank,
             self.kv_lora_rank,
             mla_modules,
-            cache_config,
-            quant_config,
-            prefix,
+            vllm_config=vllm_config,
+            prefix=prefix,
         )
 
     def forward(
@@ -406,14 +405,14 @@ class OpenPanguEmbeddedAttention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         max_position_embeddings: int = 8192,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         bias: bool = False,
         bias_o_proj: bool = False,
-        cache_config: CacheConfig | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         layer_idx = extract_layer_index(prefix)
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -491,9 +490,8 @@ class OpenPanguEmbeddedAttention(nn.Module):
             self.num_heads,
             self.head_dim,
             self.scaling,
+            vllm_config,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
             per_layer_sliding_window=sliding_window,
             attn_type=attn_type,
             prefix=f"{prefix}.attn",
@@ -544,14 +542,14 @@ class OpenPanguSinkAttention(nn.Module):
         num_kv_heads: int,
         rope_parameters: dict[str, Any] | None = None,
         max_position_embeddings: int = 8192,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         bias: bool = False,
         bias_o_proj: bool = False,
-        cache_config: CacheConfig | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         layer_idx = extract_layer_index(prefix)
         self.hidden_size = hidden_size
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -644,14 +642,13 @@ class OpenPanguSinkAttention(nn.Module):
             self.num_heads,
             self.head_dim,
             self.scaling,
-            sink_len=self.param_sink_number,
+            self.param_sink_number,
+            vllm_config,
+            attn_backend=FlashAttentionDiffKVBackend,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
             per_layer_sliding_window=sliding_window,
             attn_type=attn_type,
             prefix=f"{prefix}.attn",
-            attn_backend=FlashAttentionDiffKVBackend,
             head_size_v=self.v_channels,
         )
 
@@ -804,7 +801,6 @@ class OpenPanguDecoderLayer(nn.Module):
 
         if config is None:
             config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
 
@@ -836,8 +832,7 @@ class OpenPanguDecoderLayer(nn.Module):
                 ),
                 kv_lora_rank=config.kv_lora_rank,
                 max_position_embeddings=max_position_embeddings,
-                cache_config=cache_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=f"{prefix}.self_attn",
             )
         elif self.use_sink_attention:
@@ -869,10 +864,9 @@ class OpenPanguDecoderLayer(nn.Module):
                 ),
                 rope_parameters=rope_parameters,
                 max_position_embeddings=max_position_embeddings,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 bias=attention_bias,
                 bias_o_proj=bias_o_proj,
-                cache_config=cache_config,
                 prefix=f"{prefix}.self_attn",
                 attn_type=attn_type,
             )
@@ -899,10 +893,9 @@ class OpenPanguDecoderLayer(nn.Module):
                     config, "num_key_value_heads", config.num_attention_heads
                 ),
                 max_position_embeddings=max_position_embeddings,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 bias=attention_bias,
                 bias_o_proj=bias_o_proj,
-                cache_config=cache_config,
                 prefix=f"{prefix}.self_attn",
                 attn_type=attn_type,
             )

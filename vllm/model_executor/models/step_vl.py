@@ -187,10 +187,11 @@ class PerceptionEncoderVisionAttention(nn.Module):
         max_grid_height: int,
         max_grid_width: int,
         use_cls_token: bool = False,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.embed_dim = embed_dim
         self.total_num_heads = num_heads
         self.head_dim = embed_dim // num_heads
@@ -261,17 +262,18 @@ class PerceptionEncoderVisionBlock(nn.Module):
         act_layer: Callable = nn.GELU,
         norm_layer: Callable = nn.LayerNorm,
         use_cls_token: bool = False,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.attn = PerceptionEncoderVisionAttention(
             d_model,
             n_head,
             max_grid_height=max_grid_height,
             max_grid_width=max_grid_width,
             use_cls_token=use_cls_token,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
         self.ls_1 = (
@@ -314,7 +316,7 @@ class PerceptionEncoderVisionTransformer(nn.Module):
         act_layer: Callable = nn.GELU,
         norm_layer: Callable = nn.LayerNorm,
         use_cls_token: bool = False,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -332,7 +334,7 @@ class PerceptionEncoderVisionTransformer(nn.Module):
                     act_layer=act_layer,
                     norm_layer=norm_layer,
                     use_cls_token=use_cls_token,
-                    quant_config=quant_config,
+                    vllm_config=vllm_config,
                     prefix=f"{prefix}.resblocks.{i}",
                 )
                 for i in range(layers)
@@ -351,7 +353,7 @@ class PerceptionEncoder(nn.Module):
         config,
         act_layer: Callable,
         norm_layer: Callable = _DEFAULT_NORM_LAYER,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -391,7 +393,7 @@ class PerceptionEncoder(nn.Module):
             act_layer=act_layer,
             norm_layer=norm_layer,
             use_cls_token=self.use_cls_token,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.transformer",
         )
 
@@ -508,7 +510,7 @@ class StepVLForConditionalGeneration(Step3VLForConditionalGeneration):
             self.vision_model = PerceptionEncoder(
                 config.vision_config,
                 get_act_fn(config.vision_config.hidden_act),
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "vision_model"),
             )
             self.vit_large_projector = ColumnParallelLinear(

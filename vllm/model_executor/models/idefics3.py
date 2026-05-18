@@ -464,7 +464,7 @@ class Idefics3Model(nn.Module):
         self.vocab_size = self.config.text_config.vocab_size
         self.vision_model = Idefics3VisionTransformer(
             config.vision_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "vision_model"),
         )
         self.connector = Idefics3Connector(

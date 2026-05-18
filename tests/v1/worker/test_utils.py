@@ -10,10 +10,18 @@ def test_bind_kv_cache(default_vllm_config):
     from vllm.model_executor.layers.attention import Attention
 
     ctx = {
-        "layers.0.self_attn": Attention(32, 128, 0.1, prefix="layers.0.self_attn"),
-        "layers.1.self_attn": Attention(32, 128, 0.1, prefix="layers.1.self_attn"),
-        "layers.2.self_attn": Attention(32, 128, 0.1, prefix="layers.2.self_attn"),
-        "layers.3.self_attn": Attention(32, 128, 0.1, prefix="layers.3.self_attn"),
+        "layers.0.self_attn": Attention(
+            32, 128, 0.1, default_vllm_config, prefix="layers.0.self_attn"
+        ),
+        "layers.1.self_attn": Attention(
+            32, 128, 0.1, default_vllm_config, prefix="layers.1.self_attn"
+        ),
+        "layers.2.self_attn": Attention(
+            32, 128, 0.1, default_vllm_config, prefix="layers.2.self_attn"
+        ),
+        "layers.3.self_attn": Attention(
+            32, 128, 0.1, default_vllm_config, prefix="layers.3.self_attn"
+        ),
     }
     kv_cache = {
         "layers.0.self_attn": torch.zeros((1,)),
@@ -39,8 +47,12 @@ def test_bind_kv_cache_non_attention(default_vllm_config):
 
     # example from Jamba PP=2
     ctx = {
-        "model.layers.20.attn": Attention(32, 128, 0.1, prefix="model.layers.20.attn"),
-        "model.layers.28.attn": Attention(32, 128, 0.1, prefix="model.layers.28.attn"),
+        "model.layers.20.attn": Attention(
+            32, 128, 0.1, default_vllm_config, prefix="model.layers.20.attn"
+        ),
+        "model.layers.28.attn": Attention(
+            32, 128, 0.1, default_vllm_config, prefix="model.layers.28.attn"
+        ),
     }
     kv_cache = {
         "model.layers.20.attn": torch.zeros((1,)),
@@ -67,7 +79,7 @@ def test_bind_kv_cache_draft_model(default_vllm_config):
         "draft_model.layers.1.attn",
     ]
     ctx = {
-        layer_name: Attention(32, 128, 0.1, prefix=layer_name)
+        layer_name: Attention(32, 128, 0.1, default_vllm_config, prefix=layer_name)
         for layer_name in layer_names
     }
     kv_cache = {layer_name: torch.zeros((1,)) for layer_name in layer_names}

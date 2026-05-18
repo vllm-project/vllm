@@ -641,7 +641,6 @@ class Lfm2VLForConditionalGeneration(
         config: Lfm2VlConfig = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.multimodal_config
         vision_config = config.vision_config
-        quant_config = vllm_config.quant_config
 
         self.config = config
         self.vllm_config = vllm_config
@@ -652,7 +651,7 @@ class Lfm2VLForConditionalGeneration(
             if vision_config.model_type == "siglip2_vision_model":
                 self.vision_tower = Siglip2Model(
                     config=vision_config,
-                    quant_config=quant_config,
+                    vllm_config=vllm_config,
                     prefix=maybe_prefix(prefix, "vision_tower"),
                 )
             else:

@@ -19,6 +19,7 @@ from vllm.compilation.decorators import (
     should_torch_compile_mm_encoder,
     support_torch_compile,
 )
+from vllm.config import VllmConfig
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -148,12 +149,13 @@ class InternParallelAttention(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         *,
         num_dummy_heads: int = 0,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
 
         self.config = config
         self.embed_dim = config.hidden_size
@@ -293,13 +295,15 @@ class InternVisionEncoderLayer(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         *,
         num_dummy_heads: int = 0,
         prefix: str = "",
         attn_cls: type[InternParallelAttention] = InternParallelAttention,
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
+        self.vllm_config = vllm_config
         self.embed_dim = config.hidden_size
         self.intermediate_size = config.intermediate_size
         self.norm_type = config.norm_type
@@ -333,7 +337,7 @@ class InternVisionEncoderLayer(nn.Module):
     ):
         return self.attn_cls(
             config,
-            quant_config=quant_config,
+            vllm_config=self.vllm_config,
             num_dummy_heads=num_dummy_heads,
             prefix=prefix,
         )
@@ -353,7 +357,7 @@ class InternVisionEncoder(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,
         num_dummy_heads: int = 0,
@@ -374,7 +378,7 @@ class InternVisionEncoder(nn.Module):
             [
                 self.layer_cls(
                     config=config,
-                    quant_config=quant_config,
+                    vllm_config=vllm_config,
                     num_dummy_heads=num_dummy_heads,
                     prefix=f"{prefix}.layers.{layer_idx}",
                 )
@@ -398,6 +402,7 @@ class InternVisionModel(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
+        vllm_config: VllmConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,
@@ -412,7 +417,7 @@ class InternVisionModel(nn.Module):
         self.embeddings = InternVisionEmbeddings(config)
         self.encoder = InternVisionEncoder(
             config=config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             num_hidden_layers_override=num_hidden_layers_override,
             num_dummy_heads=num_dummy_heads,
             prefix=f"{prefix}.encoder",

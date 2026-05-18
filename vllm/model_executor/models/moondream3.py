@@ -574,11 +574,11 @@ class Moondream3Attention(nn.Module):
         self,
         config: Moondream3TextConfig,
         layer_idx: int,
-        cache_config=None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = config.dim
         self.num_heads = config.n_heads
         self.num_kv_heads = config.n_kv_heads
@@ -622,12 +622,11 @@ class Moondream3Attention(nn.Module):
 
         self.scaling = self.head_dim**-0.5
         self.attn = Attention(
-            num_heads=self.num_heads_per_partition,
-            head_size=self.head_dim,
-            scale=self.scaling,
+            self.num_heads_per_partition,
+            self.head_dim,
+            self.scaling,
+            vllm_config,
             num_kv_heads=self.num_kv_heads_per_partition,
-            cache_config=cache_config,
-            quant_config=quant_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -743,11 +742,11 @@ class Moondream3DecoderLayer(nn.Module):
     def __init__(
         self,
         config: Moondream3TextConfig,
-        cache_config=None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         layer_idx = extract_layer_index(prefix)
         self.layer_idx = layer_idx
 
@@ -756,8 +755,7 @@ class Moondream3DecoderLayer(nn.Module):
         self.attn = Moondream3Attention(
             config=config,
             layer_idx=layer_idx,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -798,8 +796,7 @@ class Moondream3TextModel(nn.Module):
     def __init__(
         self,
         config: Moondream3TextConfig,
-        cache_config=None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -816,8 +813,7 @@ class Moondream3TextModel(nn.Module):
             config.n_layers,
             lambda prefix: Moondream3DecoderLayer(
                 config=config,
-                cache_config=cache_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=prefix,
             ),
             prefix=blocks_prefix,
@@ -1047,7 +1043,6 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         hf_config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        cache_config = vllm_config.cache_config
 
         # Reuse the transformers_utils config implementation.
         if isinstance(hf_config, Moondream3Config):
@@ -1077,8 +1072,7 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             # Text decoder
             self.text = Moondream3TextModel(
                 config=self.config.text_config,
-                cache_config=cache_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "text"),
             )
 

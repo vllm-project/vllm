@@ -13,9 +13,9 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
+from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.inputs import MultiModalDataDict
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import BatchedTensorInputs
 from vllm.multimodal.parse import (
@@ -175,7 +175,7 @@ class NVLM_D_Model(InternVLChatModel):
     def _init_vision_model(
         self,
         config: PretrainedConfig,
-        quant_config: QuantizationConfig | None,
+        vllm_config: VllmConfig | None,
         *,
         is_mono: bool,
         prefix: str,
@@ -193,7 +193,7 @@ class NVLM_D_Model(InternVLChatModel):
             # make the number of heads divisible by 8.
             return InternVisionModel(
                 config.vision_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 num_hidden_layers_override=num_hidden_layers,
                 num_dummy_heads=7,
                 prefix=prefix,

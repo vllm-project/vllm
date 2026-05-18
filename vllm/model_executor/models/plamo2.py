@@ -547,7 +547,6 @@ class Plamo2AttentionMixer(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "", **kwargs) -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         self.hidden_size = config.hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -620,8 +619,8 @@ class Plamo2AttentionMixer(nn.Module):
             self.num_heads,
             self.head_dim,
             self.scaling,
+            vllm_config,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
             prefix=f"{prefix}.attn",
         )
 

@@ -61,11 +61,11 @@ class QKNormRoPETestModel(torch.nn.Module):
 
         # Register layer metadata for the fusion pass via Attention.
         self.attn = Attention(
-            num_heads=self.num_heads,
-            head_size=self.head_dim,
-            scale=1.0 / self.head_dim**0.5,
+            self.num_heads,
+            self.head_dim,
+            1.0 / self.head_dim**0.5,
+            vllm_config,
             num_kv_heads=self.num_kv_heads,
-            cache_config=vllm_config.cache_config,
             prefix=prefix,
             attn_type=AttentionType.DECODER,
         )

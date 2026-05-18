@@ -10,7 +10,7 @@ from torch import nn
 from transformers import BambaConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -97,12 +97,13 @@ class BambaMixerDecoderLayer(nn.Module):
         self,
         config: BambaConfig,
         layer_idx: int,
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        model_config = vllm_config.model_config if vllm_config is not None else None
+        cache_config = vllm_config.cache_config if vllm_config is not None else None
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.config = config
         self.mamba = MambaMixer2(
             hidden_size=config.hidden_size,
@@ -152,12 +153,11 @@ class BambaAttentionDecoderLayer(nn.Module):
         self,
         config: BambaConfig,
         layer_idx: int,
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         self.hidden_size = config.hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -212,8 +212,8 @@ class BambaAttentionDecoderLayer(nn.Module):
             self.num_heads,
             self.head_dim,
             self.scaling,
+            vllm_config,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -272,9 +272,6 @@ class BambaModel(nn.Module):
         super().__init__()
 
         config: BambaConfig = vllm_config.model_config.hf_config
-        model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
 
         self.config = config
 
@@ -291,9 +288,7 @@ class BambaModel(nn.Module):
             return layer_class(
                 config,
                 layer_idx,
-                model_config,
-                cache_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=prefix,
             )
 

@@ -11,7 +11,7 @@ from torch import nn
 from torch.nn.parameter import Parameter
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.distributed import (
     get_dp_group,
     get_ep_group,
@@ -137,8 +137,7 @@ class Step3p5Attention(nn.Module):
         rms_norm_eps: float = 1e-06,
         qkv_bias: bool = False,
         rope_theta: float | list[float] | None = 10000,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         rope_scaling: dict[str, Any] | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
@@ -152,6 +151,7 @@ class Step3p5Attention(nn.Module):
         partial_rotary_factor: float = 1.0,
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = hidden_size
         self.total_num_heads = num_heads
         tp_size = get_tensor_model_parallel_world_size()
@@ -246,9 +246,8 @@ class Step3p5Attention(nn.Module):
             self.num_heads,
             self.head_dim,
             self.scaling,
+            vllm_config,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
             prefix=f"{prefix}.attn",
             per_layer_sliding_window=sliding_window,
             attn_type=attn_type,
@@ -457,8 +456,7 @@ class Step3p5DecoderLayer(nn.Module):
                 rms_norm_eps=config.rms_norm_eps,
                 qkv_bias=getattr(config, "attention_bias", False),
                 head_dim=head_dim if head_dim else getattr(config, "head_dim", None),
-                cache_config=cache_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 rope_scaling=getattr(config, "rope_scaling", None),
                 sliding_window=getattr(config, "sliding_window", None),
                 use_head_wise_attn_gate=getattr(

@@ -44,7 +44,6 @@ from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     RowParallelLinear,
 )
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.common import (
     ApplyRotaryEmb,
 )
@@ -558,10 +557,11 @@ class SiglipAttention(nn.Module):
         embed_dim: int,
         num_heads: int,
         projection_size: int,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
 
         self.tp_size = parallel_state.get_tensor_model_parallel_world_size()
         self.tp_rank = parallel_state.get_tensor_model_parallel_rank()
@@ -686,7 +686,7 @@ class SiglipEncoderLayer(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -696,13 +696,12 @@ class SiglipEncoderLayer(nn.Module):
             embed_dim=config.hidden_size,
             num_heads=config.num_attention_heads,
             projection_size=config.hidden_size,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
         )
         self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
         self.mlp = SiglipMLP(
             config,
-            quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
 
@@ -739,7 +738,7 @@ class SiglipEncoder(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -757,7 +756,7 @@ class SiglipEncoder(nn.Module):
             [
                 SiglipEncoderLayer(
                     config,
-                    quant_config=quant_config,
+                    vllm_config=vllm_config,
                     prefix=f"{prefix}.layers.{layer_idx}",
                 )
                 for layer_idx in range(config.num_hidden_layers)
@@ -839,7 +838,7 @@ class SiglipVisionTransformer(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -849,7 +848,7 @@ class SiglipVisionTransformer(nn.Module):
         self.embeddings = SiglipVisionEmbeddings(config)
         self.encoder = SiglipEncoder(
             config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.encoder",
         )
         self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
@@ -887,14 +886,15 @@ class SiglipVisionModel(nn.Module):
     def __init__(
         self,
         config,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
 
         self.vision_model = SiglipVisionTransformer(
             config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "vision_model"),
         )
         self.quant_config = quant_config
@@ -1024,14 +1024,12 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
                 text_config.pop(key, None)
             config.update(text_config)
 
-        quant_config = vllm_config.quant_config
-
         self.config = config
 
         with self._mark_tower_model(vllm_config, "image"):
             self.visual = SiglipVisionModel(
                 config=config.vision_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
             self.mlp_AR = Projector(config, config.vision_config)

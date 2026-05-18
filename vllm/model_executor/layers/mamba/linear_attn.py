@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch import nn
 
-from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
@@ -28,7 +28,6 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
@@ -272,15 +271,14 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
         max_position: int,
         block_size: int,
         num_hidden_layer: int,
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         layer_idx: int = 0,
         linear_layer_idx: int = 0,
         prefix: str = "linear_attn",
     ) -> None:
         super().__init__()
 
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.layer_idx = layer_idx
         self.BLOCK = block_size
         self.hidden_size = hidden_size
@@ -295,8 +293,12 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
         self.tp_heads = self.total_num_heads // self.tp_size
         self.qkv_size = self.num_heads * self.head_dim
         self.tp_hidden = self.head_dim * self.tp_heads
-        self.model_config = model_config
-        self.cache_config = cache_config
+        self.model_config = (
+            vllm_config.model_config if vllm_config is not None else None
+        )
+        self.cache_config = (
+            vllm_config.cache_config if vllm_config is not None else None
+        )
         self.prefix = prefix
 
         self.qkv_proj = ColumnParallelLinear(

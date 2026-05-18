@@ -29,7 +29,7 @@ import torch
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -86,11 +86,11 @@ class JAISAttention(nn.Module):
     def __init__(
         self,
         config: JAISConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = config.hidden_size
         total_num_heads = config.num_attention_heads
         tensor_model_parallel_world_size = get_tensor_model_parallel_world_size()
@@ -129,10 +129,9 @@ class JAISAttention(nn.Module):
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
-            scale=self.scale,
+            self.scale,
+            vllm_config,
             alibi_slopes=alibi_slopes,
-            cache_config=cache_config,
-            quant_config=quant_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -203,17 +202,19 @@ class JAISBlock(nn.Module):
     def __init__(
         self,
         config: JAISConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         hidden_size = config.hidden_size
         inner_dim = config.n_inner if config.n_inner is not None else 4 * hidden_size
 
         self.ln_1 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
         self.attn = JAISAttention(
-            config, cache_config, quant_config, prefix=f"{prefix}.attn"
+            config,
+            vllm_config=vllm_config,
+            prefix=f"{prefix}.attn",
         )
         self.ln_2 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
         self.mlp = JAISMLP(inner_dim, config, quant_config, prefix=f"{prefix}.mlp")
@@ -244,8 +245,6 @@ class JAISModel(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
 
         self.config = config
         assert not config.scale_attn_by_inverse_layer_idx
@@ -266,8 +265,7 @@ class JAISModel(nn.Module):
             config.num_hidden_layers,
             lambda prefix: JAISBlock(
                 config=config,
-                cache_config=cache_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.h",

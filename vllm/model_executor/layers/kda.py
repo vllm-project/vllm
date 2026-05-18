@@ -5,7 +5,7 @@ import torch
 from einops import rearrange
 from torch import nn
 
-from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -37,7 +37,6 @@ from .mamba.mamba_utils import (
     is_conv_state_dim_first,
 )
 from .mamba.ops.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
-from .quantization.base_config import QuantizationConfig
 
 logger = init_logger(__name__)
 
@@ -108,19 +107,23 @@ class KimiDeltaAttention(nn.Module, MambaBase):
         self,
         layer_idx: int,
         hidden_size: int,
-        quant_config: QuantizationConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig | None = None,
+        model_config=None,
         rms_norm_eps: float = 1e-5,
         prefix: str = "",
         **kwargs,
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
         self.hidden_size = hidden_size
-        self.model_config = model_config
-        self.cache_config = cache_config
+        self.model_config = (
+            vllm_config.model_config if vllm_config is not None else None
+        )
+        self.cache_config = (
+            vllm_config.cache_config if vllm_config is not None else None
+        )
         if model_config is None:
             raise ValueError("model_config must be provided")
         kda_config = model_config.linear_attn_config  # type: ignore[attr-defined]

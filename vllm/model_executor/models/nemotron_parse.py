@@ -20,7 +20,7 @@ from transformers import (
     PretrainedConfig,
 )
 
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.config.lora import LoRAConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.inputs import MultiModalDataDict
@@ -28,7 +28,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -99,19 +98,18 @@ class BartDecoderLayer(nn.Module):
     def __init__(
         self,
         config: BartConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.embed_dim = config.d_model
 
         self.self_attn = WhisperAttention(
             embed_dim=self.embed_dim,
             num_heads=config.decoder_attention_heads,
             attn_type=AttentionType.DECODER,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
         )
         self.activation_fn = get_act_fn(config.activation_function)
@@ -125,8 +123,7 @@ class BartDecoderLayer(nn.Module):
         self.encoder_attn = WhisperCrossAttention(
             self.embed_dim,
             config.decoder_attention_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.encoder_attn",
         )
         self.encoder_attn_layer_norm = nn.LayerNorm(self.embed_dim)
@@ -247,13 +244,14 @@ class MBartDecoderNoPos(nn.Module):
     def __init__(
         self,
         config: BartConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         lora_config: LoRAConfig | None = None,
         embed_tokens: nn.Embedding | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        cache_config = vllm_config.cache_config if vllm_config is not None else None
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.cache_config = cache_config
         self.quant_config = quant_config
         self.lora_config = lora_config
@@ -270,9 +268,8 @@ class MBartDecoderNoPos(nn.Module):
             [
                 MBartDecoderLayer(
                     config,
-                    cache_config,
-                    quant_config,
                     prefix=f"{prefix}.layers.{layer_idx}",
+                    vllm_config=vllm_config,
                 )
                 for layer_idx in range(config.decoder_layers)
             ]
@@ -478,14 +475,15 @@ class RadioWithNeck(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
         self.config = config.encoder
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
 
         self.model_encoder = self.get_vit_model_from_radio_config(
-            config, quant_config=quant_config
+            config, vllm_config=vllm_config
         )
 
         # Neck components
@@ -518,7 +516,7 @@ class RadioWithNeck(nn.Module):
     def get_vit_model_from_radio_config(
         self,
         hf_config: PretrainedConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
     ) -> RadioModel:
         hf_config_vision = hf_config.encoder
         model_name = hf_config_vision.args.get("model")
@@ -531,7 +529,7 @@ class RadioWithNeck(nn.Module):
             **hf_config_vision.args,
         )
 
-        return RadioModel(config=radio_config, quant_config=quant_config)
+        return RadioModel(config=radio_config, vllm_config=vllm_config)
 
     def forward(self, pixel_values: torch.Tensor, **kwargs) -> torch.Tensor:
         summary, feature = self.model_encoder(pixel_values)
@@ -585,19 +583,17 @@ class NemotronParseForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         self.config = config
         self.vision_config = config.encoder
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
         with self._mark_tower_model(vllm_config, "image"):
             self.encoder = RadioWithNeck(
-                config=config, quant_config=quant_config, prefix=f"{prefix}.encoder"
+                config=config, vllm_config=vllm_config, prefix=f"{prefix}.encoder"
             )
 
         with self._mark_language_model(vllm_config):
             self.decoder = MBartDecoderNoPos(
                 config.decoder,
-                cache_config=cache_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=f"{prefix}.decoder",
             )
 

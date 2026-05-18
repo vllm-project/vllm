@@ -11,6 +11,7 @@ from torch.nn import functional as F
 from transformers import Siglip2VisionConfig
 from transformers.configuration_utils import PretrainedConfig
 
+from vllm.config import VllmConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import MMEncoderAttention
@@ -179,10 +180,11 @@ class Siglip2Attention(nn.Module):
     def __init__(
         self,
         config: Siglip2VisionConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.config = config
         self.embed_dim = config.hidden_size
         self.num_heads = config.num_attention_heads
@@ -314,7 +316,7 @@ class Siglip2EncoderLayer(nn.Module):
     def __init__(
         self,
         config: Siglip2VisionConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -322,13 +324,12 @@ class Siglip2EncoderLayer(nn.Module):
         self.layer_norm1 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
         self.self_attn = Siglip2Attention(
             config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
         )
         self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
         self.mlp = Siglip2MLP(
             config,
-            quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
 
@@ -373,7 +374,7 @@ class Siglip2Encoder(nn.Module):
     def __init__(
         self,
         config: Siglip2VisionConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -382,7 +383,7 @@ class Siglip2Encoder(nn.Module):
             [
                 Siglip2EncoderLayer(
                     config,
-                    quant_config=quant_config,
+                    vllm_config=vllm_config,
                     prefix=f"{prefix}.layers.{idx}",
                 )
                 for idx in range(config.num_hidden_layers)
@@ -555,6 +556,7 @@ class Siglip2VisionTransformer(nn.Module):
     def __init__(
         self,
         config: Siglip2VisionConfig,
+        vllm_config: VllmConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
@@ -565,7 +567,7 @@ class Siglip2VisionTransformer(nn.Module):
         self.embeddings = Siglip2VisionEmbeddings(config)
         self.encoder = Siglip2Encoder(
             config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.encoder",
         )
         self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
@@ -591,6 +593,7 @@ class Siglip2NavitModel(torch.nn.Module):
     def __init__(
         self,
         config: Siglip2VisionConfig,
+        vllm_config: VllmConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
@@ -598,7 +601,7 @@ class Siglip2NavitModel(torch.nn.Module):
 
         self.vision_model = Siglip2VisionTransformer(
             config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "vision_model"),
         )
 

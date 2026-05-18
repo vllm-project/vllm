@@ -452,9 +452,9 @@ class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config
 
         config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
 
         # Text config
         text_config = config.text_config

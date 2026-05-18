@@ -32,7 +32,7 @@ from torch import nn
 from transformers import Jais2Config
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
@@ -111,12 +111,12 @@ class Jais2Attention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         max_position_embeddings: int = 8192,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         bias: bool = False,
-        cache_config: CacheConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         layer_idx = extract_layer_index(prefix)
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -189,9 +189,8 @@ class Jais2Attention(nn.Module):
             self.num_heads,
             self.head_dim,
             self.scaling,
+            vllm_config,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
             per_layer_sliding_window=sliding_window,
             prefix=f"{prefix}.attn",
         )
@@ -219,7 +218,6 @@ class Jais2DecoderLayer(nn.Module):
         super().__init__()
 
         config = config or vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = self.get_quant_config(vllm_config)
 
         self.hidden_size = config.hidden_size
@@ -237,9 +235,8 @@ class Jais2DecoderLayer(nn.Module):
                 config, "num_key_value_heads", config.num_attention_heads
             ),
             max_position_embeddings=max_position_embeddings,
-            quant_config=quant_config,
             bias=attention_bias,
-            cache_config=cache_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
         )
         self.mlp = Jais2MLP(

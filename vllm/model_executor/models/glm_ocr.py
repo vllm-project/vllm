@@ -92,10 +92,11 @@ class GlmOcrVisionAttention(nn.Module):
         embed_dim: int,
         num_heads: int,
         projection_size: int,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         # Per attention head and per partition values.
         use_data_parallel = is_vit_use_data_parallel()
         self.tp_size = (
@@ -211,6 +212,7 @@ class GlmOcrVisionBlock(Glm4vVisionBlock):
         num_heads: int,
         mlp_hidden_dim: int,
         norm_layer: Callable[[int], nn.Module] | None = None,
+        vllm_config: VllmConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
@@ -219,8 +221,9 @@ class GlmOcrVisionBlock(Glm4vVisionBlock):
             num_heads,
             mlp_hidden_dim,
             norm_layer,
-            quant_config,
-            prefix,
+            vllm_config=vllm_config,
+            quant_config=quant_config,
+            prefix=prefix,
         )
         if norm_layer is None:
             norm_layer = partial(nn.LayerNorm, eps=1e-6)
@@ -230,14 +233,13 @@ class GlmOcrVisionBlock(Glm4vVisionBlock):
             embed_dim=dim,
             num_heads=num_heads,
             projection_size=dim,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
         self.mlp = GlmOcrVisionMLP(
             dim,
             mlp_hidden_dim,
             bias=True,
-            quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
 
@@ -256,9 +258,10 @@ class GlmOcrVisionTransformer(Glm4vVisionTransformer):
         text_config: "GlmOcrTextConfig",
         vision_config: "GlmOcrVisionConfig",
         norm_eps: float = 1e-5,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         super().__init__(text_config, vision_config, norm_eps, quant_config, prefix)
 
         del self.post_conv_layernorm
@@ -297,7 +300,7 @@ class GlmOcrVisionTransformer(Glm4vVisionTransformer):
                     num_heads=self.num_heads,
                     mlp_hidden_dim=vision_config.intermediate_size,
                     norm_layer=norm_layer,
-                    quant_config=quant_config,
+                    vllm_config=vllm_config,
                     prefix=f"{prefix}.blocks.{layer_idx}",
                 )
                 for layer_idx in range(depth)
@@ -383,13 +386,12 @@ class GlmOcrForConditionalGeneration(Glm4vForConditionalGeneration):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.visual = GlmOcrVisionTransformer(
                 config.text_config,
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-5),
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )

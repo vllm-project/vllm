@@ -120,7 +120,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
         with self._mark_tower_model(vllm_config, "image"):
             self.vision_model = self._init_vision_model(
                 config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "vision_model"),
             )
             self.mlp1 = self._init_mlp1(config)
@@ -155,7 +155,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
     def _init_vision_model(
         self,
         config: PretrainedConfig,
-        quant_config: QuantizationConfig | None,
+        vllm_config: VllmConfig | None = None,
         *,
         prefix: str,
     ):
@@ -506,14 +506,14 @@ class LlamaNemotronVLForEmbedding(LlamaNemotronVLChatModel, VllmModelForPooling)
     def _init_vision_model(
         self,
         config: PretrainedConfig,
-        quant_config,
+        vllm_config: VllmConfig | None = None,
         *,
         prefix: str,
     ) -> nn.Module:
         """Override to use SigLIP instead of C-RADIO."""
         return SiglipVisionModel(
             config.vision_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=prefix,
             use_head=False,
         )

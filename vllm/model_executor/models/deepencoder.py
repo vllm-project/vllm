@@ -18,10 +18,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import CLIPVisionConfig
 
+from vllm.config import VllmConfig
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from .clip import CLIPEncoder, CLIPVisionEmbeddings
@@ -613,7 +613,7 @@ class DeepCLIPVisionTransformer(nn.Module):
     def __init__(
         self,
         config: CLIPVisionConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,
         prefix: str = "",
@@ -631,7 +631,7 @@ class DeepCLIPVisionTransformer(nn.Module):
 
         self.transformer = CLIPEncoder(
             config=config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             num_hidden_layers_override=num_hidden_layers_override,
             prefix=f"{prefix}.encoder",
             attn_cls=MMEncoderAttention,

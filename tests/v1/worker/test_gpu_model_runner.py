@@ -122,7 +122,7 @@ def model_runner():
         num_heads = model_config.get_num_kv_heads(vllm_config.parallel_config)
         head_size = model_config.get_head_size()
         vllm_config.compilation_config.static_forward_context["layer.0"] = Attention(
-            num_heads, head_size, 0.1
+            num_heads, head_size, 0.1, vllm_config
         )
         runner = GPUModelRunner(vllm_config, DEVICE_TYPE)
         initialize_kv_cache(runner)
@@ -795,6 +795,7 @@ def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order(default_vllm_c
                 num_heads=8,
                 head_size=64,
                 scale=1.0,
+                vllm_config=default_vllm_config,
                 prefix=layer_0,
                 kv_sharing_target_layer_name=layer_1,
             ),
@@ -802,6 +803,7 @@ def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order(default_vllm_c
                 num_heads=8,
                 head_size=64,
                 scale=1.0,
+                vllm_config=default_vllm_config,
                 prefix=layer_1,
             ),
         }
@@ -821,12 +823,14 @@ def test_init_kv_cache_with_kv_sharing_target_layer_not_exist(default_vllm_confi
                 num_heads=8,
                 head_size=64,
                 scale=1.0,
+                vllm_config=default_vllm_config,
                 prefix=layer_0,
             ),
             layer_1: Attention(
                 num_heads=8,
                 head_size=64,
                 scale=1.0,
+                vllm_config=default_vllm_config,
                 prefix=layer_1,
                 # invalid layer: cross_attn.atn doesn't exist!
                 kv_sharing_target_layer_name=invalid_layer,
@@ -849,12 +853,14 @@ def test_init_kv_cache_with_kv_sharing_target_same_as_current(default_vllm_confi
                 num_heads=8,
                 head_size=64,
                 scale=1.0,
+                vllm_config=default_vllm_config,
                 prefix=layer_0,
             ),
             layer_1: Attention(
                 num_heads=8,
                 head_size=64,
                 scale=1.0,
+                vllm_config=default_vllm_config,
                 prefix=layer_1,
                 kv_sharing_target_layer_name=layer_1,
             ),
@@ -874,12 +880,14 @@ def test_init_kv_cache_without_kv_sharing(default_vllm_config):
                 num_heads=8,
                 head_size=64,
                 scale=1.0,
+                vllm_config=vllm_config,
                 prefix=layer_0,
             ),
             layer_1: Attention(
                 num_heads=8,
                 head_size=64,
                 scale=1.0,
+                vllm_config=vllm_config,
                 prefix=layer_1,
             ),
         }
@@ -941,12 +949,14 @@ def test_init_kv_cache_with_kv_sharing_valid(default_vllm_config):
                 num_heads=8,
                 head_size=64,
                 scale=1.0,
+                vllm_config=vllm_config,
                 prefix=layer_0,
             ),
             layer_1: Attention(
                 num_heads=8,
                 head_size=64,
                 scale=1.0,
+                vllm_config=vllm_config,
                 prefix=layer_1,
                 kv_sharing_target_layer_name="model.layers.0.self_attn.attn",
             ),
@@ -1068,10 +1078,11 @@ def test_hybrid_attention_mamba_tensor_shapes():
         fwd_context = {}
         for key in [layer_0, layer_1]:
             fwd_context[key] = Attention(
-                num_heads=model_config.get_num_attention_heads(parallel_config),
+                model_config.get_num_attention_heads(parallel_config),
+                model_config.get_head_size(),
+                1.0,
+                vllm_config,
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
-                head_size=model_config.get_head_size(),
-                scale=1.0,
                 prefix=key,
             )
         for key in [layer_2, layer_3, layer_4, layer_5]:
@@ -1325,7 +1336,7 @@ def test_hybrid_cache_integration(default_vllm_config, dist_init):
     num_heads = model_config.get_num_kv_heads(vllm_config.parallel_config)
     head_size = model_config.get_head_size()
     vllm_config.compilation_config.static_forward_context["layer.0"] = Attention(
-        num_heads, head_size, 0.1
+        num_heads, head_size, 0.1, vllm_config
     )
 
     runner = GPUModelRunner(vllm_config, DEVICE_TYPE)
@@ -1521,10 +1532,11 @@ def test_mamba_cache_raises_when_max_num_seqs_exceeds_blocks():
         fwd_context = {}
         for key in ["model.layers.0.self_attn.attn", "model.layers.1.self_attn.attn"]:
             fwd_context[key] = Attention(
-                num_heads=model_config.get_num_attention_heads(parallel_config),
+                model_config.get_num_attention_heads(parallel_config),
+                model_config.get_head_size(),
+                1.0,
+                vllm_config,
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
-                head_size=model_config.get_head_size(),
-                scale=1.0,
                 prefix=key,
             )
         for key in [

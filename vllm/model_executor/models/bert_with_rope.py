@@ -7,7 +7,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -92,13 +92,13 @@ class BertWithRopeAttention(nn.Module):
         self,
         hidden_size: int,
         num_attention_heads: int,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         bias: bool = True,
         rotary_kwargs: dict | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
 
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -130,12 +130,11 @@ class BertWithRopeAttention(nn.Module):
         self.rotary_emb = get_rope(**rotary_kwargs)
 
         self.attn = EncoderOnlyAttention(
-            num_heads=self.num_heads,
-            head_size=self.head_dim,
-            scale=self.scaling,
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            vllm_config,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -345,19 +344,18 @@ class BertWithRopeBlock(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         moe: bool = False,
         bias: bool = True,
         rotary_kwargs: dict | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.attn = BertWithRopeAttention(
             hidden_size=config.hidden_size,
             num_attention_heads=config.num_attention_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             bias=bias,
             rotary_kwargs=rotary_kwargs,
             prefix=f"{prefix}.attention",
@@ -411,16 +409,14 @@ class BertWithRopeEncoder(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
-        config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
+        model_config = vllm_config.model_config
+        config = model_config.hf_config
         every_n = getattr(config, "moe_every_n_layers", 0)
         self.layers = nn.ModuleList(
             [
                 BertWithRopeBlock(
                     config=config,
-                    cache_config=cache_config,
-                    quant_config=quant_config,
+                    vllm_config=vllm_config,
                     bias=bias,
                     moe=every_n > 0 and (layer_idx % every_n == 1),
                     rotary_kwargs=rotary_kwargs,

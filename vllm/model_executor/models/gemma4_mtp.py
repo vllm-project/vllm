@@ -25,7 +25,7 @@ import torch
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
@@ -38,7 +38,6 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -161,8 +160,7 @@ class Gemma4MTPAttention(nn.Module):
         num_kv_heads: int,
         head_dim: int,
         max_position_embeddings: int,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         attn_logits_soft_cap: float | None = None,
         prefix: str = "",
     ) -> None:
@@ -223,9 +221,8 @@ class Gemma4MTPAttention(nn.Module):
             self.num_heads,
             self.head_dim,
             self.scaling,
+            vllm_config,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
             logits_soft_cap=attn_logits_soft_cap,
             per_layer_sliding_window=sliding_window,
             prefix=f"{prefix}.attn",
@@ -263,8 +260,7 @@ class Gemma4MTPDecoderLayer(nn.Module):
     def __init__(
         self,
         config,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -286,8 +282,7 @@ class Gemma4MTPDecoderLayer(nn.Module):
             num_kv_heads=config.num_key_value_heads,
             head_dim=head_dim,
             max_position_embeddings=config.max_position_embeddings,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             attn_logits_soft_cap=getattr(config, "attn_logit_softcapping", None),
             prefix=f"{prefix}.self_attn",
         )
@@ -383,8 +378,7 @@ class Gemma4MultiTokenPredictor(nn.Module):
         self.layers = nn.ModuleList(
             Gemma4MTPDecoderLayer(
                 text_config,
-                cache_config=vllm_config.cache_config,
-                quant_config=vllm_config.quant_config,
+                vllm_config=vllm_config,
                 prefix=f"{prefix}.layers.{idx}",
             )
             for idx in range(self.num_mtp_layers)

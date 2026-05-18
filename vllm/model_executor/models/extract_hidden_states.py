@@ -15,7 +15,7 @@ from typing import ClassVar
 import torch
 import torch.nn as nn
 
-from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention.attention import set_default_quant_scales
@@ -238,7 +238,7 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
         self,
         num_heads: int,
         head_size: int,
-        cache_config: CacheConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
     ):
@@ -249,9 +249,10 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
         self.layer_name = prefix
 
         vllm_config = get_current_vllm_config()
+        model_config = vllm_config.model_config
 
         # KV cache configuration
-        cache_config = cache_config or vllm_config.cache_config
+        cache_config = vllm_config.cache_config
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
             self.block_size = cache_config.block_size
@@ -264,7 +265,7 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
             f"kv cache dtype was set to {kv_cache_dtype}"
         )
         self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
-            kv_cache_dtype, vllm_config.model_config
+            kv_cache_dtype, model_config
         )
 
         # Initialize KV cache quantization attributes
@@ -363,7 +364,7 @@ class ExtractHiddenStatesModel(nn.Module):
                 str(self.target_num_hidden_layers): CacheOnlyAttentionLayer(
                     num_heads=self.num_hidden_states,
                     head_size=self.hidden_size,
-                    cache_config=cache_config,
+                    vllm_config=vllm_config,
                     prefix=maybe_prefix(
                         prefix, f"cache_only_layers.{self.target_num_hidden_layers}"
                     ),

@@ -73,7 +73,7 @@ class ExaoneMoeMultiTokenPredictor(nn.Module):
         self.layers = nn.ModuleList(
             ExaoneMoeDecoderLayer(
                 vllm_config.model_config.hf_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=f"{prefix}.layers.{idx}",
                 mtp_layer=True,
             )

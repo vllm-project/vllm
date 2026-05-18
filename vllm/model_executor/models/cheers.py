@@ -22,7 +22,6 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -368,7 +367,7 @@ class CheersUndProjector(nn.Module):
         image_embed_dim: int,
         text_embed_dim: int,
         compression_factor: tuple[int, int] = (2, 2),
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -589,7 +588,6 @@ class CheersForConditionalGeneration(
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
 
         if type(config).__name__ not in ("CheersConfig", "UMMConfig"):
@@ -641,7 +639,7 @@ class CheersForConditionalGeneration(
 
             self.vision_representation = SiglipVisionModel(
                 config=vit_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "vision_representation"),
             )
 
@@ -652,7 +650,7 @@ class CheersForConditionalGeneration(
                 image_embed_dim=vit_hidden_size,
                 text_embed_dim=llm_hidden_size,
                 compression_factor=(2, 2),
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "und_projector"),
             )
 

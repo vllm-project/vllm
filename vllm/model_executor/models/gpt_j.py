@@ -27,7 +27,7 @@ from torch import nn
 from transformers import GPTJConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import Attention
@@ -63,11 +63,11 @@ class GPTJAttention(nn.Module):
     def __init__(
         self,
         config: GPTJConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.total_num_heads = config.num_attention_heads
         self.hidden_size = config.hidden_size
         self.head_size = self.hidden_size // self.total_num_heads
@@ -108,8 +108,7 @@ class GPTJAttention(nn.Module):
             self.num_heads,
             self.head_size,
             scaling,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -161,15 +160,17 @@ class GPTJBlock(nn.Module):
     def __init__(
         self,
         config: GPTJConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         inner_dim = 4 * config.n_embd if config.n_inner is None else config.n_inner
         self.ln_1 = nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
         self.attn = GPTJAttention(
-            config, cache_config, quant_config, prefix=f"{prefix}.attn"
+            config,
+            vllm_config=vllm_config,
+            prefix=f"{prefix}.attn",
         )
         self.mlp = GPTJMLP(inner_dim, config, quant_config, prefix=f"{prefix}.mlp")
 
@@ -195,7 +196,6 @@ class GPTJModel(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
         self.config = config
@@ -207,7 +207,11 @@ class GPTJModel(nn.Module):
         )
         self.start_layer, self.end_layer, self.h = make_layers(
             config.n_layer,
-            lambda prefix: GPTJBlock(config, cache_config, quant_config, prefix=prefix),
+            lambda prefix: GPTJBlock(
+                config,
+                vllm_config=vllm_config,
+                prefix=prefix,
+            ),
             prefix=f"{prefix}.h",
         )
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)

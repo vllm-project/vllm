@@ -24,7 +24,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -169,12 +169,12 @@ class ExaoneMoeDecoderLayer(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         mtp_layer: bool = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         layer_idx = extract_layer_index(prefix)
         self.hidden_size = config.hidden_size
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
@@ -192,9 +192,8 @@ class ExaoneMoeDecoderLayer(nn.Module):
                 config, "num_key_value_heads", config.num_attention_heads
             ),
             max_position_embeddings=max_position_embeddings,
-            quant_config=quant_config,
             bias=attention_bias,
-            cache_config=cache_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
         )
 
@@ -246,8 +245,8 @@ class ExaoneMoeModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
-        config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
+        model_config = vllm_config.model_config
+        config = model_config.hf_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
         self.num_redundant_experts = (
@@ -277,8 +276,7 @@ class ExaoneMoeModel(nn.Module):
             config.num_hidden_layers,
             lambda prefix: ExaoneMoeDecoderLayer(
                 config=config,
-                cache_config=cache_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.layers",

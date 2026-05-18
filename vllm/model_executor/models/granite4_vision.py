@@ -24,11 +24,10 @@ from transformers.models.llava_next.modeling_llava_next import (
 )
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.granite import GraniteForCausalLM, GraniteModel
 from vllm.model_executor.models.interfaces import (
@@ -119,8 +118,7 @@ class WindowQFormerDownsampler(nn.Module):
     def __init__(
         self,
         config,
-        quant_config: QuantizationConfig | None = None,
-        cache_config: CacheConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         spatial_offset: int | None = None,
         prefix: str = "",
     ):
@@ -147,8 +145,7 @@ class WindowQFormerDownsampler(nn.Module):
         )
         self.qformer = Blip2QFormerModel(
             qformer_config,
-            quant_config=quant_config,
-            cache_config=cache_config,
+            vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "qformer"),
         )
 
@@ -475,7 +472,6 @@ class Granite4VisionForConditionalGeneration(
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
         self.config = config
         self.vllm_config = vllm_config
 
@@ -487,7 +483,7 @@ class Granite4VisionForConditionalGeneration(
             # encoder output list).
             self.vision_tower = SiglipVisionModel(
                 config.vision_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 require_post_norm=False,
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
@@ -500,15 +496,12 @@ class Granite4VisionForConditionalGeneration(
             else:
                 self.image_newline = None
 
-            cache_config = vllm_config.cache_config
-
             # Deepstack projectors: one per (vision_layer, llm_layer) pair
             self.layerwise_projectors = nn.ModuleList(
                 [
                     WindowQFormerDownsampler(
                         config,
-                        quant_config=quant_config,
-                        cache_config=cache_config,
+                        vllm_config=vllm_config,
                         prefix=maybe_prefix(prefix, f"layerwise_projectors.{i}"),
                     )
                     for i in range(len(config.deepstack_layer_map))
@@ -522,8 +515,7 @@ class Granite4VisionForConditionalGeneration(
                     [
                         WindowQFormerDownsampler(
                             config,
-                            quant_config=quant_config,
-                            cache_config=cache_config,
+                            vllm_config=vllm_config,
                             spatial_offset=i,
                             prefix=maybe_prefix(prefix, f"spatial_projectors.{i}"),
                         )

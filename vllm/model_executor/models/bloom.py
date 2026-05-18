@@ -28,7 +28,7 @@ from torch import nn
 from transformers import BloomConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -88,11 +88,11 @@ class BloomAttention(nn.Module):
     def __init__(
         self,
         config: BloomConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = config.hidden_size
         self.total_num_heads = config.n_head
         self.head_dim = self.hidden_size // self.total_num_heads
@@ -130,9 +130,8 @@ class BloomAttention(nn.Module):
             self.num_heads,
             self.head_dim,
             scaling,
+            vllm_config,
             alibi_slopes=alibi_slopes,
-            cache_config=cache_config,
-            quant_config=quant_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -183,16 +182,18 @@ class BloomBlock(nn.Module):
     def __init__(
         self,
         config: BloomConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         hidden_size = config.hidden_size
 
         self.input_layernorm = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
         self.self_attention = BloomAttention(
-            config, cache_config, quant_config, prefix=f"{prefix}.self_attention"
+            config,
+            vllm_config=vllm_config,
+            prefix=f"{prefix}.self_attention",
         )
         self.post_attention_layernorm = nn.LayerNorm(
             hidden_size, eps=config.layer_norm_epsilon
@@ -241,8 +242,6 @@ class BloomModel(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
         self.config = config
 
         self.embed_dim = config.hidden_size
@@ -260,7 +259,9 @@ class BloomModel(nn.Module):
         self.start_layer, self.end_layer, self.h = make_layers(
             config.num_hidden_layers,
             lambda prefix: BloomBlock(
-                config, cache_config, quant_config, prefix=prefix
+                config,
+                vllm_config=vllm_config,
+                prefix=prefix,
             ),
             prefix=f"{prefix}.h",
         )

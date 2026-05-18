@@ -33,7 +33,7 @@ import torch.nn.functional as F
 from torch import nn
 from transformers import BatchFeature, PretrainedConfig
 
-from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
+from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import MultiModalDataDict, PromptType, TokensPrompt
@@ -242,8 +242,7 @@ class GraniteSpeechEncoderProjector(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        cache_config: CacheConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -261,8 +260,7 @@ class GraniteSpeechEncoderProjector(nn.Module):
         # all existing models use this for the projector.
         self.qformer = Blip2QFormerModel(
             config.projector_config,
-            quant_config=quant_config,
-            cache_config=cache_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.qformer",
         )
         self.linear = nn.Linear(
@@ -502,9 +500,10 @@ class GraniteSpeechCTCEncoder(nn.Module):
         self,
         config: PretrainedConfig,
         prefix: str,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.config = config
 
         # Precompute clamped relative positional encoding distances
@@ -619,15 +618,14 @@ class GraniteSpeechForConditionalGeneration(
             # Conformer encoder
             self.encoder = GraniteSpeechCTCEncoder(
                 config=config.encoder_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "encoder"),
             )
 
             # Blip2 QFormer
             self.projector = GraniteSpeechEncoderProjector(
                 config=config,
-                quant_config=quant_config,
-                cache_config=cache_config,
+                vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "projector"),
             )
 

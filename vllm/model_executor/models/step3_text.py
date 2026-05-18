@@ -10,7 +10,7 @@ import torch
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
@@ -148,11 +148,11 @@ class Step3TextAttention(nn.Module):
         share_q_dim: int | None = None,
         max_position_embedding: int = 8192,
         head_dim: int = 256,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
 
@@ -203,8 +203,8 @@ class Step3TextAttention(nn.Module):
             self.num_heads,
             self.head_dim,
             scaling,
-            self.num_kv_heads,
-            cache_config=cache_config,
+            vllm_config,
+            num_kv_heads=self.num_kv_heads,
             prefix=f"{prefix}.attn",
         )
 
@@ -225,19 +225,18 @@ class Step3TextDecoderLayer(nn.Module):
     def __init__(
         self,
         config: Step3TextConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = config.hidden_size
 
         self.self_attn = Step3TextAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=1,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             norm_eps=config.rms_norm_eps,
             max_position_embedding=config.max_position_embedding,
             head_dim=config.head_dim,
@@ -314,8 +313,6 @@ class Step3TextModel(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
         self.vocab_size = config.vocab_size
         self.config = config
 
@@ -333,8 +330,7 @@ class Step3TextModel(nn.Module):
             config.num_hidden_layers,
             lambda prefix: Step3TextDecoderLayer(
                 config=config,
-                cache_config=cache_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.layers",

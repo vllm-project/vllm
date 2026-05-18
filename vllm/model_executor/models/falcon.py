@@ -31,7 +31,7 @@ from torch.nn import LayerNorm
 from transformers import FalconConfig as HF_FalconConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -95,11 +95,11 @@ class FalconAttention(nn.Module):
     def __init__(
         self,
         config: FalconConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
 
         self.hidden_size = config.hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -174,8 +174,8 @@ class FalconAttention(nn.Module):
                 self.num_heads,
                 self.head_dim,
                 self.inv_norm_factor,
+                vllm_config,
                 num_kv_heads=self.num_kv_heads,
-                quant_config=quant_config,
                 prefix=f"{prefix}.attn",
             )
         elif self.use_alibi:
@@ -190,19 +190,18 @@ class FalconAttention(nn.Module):
                 self.num_heads,
                 self.head_dim,
                 self.inv_norm_factor,
+                vllm_config,
                 num_kv_heads=self.num_kv_heads,
                 alibi_slopes=alibi_slopes,
-                quant_config=quant_config,
                 prefix=f"{prefix}.attn",
             )
         else:
             self.attn = Attention(
                 self.num_heads,
                 self.head_dim,
-                scale=self.inv_norm_factor,
+                self.inv_norm_factor,
+                vllm_config,
                 num_kv_heads=self.num_kv_heads,
-                cache_config=cache_config,
-                quant_config=quant_config,
                 prefix=f"{prefix}.attn",
             )
 
@@ -268,15 +267,17 @@ class FalconDecoderLayer(nn.Module):
     def __init__(
         self,
         config: FalconConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.self_attention = FalconAttention(
-            config, cache_config, quant_config, prefix=f"{prefix}.self_attention"
+            config,
+            vllm_config=vllm_config,
+            prefix=f"{prefix}.self_attention",
         )
         self.mlp = FalconMLP(config, quant_config, prefix=f"{prefix}.mlp")
         self.config = config
@@ -368,8 +369,6 @@ class FalconModel(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
 
         self.config = config
         self.embed_dim = config.hidden_size
@@ -386,7 +385,9 @@ class FalconModel(nn.Module):
         self.start_layer, self.end_layer, self.h = make_layers(
             config.num_hidden_layers,
             lambda prefix: FalconDecoderLayer(
-                config, cache_config, quant_config, prefix=prefix
+                config,
+                vllm_config=vllm_config,
+                prefix=prefix,
             ),
             prefix=f"{prefix}.h",
         )

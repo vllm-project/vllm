@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
@@ -17,7 +17,6 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -42,20 +41,17 @@ class NemotronHMTPAttentionDecoderLayer(NemotronHAttentionDecoderLayer):
         self,
         config: NemotronHConfig,
         layer_idx: int,
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         parallel_config: ParallelConfig | None = None,
         prefix: str = "",
         has_start_projections: bool = False,
         has_end_norm: bool = False,
     ) -> None:
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         super().__init__(
             config=config,
             layer_idx=layer_idx,
-            model_config=model_config,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             parallel_config=parallel_config,
             prefix=prefix,
         )
@@ -129,20 +125,17 @@ class NemotronHMTPMoEDecoderLayer(NemotronHMoEDecoderLayer):
         self,
         config: NemotronHConfig,
         layer_idx: int,
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         parallel_config: ParallelConfig | None = None,
         prefix: str = "",
         has_start_projections: bool = False,
         has_end_norm: bool = False,
     ) -> None:
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         super().__init__(
             config=config,
             layer_idx=layer_idx,
-            model_config=model_config,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             parallel_config=parallel_config,
             prefix=prefix,
         )
@@ -256,9 +249,7 @@ class NemotronHMultiTokenPredictor(nn.Module):
             common_kwargs = dict(
                 config=config,
                 layer_idx=self.mtp_start_layer_idx + i,
-                model_config=vllm_config.model_config,
-                cache_config=vllm_config.cache_config,
-                quant_config=vllm_config.quant_config,
+                vllm_config=vllm_config,
                 parallel_config=vllm_config.parallel_config,
                 prefix=layer_prefix,
                 has_start_projections=is_start_of_step,

@@ -355,12 +355,13 @@ class CLIPAttention(nn.Module):
     def __init__(
         self,
         config: CLIPTextConfig | CLIPVisionConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         *,
         prefix: str = "",
         attn_cls: type[Attention] | type[MMEncoderAttention],
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
 
         self.config = config
         self.embed_dim = config.hidden_size
@@ -409,6 +410,7 @@ class CLIPAttention(nn.Module):
                 self.num_heads_per_partition,
                 self.head_dim,
                 self.scale,
+                vllm_config=vllm_config,
                 prefix=f"{prefix}.attn",
             )
 
@@ -468,7 +470,7 @@ class CLIPEncoderLayer(nn.Module):
     def __init__(
         self,
         config: CLIPTextConfig | CLIPVisionConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         *,
         prefix: str = "",
         attn_cls: type[Attention] | type[MMEncoderAttention],
@@ -477,14 +479,13 @@ class CLIPEncoderLayer(nn.Module):
 
         self.self_attn = CLIPAttention(
             config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
             attn_cls=attn_cls,
         )
         self.layer_norm1 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.mlp = CLIPMLP(
             config,
-            quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
         self.layer_norm2 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
@@ -516,6 +517,7 @@ class CLIPEncoder(nn.Module):
     def __init__(
         self,
         config: CLIPTextConfig | CLIPVisionConfig,
+        vllm_config: VllmConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         num_hidden_layers_override: int | None = None,
         *,
@@ -535,7 +537,7 @@ class CLIPEncoder(nn.Module):
             [
                 CLIPEncoderLayer(
                     config=config,
-                    quant_config=quant_config,
+                    vllm_config=vllm_config,
                     prefix=f"{prefix}.layers.{layer_idx}",
                     attn_cls=attn_cls,
                 )
@@ -566,7 +568,7 @@ class CLIPTextTransformer(nn.Module):
     def __init__(
         self,
         config: CLIPTextConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         *,
         prefix: str = "",
     ) -> None:
@@ -579,7 +581,7 @@ class CLIPTextTransformer(nn.Module):
 
         self.encoder = CLIPEncoder(
             config=config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.encoder",
             attn_cls=Attention,
         )
@@ -644,7 +646,7 @@ class CLIPVisionTransformer(nn.Module):
     def __init__(
         self,
         config: CLIPVisionConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,
         require_post_norm: bool | None = None,
@@ -663,7 +665,7 @@ class CLIPVisionTransformer(nn.Module):
 
         self.encoder = CLIPEncoder(
             config=config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             num_hidden_layers_override=num_hidden_layers_override,
             prefix=f"{prefix}.encoder",
             attn_cls=MMEncoderAttention,
@@ -764,6 +766,7 @@ class CLIPVisionModel(nn.Module):
     def __init__(
         self,
         config: CLIPVisionConfig,
+        vllm_config: VllmConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,
@@ -774,7 +777,7 @@ class CLIPVisionModel(nn.Module):
 
         self.vision_model = CLIPVisionTransformer(
             config=config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             num_hidden_layers_override=num_hidden_layers_override,
             require_post_norm=require_post_norm,
             prefix=maybe_prefix(prefix, "vision_model"),
@@ -824,7 +827,6 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         super().__init__()
 
         config: CLIPConfig = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.multimodal_config = multimodal_config
@@ -839,7 +841,7 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         with self._mark_language_model(vllm_config):
             self.text_model = CLIPTextTransformer(
                 text_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "text_model"),
             )
             self.text_projection = nn.Linear(
@@ -851,7 +853,7 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         with self._mark_tower_model(vllm_config, "image"):
             self.vision_model = CLIPVisionTransformer(
                 vision_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "vision_model"),
             )
             self.visual_projection = nn.Linear(
