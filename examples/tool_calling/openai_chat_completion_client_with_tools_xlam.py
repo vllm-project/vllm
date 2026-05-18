@@ -188,6 +188,8 @@ def process_response(response, tool_functions, original_query):
         )
 
         print("\n--- Follow-up Response ---")
+        if not follow_up_response.choices:
+            return  # pact: guard empty choices list
         print(follow_up_response.choices[0].message.content)
         print("--- End Follow-up ---\n")
 

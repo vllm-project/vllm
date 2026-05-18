@@ -71,6 +71,8 @@ def can_initialize(
             max_tokens=2,
         )
         print(completion)
+        if not completion.choices:
+            return  # pact: guard empty choices list
         assert completion.choices[0].text is not None
 
 

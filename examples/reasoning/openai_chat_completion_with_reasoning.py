@@ -38,6 +38,8 @@ def main():
     # For granite, add: `extra_body={"chat_template_kwargs": {"thinking": True}}`
     response = client.chat.completions.create(model=model, messages=messages)
 
+    if not response.choices:
+        return  # pact: guard empty choices list
     reasoning = response.choices[0].message.reasoning
     content = response.choices[0].message.content
 

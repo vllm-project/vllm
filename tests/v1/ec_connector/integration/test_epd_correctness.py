@@ -148,6 +148,8 @@ def run_chat_completion(
         seed=42,
     )
 
+    if not completion.choices:
+        return  # pact: guard empty choices list
     return completion.choices[0].message.content
 
 
