@@ -24,6 +24,7 @@ from triton_kernels.tensor import FP4, convert_layout, wrap_torch_tensor
 from triton_kernels.tensor_details import layout
 from triton_kernels.testing import assert_close
 
+from tests.utils import requires_platform
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
@@ -34,7 +35,6 @@ from vllm.model_executor.layers.fused_moe.experts.gpt_oss_triton_kernels_moe imp
     UnfusedOAITritonExperts,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
-from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
 from .utils import make_dummy_moe_config, shuffle_weight
@@ -206,9 +206,7 @@ def oai_triton_moe_impl(
     )
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
-)
+@requires_platform("cuda")
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("m,n,k", MNK)
 @pytest.mark.parametrize("num_experts", [32, 128])

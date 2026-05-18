@@ -4,6 +4,7 @@ from collections.abc import Callable
 
 import pytest
 
+from tests.utils import requires_platform
 from vllm.config import PassConfig
 from vllm.platforms import current_platform
 
@@ -59,7 +60,7 @@ pytestmark = pytest.mark.skipif(
 @pytest.mark.parametrize("n_layers", [4])
 @pytest.mark.parametrize("custom_ops", custom_ops_combos("quant_fp8", "rms_norm"))
 @pytest.mark.parametrize("inductor_graph_partition", INDUCTOR_GRAPH_PARTITION)
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test CUDA")
+@requires_platform("cuda")
 def test_tp2_ar_rms_fp8_fusions(
     model_name: str,
     matches_fn: Callable[[int], Matches],
@@ -129,7 +130,7 @@ def test_tp2_ar_rms_fp8_fusions(
 @pytest.mark.parametrize("custom_ops", custom_ops_combos("rms_norm"))
 @pytest.mark.parametrize("inductor_graph_partition", INDUCTOR_GRAPH_PARTITION)
 @pytest.mark.skipif(not is_blackwell(), reason="Blackwell required for fp4")
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test CUDA")
+@requires_platform("cuda")
 def test_tp2_ar_rms_fp4_fusions(
     model_name: str,
     matches_fn: Callable[[int], Matches],
@@ -194,7 +195,7 @@ def test_tp2_ar_rms_fp4_fusions(
 @pytest.mark.parametrize("n_layers", [4])
 @pytest.mark.parametrize("custom_ops", tuple(custom_ops_combos("rms_norm")))
 @pytest.mark.parametrize("inductor_graph_partition", INDUCTOR_GRAPH_PARTITION)
-@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="Only test CUDA/ROCm")
+@requires_platform("gpu")
 def test_tp2_ar_rms_fusions(
     model_name: str,
     matches_fn: Callable[[int], Matches],

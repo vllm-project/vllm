@@ -6,18 +6,17 @@
 Run `pytest tests/kernels/quantization/test_w4a16_kernel_selection.py`.
 """
 
-import pytest
 import torch
 
+from tests.utils import requires_platform
 from vllm.model_executor.kernels.linear import (
     MPLinearLayerConfig,
     choose_mp_linear_kernel,
 )
-from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
 
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
+@requires_platform("rocm")
 def test_choose_mp_linear_kernel_picks_triton_w4a16_for_uint4b8():
     # int4 weights, 16-bit activations (CT W4A16 typical config).
     K, N = 1024, 256
@@ -35,7 +34,7 @@ def test_choose_mp_linear_kernel_picks_triton_w4a16_for_uint4b8():
     assert kernel_type.__name__ == "TritonW4A16LinearKernel"
 
 
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
+@requires_platform("rocm")
 def test_choose_mp_linear_kernel_picks_triton_w4a16_for_uint4_asymmetric():
     # Asymmetric int4 weights should also be supported (explicit zero points).
     K, N = 512, 512

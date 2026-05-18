@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import pytest
 import torch.nn as nn
 
-from vllm.platforms import current_platform
+from tests.utils import requires_platform
 
 prompt = """
 Generals gathered in their masses
@@ -68,7 +67,7 @@ def retrieve_chunks(self):
     return chunks
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA not available")
+@requires_platform("cuda")
 def test_pooling_chunked_prefill(vllm_runner, monkeypatch):
     """Test chunked prefill for pooling models with LastPool."""
 
@@ -121,7 +120,7 @@ def test_pooling_chunked_prefill(vllm_runner, monkeypatch):
         assert chunks[0] == prompt_len
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA not available")
+@requires_platform("cuda")
 def test_pooling_prefix_cache(vllm_runner, monkeypatch):
     """Test chunked prefill for pooling models with LastPool."""
 

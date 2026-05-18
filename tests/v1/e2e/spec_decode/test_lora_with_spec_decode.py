@@ -8,10 +8,10 @@ This script contains:
 import pytest
 import torch
 
+from tests.utils import requires_platform
 from vllm import LLM, SamplingParams
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.lora.request import LoRARequest
-from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
 LORA_TEST_PROMPT_MAP: dict[str, str] = {}
@@ -36,7 +36,7 @@ Numbers should be represented as integers only.
 SEED = 42
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA not available")
+@requires_platform("cuda")
 @pytest.mark.parametrize(
     "model_setup",
     [

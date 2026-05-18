@@ -10,6 +10,7 @@ import pytest
 
 from tests.quantization.utils import is_quant_method_supported
 from vllm.platforms import current_platform
+from tests.utils import requires_platform
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 from ..utils import check_logprobs_close
 
@@ -118,7 +119,7 @@ def test_models(
 
 
 @pytest.mark.cpu_model
-@pytest.mark.skipif(not current_platform.is_cpu(), reason="test for the CPU backend.")
+@requires_platform("cpu")
 @pytest.mark.parametrize(
     "kv_cache_dtype,base_model,test_model",
     [

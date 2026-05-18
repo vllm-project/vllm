@@ -4,6 +4,7 @@ from collections.abc import Callable
 
 import pytest
 
+from tests.utils import requires_platform
 from vllm.config import PassConfig
 from vllm.platforms import current_platform
 
@@ -102,7 +103,7 @@ def test_tp2_async_tp_fp8_fusions(
 @pytest.mark.parametrize("custom_ops", custom_ops_combos("rms_norm"))
 @pytest.mark.parametrize("inductor_graph_partition", INDUCTOR_GRAPH_PARTITION)
 @pytest.mark.skipif(not is_blackwell(), reason="Blackwell required for fp4")
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test CUDA")
+@requires_platform("cuda")
 def test_tp2_async_tp_nvfp4_fusions(
     model_name: str,
     matches_fn: Callable[[int], Matches],

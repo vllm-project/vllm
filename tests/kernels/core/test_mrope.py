@@ -5,8 +5,8 @@ from typing import NamedTuple
 import pytest
 import torch
 
+from tests.utils import requires_platform
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.platforms import current_platform
 from vllm.transformers_utils.config import get_config
 from vllm.utils.torch_utils import set_random_seed
 
@@ -56,9 +56,7 @@ MODELS_TO_TEST = [
 num_tokens_list = [11, 8192]
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="Skipping CUDA/ROCm only tests."
-)
+@requires_platform("gpu")
 @pytest.mark.parametrize(
     "model_info, model_name",
     [
@@ -126,9 +124,7 @@ def test_mrope(
     torch.testing.assert_close(key_native, key_cuda, atol=atol, rtol=rtol)
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="Skipping CUDA/ROCm only tests."
-)
+@requires_platform("gpu")
 @pytest.mark.parametrize(
     "model_info, model_name",
     [

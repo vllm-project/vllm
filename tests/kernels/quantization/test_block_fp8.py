@@ -11,6 +11,7 @@ from tests.kernels.quant_utils import (
     native_per_token_group_quant_fp8,
     native_w8a8_block_matmul,
 )
+from tests.utils import requires_platform
 from vllm.config import VllmConfig
 from vllm.model_executor.kernels.linear.scaled_mm.cutlass import cutlass_scaled_mm
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -135,9 +136,7 @@ def test_w8a8_block_fp8_matmul(M, N, K, block_size, out_dtype, seed):
     assert rel_diff < 0.001
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="CUTLASS only supported on CUDA platform."
-)
+@requires_platform("cuda")
 @torch.inference_mode()
 def test_w8a8_block_fp8_cutlass_matmul():
     # Test simple case where weight.shape % 128 != 0,

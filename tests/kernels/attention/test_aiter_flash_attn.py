@@ -5,6 +5,7 @@
 import pytest
 import torch
 
+from tests.utils import requires_platform
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -85,7 +86,7 @@ def ref_paged_attn(
     return torch.cat(outputs, dim=0)
 
 
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="Only ROCm is supported")
+@requires_platform("rocm")
 @pytest.mark.parametrize(
     "seq_lens", [[(10, 1328), (5, 18), (129, 463)], [(8, 523), (24, 37), (3, 2011)]]
 )

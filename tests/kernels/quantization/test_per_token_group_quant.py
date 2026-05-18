@@ -5,8 +5,8 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from tests.utils import requires_platform
 from vllm.model_executor.layers.quantization.utils import fp8_utils, int8_utils
-from vllm.platforms import current_platform
 
 
 @pytest.mark.parametrize(
@@ -76,9 +76,7 @@ def test_per_token_group_quant_fp8(
     ],
 )
 @pytest.mark.parametrize("poisoned_scales", [False, True])
-@pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="DeepGEMM not available on this platform"
-)
+@requires_platform("cuda")
 def test_per_token_group_quant_fp8_packed(
     num_tokens, hidden_dim, group_size, poisoned_scales
 ):
@@ -156,9 +154,7 @@ def test_per_token_group_quant_fp8_packed(
     )
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="DeepGEMM not available on this platform"
-)
+@requires_platform("cuda")
 def test_per_token_group_quant_fp8_packed_all_zero():
     """All-zero input must produce well-defined UE8M0 scale bytes via the eps
     floor in the kernel's UE8M0 path. Locks down the all-zero behavior before
@@ -215,9 +211,7 @@ def test_per_token_group_quant_fp8_packed_all_zero():
     assert torch.equal(actual, expected), "All-zero scale bytes mismatch"
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="DeepGEMM not available on this platform"
-)
+@requires_platform("cuda")
 def test_per_token_group_quant_fp8_packed_mantissa_rounds_up():
     """Inputs whose absmax/max_8bit produces a non-power-of-2 force the
     mantissa-rounding-up branch (exp_byte += 1). Locks down this behavior
@@ -285,9 +279,7 @@ def test_per_token_group_quant_fp8_packed_mantissa_rounds_up():
         (1, 384),  # extreme: 1 group, 1 mn row -> both axes padded
     ],
 )
-@pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="DeepGEMM not available on this platform"
-)
+@requires_platform("cuda")
 def test_per_token_group_quant_fp8_packed_zero_fills_padded_output_q(
     num_tokens, hidden_dim
 ):

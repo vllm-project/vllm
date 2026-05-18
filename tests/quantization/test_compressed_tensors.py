@@ -16,6 +16,7 @@ from compressed_tensors.quantization import (
 )
 
 from tests.models.utils import check_logprobs_close
+from tests.utils import requires_platform
 from vllm.model_executor.kernels.linear import (
     Fp8BlockScaledMMLinearKernel,
 )
@@ -290,9 +291,7 @@ def test_compressed_tensors_w8a8_dynamic_per_token(
         ),
     ],
 )
-@pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="The tests are skipped on non-CUDA platform."
-)
+@requires_platform("cuda")
 def test_compressed_tensors_wNa16(vllm_runner, wNa16_args):
     model, strategy, group, pack_factor, symmetric, has_g_idx = wNa16_args
     with vllm_runner(model, enforce_eager=True) as llm:
@@ -346,9 +345,7 @@ def test_compressed_tensors_fp8(vllm_runner):
         assert output
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
-)
+@requires_platform("cuda")
 def test_compressed_tensors_kv_cache_fp8_per_tensor(vllm_runner):
     model_path = "nm-testing/TinyLlama-1.1B-Chat-v1.0-kvcache-fp8-tensor"
     with vllm_runner(model_path) as llm:
@@ -356,9 +353,7 @@ def test_compressed_tensors_kv_cache_fp8_per_tensor(vllm_runner):
         assert output
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
-)
+@requires_platform("cuda")
 def test_compressed_tensors_kv_cache_fp8_per_attn_head(vllm_runner):
     model_path = "nm-testing/TinyLlama-1.1B-Chat-v1.0-kvcache-fp8-attn_head"
     try:
@@ -442,9 +437,7 @@ def test_compressed_tensors_w4a8_fp8(vllm_runner, args):
         assert output
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
-)
+@requires_platform("cuda")
 @pytest.mark.parametrize(
     "model,prompt,exp_perplexity",
     [

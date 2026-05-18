@@ -7,6 +7,7 @@ import torch
 
 import vllm._custom_ops as ops
 from tests.kernels.quant_utils import ref_dynamic_per_tensor_fp8_quant
+from tests.utils import requires_platform
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx950
 from vllm.utils.platform_utils import num_compute_units
@@ -124,7 +125,7 @@ def pad_fp8(weight):
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("padded_a", [False, True])
 @pytest.mark.parametrize("bias_mode", BIAS_MODES)
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
+@requires_platform("rocm")
 @pytest.mark.skipif(not on_gfx950(), reason="only meant for gfx950")
 def test_rocm_wvsplitkrc_kernel(xnorm, n, k, m, dtype, seed, padded_a, bias_mode):
     torch.manual_seed(seed)
@@ -176,7 +177,7 @@ def test_rocm_wvsplitkrc_kernel(xnorm, n, k, m, dtype, seed, padded_a, bias_mode
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("rows_per_block", [2, 4, 8, 16])
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
+@requires_platform("rocm")
 @torch.inference_mode()
 def test_rocm_llmm1_kernel(n, k, m, dtype, rows_per_block, seed):
     torch.manual_seed(seed)
@@ -196,7 +197,7 @@ def test_rocm_llmm1_kernel(n, k, m, dtype, rows_per_block, seed):
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
+@requires_platform("rocm")
 @pytest.mark.parametrize("bias_mode", BIAS_MODES)
 @pytest.mark.parametrize("padded_a", [False, True])
 @pytest.mark.parametrize("padded_b", [False, True])

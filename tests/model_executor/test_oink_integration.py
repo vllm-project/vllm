@@ -5,7 +5,7 @@ import types
 
 import pytest
 
-from vllm.platforms import current_platform
+from tests.utils import requires_platform
 
 
 def _test_oink_availability_impl(
@@ -53,7 +53,7 @@ def _test_oink_availability_impl(
         ((10, 0), True, True, True, True),
     ],
 )
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test on CUDA")
+@requires_platform("cuda")
 def test_oink_availability_checks(
     device_capability: tuple[int, int],
     has_rmsnorm: bool,

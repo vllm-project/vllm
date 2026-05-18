@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 import vllm._custom_ops as ops
-from vllm.platforms import current_platform
+from tests.utils import requires_platform
 from vllm.utils.math_utils import cdiv
 
 
@@ -43,7 +43,7 @@ def ref_mla(
 @pytest.mark.parametrize("dtype", [torch.float, torch.half, torch.bfloat16])
 @pytest.mark.parametrize("varlen", [False, True])
 @pytest.mark.cpu_model
-@pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only")
+@requires_platform("cpu")
 def test_mla_decode_cpu(
     bs: int,
     mean_seq_len: int,

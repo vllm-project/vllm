@@ -9,10 +9,10 @@ import ray
 import torch
 import torch.distributed as dist
 
+from tests.utils import requires_platform
 from vllm import _custom_ops as ops
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce  # noqa
 from vllm.distributed.parallel_state import get_tp_group, graph_capture
-from vllm.platforms import current_platform
 
 from ..utils import (
     ensure_model_parallel_initialized,
@@ -113,9 +113,7 @@ def eager_quickreduce(
         torch.testing.assert_close(out, inp * tp_size, atol=2.5, rtol=0.1)
 
 
-@pytest.mark.skipif(
-    not current_platform.is_rocm(), reason="only test quick allreduce for rocm"
-)
+@requires_platform("rocm")
 @pytest.mark.parametrize("quant_mode", ["FP", "INT8", "INT6", "INT4"])
 @pytest.mark.parametrize("tp_size", [2])
 @pytest.mark.parametrize("pipeline_parallel_size", [1, 2])
@@ -188,9 +186,7 @@ def qr_variable_input(rank, world_size):
         num += 1
 
 
-@pytest.mark.skipif(
-    not current_platform.is_rocm(), reason="only test quick allreduce for rocm"
-)
+@requires_platform("rocm")
 @pytest.mark.parametrize("tp_size", [4, 8])
 @pytest.mark.parametrize("pipeline_parallel_size", [1])
 def test_custom_quick_allreduce_variable_input(tp_size, pipeline_parallel_size):

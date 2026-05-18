@@ -11,6 +11,7 @@ import importlib
 import pytest
 import torch
 
+from tests.utils import requires_platform
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -107,7 +108,7 @@ def _w4a16_reference(
     return out.to(a_mk.dtype)
 
 
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
+@requires_platform("rocm")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize(
     "M,K,N,G,has_zp",
@@ -162,7 +163,7 @@ def test_triton_w4a16_gemm_matches_reference(dtype, M, K, N, G, has_zp):
     torch.testing.assert_close(out, ref, rtol=1e-2, atol=1e-2)
 
 
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
+@requires_platform("rocm")
 def test_triton_w4a16_gemm_requires_contiguous_inputs():
     if not torch.cuda.is_available():
         pytest.skip("CUDA/HIP device not available")
@@ -185,7 +186,7 @@ def test_triton_w4a16_gemm_requires_contiguous_inputs():
         )
 
 
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
+@requires_platform("rocm")
 def test_triton_w4a16_process_weights_after_loading_repacks_layout():
     if not torch.cuda.is_available():
         pytest.skip("CUDA/HIP device not available")

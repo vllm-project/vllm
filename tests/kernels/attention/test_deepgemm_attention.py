@@ -5,6 +5,7 @@ import random
 import pytest
 import torch
 
+from tests.utils import requires_platform
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     _ceil_to_ue8m0,
@@ -90,7 +91,7 @@ def _ref_fp8_mqa_logits(
     return logits
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@requires_platform("cuda")
 @pytest.mark.skipif(not has_deep_gemm(), reason="DeepGEMM not available")
 @pytest.mark.skipif(
     not current_platform.has_device_capability(90), reason="SM90 and SM100 only"
@@ -200,7 +201,7 @@ def _ref_fp8_fp4_paged_mqa_logits(
     return logits
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@requires_platform("cuda")
 @pytest.mark.skipif(not has_deep_gemm(), reason="DeepGEMM not available")
 @pytest.mark.skipif(
     not current_platform.has_device_capability(90), reason="SM90 and SM100 only"

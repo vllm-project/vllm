@@ -16,13 +16,13 @@ from dataclasses import dataclass
 import pytest
 import torch
 
+from tests.utils import requires_platform
 from vllm.config import (
     CompilationConfig,
     VllmConfig,
     get_cached_compilation_config,
     set_current_vllm_config,
 )
-from vllm.platforms import current_platform
 
 CUDA_DEVICES = ["cuda:0"]
 
@@ -185,9 +185,7 @@ def run_dispatch_test(
             apply_rotary_emb.forward = original_forward
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="Skipping CUDA/ROCm only tests."
-)
+@requires_platform("gpu")
 @pytest.mark.parametrize("test_case", get_test_cases(), ids=lambda tc: tc.name)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_rotary_embedding_dispatch(

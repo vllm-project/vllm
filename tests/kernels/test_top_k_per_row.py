@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.platforms import current_platform
+from tests.utils import requires_platform
 from vllm.utils.torch_utils import set_random_seed
 
 # Test parameters
@@ -158,7 +158,7 @@ def validate_topk_against_reference(
 @pytest.mark.parametrize("num_rows", NUM_ROWS)
 @pytest.mark.parametrize("top_k", TOP_K_VALUES)
 @pytest.mark.parametrize("clean_logits", [True, False])
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@requires_platform("cuda")
 @torch.inference_mode()
 def test_top_k_per_row(
     num_rows: int,
@@ -273,7 +273,7 @@ def _run_top_k_per_row_decode_test(
 @pytest.mark.parametrize("next_n", NEXT_N)
 @pytest.mark.parametrize("clean_logits", [True, False])
 @pytest.mark.parametrize("data_generation", DATA_GENERATION)
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@requires_platform("cuda")
 @torch.inference_mode()
 def test_top_k_per_row_decode(
     top_k: int,
@@ -292,7 +292,7 @@ def test_top_k_per_row_decode(
     )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@requires_platform("cuda")
 @pytest.mark.parametrize("clean_logits", [True, False])
 @torch.inference_mode()
 def test_top_k_per_row_decode_large_vocab_size(clean_logits: bool) -> None:
@@ -310,7 +310,7 @@ def test_top_k_per_row_decode_large_vocab_size(clean_logits: bool) -> None:
     )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@requires_platform("cuda")
 @pytest.mark.parametrize(
     "seq_len_range,test_id",
     [
@@ -524,7 +524,7 @@ def run_large_context_topk_test(
             Torch: {torch_vals.sort(descending=True)[0][:10]}"""
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@requires_platform("cuda")
 @pytest.mark.parametrize(
     "test_config",
     [
@@ -623,7 +623,7 @@ def test_persistent_topk_correctness(test_config: dict) -> None:
     )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@requires_platform("cuda")
 @pytest.mark.parametrize(
     "test_config",
     [
@@ -683,7 +683,7 @@ def test_persistent_topk_algorithm_paths(test_config: dict) -> None:
     )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@requires_platform("cuda")
 @torch.inference_mode()
 def test_persistent_topk_stress() -> None:
     """
@@ -710,7 +710,7 @@ def test_persistent_topk_stress() -> None:
         )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@requires_platform("cuda")
 @pytest.mark.parametrize(
     "test_config",
     [
@@ -790,7 +790,7 @@ def test_persistent_topk(test_config: dict, top_k: int) -> None:
     )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@requires_platform("cuda")
 @pytest.mark.parametrize("top_k", [512, 2048])
 @torch.inference_mode()
 def test_persistent_topk_padded_stride(top_k: int) -> None:
