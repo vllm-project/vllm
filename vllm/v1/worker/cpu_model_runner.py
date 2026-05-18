@@ -10,6 +10,7 @@ import vllm.utils.cpu_triton_utils as cpu_tl
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.triton_dispatcher import register_kernel
 from vllm.tracing import instrument
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -89,9 +90,12 @@ class CPUModelRunner(GPUModelRunner):
         vllm.v1.sample.rejection_sampler.rejection_random_sample_kernel = (
             cpu_tl.rejection_random_sample_kernel
         )
-        vllm.v1.sample.rejection_sampler.expand_kernel = cpu_tl.expand_kernel
         vllm.v1.sample.rejection_sampler.sample_recovered_tokens_kernel = (
             cpu_tl.sample_recovered_tokens_kernel
+        )
+
+        register_kernel("vllm.v1.sample.rejection_sampler.expand_kernel")(
+            cpu_tl._expand_kernel_impl
         )
 
     @instrument(span_name="Loading (CPU)")

@@ -332,5 +332,4 @@ eagle_step_slot_mapping_metadata_kernel = _FuncWrapper(
 )
 rejection_greedy_sample_kernel = _FuncWrapper(_rejection_greedy_sample_kernel_impl)
 rejection_random_sample_kernel = _FuncWrapper(_rejection_random_sample_kernel_impl)
-expand_kernel = _FuncWrapper(_expand_kernel_impl)
 sample_recovered_tokens_kernel = _FuncWrapper(_sample_recovered_tokens_kernel_impl)
