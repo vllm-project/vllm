@@ -72,7 +72,7 @@ typedef RVVTYPE(vuint16, LMUL_512, _t) fixed_u16x32_t
     __attribute__((riscv_rvv_vector_bits(512)));
 
 // bfloat16
-#ifdef RISCV_BF16_SUPPORT
+#ifdef __riscv_zvfbfmin
 typedef RVVTYPE(vbfloat16, LMUL_128, _t) fixed_bf16x8_t
     __attribute__((riscv_rvv_vector_bits(128)));
 typedef RVVTYPE(vbfloat16, LMUL_256, _t) fixed_bf16x16_t
