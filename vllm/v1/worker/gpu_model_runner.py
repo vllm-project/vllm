@@ -5892,7 +5892,12 @@ class GPUModelRunner(
             all_greedy=False,
             all_random=False,
             top_p=dummy_tensors(0.9),
-            top_k=dummy_tensors(logits.size(1) - 1),
+            # Use a realistic top_k value. The dummy run only exists for
+            # KV-cache memory profiling, and the memory footprint is
+            # independent of top_k. A near-vocab_size value (vocab_size - 1)
+            # triggers an SM120 top-k masking kernel hang on RTX 5090 in both
+            # the Triton and FlashInfer paths; see issue #42987.
+            top_k=dummy_tensors(50),
             generators={},
             max_num_logprobs=None,
             logprob_token_ids=None,
