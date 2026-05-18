@@ -53,13 +53,7 @@ def reference_silu_mul_fp8(
     up_f32 = up_f32 * up_scales.unsqueeze(-1)
 
     if use_tanh_silu:
-        x = up_f32.reshape(N, H)
-        silu_up = (
-            x
-            * 0.5
-            * (1.0 + torch.tanh(0.7978845608028654 * (x + 0.044715 * x * x * x)))
-        )
-        silu_up = silu_up.reshape(N, G, GROUP_SIZE)
+        silu_up = up_f32 * (0.5 + 0.5 * torch.tanh(up_f32 * 0.5))
     else:
         silu_up = up_f32 * torch.sigmoid(up_f32)
 
