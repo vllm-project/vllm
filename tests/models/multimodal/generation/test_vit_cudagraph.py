@@ -41,6 +41,13 @@ def qwen_vl_chat_template(content: str) -> str:
     return f"<|im_start|>user\n{content}<|im_end|>\n<|im_start|>assistant\n"
 
 
+def step3_vl_chat_template(content: str) -> str:
+    return (
+        "<｜begin▁of▁sentence｜> You are a helpful assistant.<|BOT|>user\n "
+        f"<im_patch>{content} <|EOT|><|BOT|>assistant\n"
+    )
+
+
 MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
     "qwen2_5_vl": VitCudagraphTestConfig(
         model="Qwen/Qwen2.5-VL-3B-Instruct",
@@ -89,6 +96,11 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         ),
         needs_video_metadata=False,
         marks=[pytest.mark.core_model],
+    ),
+    "step3_vl": VitCudagraphTestConfig(
+        model="stepfun-ai/Step3-VL-10B",
+        image_prompt=step3_vl_chat_template("What is in this image?"),
+        video_prompt=None,
     ),
 }
 
