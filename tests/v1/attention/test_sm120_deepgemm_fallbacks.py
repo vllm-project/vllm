@@ -83,6 +83,35 @@ def _reference_paged_mqa_logits(
     return logits
 
 
+def _assert_topk_indices_match_values(
+    logits: torch.Tensor,
+    actual: torch.Tensor,
+    topk_tokens: int,
+) -> None:
+    for row_idx in range(logits.shape[0]):
+        valid_count = int(torch.isfinite(logits[row_idx]).sum().item())
+        row_topk = min(topk_tokens, valid_count)
+        expected = torch.topk(logits[row_idx], row_topk, dim=0).indices.to(torch.int32)
+        actual_row = actual[row_idx, :row_topk]
+        assert torch.all(actual_row >= 0)
+        assert torch.all(torch.isfinite(logits[row_idx, actual_row.long()]))
+        actual_values = torch.sort(logits[row_idx, actual_row.long()]).values
+        expected_values = torch.sort(logits[row_idx, expected.long()]).values
+        torch.testing.assert_close(
+            actual_values,
+            expected_values,
+            rtol=0,
+            atol=0,
+        )
+        if row_topk < topk_tokens:
+            torch.testing.assert_close(
+                actual[row_idx, row_topk:],
+                torch.full_like(actual[row_idx, row_topk:], -1),
+                rtol=0,
+                atol=0,
+            )
+
+
 def test_decode_logits_width_uses_active_context_bound():
     assert _decode_logits_width(262144, 1024) == 1024
     assert _decode_logits_width(4096, 8192) == 4096
@@ -133,6 +162,21 @@ def test_sm120_mqa_direct_topk_uses_triton_logits_when_logits_fit(
         return original_triton(*args, **kwargs)
 
     monkeypatch.setattr(sm12x_mqa, "fp8_mqa_logits_triton", wrapped_triton)
+    original_topk_op = sm12x_deep_gemm_fallbacks._top_k_per_row_prefill_op()
+    if original_topk_op is None:
+        pytest.skip("top_k_per_row_prefill op is unavailable")
+    topk_calls = 0
+
+    def wrapped_topk_op(*args, **kwargs):
+        nonlocal topk_calls
+        topk_calls += 1
+        return original_topk_op(*args, **kwargs)
+
+    monkeypatch.setattr(
+        sm12x_deep_gemm_fallbacks,
+        "_top_k_per_row_prefill_op",
+        lambda: wrapped_topk_op,
+    )
 
     assert deep_gemm_utils.fp8_fp4_mqa_topk_indices(
         (q_fp8, None),
@@ -143,6 +187,7 @@ def test_sm120_mqa_direct_topk_uses_triton_logits_when_logits_fit(
         out,
     )
     assert calls == 1
+    assert topk_calls == 1
 
     reference_logits = sm12x_deep_gemm_fallbacks._fp8_mqa_logits_torch(
         (q_fp8, None),
@@ -152,10 +197,7 @@ def test_sm120_mqa_direct_topk_uses_triton_logits_when_logits_fit(
         cu_seqlen_ke,
         clean_logits=True,
     )
-    expected = torch.topk(reference_logits, topk_tokens, dim=1).indices.to(
-        torch.int32
-    )
-    torch.testing.assert_close(out, expected, rtol=0, atol=0)
+    _assert_topk_indices_match_values(reference_logits, out, topk_tokens)
 
 
 @pytest.mark.skipif(

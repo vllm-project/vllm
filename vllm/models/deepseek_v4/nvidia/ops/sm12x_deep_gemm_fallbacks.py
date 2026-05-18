@@ -14,6 +14,15 @@ _SM120_MQA_TRITON_TOPK_MAX_LOGITS_BYTES = 512 * 1024 * 1024
 _SM120_PAGED_MQA_TOPK_CHUNK_SIZE = 8192
 
 
+def _top_k_per_row_prefill_op():
+    try:
+        from vllm import _custom_ops as _custom_ops  # noqa: F401
+
+        return torch.ops._C.top_k_per_row_prefill
+    except (AttributeError, ImportError, RuntimeError):
+        return None
+
+
 def _fp8_mqa_logits_head_chunk_size(
     seq_len: int,
     seq_len_kv: int,
@@ -238,10 +247,28 @@ def _fp8_mqa_logits_topk_triton(
     if select_k == 0:
         return True
 
-    values, indices = torch.topk(logits, select_k, dim=1)
     selected = out[:, :select_k]
-    selected.copy_(indices.to(torch.int32))
-    selected.masked_fill_(~torch.isfinite(values), -1)
+    topk_op = _top_k_per_row_prefill_op()
+    if topk_op is not None:
+        topk_op(
+            logits,
+            cu_seqlen_ks,
+            cu_seqlen_ke,
+            selected,
+            logits.shape[0],
+            logits.stride(0),
+            logits.stride(1),
+            select_k,
+        )
+        selected.add_(cu_seqlen_ks[:, None])
+        valid = (selected >= cu_seqlen_ks[:, None]) & (
+            selected < cu_seqlen_ke[:, None]
+        )
+        selected.masked_fill_(~valid, -1)
+    else:
+        values, indices = torch.topk(logits, select_k, dim=1)
+        selected.copy_(indices.to(torch.int32))
+        selected.masked_fill_(~torch.isfinite(values), -1)
     return True
 
 
