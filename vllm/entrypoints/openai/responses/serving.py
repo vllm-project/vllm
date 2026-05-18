@@ -917,13 +917,6 @@ class OpenAIServingResponses(OpenAIServing):
             kv_transfer_params=context.kv_transfer_params,
         )
 
-        if request.store:
-            async with self.response_store_lock:
-                stored_response = self.response_store.get(response.id)
-                # If the response is already cancelled, don't update it.
-                if stored_response is None or stored_response.status != "cancelled":
-                    self.response_store[response.id] = response
-
         if envs.VLLM_LLM_SIGN_ENABLED:
             # Resolve cross-turn signing context (parent_hash from
             # the prior turn's stored llm_sign envelope, and the
@@ -932,6 +925,16 @@ class OpenAIServingResponses(OpenAIServing):
             # llm_sign-only state out of the inference function
             # signatures: the signing-related lookup is fully
             # localized to the signing call site.
+            #
+            # IMPORTANT: signing must happen *before* persisting the
+            # response in ``response_store``. Otherwise a concurrent
+            # request that follows up via ``previous_response_id``
+            # could observe an unsigned (or partially-signed) parent
+            # and break the cross-turn cryptographic chain — and a
+            # signing failure after storage would leave an unsigned
+            # response cached in the store. Keeping sign-then-store
+            # guarantees the store only ever contains fully signed
+            # responses.
             parent_hash: str | None = None
             start_seq = 0
             prev_id = request.previous_response_id
@@ -942,12 +945,20 @@ class OpenAIServingResponses(OpenAIServing):
                     parent_hash, start_seq = responses_parent_signing_context(
                         prev_response
                     )
-            return maybe_sign_responses_response(
+            response = maybe_sign_responses_response(
                 request,
                 response,
                 parent_hash=parent_hash,
                 start_seq=start_seq,
             )
+
+        if request.store:
+            async with self.response_store_lock:
+                stored_response = self.response_store.get(response.id)
+                # If the response is already cancelled, don't update it.
+                if stored_response is None or stored_response.status != "cancelled":
+                    self.response_store[response.id] = response
+
         return response
 
     def _topk_logprobs(

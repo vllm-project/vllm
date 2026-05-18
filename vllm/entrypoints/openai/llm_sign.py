@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Mapping
 from typing import Any
 
@@ -253,15 +254,22 @@ class _OpenAILLMSigner:
 
 
 _signer: _OpenAILLMSigner | None = None
+_signer_lock = threading.Lock()
 
 
 def _get_signer() -> _OpenAILLMSigner:
     global _signer
     if _signer is None:
-        _signer = _OpenAILLMSigner()
+        with _signer_lock:
+            # Double-checked locking: another thread may have
+            # initialized the singleton while we were waiting on
+            # the lock.
+            if _signer is None:
+                _signer = _OpenAILLMSigner()
     return _signer
 
 
 def clear_cached_signer() -> None:
     global _signer
-    _signer = None
+    with _signer_lock:
+        _signer = None
