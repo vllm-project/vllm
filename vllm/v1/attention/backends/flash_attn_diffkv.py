@@ -4,7 +4,12 @@
 
 import torch
 
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.logger import init_logger
+from vllm.platforms import current_platform
+from vllm.utils.torch_utils import (
+    canonicalize_singleton_dim_strides,
+    is_quantized_kv_cache,
+)
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.fa_utils import (
     get_flash_attn_version,
@@ -24,6 +29,8 @@ from .flash_attn import (
     FlashAttentionMetadata,
     cascade_attention,
 )
+
+logger = init_logger(__name__)
 
 
 class FlashAttentionDiffKVBackend(FlashAttentionBackend):
@@ -204,14 +211,28 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
         # Different head_size for K and V
         key_cache = kv_cache[..., : self.head_size]
         value_cache = kv_cache[..., self.head_size :]
+        # Fix degenerate strides on size-1 dims (e.g. num_kv_heads=1 with TP).
+        # FA3/4 on H100+ uses TMA, which requires ≥16-byte stride alignment.
+        # See vllm.utils.torch_utils.canonicalize_singleton_dim_strides.
+        fixed_k = canonicalize_singleton_dim_strides(key_cache)
+        fixed_v = canonicalize_singleton_dim_strides(value_cache)
+        if fixed_k is not key_cache or fixed_v is not value_cache:
+            logger.debug(
+                "Canonicalized degenerate KV cache strides (FlashAttentionDiffKV): "
+                "shape=%s, key strides before=%s after=%s, "
+                "value strides before=%s after=%s",
+                key_cache.shape,
+                key_cache.stride(),
+                fixed_k.stride(),
+                value_cache.stride(),
+                fixed_v.stride(),
+            )
+        key_cache, value_cache = fixed_k, fixed_v
 
         if is_quantized_kv_cache(self.kv_cache_dtype):
             # queries are quantized in the attention layer
-            dtype = FlashAttentionBackend.get_fp8_dtype_for_flashattn(
-                self.kv_cache_dtype
-            )
-            key_cache = key_cache.view(dtype)
-            value_cache = value_cache.view(dtype)
+            key_cache = key_cache.view(current_platform.fp8_dtype())
+            value_cache = value_cache.view(current_platform.fp8_dtype())
 
         if not attn_metadata.use_cascade:
             cu_seqlens_q = attn_metadata.query_start_loc
