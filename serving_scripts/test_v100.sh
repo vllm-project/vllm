@@ -1,4 +1,4 @@
-    #!/usr/bin/env bash
+#!/usr/bin/env bash
 #SBATCH --nodelist=htc-g[048-049]
 #SBATCH --job-name=vllm-v100-nsys-debug
 #SBATCH --nodes=2
