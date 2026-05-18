@@ -304,10 +304,12 @@ class DeepseekV2MoE(nn.Module):
             self.is_rocm_aiter_moe_enabled
             and self.gate.e_score_correction_bias is not None
         ):
-            # AITER biased_grouped_topk requires the correction bias dtype to
-            # match the router logits. Keep DeepSeek's correction bias in fp32
-            # by requesting fp32 router logits for this routing path.
-            self.gate.set_out_dtype(torch.float32)
+            # AITER biased_grouped_topk dispatches over VLLM_DISPATCH_FLOATING_TYPES
+            # on the gating_output dtype and requires `correction_bias` to match.
+            # Aligning router_logits with the gate's native output dtype (bf16)
+            # eliminates the per-layer `bfloat16tofloat32_copy_kernel_cuda` cast
+            # while staying fully fp32 inside the kernel (it promotes on load).
+            self.gate.set_out_dtype(self.gate.weight.dtype)
 
         if config.n_shared_experts is None or self.is_fusion_moe_shared_experts_enabled:
             self.shared_experts = None
