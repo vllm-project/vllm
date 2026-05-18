@@ -30,6 +30,9 @@ class PassContext:
     def __init__(self, compile_range: Range):
         self.compile_range: Range = compile_range
 
+        # set of arg indices
+        self.donated_input_ids: set[int] = set()
+
 
 def get_pass_context() -> PassContext:
     """Get the current pass context."""
@@ -49,6 +52,15 @@ def pass_context(compile_range: Range) -> Generator[None, None, None]:
         yield
     finally:
         _pass_context = prev_context
+
+
+@functools.cache
+def _hash_source_cached(*srcs: str | type | types.FunctionType) -> str:
+    hasher = hashlib.sha256()
+    for src in srcs:
+        src_str = src if isinstance(src, str) else inspect.getsource(src)
+        hasher.update(src_str.encode("utf-8"))
+    return hasher.hexdigest()
 
 
 class InductorPass(CustomGraphPass):  # type: ignore[misc]
@@ -72,19 +84,16 @@ class InductorPass(CustomGraphPass):  # type: ignore[misc]
         Utility method to hash the sources of functions or objects.
         :param srcs: strings or objects to add to the hash.
         Objects and functions have their source inspected.
+        Results are cached by resolved types to avoid repeated
+        inspect.getsource() calls.
         :return:
         """
-        hasher = hashlib.sha256()
-        for src in srcs:
-            if isinstance(src, str):
-                src_str = src
-            elif isinstance(src, (types.FunctionType, type)):
-                src_str = inspect.getsource(src)
-            else:
-                # object instance
-                src_str = inspect.getsource(src.__class__)
-            hasher.update(src_str.encode("utf-8"))
-        return hasher.hexdigest()
+        # Resolve instances to their class for a hashable cache key.
+        cache_key = tuple(
+            src if isinstance(src, (str, type, types.FunctionType)) else src.__class__
+            for src in srcs
+        )
+        return _hash_source_cached(*cache_key)
 
     @staticmethod
     def hash_dict(dict_: dict[Any, Any]) -> str:

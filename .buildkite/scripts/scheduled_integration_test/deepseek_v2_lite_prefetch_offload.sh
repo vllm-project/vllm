@@ -51,6 +51,7 @@ vllm serve "$MODEL" \
   --offload-num-in-group 2 \
   --offload-prefetch-step 1 \
   --offload-params w13_weight w2_weight \
+  --generation-config vllm \
   --port "$PORT" \
   ${EXTRA_ARGS+"${EXTRA_ARGS[@]}"} &
 SERVER_PID=$!
