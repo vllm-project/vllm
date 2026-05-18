@@ -7,13 +7,15 @@ from collections.abc import Iterable
 import torch
 import torch.nn as nn
 
+from vllm.config import VllmConfig
 from vllm.model_executor.models.qwen3 import Qwen3Model
-from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
+from vllm.model_executor.models.utils import AutoWeightsLoader, maybe_prefix
+from vllm.sequence import IntermediateTensors
 
 WeightItem = tuple[str, torch.Tensor]
 
 
-class VoyageQwen3BidirectionalEmbedModel(Qwen3Model):
+class VoyageQwen3BidirectionalEmbedModel(nn.Module):
     """
     Qwen3Model + Voyage embedding head + bidirectional attention.
 
@@ -27,25 +29,14 @@ class VoyageQwen3BidirectionalEmbedModel(Qwen3Model):
       - mlp.gate_up_proj (fused)
       - self_attn.qkv_proj (fused)
       - No "model." prefix
-
     """
 
-    packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
-    }
-
-    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__()
+        self.config = vllm_config.model_config.hf_config
+        self.model = Qwen3Model(
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+        )
 
         # Embedding head (hidden_size -> num_labels, bias=False)
         self.linear = nn.Linear(
@@ -54,10 +45,23 @@ class VoyageQwen3BidirectionalEmbedModel(Qwen3Model):
             bias=False,
         )
 
-    def forward(self, *args, **kwargs):
-        out = super().forward(*args, **kwargs)
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors
+        )
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        out = self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
         return self.linear(out)
 
     def load_weights(self, weights: Iterable[WeightItem]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return loader.load_weights(weights)
