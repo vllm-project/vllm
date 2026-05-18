@@ -242,18 +242,6 @@ echo "After venv: python=$(command -v python) ray=$(command -v ray 2>/dev/null |
 slurm_debug "PATH=${PATH}"
 slurm_debug "pip install starting (cuda + build + editable vllm)..."
 
-python -m pip install -U pip
-python -m pip install -r "${REPO_ROOT}/requirements/cuda.txt"
-python -m pip install -r "${REPO_ROOT}/requirements/build/cuda.txt"
-RAY_REQUIREMENT="${RAY_REQUIREMENT:-ray[cgraph]>=2.48.0}"
-echo "Installing Ray requirement: ${RAY_REQUIREMENT}"
-python -m pip install "${RAY_REQUIREMENT}"
-(
-  cd "${REPO_ROOT}" || exit 1
-  export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED:-1}"
-  python -m pip install -e . ${VLLM_PIP_INSTALL_EXTRA_ARGS:-}
-)
-
 RAY_BIN="${VENV_DIR}/bin/ray"
 if [ ! -x "${RAY_BIN}" ]; then
   echo "Error: ray binary not found at ${RAY_BIN}. Install ray into this venv." >&2
