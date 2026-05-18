@@ -9,9 +9,10 @@
 // per vector (LMUL_256 bits of FP32 data), which maps to:
 //   VLEN=128: m2 (256 bits = 8 x FP32)
 //   VLEN=256: m1 (256 bits = 8 x FP32)
-// Scalar RISC-V builds (-march=rv64gc) don't define __riscv_v_min_vlen,
-// so we gate the entire file on it.
-#if defined(__riscv_v_min_vlen)
+// Only VLEN=128 and VLEN=256 are supported; other VLENs (512, 1024)
+// and scalar RISC-V builds fall back to VEC/VEC16.
+#if defined(__riscv_v_min_vlen) && \
+    (__riscv_v_min_vlen == 128 || __riscv_v_min_vlen == 256)
 
   #include "cpu_attn_impl.hpp"
   #include "cpu_types_riscv_defs.hpp"
@@ -406,6 +407,6 @@ class AttentionImpl<ISA::RVV, scalar_t, head_dim, kv_cache_scalar_t> {
   #undef HEAD_SIZE_ALIGNMENT
   #undef MAX_Q_HEAD_NUM_PER_ITER
 
-#endif  // defined(__riscv_v_min_vlen)
+#endif  // __riscv_v_min_vlen == 128 || 256
 
 #endif  // CPU_ATTN_RVV_HPP
