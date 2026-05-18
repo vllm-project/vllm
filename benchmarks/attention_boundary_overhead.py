@@ -363,8 +363,20 @@ def _print_result(name: str, legacy_us: float, current_us: float) -> None:
 
 
 def run(args: argparse.Namespace) -> None:
-    repo_root = Path(args.vllm_root).resolve()
-    ascend_root = Path(args.ascend_root).resolve() if args.ascend_root else None
+    default_vllm_root = Path(__file__).resolve().parents[1]
+    repo_root = Path(args.vllm_root).resolve() if args.vllm_root else default_vllm_root
+    ascend_root = None
+    if args.repo == "ascend":
+        ascend_root = (
+            Path(args.ascend_root).resolve()
+            if args.ascend_root
+            else repo_root.parent / "vllm-ascend-hust"
+        )
+        if not ascend_root.exists():
+            raise FileNotFoundError(
+                "Unable to find vllm-ascend-hust. Pass --ascend-root to "
+                "benchmark the Ascend helper from a non-default checkout path."
+            )
     _prepend_repo_paths(repo_root, ascend_root)
 
     dtype = torch.int64 if args.dtype == "int64" else torch.int32
@@ -474,11 +486,16 @@ def main() -> None:
     )
     parser.add_argument(
         "--vllm-root",
-        default="/mnt/workspace/vllm-boundary-task/work/vllm-hust",
+        default=None,
+        help="path to the vllm checkout; defaults to this script's repository",
     )
     parser.add_argument(
         "--ascend-root",
-        default="/mnt/workspace/vllm-boundary-task/work/vllm-ascend-hust",
+        default=None,
+        help=(
+            "path to the vllm-ascend checkout; only used with --repo ascend "
+            "and defaults to ../vllm-ascend-hust"
+        ),
     )
     parser.add_argument("--iters", type=int, default=1000)
     parser.add_argument("--warmup", type=int, default=100)
