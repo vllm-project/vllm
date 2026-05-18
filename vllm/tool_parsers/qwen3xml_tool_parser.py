@@ -925,6 +925,7 @@ class StreamingXMLToolCallParser:
                 )
                 self._emit_delta(delta)
             self.current_function_open = False
+            self.current_function_name = None
 
         elif name == "tool_call":
             # Before ending tool_call,
