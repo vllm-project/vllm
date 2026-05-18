@@ -9,6 +9,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
+use std::{fmt, fs};
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
@@ -19,9 +20,9 @@ use serde_json::json;
 use serial_test::serial;
 use tower::{Service as _, ServiceExt as _};
 use vllm_chat::{
-    ChatBackend, ChatEvent, ChatLlm, ChatMessage, ChatRenderer, ChatRequest, ChatRole,
-    ChatTextBackend, DefaultChatOutputProcessor, DynChatOutputProcessor, DynChatRenderer,
-    NewChatOutputProcessorOptions, SamplingParams,
+    ChatBackend, ChatContent, ChatContentPart, ChatEvent, ChatLlm, ChatMessage, ChatRenderer,
+    ChatRequest, ChatRole, ChatTextBackend, DefaultChatOutputProcessor, DynChatOutputProcessor,
+    DynChatRenderer, NewChatOutputProcessorOptions, SamplingParams,
 };
 use vllm_engine_core_client::protocol::logprobs::{
     Logprobs, MaybeWireLogprobs, PositionLogprobs, TokenLogprob,
@@ -391,9 +392,10 @@ async fn recv_engine_message(dealer: &mut DealerSocket) -> Vec<Bytes> {
     dealer.recv().await.expect("recv engine message").into_vec()
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct FakeChatBackend {
     model_id: String,
+    multimodal_model_info: Option<vllm_chat::multimodal::MultimodalModelInfo>,
 }
 
 #[derive(Debug)]
@@ -405,7 +407,21 @@ impl Tokenizer for FakeChatTokenizer {
         text: &str,
         _add_special_tokens: bool,
     ) -> vllm_text::tokenizer::Result<Vec<u32>> {
-        Ok(text.bytes().map(u32::from).collect())
+        let mut token_ids = Vec::new();
+        let mut rest = text;
+        while !rest.is_empty() {
+            if let Some(stripped) = rest.strip_prefix("<image>") {
+                token_ids.push(999);
+                rest = stripped;
+                continue;
+            }
+
+            let ch = rest.chars().next().expect("rest is not empty");
+            let mut buf = [0; 4];
+            token_ids.extend(ch.encode_utf8(&mut buf).bytes().map(u32::from));
+            rest = &rest[ch.len_utf8()..];
+        }
+        Ok(token_ids)
     }
 
     fn decode(
@@ -421,6 +437,8 @@ impl Tokenizer for FakeChatTokenizer {
 
     fn token_to_id(&self, token: &str) -> Option<u32> {
         match token {
+            "<image>" => Some(999),
+            "<|image_pad|>" => Some(151655),
             "<think>" => Some(0xF001),
             "</think>" => Some(0xF002),
             "<|START_THINKING|>" => Some(0xF003),
@@ -430,19 +448,52 @@ impl Tokenizer for FakeChatTokenizer {
             _ => None,
         }
     }
+
+    fn id_to_token(&self, id: u32) -> Option<String> {
+        match id {
+            999 => Some("<image>".to_string()),
+            151655 => Some("<|image_pad|>".to_string()),
+            0xF001 => Some("<think>".to_string()),
+            0xF002 => Some("</think>".to_string()),
+            0xF003 => Some("<|START_THINKING|>".to_string()),
+            0xF004 => Some("<|END_THINKING|>".to_string()),
+            0xF005 => Some("◁think▷".to_string()),
+            0xF006 => Some("◁/think▷".to_string()),
+            _ => None,
+        }
+    }
 }
 
 impl FakeChatBackend {
     fn new() -> Self {
         Self {
             model_id: "test-model".to_string(),
+            multimodal_model_info: None,
         }
     }
 
     fn with_model_id(model_id: impl Into<String>) -> Self {
         Self {
             model_id: model_id.into(),
+            multimodal_model_info: None,
         }
+    }
+
+    fn with_multimodal_model_info(
+        multimodal_model_info: vllm_chat::multimodal::MultimodalModelInfo,
+    ) -> Self {
+        Self {
+            model_id: "test-model".to_string(),
+            multimodal_model_info: Some(multimodal_model_info),
+        }
+    }
+}
+
+impl fmt::Debug for FakeChatBackend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FakeChatBackend")
+            .field("model_id", &self.model_id)
+            .finish_non_exhaustive()
     }
 }
 
@@ -459,6 +510,10 @@ impl TextBackend for FakeChatBackend {
 impl ChatBackend for FakeChatBackend {
     fn chat_renderer(&self) -> DynChatRenderer {
         Arc::new(self.clone())
+    }
+
+    fn multimodal_model_info(&self) -> Option<&vllm_chat::multimodal::MultimodalModelInfo> {
+        self.multimodal_model_info.as_ref()
     }
 
     fn new_chat_output_processor(
@@ -482,7 +537,7 @@ impl ChatRenderer for FakeChatBackend {
         for message in &request.messages {
             prompt.push_str(message.role().as_str());
             prompt.push_str(": ");
-            prompt.push_str(&message.text_content()?);
+            prompt.push_str(&render_fake_message_content(message)?);
             prompt.push('\n');
         }
         if request.chat_options.add_generation_prompt() {
@@ -492,6 +547,55 @@ impl ChatRenderer for FakeChatBackend {
             prompt: Prompt::Text(prompt),
         })
     }
+}
+
+fn render_fake_message_content(message: &ChatMessage) -> vllm_chat::Result<String> {
+    match message {
+        ChatMessage::System { content }
+        | ChatMessage::Developer { content, .. }
+        | ChatMessage::User { content }
+        | ChatMessage::ToolResponse { content, .. } => render_fake_content(content),
+        ChatMessage::Assistant { .. } => message.text_content(),
+    }
+}
+
+fn render_fake_content(content: &ChatContent) -> vllm_chat::Result<String> {
+    Ok(match content {
+        ChatContent::Text(text) => text.clone(),
+        ChatContent::Parts(parts) => {
+            let mut out = String::new();
+            for part in parts {
+                match part {
+                    ChatContentPart::Text { text } => out.push_str(text),
+                    ChatContentPart::ImageUrl { .. } => out.push_str("<image>"),
+                }
+            }
+            out
+        }
+    })
+}
+
+fn qwen_multimodal_model_info() -> vllm_chat::multimodal::MultimodalModelInfo {
+    let config_path = std::env::temp_dir().join(format!(
+        "vllm-server-qwen-config-{}.json",
+        uuid::Uuid::new_v4()
+    ));
+    fs::write(
+        &config_path,
+        r#"{"model_type":"qwen2_vl","vision_token_id":151655}"#,
+    )
+    .expect("write qwen test config");
+    let info = vllm_chat::multimodal::MultimodalModelInfo::from_paths(
+        "qwen2-vl-test".to_string(),
+        Some("qwen2_vl".to_string()),
+        Some(&config_path),
+        None,
+        Arc::new(FakeChatTokenizer),
+    )
+    .expect("load multimodal info")
+    .expect("qwen multimodal info is registered");
+    let _ = fs::remove_file(config_path);
+    info
 }
 
 #[derive(Clone, Debug)]
@@ -751,6 +855,56 @@ async fn test_app_with_backend_and_stream_output_specs(
     )
 }
 
+async fn test_app_with_backend_and_engine_request_check<F>(
+    backend: Arc<dyn ChatTextBackend>,
+    check_request: F,
+) -> (axum::Router, MockEngineTask)
+where
+    F: FnOnce(&EngineCoreRequest) + Send + 'static,
+{
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = b"engine-openai-check-request".to_vec();
+
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id.clone(),
+        move |dealer, push| {
+            boxed_test_future(async move {
+                let add = recv_engine_message(dealer).await;
+                let request: EngineCoreRequest =
+                    rmp_serde::from_slice(&add[1]).expect("decode request");
+                check_request(&request);
+                send_outputs(
+                    push,
+                    engine_outputs_for_request(&request.request_id, default_stream_output_specs()),
+                )
+                .await;
+            })
+        },
+    ));
+
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+    )
+    .await
+    .expect("connect client");
+
+    let chat = ChatLlm::from_shared_backend(test_llm(client), backend);
+    (
+        build_router(Arc::new(AppState::new(
+            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            chat,
+        ))),
+        engine_task,
+    )
+}
+
 async fn test_chat_with_engine_handle() -> (ChatLlm, MockEngineTask) {
     test_chat_with_engine_outputs(b"engine-openai-chat", default_stream_output_specs()).await
 }
@@ -988,6 +1142,72 @@ async fn non_stream_chat_returns_json_response() {
     assert_eq!(json["usage"]["prompt_tokens"], 22);
     assert_eq!(json["usage"]["completion_tokens"], 3);
     assert_eq!(json["usage"]["total_tokens"], 25);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn non_stream_chat_image_url_reaches_engine_mm_features() {
+    let (app, engine_task) = test_app_with_backend_and_engine_request_check(
+        Arc::new(FakeChatBackend::with_multimodal_model_info(
+            qwen_multimodal_model_info(),
+        )),
+        |request| {
+            let prompt_token_ids = request.prompt_token_ids.as_ref().expect("prompt token ids");
+            assert!(prompt_token_ids.contains(&151655));
+
+            let features = request.mm_features.as_ref().expect("multimodal features");
+            assert_eq!(features.len(), 1);
+            assert_eq!(features[0].modality, "image");
+            assert_eq!(features[0].identifier, "image-1");
+            assert!(features[0].mm_position.length > 0);
+            assert!(features[0].mm_position.is_embed.is_some());
+
+            let data = features[0].data.as_ref().expect("feature data");
+            assert!(data.contains_key("pixel_values"));
+            assert!(data.contains_key("image_grid_thw"));
+        },
+    )
+    .await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": false,
+                        "messages": [{
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "describe "},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+                                    },
+                                    "uuid": "image-1"
+                                }
+                            ]
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    assert_eq!(json["object"], "chat.completion");
+    assert_eq!(json["choices"][0]["message"]["content"], "hi");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

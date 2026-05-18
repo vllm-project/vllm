@@ -12,6 +12,7 @@ arc-swap.workspace = true
 bytemuck.workspace = true
 byteorder.workspace = true
 bytes.workspace = true
+easy-ext.workspace = true
 enum-as-inner.workspace = true
 futures.workspace = true
 hex.workspace = true

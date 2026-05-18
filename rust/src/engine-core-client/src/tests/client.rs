@@ -23,7 +23,7 @@ use crate::protocol::multimodal::{
     SliceSpec,
 };
 use crate::protocol::stats::SchedulerStats;
-use crate::protocol::tensor_wire::WireTensor;
+use crate::protocol::tensor::WireTensor;
 use crate::protocol::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest,
     EngineCoreRequestType, EngineCoreSamplingParams, UtilityOutput, UtilityResultEnvelope,

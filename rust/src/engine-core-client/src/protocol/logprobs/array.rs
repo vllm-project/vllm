@@ -4,7 +4,7 @@ use byteorder::{BigEndian, LittleEndian, NativeEndian, ReadBytesExt};
 use itertools::Itertools as _;
 
 use crate::error::{Error, Result, ext_value_decode};
-use crate::protocol::tensor_wire::{WireArrayData, WireNdArray};
+use crate::protocol::tensor::{ShapeExt as _, WireArrayData, WireNdArray};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ScalarType {
@@ -196,8 +196,7 @@ pub(super) fn validate_byte_length(
     scalar: ScalarType,
 ) -> Result<()> {
     let element_count = shape
-        .iter()
-        .try_fold(1usize, |acc, dim| acc.checked_mul(*dim))
+        .checked_numel()
         .ok_or_else(|| decode_error(field, "shape element count overflowed usize"))?;
     let element_size = match scalar {
         ScalarType::I32 | ScalarType::F32 => 4,

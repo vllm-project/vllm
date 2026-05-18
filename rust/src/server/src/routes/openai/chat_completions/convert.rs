@@ -28,7 +28,7 @@ pub struct PreparedRequest {
     pub requested_logprobs: bool,
     /// Whether the caller requested top-level prompt logprobs.
     pub include_prompt_logprobs: bool,
-    /// Lowered text-only chat request for `vllm-chat`.
+    /// Lowered chat request for `vllm-chat`.
     pub chat_request: ChatRequest,
     /// Last assistant-role message content to echo back when `echo=true`.
     pub echo: Option<String>,
@@ -255,7 +255,12 @@ fn convert_content(content: MessageContent) -> Result<ChatContent, ApiError> {
             .into_iter()
             .map(|part| match part {
                 ContentPart::Text { text } => Ok(ChatContentPart::text(text)),
-                _ => bail_invalid_request!("Only text content parts are supported."),
+                ContentPart::ImageUrl { image_url, uuid } => Ok(ChatContentPart::ImageUrl {
+                    image_url: image_url.url,
+                    detail: image_url.detail,
+                    uuid,
+                }),
+                _ => bail_invalid_request!("Only text and image_url content parts are supported."),
             })
             .try_collect()
             .map(ChatContent::Parts),
@@ -273,7 +278,9 @@ fn convert_assistant_text_blocks(
             .into_iter()
             .map(|part| match part {
                 ContentPart::Text { text } => Ok(AssistantContentBlock::Text { text }),
-                _ => bail_invalid_request!("Only text content parts are supported."),
+                _ => bail_invalid_request!(
+                    "Only text content parts are supported for assistant messages."
+                ),
             })
             .try_collect(),
     }
@@ -335,9 +342,10 @@ mod tests {
 
     use axum::http::HeaderMap;
     use expect_test::expect;
+    use llm_multimodal::ImageDetail;
     use serde_json::json;
     use vllm_chat::{
-        AssistantContentBlock, AssistantToolCall, ChatMessage as VllmChatMessage,
+        AssistantContentBlock, AssistantToolCall, ChatContentPart, ChatMessage as VllmChatMessage,
         ChatTool as VllmChatTool, ChatToolChoice, GenerationPromptMode,
         SamplingParams as VllmSamplingParams,
     };
@@ -349,7 +357,7 @@ mod tests {
     };
     use crate::routes::openai::utils::types::{
         ChatMessage, ContentPart, Function, FunctionCallResponse, ImageUrl, MessageContent, Tool,
-        ToolCall, ToolChoice, ToolChoiceValue,
+        ToolCall, ToolChoice, ToolChoiceValue, VideoUrl,
     };
     use crate::utils::{ResolvedRequestContext, resolve_request_context};
 
@@ -536,32 +544,52 @@ mod tests {
     }
 
     #[test]
-    fn prepare_chat_request_rejects_non_text_content_parts() {
+    fn prepare_chat_request_maps_image_url_content_parts() {
         let request = ChatCompletionRequest {
             messages: vec![ChatMessage::User {
-                content: MessageContent::Parts(vec![ContentPart::ImageUrl {
-                    image_url: ImageUrl {
-                        url: "https://example.com/image.png".to_string(),
-                        detail: None,
+                content: MessageContent::Parts(vec![
+                    ContentPart::Text {
+                        text: "describe ".to_string(),
                     },
-                }]),
+                    ContentPart::ImageUrl {
+                        image_url: ImageUrl {
+                            url: "https://example.com/image.png".to_string(),
+                            detail: Some(ImageDetail::Low),
+                        },
+                        uuid: Some("image-1".to_string()),
+                    },
+                    ContentPart::Text {
+                        text: " briefly".to_string(),
+                    },
+                ]),
                 name: None,
             }],
             ..base_request()
         };
 
-        assert!(
-            prepare_chat_request(
-                request,
-                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
-                ResolvedRequestContext::default(),
-            )
-            .is_err()
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert_eq!(
+            prepared.chat_request.messages,
+            vec![VllmChatMessage::user(vec![
+                ChatContentPart::text("describe "),
+                ChatContentPart::ImageUrl {
+                    image_url: "https://example.com/image.png".to_string(),
+                    detail: Some(ImageDetail::Low),
+                    uuid: Some("image-1".to_string()),
+                },
+                ChatContentPart::text(" briefly"),
+            ])]
         );
     }
 
     #[test]
-    fn prepare_chat_request_rejects_non_text_developer_content_parts() {
+    fn prepare_chat_request_maps_developer_image_url_content_parts() {
         let request = ChatCompletionRequest {
             messages: vec![ChatMessage::Developer {
                 content: MessageContent::Parts(vec![ContentPart::ImageUrl {
@@ -569,6 +597,7 @@ mod tests {
                         url: "https://example.com/image.png".to_string(),
                         detail: None,
                     },
+                    uuid: None,
                 }]),
                 tools: None,
                 name: None,
@@ -576,14 +605,74 @@ mod tests {
             ..base_request()
         };
 
-        assert!(
-            prepare_chat_request(
-                request,
-                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
-                ResolvedRequestContext::default(),
-            )
-            .is_err()
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert_eq!(
+            prepared.chat_request.messages,
+            vec![VllmChatMessage::developer(
+                vec![ChatContentPart::image_url("https://example.com/image.png")],
+                None,
+            )]
         );
+    }
+
+    #[test]
+    fn prepare_chat_request_rejects_video_content_parts() {
+        let request = ChatCompletionRequest {
+            messages: vec![ChatMessage::User {
+                content: MessageContent::Parts(vec![ContentPart::VideoUrl {
+                    video_url: VideoUrl {
+                        url: "https://example.com/video.mp4".to_string(),
+                    },
+                }]),
+                name: None,
+            }],
+            ..base_request()
+        };
+
+        let error = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .unwrap_err();
+
+        expect!["Only text and image_url content parts are supported."]
+            .assert_eq(&error.to_error_response().error.message);
+    }
+
+    #[test]
+    fn prepare_chat_request_rejects_assistant_image_url_content_parts() {
+        let request = ChatCompletionRequest {
+            messages: vec![ChatMessage::Assistant {
+                content: Some(MessageContent::Parts(vec![ContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: "https://example.com/image.png".to_string(),
+                        detail: None,
+                    },
+                    uuid: None,
+                }])),
+                name: None,
+                tool_calls: None,
+                reasoning: None,
+            }],
+            ..base_request()
+        };
+
+        let error = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .unwrap_err();
+
+        expect!["Only text content parts are supported for assistant messages."]
+            .assert_eq(&error.to_error_response().error.message);
     }
 
     #[test]

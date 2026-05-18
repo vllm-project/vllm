@@ -200,6 +200,7 @@ impl ChatRenderer for HfChatRenderer {
 }
 
 /// Chat message in the JSON shape expected by Jinja chat templates.
+// TODO: borrow more fields directly from the original `ChatMessage`.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Serialize)]
 struct TemplateMessage {
@@ -224,7 +225,14 @@ struct TemplateMessage {
 #[serde(untagged)]
 enum TemplateContent {
     String(String),
-    OpenAi(ChatContent),
+    OpenAi(Vec<TemplateContentPart>),
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum TemplateContentPart {
+    Text { text: String },
+    Image,
 }
 
 #[derive(Debug, Serialize)]
@@ -367,10 +375,32 @@ fn to_template_content(
         ChatTemplateContentFormat::String => {
             TemplateContent::String(to_template_string_content(content, multimodal)?)
         }
-        // TODO: some models may expect `type: "image"` here instead of passing through OpenAI
-        // content types like `image_url`.
-        ChatTemplateContentFormat::OpenAi => TemplateContent::OpenAi(content.clone()),
+        ChatTemplateContentFormat::OpenAi => {
+            TemplateContent::OpenAi(to_template_openai_content(content, multimodal)?)
+        }
     })
+}
+
+fn to_template_openai_content(
+    content: &ChatContent,
+    multimodal: Option<&MultimodalRenderInfo>,
+) -> Result<Vec<TemplateContentPart>> {
+    match content {
+        ChatContent::Text(text) => Ok(vec![TemplateContentPart::Text { text: text.clone() }]),
+        ChatContent::Parts(parts) => parts
+            .iter()
+            .map(|part| match part {
+                ChatContentPart::Text { text } => {
+                    Ok(TemplateContentPart::Text { text: text.clone() })
+                }
+                // All multimodal contents are normalized to `{ "type": <modality> }`.
+                ChatContentPart::ImageUrl { .. } => {
+                    multimodal.ok_or(Error::UnsupportedMultimodalContent("image_url"))?;
+                    Ok(TemplateContentPart::Image)
+                }
+            })
+            .collect(),
+    }
 }
 
 fn to_template_string_content(
@@ -483,9 +513,9 @@ mod tests {
     }
 
     #[test]
-    fn openai_content_format_preserves_image_object_for_template() {
+    fn openai_content_format_normalizes_image_url_for_template() {
         let rendered = render_mm(
-            "{% for item in messages[0].content %}{% if item.type == 'image_url' %}<|image_pad|>{% else %}{{ item.text }}{% endif %}{% endfor %}",
+            "{% for item in messages[0].content %}{% if item.type == 'image' %}<|image_pad|>{% else %}{{ item.text }}{% endif %}{% endfor %}",
             &image_request(),
             ChatTemplateContentFormatOption::OpenAi,
         )

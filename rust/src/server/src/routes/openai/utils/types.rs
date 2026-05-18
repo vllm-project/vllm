@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::slice;
 
+use llm_multimodal::ImageDetail;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -83,7 +84,11 @@ pub enum ContentPart {
     #[serde(rename = "text")]
     Text { text: String },
     #[serde(rename = "image_url")]
-    ImageUrl { image_url: ImageUrl },
+    ImageUrl {
+        image_url: ImageUrl,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        uuid: Option<String>,
+    },
     #[serde(rename = "video_url")]
     VideoUrl { video_url: VideoUrl },
 }
@@ -92,7 +97,7 @@ pub enum ContentPart {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct ImageUrl {
     pub url: String,
-    pub detail: Option<String>,
+    pub detail: Option<ImageDetail>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use llm_multimodal::{ModelSpecificValue, PreprocessedImages};
 use vllm_engine_core_client::protocol::multimodal::MmKwargValue as ProtocolKwargValue;
-use vllm_engine_core_client::protocol::tensor_wire::WireTensor;
+use vllm_engine_core_client::protocol::tensor::{ShapeExt as _, WireTensor};
 
 use crate::error::{Error, Result, bail_multimodal, multimodal};
 
@@ -20,6 +20,9 @@ pub(super) enum KwargValue {
 }
 
 /// Collect `pixel_values` and model-specific outputs into one tensor map.
+// FIXME: the model runner expects tensor data to be in the desired dtype,
+// otherwise it will fail. We should be aware of the resolved model dtype and do
+// conversions here if needed.
 pub(super) fn collect_tensors(preprocessed: PreprocessedImages) -> HashMap<String, KwargValue> {
     let PreprocessedImages {
         pixel_values,
@@ -180,10 +183,9 @@ fn slice_first_axis_range<T: Clone>(
     if start > end || end > first_dim {
         bail_multimodal!("invalid tensor slice {start}..{end} for first dimension {first_dim}");
     }
-    let expected_len = shape.iter().try_fold(1usize, |acc, dim| {
-        acc.checked_mul(*dim)
-            .ok_or_else(|| multimodal!("tensor shape {shape:?} has too many elements"))
-    })?;
+    let expected_len = shape
+        .checked_numel()
+        .ok_or_else(|| multimodal!("tensor shape {shape:?} has too many elements"))?;
     if expected_len != data.len() {
         bail_multimodal!(
             "tensor shape {shape:?} expects {expected_len} elements, got {}",

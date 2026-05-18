@@ -40,7 +40,7 @@ pub mod handshake;
 pub mod logprobs;
 pub mod multimodal;
 pub mod stats;
-pub mod tensor_wire;
+pub mod tensor;
 pub use classfied_outputs::{
     ClassifiedEngineCoreOutputs, DpControlMessage, RequestBatchOutputs, UtilityCallOutput,
 };

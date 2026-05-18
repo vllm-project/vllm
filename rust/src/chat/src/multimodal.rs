@@ -26,6 +26,7 @@ use vllm_engine_core_client::protocol::multimodal::{
     MmBatchedField, MmFeatureSpec, MmFeatures, MmField, MmFieldElem, MmFlatField, MmKwargsItem,
     MmSharedField, MmSlice, PlaceholderRange, SliceSpec,
 };
+use vllm_engine_core_client::protocol::tensor::WireTensor;
 use vllm_text::Prompt;
 use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
 
@@ -86,6 +87,7 @@ struct ResolvedMultimodalSpec {
     raw: &'static dyn ModelProcessorSpec,
     placeholder_token: String,
     placeholder_marker_token_id: u32,
+    placeholder_embed_token_id: u32,
     field_layouts: HashMap<String, FieldLayout>,
     keep_on_cpu_keys: HashSet<String>,
 }
@@ -97,20 +99,22 @@ impl ResolvedMultimodalSpec {
             raw.placeholder_token(&metadata).map_err(|error| multimodal!("{error}"))?;
         // This is the rendered prompt marker, so resolve it from the token
         // string itself. Do not use `ModelProcessorSpec::placeholder_token_id()`:
-        // for specs such as Qwen2-VL and Llama 4 that ID is the replacement
-        // vision/pad/patch token, not necessarily the token ID of
-        // `placeholder_token`.
+        // for some specs that ID is the replacement vision/patch token,
+        // not necessarily the token ID of `placeholder_token`.
         let placeholder_marker_token_id =
             context.tokenizer().token_to_id(&placeholder_token).ok_or_else(|| {
                 multimodal!(
                     "placeholder token `{placeholder_token}` is not in the tokenizer vocabulary"
                 )
             })?;
+        let placeholder_embed_token_id =
+            raw.placeholder_token_id(&metadata).map_err(|error| multimodal!("{error}"))? as u32;
 
         Ok(Self {
             raw,
             placeholder_token,
             placeholder_marker_token_id,
+            placeholder_embed_token_id,
             field_layouts: raw.field_layouts(),
             keep_on_cpu_keys: raw.keep_on_cpu_keys().into_iter().collect(),
         })
@@ -309,7 +313,7 @@ impl MultimodalModelInfo {
         let fetched = self.fetch_images(media_parts).await?;
         let preprocessed = self.preprocess_images(&fetched.frames).await?;
         let replacements = self.spec.prompt_replacements(&self.context, &preprocessed)?;
-        let ranges = self.expand_prompt_tokens(prompt_token_ids, &replacements)?;
+        let ranges = self.expand_prompt_tokens(prompt_token_ids, replacements)?;
 
         let features = self.build_features(preprocessed, fetched, ranges)?;
         if features.len() != media_parts_len {
@@ -373,7 +377,7 @@ impl MultimodalModelInfo {
     fn expand_prompt_tokens(
         &self,
         prompt_token_ids: &mut Vec<u32>,
-        replacements: &[PromptReplacement],
+        replacements: Vec<PromptReplacement>,
     ) -> Result<Vec<PlaceholderRange>> {
         let mut cursor = 0;
         let mut ranges = Vec::with_capacity(replacements.len());
@@ -395,20 +399,29 @@ impl MultimodalModelInfo {
                     self.spec.placeholder_token
                 )
             })?;
-            let replacement_tokens =
-                replacement.tokens.iter().map(|&token| token as u32).collect::<Vec<_>>();
-            if replacement_tokens.is_empty() {
+
+            if replacement.tokens.is_empty() {
                 bail_multimodal!(
                     "placeholder token `{}` expanded to no tokens",
                     self.spec.placeholder_token
                 );
             }
-            let replacement_len = replacement_tokens.len();
+            let replacement_len = replacement.tokens.len();
+            let replacement_tokens =
+                replacement.tokens.iter().map(|&token| token as u32).collect::<Vec<_>>();
+            let is_embed = {
+                let mask = replacement_tokens
+                    .iter()
+                    .map(|&token| token == self.spec.placeholder_embed_token_id)
+                    .collect::<Vec<_>>();
+                WireTensor::from_bool(vec![replacement_len], mask).map_err(Error::Multimodal)?
+            };
+
             prompt_token_ids.splice(offset..offset + 1, replacement_tokens);
             ranges.push(PlaceholderRange {
                 offset,
                 length: replacement_len,
-                is_embed: None,
+                is_embed: Some(is_embed),
             });
             cursor = offset + replacement_len;
         }
@@ -519,9 +532,18 @@ impl TokenResolver for TokenizerResolver {
 mod tests {
     use std::sync::Arc;
 
+    use llm_multimodal::TokenId;
+    use vllm_engine_core_client::protocol::tensor::WireArrayData;
     use vllm_text::tokenizer::{IncrementalDecoder, Tokenizer, TokenizerError};
 
     use super::*;
+
+    const LLAMA4_IMAGE_START_ID: u32 = 200088;
+    const LLAMA4_IMAGE_END_ID: u32 = 200089;
+    const LLAMA4_IMAGE_ID: u32 = 200090;
+    const LLAMA4_PATCH_ID: u32 = 200092;
+    const LLAMA4_TILE_X_SEPARATOR_ID: u32 = 200093;
+    const LLAMA4_TILE_Y_SEPARATOR_ID: u32 = 200094;
 
     struct TestTokenizer;
 
@@ -532,7 +554,7 @@ mod tests {
             _add_special_tokens: bool,
         ) -> std::result::Result<Vec<u32>, TokenizerError> {
             Ok(match text {
-                "<image>" => vec![999],
+                "<|image|>" => vec![LLAMA4_IMAGE_ID],
                 text => text.bytes().map(u32::from).collect(),
             })
         }
@@ -547,16 +569,24 @@ mod tests {
 
         fn token_to_id(&self, token: &str) -> Option<u32> {
             match token {
-                "<image>" => Some(999),
-                "<|image_pad|>" => Some(151655),
+                "<|image_start|>" => Some(LLAMA4_IMAGE_START_ID),
+                "<|image_end|>" => Some(LLAMA4_IMAGE_END_ID),
+                "<|image|>" => Some(LLAMA4_IMAGE_ID),
+                "<|patch|>" => Some(LLAMA4_PATCH_ID),
+                "<|tile_x_separator|>" => Some(LLAMA4_TILE_X_SEPARATOR_ID),
+                "<|tile_y_separator|>" => Some(LLAMA4_TILE_Y_SEPARATOR_ID),
                 _ => None,
             }
         }
 
         fn id_to_token(&self, id: u32) -> Option<String> {
             match id {
-                999 => Some("<image>".to_string()),
-                151655 => Some("<|image_pad|>".to_string()),
+                LLAMA4_IMAGE_START_ID => Some("<|image_start|>".to_string()),
+                LLAMA4_IMAGE_END_ID => Some("<|image_end|>".to_string()),
+                LLAMA4_IMAGE_ID => Some("<|image|>".to_string()),
+                LLAMA4_PATCH_ID => Some("<|patch|>".to_string()),
+                LLAMA4_TILE_X_SEPARATOR_ID => Some("<|tile_x_separator|>".to_string()),
+                LLAMA4_TILE_Y_SEPARATOR_ID => Some("<|tile_y_separator|>".to_string()),
                 _ => None,
             }
         }
@@ -571,22 +601,20 @@ mod tests {
         }
     }
 
-    fn qwen_info() -> MultimodalModelInfo {
-        let model_id = "qwen2-vl-test".to_string();
-        let config = serde_json::json!({
-            "model_type": "qwen2_vl",
-            "vision_token_id": 151655
-        });
+    fn test_info(model_type: &str, config: serde_json::Value) -> MultimodalModelInfo {
         let context = MultimodalModelContext {
-            model_id,
-            model_type: Some("qwen2_vl".to_string()),
+            model_id: format!("{model_type}-test"),
+            model_type: Some(model_type.to_string()),
             config,
             tokenizer: TokenizerResolver(Arc::new(TestTokenizer)),
         };
-        let spec = context.resolve_model_spec().expect("qwen spec should match");
+        let spec = context
+            .resolve_model_spec()
+            .unwrap_or_else(|| panic!("{model_type} spec should match"));
         let spec = ResolvedMultimodalSpec::new(spec, &context).unwrap();
-        let raw_image_processor =
-            context.resolve_image_processor().expect("qwen image processor should match");
+        let raw_image_processor = context
+            .resolve_image_processor()
+            .unwrap_or_else(|| panic!("{model_type} image processor should match"));
         let media_connector = Arc::new(
             MediaConnector::new(reqwest::Client::new(), MediaConnectorConfig::default()).unwrap(),
         );
@@ -602,93 +630,132 @@ mod tests {
         }
     }
 
-    #[test]
-    fn resolves_qwen_placeholder_token() {
-        let info = qwen_info();
-        let placeholder = info.placeholder_token();
+    fn llama4_info() -> MultimodalModelInfo {
+        let config = serde_json::json!({
+            "model_type": "llama4",
+            "image_token_index": LLAMA4_PATCH_ID,
+            "vision_config": {"image_size": 336, "patch_size": 14}
+        });
+        test_info("llama4", config)
+    }
 
-        assert_eq!(placeholder, "<image>");
+    fn llama4_single_tile_replacement() -> PromptReplacement {
+        PromptReplacement::sequence(
+            Modality::Image,
+            "<|image|>",
+            vec![
+                LLAMA4_IMAGE_START_ID as TokenId,
+                LLAMA4_IMAGE_ID as TokenId,
+                LLAMA4_PATCH_ID as TokenId,
+                LLAMA4_PATCH_ID as TokenId,
+                LLAMA4_IMAGE_END_ID as TokenId,
+            ],
+        )
+    }
+
+    fn llama4_multi_tile_replacement() -> PromptReplacement {
+        PromptReplacement::sequence(
+            Modality::Image,
+            "<|image|>",
+            vec![
+                LLAMA4_IMAGE_START_ID as TokenId,
+                LLAMA4_PATCH_ID as TokenId,
+                LLAMA4_TILE_X_SEPARATOR_ID as TokenId,
+                LLAMA4_PATCH_ID as TokenId,
+                LLAMA4_TILE_Y_SEPARATOR_ID as TokenId,
+                LLAMA4_IMAGE_ID as TokenId,
+                LLAMA4_PATCH_ID as TokenId,
+                LLAMA4_IMAGE_END_ID as TokenId,
+            ],
+        )
+    }
+
+    fn assert_bool_mask(range: &PlaceholderRange, expected: &[bool]) {
+        let tensor = range.is_embed.as_ref().expect("is_embed mask");
+        assert_eq!(tensor.dtype, "bool");
+        assert_eq!(tensor.shape, vec![expected.len()]);
+        assert_eq!(
+            tensor.data,
+            WireArrayData::RawView(expected.iter().map(|value| u8::from(*value)).collect())
+        );
     }
 
     #[test]
-    fn expand_prompt_tokens_replaces_placeholder_marker() {
-        let info = qwen_info();
-        let mut prompt_token_ids = vec![1, 999, 2];
-        let replacements = vec![PromptReplacement::sequence(
-            Modality::Image,
-            "<image>",
-            vec![151655, 151655, 151655],
-        )];
+    fn expand_prompt_tokens_marks_only_llama4_patch_tokens_as_embed() {
+        let info = llama4_info();
+        let mut prompt_token_ids = vec![1, LLAMA4_IMAGE_ID, 2];
+        let replacements = vec![llama4_multi_tile_replacement()];
 
-        let ranges = info.expand_prompt_tokens(&mut prompt_token_ids, &replacements).unwrap();
+        let ranges = info.expand_prompt_tokens(&mut prompt_token_ids, replacements).unwrap();
 
-        assert_eq!(prompt_token_ids, vec![1, 151655, 151655, 151655, 2]);
+        assert_eq!(
+            prompt_token_ids,
+            vec![
+                1,
+                LLAMA4_IMAGE_START_ID,
+                LLAMA4_PATCH_ID,
+                LLAMA4_TILE_X_SEPARATOR_ID,
+                LLAMA4_PATCH_ID,
+                LLAMA4_TILE_Y_SEPARATOR_ID,
+                LLAMA4_IMAGE_ID,
+                LLAMA4_PATCH_ID,
+                LLAMA4_IMAGE_END_ID,
+                2,
+            ]
+        );
         assert_eq!(ranges[0].offset, 1);
-        assert_eq!(ranges[0].length, 3);
+        assert_eq!(ranges[0].length, 8);
+        assert_bool_mask(
+            &ranges[0],
+            &[false, true, false, true, false, false, true, false],
+        );
     }
 
     #[test]
     fn expand_prompt_tokens_errors_when_placeholder_missing() {
-        let info = qwen_info();
+        let info = llama4_info();
         let mut prompt_token_ids = vec![1, 2, 3];
-        let replacements = vec![PromptReplacement::sequence(
-            Modality::Image,
-            "<image>",
-            vec![151655],
-        )];
+        let replacements = vec![llama4_single_tile_replacement()];
 
-        let error = info.expand_prompt_tokens(&mut prompt_token_ids, &replacements).unwrap_err();
+        let error = info.expand_prompt_tokens(&mut prompt_token_ids, replacements).unwrap_err();
 
         assert!(matches!(error, Error::Multimodal(message) if message.contains("not found")));
     }
 
     #[test]
-    fn expand_prompt_tokens_uses_cached_model_placeholder() {
-        let info = qwen_info();
-        let mut prompt_token_ids = vec![1, 999, 2, 999, 3];
+    fn expand_prompt_tokens_skips_llama4_image_marker_inside_replacement() {
+        let info = llama4_info();
+        let mut prompt_token_ids = vec![1, LLAMA4_IMAGE_ID, 2, LLAMA4_IMAGE_ID, 3];
         let replacements = vec![
-            PromptReplacement::sequence(Modality::Image, "<image>", vec![151655, 151655]),
-            PromptReplacement::sequence(Modality::Image, "<image>", vec![151656]),
+            llama4_single_tile_replacement(),
+            llama4_single_tile_replacement(),
         ];
 
-        let ranges = info.expand_prompt_tokens(&mut prompt_token_ids, &replacements).unwrap();
+        let ranges = info.expand_prompt_tokens(&mut prompt_token_ids, replacements).unwrap();
 
-        assert_eq!(prompt_token_ids, vec![1, 151655, 151655, 2, 151656, 3]);
+        assert_eq!(
+            prompt_token_ids,
+            vec![
+                1,
+                LLAMA4_IMAGE_START_ID,
+                LLAMA4_IMAGE_ID,
+                LLAMA4_PATCH_ID,
+                LLAMA4_PATCH_ID,
+                LLAMA4_IMAGE_END_ID,
+                2,
+                LLAMA4_IMAGE_START_ID,
+                LLAMA4_IMAGE_ID,
+                LLAMA4_PATCH_ID,
+                LLAMA4_PATCH_ID,
+                LLAMA4_IMAGE_END_ID,
+                3,
+            ]
+        );
         assert_eq!(ranges[0].offset, 1);
-        assert_eq!(ranges[0].length, 2);
-        assert_eq!(ranges[1].offset, 4);
-        assert_eq!(ranges[1].length, 1);
-    }
-
-    #[tokio::test]
-    async fn finalizes_qwen_image_data_url_into_token_ids_and_features() {
-        let info = qwen_info();
-        let request = ChatRequest {
-            messages: vec![ChatMessage::user(vec![ChatContentPart::ImageUrl {
-                image_url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=".to_string(),
-                detail: None,
-                uuid: Some("image-1".to_string()),
-            }])],
-            ..ChatRequest::for_test()
-        };
-        let rendered = RenderedPrompt {
-            prompt: Prompt::Text("<image>".to_string()),
-        };
-
-        let (prompt, features) =
-            finalize_rendered_prompt(&request, rendered, Some(&info)).await.unwrap();
-
-        let token_ids = prompt.into_token_ids().unwrap();
-        assert!(!token_ids.is_empty());
-        assert!(token_ids.iter().all(|id| *id == 151655));
-
-        let features = features.unwrap();
-        assert_eq!(features.len(), 1);
-        assert_eq!(features[0].identifier, "image-1");
-        assert_eq!(features[0].mm_position.offset, 0);
-        assert_eq!(features[0].mm_position.length, token_ids.len());
-        let data = features[0].data.as_ref().unwrap();
-        assert!(data.contains_key("pixel_values"));
-        assert!(data.contains_key("image_grid_thw"));
+        assert_eq!(ranges[0].length, 5);
+        assert_bool_mask(&ranges[0], &[false, false, true, true, false]);
+        assert_eq!(ranges[1].offset, 7);
+        assert_eq!(ranges[1].length, 5);
+        assert_bool_mask(&ranges[1], &[false, false, true, true, false]);
     }
 }

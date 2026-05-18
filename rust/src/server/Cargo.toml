@@ -12,6 +12,7 @@ futures.workspace = true
 http-body.workspace = true
 itertools.workspace = true
 libc.workspace = true
+llm-multimodal.workspace = true
 prost.workspace = true
 prost-types.workspace = true
 rmpv.workspace = true

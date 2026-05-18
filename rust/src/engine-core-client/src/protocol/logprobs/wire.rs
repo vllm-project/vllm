@@ -1,6 +1,6 @@
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 
-use crate::protocol::tensor_wire::WireNdArray;
+use crate::protocol::tensor::WireNdArray;
 
 /// Python wire representation of `LogprobsLists` / `LogprobsTensors` before
 /// aux-frame references and raw-view payloads are resolved.

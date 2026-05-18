@@ -10,6 +10,15 @@ use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 /// <https://github.com/vllm-project/vllm/blob/5a0a8fc1ea7542394ff315138bd5677b7b53bca1/vllm/v1/serial_utils.py#L41-L43>
 const CUSTOM_TYPE_RAW_VIEW: i8 = 3;
 
+#[easy_ext::ext(ShapeExt)]
+impl [usize] {
+    /// Returned the total number of elements implied by this shape, or `None`
+    /// if the product of the dimensions overflows `usize`.
+    pub fn checked_numel(&self) -> Option<usize> {
+        self.iter().try_fold(1usize, |acc, dim| acc.checked_mul(*dim))
+    }
+}
+
 /// Python ndarray/tensor wire tuple encoded as `(dtype, shape, data)`.
 ///
 /// This matches the custom msgpack representation built by Python
@@ -86,8 +95,7 @@ impl WireNdArray {
 /// of the data.
 fn validate_element_count(shape: &[usize], len: usize) -> Result<(), String> {
     let expected = shape
-        .iter()
-        .try_fold(1usize, |acc, dim| acc.checked_mul(*dim))
+        .checked_numel()
         .ok_or_else(|| format!("tensor shape product overflows usize: {shape:?}"))?;
     if expected == len {
         Ok(())

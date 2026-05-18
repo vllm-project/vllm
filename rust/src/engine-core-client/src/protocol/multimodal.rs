@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 
-use super::tensor_wire::WireTensor;
+use super::tensor::WireTensor;
 
 /// Multimodal feature payload accepted from higher-level frontend code.
 ///
@@ -56,6 +56,7 @@ pub struct PlaceholderRange {
 
     /// A boolean mask of shape `(length,)` indicating which positions
     /// between `offset` and `offset + length` to assign embeddings to.
+    /// `None` means all positions.
     #[serde(default)]
     pub is_embed: Option<WireTensor>,
 }
