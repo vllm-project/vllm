@@ -502,6 +502,12 @@ class MambaMixer2(MambaBase, PluggableLayer):
         self.prefix = prefix
 
         self.num_spec = vllm_config.num_speculative_tokens
+        if self.num_spec > 0:
+            self.register_buffer(
+                "_decode_state_offsets",
+                torch.arange(1 + self.num_spec, dtype=torch.int32).unsqueeze(0),
+                persistent=False,
+            )
 
         # Pre-compute sizes for forward pass
         self.tped_intermediate_size = self.intermediate_size // self.tp_size
@@ -955,18 +961,14 @@ class MambaMixer2(MambaBase, PluggableLayer):
             if is_mamba_cache_all:
                 if self.num_spec > 0:
                     assert block_idx_last_scheduled_token_prev_step_d is not None
-                    offsets = torch.arange(
-                        1 + self.num_spec,
-                        device=block_idx_last_scheduled_token_d.device,
-                        dtype=block_idx_last_scheduled_token_d.dtype,
-                    )
                     input_indices = (
                         block_idx_last_scheduled_token_prev_step_d.unsqueeze(1)
-                        + offsets.unsqueeze(0)
+                        + self._decode_state_offsets
                     )
-                    output_indices = block_idx_last_scheduled_token_d.unsqueeze(
-                        1
-                    ) + offsets.unsqueeze(0)
+                    output_indices = (
+                        block_idx_last_scheduled_token_d.unsqueeze(1)
+                        + self._decode_state_offsets
+                    )
                     state_indices_tensor_d_input = state_indices_tensor_d.gather(
                         1, input_indices
                     )

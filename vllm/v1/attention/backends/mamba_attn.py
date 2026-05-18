@@ -112,7 +112,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             max_num_blocks = (
                 cdiv(
                     self.vllm_config.model_config.max_model_len,
-                    self.kv_cache_spec.block_size,
+                    kv_cache_spec.block_size,
                 )
                 + kv_cache_spec.num_speculative_blocks
             )
