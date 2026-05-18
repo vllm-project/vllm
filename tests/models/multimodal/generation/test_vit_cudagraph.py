@@ -5,8 +5,8 @@ from dataclasses import dataclass, field
 
 import pytest
 
+from tests.utils import requires_platform
 from vllm.multimodal.video import sample_frames_from_video
-from vllm.platforms import current_platform
 
 from ....conftest import IMAGE_ASSETS, VIDEO_ASSETS
 from ....utils import create_new_process_for_each_test
@@ -119,7 +119,7 @@ def get_compilation_config():
 
 
 @pytest.mark.parametrize("model_id", params_with_marks(MODEL_CONFIGS))
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@requires_platform("cuda")
 @create_new_process_for_each_test()
 def test_vit_cudagraph_image(model_id, vllm_runner, image_assets):
     config = MODEL_CONFIGS[model_id]
@@ -161,7 +161,7 @@ def test_vit_cudagraph_image(model_id, vllm_runner, image_assets):
 
 
 @pytest.mark.parametrize("model_id", params_with_marks(MODEL_CONFIGS))
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@requires_platform("cuda")
 @create_new_process_for_each_test()
 def test_vit_cudagraph_video(model_id, vllm_runner, video_assets):
     config = MODEL_CONFIGS[model_id]

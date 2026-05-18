@@ -6,17 +6,14 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from tests.utils import requires_platform
 from vllm.model_executor.models.deepseek_v4 import (
     DeepseekV4MegaMoEExperts,
     _stage_deepseek_v4_mega_moe_inputs,
     make_deepseek_v4_expert_params_mapping,
 )
-from vllm.platforms import current_platform
 
-pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="DeepSeek V4 MegaMoE requires CUDA",
-)
+pytestmark = (requires_platform("cuda"),)
 
 
 def test_deepseek_v4_mega_moe_expert_mapping():

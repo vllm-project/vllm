@@ -13,13 +13,10 @@ from __future__ import annotations
 import pytest
 import torch
 
-from vllm.platforms import current_platform
+from tests.utils import requires_platform
 from vllm.v1.attention.ops.deepseek_v4_ops import fused_q_kv_rmsnorm
 
-pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda_alike(),
-    reason="fused_q_kv_rmsnorm requires a CUDA/ROCm device",
-)
+pytestmark = requires_platform("cuda_alike")
 
 
 def _ref_rmsnorm(x: torch.Tensor, w: torch.Tensor, eps: float) -> torch.Tensor:

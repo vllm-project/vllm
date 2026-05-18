@@ -6,7 +6,7 @@ import pytest
 import torch._dynamo
 
 from tests.compile.backend import LazyInitPass, TestBackend
-from tests.utils import TestFP8Layer, flat_product
+from tests.utils import TestFP8Layer, flat_product, requires_platform
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.compilation.passes.fusion.matcher_utils import QUANT_OPS
@@ -402,9 +402,7 @@ if current_platform.is_cuda():
     )
     + list(flat_product(BACKENDS_MLA_FP4, PATTERN_TEST_MODELS_MLA_FP4, [""])),
 )
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="Only test ROCm or CUDA"
-)
+@requires_platform("cuda_alike")
 @pytest.mark.skipif(not current_platform.supports_fp8(), reason="Need FP8")
 def test_mla_attention_quant_pattern(
     num_heads: int,

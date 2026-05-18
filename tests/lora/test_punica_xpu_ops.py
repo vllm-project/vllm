@@ -10,8 +10,8 @@ from tests.lora.utils import (
     generate_data,
     generate_data_for_expand_nslices,
 )
+from tests.utils import requires_platform
 from vllm.lora.ops.xpu_ops import bgmv_expand, bgmv_expand_slice, bgmv_shrink
-from vllm.platforms import current_platform
 
 
 def torch_bgmv_expand(
@@ -234,7 +234,7 @@ SEED = [0]
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("seed", SEED)
 @pytest.mark.parametrize("op_type", ["shrink", "expand"])
-@pytest.mark.skipif(not current_platform.is_xpu(), reason="skip for non xpu platform")
+@requires_platform("xpu")
 def test_bgmv(
     batches: int,
     num_loras: int,
@@ -275,7 +275,7 @@ def test_bgmv(
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("seed", SEED)
-@pytest.mark.skipif(not current_platform.is_xpu(), reason="skip for non xpu platform")
+@requires_platform("xpu")
 def test_bgmv_expand_nslices(
     batches: int,
     num_loras: int,

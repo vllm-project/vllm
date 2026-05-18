@@ -9,7 +9,7 @@ import vllm.config
 import vllm.ir.ops
 import vllm.plugins
 from tests.compile.backend import TestBackend
-from tests.utils import TestFP8Layer
+from tests.utils import TestFP8Layer, requires_platform
 from vllm._aiter_ops import IS_AITER_FOUND, rocm_aiter_ops
 from vllm.compilation.passes.fusion.matcher_utils import QUANT_OPS
 from vllm.compilation.passes.fusion.rms_quant_fusion import (
@@ -294,9 +294,7 @@ def _run_fusion_test(
 @pytest.mark.parametrize("kernel_groupshape", KERNEL_GROUPSHAPE_COMBINATIONS)
 @pytest.mark.parametrize("enable_rms_norm_custom_op", [True, False])
 @pytest.mark.parametrize("enable_quant_fp8_custom_op", [True, False])
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="Only test on CUDA and ROCm"
-)
+@requires_platform("cuda_alike")
 def test_fusion_rmsnorm_quant(
     dtype,
     hidden_size,

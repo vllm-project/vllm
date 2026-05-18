@@ -7,7 +7,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from tests.utils import create_new_process_for_each_test
+from tests.utils import create_new_process_for_each_test, requires_platform
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
 from vllm.config import (
@@ -267,7 +267,7 @@ class TestCudagraphDispatcher:
         assert dispatcher.get_capture_descs() == []
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
+@requires_platform("cuda")
 class TestCUDAGraphWrapper:
     def setup_method(self):
         self.vllm_config = _create_vllm_config(CompilationConfig())
@@ -415,7 +415,7 @@ def _run_and_monitor_call(
 
 
 @create_new_process_for_each_test("spawn")
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
+@requires_platform("cuda")
 def test_capture_replay_bypass_logic():
     comp_config = CompilationConfig(
         mode=CompilationMode.VLLM_COMPILE,
@@ -484,7 +484,7 @@ def test_capture_replay_bypass_logic():
 
 
 @create_new_process_for_each_test("spawn")
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
+@requires_platform("cuda")
 def test_nested_wrappers():
     """Tests a scenario with a PIECEWISE wrapper inside a FULL one."""
     comp_config = CompilationConfig(

@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 import torch
 
+from tests.utils import requires_platform
 from vllm.platforms import current_platform
 
 
@@ -51,7 +52,7 @@ def run_cuda_test_in_thread(device_input, expected_device_id):
 class TestSetCudaContext:
     """Test suite for the set_cuda_context function."""
 
-    @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA not available")
+    @requires_platform("cuda")
     @pytest.mark.parametrize(
         argnames="device_input,expected_device_id",
         argvalues=[
@@ -70,7 +71,7 @@ class TestSetCudaContext:
             success, message = future.result(timeout=30)
         assert success, message
 
-    @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA not available")
+    @requires_platform("cuda")
     def test_set_cuda_context_invalid_device_type(self):
         """Test error handling for invalid device type."""
         with pytest.raises(ValueError, match="Expected a cuda device"):

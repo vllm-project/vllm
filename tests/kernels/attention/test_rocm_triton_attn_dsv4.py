@@ -1,14 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import pytest
 import torch
 
+from tests.utils import requires_platform
 from vllm.platforms import current_platform
 
-pytestmark = pytest.mark.skipif(
-    not current_platform.is_rocm(), reason="Only used by ROCm"
-)
+pytestmark = requires_platform("rocm")
 
 NOPE_HEAD_DIM = 448
 ROPE_HEAD_DIM = 64

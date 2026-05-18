@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 
+from tests.utils import requires_platform
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode
-from vllm.platforms import current_platform
 
 
 def test_compile():
@@ -16,7 +16,7 @@ def test_compile():
 
 # forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
 @pytest.mark.forked
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
+@requires_platform("cuda")
 def test_qwen2_5_vl_compilation(vllm_runner, monkeypatch):
     """Test that Qwen2.5-VL vision submodules are compiled.
 
@@ -50,7 +50,7 @@ def test_qwen2_5_vl_compilation(vllm_runner, monkeypatch):
 
 # forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
 @pytest.mark.forked
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
+@requires_platform("cuda")
 def test_qwen2_5_vl_no_vit_compilation(vllm_runner, monkeypatch):
     """Test that Qwen2.5-VL vision submodules are not compiled when the
     config is passed off

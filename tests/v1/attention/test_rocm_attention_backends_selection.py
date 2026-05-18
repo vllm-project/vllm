@@ -7,14 +7,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from vllm.platforms import current_platform
+from tests.utils import requires_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import AttentionSelectorConfig
 
 # ROCm-specific attention backend selection tests
-pytestmark = pytest.mark.skipif(
-    not current_platform.is_rocm(), reason="ROCm-specific tests"
-)
+pytestmark = requires_platform("rocm")
 
 
 @pytest.fixture

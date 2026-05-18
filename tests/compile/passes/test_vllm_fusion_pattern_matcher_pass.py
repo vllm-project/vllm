@@ -6,13 +6,13 @@ import torch
 
 import vllm.config
 from tests.compile.backend import TestBackend
+from tests.utils import requires_platform
 from vllm.compilation.passes.vllm_inductor_pass import (
     VllmFusionPatternMatcherPass,
     VllmPatternMatcherPass,
     VllmPatternReplacement,
 )
 from vllm.config import CompilationConfig, CompilationMode, VllmConfig
-from vllm.platforms import current_platform
 
 
 class ReluToAbsPattern(VllmPatternReplacement):
@@ -77,7 +77,7 @@ def vllm_config():
     )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="Requires CUDA")
+@requires_platform("cuda_alike")
 def test_register_tracks_patterns(vllm_config):
     """register() appends each VllmPatternReplacement to _pattern_replacements."""
     with vllm.config.set_current_vllm_config(vllm_config):
@@ -88,7 +88,7 @@ def test_register_tracks_patterns(vllm_config):
     assert len(two._pattern_replacements) == 2
 
 
-@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="Requires CUDA")
+@requires_platform("cuda_alike")
 def test_uuid_stable(vllm_config):
     """Two instances of the same pass class produce identical uuids."""
     with vllm.config.set_current_vllm_config(vllm_config):
@@ -101,7 +101,7 @@ def test_uuid_stable(vllm_config):
     assert p2.uuid() != p3.uuid()
 
 
-@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="Requires CUDA")
+@requires_platform("cuda_alike")
 @pytest.mark.parametrize("N", [1, 2, 4])
 def test_matched_count_and_match_table(vllm_config, N):
     """matched_count and match_table reflect the number of matched patterns."""

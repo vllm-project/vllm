@@ -5,6 +5,7 @@
 import pytest
 import torch
 
+from tests.utils import requires_platform
 from vllm.platforms import current_platform
 from vllm.v1.spec_decode.utils import (
     PADDING_SLOT_ID,
@@ -15,8 +16,7 @@ DEVICE_TYPE = current_platform.device_type
 
 # Skip if no CUDA - Triton kernel requires GPU
 pytest.importorskip("triton")
-if not current_platform.is_cuda_alike() and not current_platform.is_xpu():
-    pytest.skip("CUDA/XPU required for EAGLE kernel tests", allow_module_level=True)
+pytestmark = requires_platform("gpu")
 
 
 def _reference_eagle_step_slot_mapping(

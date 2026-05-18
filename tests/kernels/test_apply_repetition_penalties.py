@@ -4,11 +4,11 @@ import pytest
 import torch
 
 from tests.kernels.utils import opcheck
+from tests.utils import requires_platform
 from vllm._custom_ops import (
     apply_repetition_penalties_cuda,
     apply_repetition_penalties_torch,
 )
-from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
 NUM_SEQS = [1, 2, 3, 4, 8, 13, 17, 32, 37, 256, 1023, 1024, 1025]
@@ -24,9 +24,7 @@ DTYPES = [torch.float32, torch.float16]
 @pytest.mark.parametrize("repetition_penalty", REPETITION_PENALTY_VALUES)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="This test for checking CUDA kernel"
-)
+@requires_platform("cuda")
 @torch.inference_mode()
 def test_apply_repetition_penalties(
     num_seqs: int,
@@ -81,9 +79,7 @@ def test_apply_repetition_penalties(
     )
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="This test for checking CUDA kernel"
-)
+@requires_platform("cuda")
 @torch.inference_mode()
 def test_apply_repetition_penalties_zero_seqs() -> None:
     """

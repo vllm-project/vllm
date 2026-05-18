@@ -22,6 +22,7 @@ from tests.kernels.moe.utils import (
     modular_triton_fused_moe,
 )
 from tests.kernels.utils import opcheck, stack_and_dev, torch_experts, torch_moe
+from tests.utils import requires_platform
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import (
     MoEActivation,
@@ -1267,7 +1268,7 @@ def test_moe_sum(m: int, topk: int, k: int, dtype: torch.dtype):
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("with_bias", [False, True])
 @pytest.mark.parametrize("activation", [MoEActivation.SILU])
-@pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only test")
+@requires_platform("cpu")
 def test_cpu_fused_moe_basic(
     m: int,
     n: int,

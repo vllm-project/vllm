@@ -9,6 +9,7 @@ import pytest
 import torch
 
 import vllm.envs as envs
+from tests.utils import requires_platform
 from vllm.config import (
     CompilationConfig,
     VllmConfig,
@@ -19,13 +20,10 @@ from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
     GroupedTopk,
     fused_grouped_topk,
 )
-from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
-)
+@requires_platform("cuda")
 @pytest.mark.parametrize("n_token", [1, 33, 64])
 @pytest.mark.parametrize("n_hidden", [1024, 2048])
 @pytest.mark.parametrize(

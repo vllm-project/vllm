@@ -6,7 +6,7 @@ import torch
 
 import vllm.envs as envs
 from tests.compile.backend import TestBackend
-from tests.utils import TestFP8Layer, multi_gpu_test
+from tests.utils import TestFP8Layer, multi_gpu_test, requires_platform
 from vllm.compilation.passes.fusion.rms_quant_fusion import RMSNormQuantFusionPass
 from vllm.compilation.passes.fusion.sequence_parallelism import SequenceParallelismPass
 from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
@@ -38,7 +38,7 @@ from vllm.utils.torch_utils import set_random_seed
 
 DEVICE_TYPE = current_platform.device_type
 
-pytestmark = pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test CUDA")
+pytestmark = requires_platform("cuda")
 
 FP8_DTYPE = current_platform.fp8_dtype()
 prompts = [

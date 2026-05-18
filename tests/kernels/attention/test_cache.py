@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from tests.kernels.utils import DEFAULT_OPCHECK_TEST_UTILS, opcheck
+from tests.utils import requires_platform
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.quant_utils import scaled_dequantize
 from vllm.platforms import current_platform
@@ -1062,7 +1063,7 @@ def test_cp_gather_cache_mla(
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.cpu_model
-@pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only")
+@requires_platform("cpu")
 @torch.inference_mode()
 def test_concat_and_cache_mla_cpu(
     kv_lora_rank: int,

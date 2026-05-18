@@ -11,7 +11,7 @@ Run `pytest tests/kernels/quantization/test_rocm_compressed_tensors_w4a16.py`.
 
 import pytest
 
-from vllm.platforms import current_platform
+from tests.utils import requires_platform
 
 
 @pytest.mark.parametrize(
@@ -22,7 +22,7 @@ from vllm.platforms import current_platform
     ],
 )
 @pytest.mark.parametrize("max_tokens", [32])
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="Should only run on ROCm")
+@requires_platform("rocm")
 def test_rocm_compressed_tensors_w4a16_e2e(
     vllm_runner, example_prompts, model_path, max_tokens
 ):

@@ -10,6 +10,7 @@ import importlib
 import pytest
 import torch
 
+from tests.utils import requires_platform
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -55,7 +56,7 @@ def get_8bit_types():
 )
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [10])
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="Should only run on ROCm")
+@requires_platform("rocm")
 def test_rocm_compressed_tensors_w8a8(
     vllm_runner, example_prompts, model_path, max_tokens, num_logprobs
 ):
