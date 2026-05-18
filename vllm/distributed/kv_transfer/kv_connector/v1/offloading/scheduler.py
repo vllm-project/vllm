@@ -710,7 +710,6 @@ class OffloadingConnectorScheduler:
 
                     offloaded_block_idx = start_block_idx + idx
                     gpu_block_idx = offloaded_block_idx * block_size_factor
-                    num_group_blocks += block_size_factor
                     for i in range(block_size_factor):
                         block_id = block_ids[gpu_block_idx + i]
                         if block_id == 0:
@@ -720,6 +719,7 @@ class OffloadingConnectorScheduler:
                         elif start_gpu_block_idx is None:
                             start_gpu_block_idx = gpu_block_idx + i
                         src_block_ids.append(block_id)
+                        num_group_blocks += 1
                         if is_sliding_window:
                             sliding_window_block_ids.append(block_id)
                         else:
