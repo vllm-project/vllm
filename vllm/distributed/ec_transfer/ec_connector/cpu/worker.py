@@ -4,8 +4,7 @@
 
 Thin, stateless across steps: opens the shared mmap region and uses the
 per-step connector metadata (`ECCPUConnectorMetadata`) to decide which
-blocks to copy in each direction. Owns no NIXL state — all RDMA
-coordination lives in the scheduler.
+blocks to copy in each direction.
 """
 
 from typing import TYPE_CHECKING
@@ -15,8 +14,8 @@ import torch
 from vllm.distributed.ec_transfer.ec_connector.cpu.metadata import (
     ECCPUConnectorMetadata,
 )
-from vllm.distributed.ec_transfer.ec_connector.ec_shared_region import (
-    ECSharedRegion,
+from vllm.distributed.ec_transfer.ec_connector.cpu.utils import (
+    setup_ec_region,
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -36,26 +35,19 @@ class ECCPUWorker:
       are visible to the scheduler process's subsequent NIXL reads.
     - Consumer role: copies `mmap[block_indices]` → `encoder_cache[mm_hash]`
       for each entry in `metadata.loads`, ordering against the compute
-      stream via a CUDA event (no CPU-side sync needed).
+      stream via a CUDA event.
     - On `ec_both` nodes both paths run back-to-back in a single step.
     """
 
     def __init__(self, vllm_config: "VllmConfig") -> None:
-        ec_config = vllm_config.ec_transfer_config
-        assert ec_config is not None
+        # Same helper the scheduler uses; both processes converge on the
+        # same mmap file via `instance_id=engine_id`.
+        layout = setup_ec_region(vllm_config)
+        self._region = layout.region
+        self._dtype = layout.dtype
+        self._hidden_dim = layout.hidden_dim
+        self._block_size_bytes = layout.block_size_bytes
 
-        self._dtype = vllm_config.model_config.dtype
-        self._hidden_dim = vllm_config.model_config.get_inputs_embeds_size()
-        element_size = torch.empty(0, dtype=self._dtype).element_size()
-        self._block_size_bytes = self._hidden_dim * element_size
-
-        num_ec_blocks = int(ec_config.get_from_extra_config("num_ec_blocks", 256))
-
-        self._region = ECSharedRegion(
-            instance_id=ec_config.engine_id,
-            num_blocks=num_ec_blocks,
-            block_size_bytes=self._block_size_bytes,
-        )
         # Pin once from TP rank 0 — the mmap is shared across all TP
         # workers in the same process group, and cudaHostRegister must
         # not be called twice on the same address range.
@@ -64,7 +56,7 @@ class ECCPUWorker:
 
         self._cpu_blocks = self._region.blocks
 
-        # Dedicated stream keeps mmap <-> GPU copies off the model's
+        # Dedicated CUDA stream keeps mmap <-> GPU copies off the model's
         # compute stream.
         self._copy_stream: torch.cuda.Stream | None = None
         self._copy_event: torch.cuda.Event | None = None
@@ -158,7 +150,9 @@ class ECCPUWorker:
         torch.cuda.current_stream().wait_event(self._copy_event)
 
     def shutdown(self) -> None:
-        # No NIXL state here; the mmap view is cleaned up by the region
-        # (if we ever hold it long enough to care) or released on process
-        # exit. The scheduler owns the unlink of the shared file.
-        return
+        # cudaHostUnregister must run from the same CUDA context as the
+        # cudaHostRegister in __init__, i.e. this process.
+        try:
+            self._region.cleanup()
+        except Exception:
+            logger.debug("ec: worker region cleanup failed", exc_info=True)

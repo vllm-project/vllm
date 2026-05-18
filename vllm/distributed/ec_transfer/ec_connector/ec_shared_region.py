@@ -51,12 +51,7 @@ class ECSharedRegion:
     while a ZMQ listener thread pins / unpins them around in-flight
     NIXL WRITEs. A single internal `threading.Lock` guards both the
     free pool and the ref counts so that the two state machines stay
-    consistent (mirrors the buffer-pool pattern in DBMSes: a block with
-    a live reference cannot be evicted, and the check-and-evict step
-    is atomic).
-
-    The lifecycle methods (`pin_memory`, `cleanup`) are not concurrent
-    with the hot paths and run without the lock.
+    consistent.
     """
 
     def __init__(
@@ -108,22 +103,19 @@ class ECSharedRegion:
             memoryview(self.mmap_obj), dtype=torch.int8
         )
         # Tracks whether `pin_memory()` succeeded; controls whether
-        # `cleanup()` needs to call cudaHostUnregister. Distinct from
-        # per-block pinning via `pin()` / `unpin()`.
+        # `cleanup()` needs to call cudaHostUnregister.
         self._cuda_host_registered: bool = False
 
         self.blocks: torch.Tensor = self._base.view(num_blocks, block_size_bytes)
 
-        # `_free` is the free pool used as a LIFO stack — most-recently
-        # freed indices are popped first, which keeps blocks warm in
-        # cache. Order within the pool is not load-bearing; eviction
-        # order lives in the scheduler.
+        self._lock = threading.Lock()
+        # `_free` is the free pool used as a LIFO.
+        # eviction order lives in the scheduler.
+        self._free: list[int] = list(range(num_blocks))
         # `_ref_count[idx]` is the number of outstanding references
         # holding the block in place (incremented by `pin`, decremented
         # by `unpin`). Missing keys mean zero. A non-zero ref count
         # blocks `try_free` from reclaiming.
-        self._lock = threading.Lock()
-        self._free: list[int] = list(range(num_blocks))
         self._ref_count: dict[int, int] = {}
 
     @property
@@ -154,10 +146,7 @@ class ECSharedRegion:
 
         Returns True if the blocks were freed, False if any of them
         were pinned (in which case the region is unchanged). This is
-        the primitive the scheduler's LRU eviction loop should use —
-        the check-then-free pattern via a separate "is pinned" query
-        followed by `free` is racy against concurrent pins from the
-        listener thread.
+        the primitive the scheduler's LRU eviction loop should use.
         """
         with self._lock:
             if any(idx in self._ref_count for idx in indices):
@@ -214,9 +203,8 @@ class ECSharedRegion:
         """
         if self._base is None:
             return
-        base_ptr = self._base.data_ptr()
         result = torch.cuda.cudart().cudaHostRegister(
-            base_ptr, self.total_size_bytes, 0
+            self.base_ptr, self.total_size_bytes, 0
         )
         if result.value != 0:
             logger.warning(
@@ -231,8 +219,7 @@ class ECSharedRegion:
     def cleanup(self) -> None:
         """Tear down the region. Lifecycle method; no concurrent access."""
         if self._cuda_host_registered and self._base is not None:
-            base_ptr = self._base.data_ptr()
-            result = torch.cuda.cudart().cudaHostUnregister(base_ptr)
+            result = torch.cuda.cudart().cudaHostUnregister(self.base_ptr)
             if result.value != 0:
                 logger.warning("cudaHostUnregister failed (code=%d)", result)
             self._cuda_host_registered = False

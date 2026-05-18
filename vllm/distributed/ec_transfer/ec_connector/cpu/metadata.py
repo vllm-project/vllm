@@ -14,6 +14,7 @@ Three distinct kinds of payload live here:
 """
 
 import hashlib
+import json
 from dataclasses import dataclass, field
 
 import msgspec
@@ -56,11 +57,7 @@ class XferAck(  # type: ignore[call-arg]
     tag="ack",
     omit_defaults=True,
 ):
-    """Producer → Consumer: xfer for `mm_hash` completed (or failed).
-
-    No xfer_id — the consumer keys on mm_hash. The design assumes a
-    consumer issues at most one in-flight XferReq per mm_hash at a time.
-    """
+    """Producer → Consumer: xfer for `mm_hash` completed (or failed)."""
 
     mm_hash: str
     ok: bool
@@ -71,7 +68,7 @@ class ECCPUConnectorMetadata(ECConnectorMetadata):
     """Per-step scheduler → worker payload for the ECCPUConnector.
 
     Populated by `ECCPUScheduler.build_connector_meta`; consumed by
-    `ECCPUWorker` via the mixin's `bind_connector_metadata` plumbing.
+    `ECCPUWorker` via the mixin's `bind_connector_metadata`.
     """
 
     # Producer role: mm_hashes the scheduler has just allocated CPU
@@ -97,6 +94,13 @@ def compute_ec_compatibility_hash(
     other's bytes — mismatched dtype/hidden_dim silently corrupts the
     encoding. The producer compares the hash it computed locally against
     the one in `XferReq` and NACKs on mismatch.
+
+    Factors are JSON-encoded so a value containing the separator (e.g. a
+    model name with a `|` in it) cannot collide with a different
+    assignment that joins to the same string.
     """
-    factors = "|".join([vllm_version, model, dtype, str(block_size_bytes)])
+    factors = json.dumps(
+        [vllm_version, model, dtype, block_size_bytes],
+        separators=(",", ":"),
+    )
     return hashlib.sha256(factors.encode("utf-8")).hexdigest()
