@@ -153,7 +153,7 @@ class Worker(WorkerBase):
         if self.profiler_config.profiler not in ("torch", "cuda", None):
             raise ValueError(f"Unknown profiler type: {self.profiler_config.profiler}")
 
-        self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
+        self.use_v2_model_runner = vllm_config.use_v2_model_runner
         # pending non-blocking PP send work from the previous iteration
         self._pp_send_work: list[Handle] = []
 
