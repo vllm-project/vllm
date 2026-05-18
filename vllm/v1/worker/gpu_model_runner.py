@@ -1004,7 +1004,7 @@ class GPUModelRunner(
                 copy_funcs=self.model.get_mamba_state_copy_func(),
                 make_buffer=self._make_buffer,
                 device=self.device,
-                with_postprocess=(
+                with_postprocess_align=(
                     self.speculative_config is not None and self.model_config.is_hybrid
                 ),
             )
@@ -1508,7 +1508,7 @@ class GPUModelRunner(
             # update without CPU-GPU sync. The metadata
             # (num_scheduled_tokens, num_draft_tokens, num_computed_tokens) is
             # pre-staged to GPU buffers in _prepare_inputs.
-            mamba_utils.postprocess_mamba_gpu(
+            mamba_utils.postprocess_mamba_align_gpu(
                 bufs=self._get_mamba_bufs(),
                 num_reqs=num_reqs,
                 num_accepted_tokens_gpu=self.num_accepted_tokens.gpu,
@@ -1520,30 +1520,25 @@ class GPUModelRunner(
                 forward_context=self.compilation_config.static_forward_context,
                 mamba_state_copy_funcs=self.model.get_mamba_state_copy_func(),
             )
+
+            assert self.num_accepted_tokens_event is not None
+            self.num_accepted_tokens_event.record()
         else:
-            # Simply copies the accepted token counts to CPU
-            # asynchronously for use in the next iteration's preprocessing.
             self.input_batch.num_accepted_tokens_cpu_tensor[:num_reqs].copy_(
                 self.num_accepted_tokens.gpu[:num_reqs], non_blocking=True
             )
-            # Python postprocess: anchors mamba_state_idx for the
-            # "all" + spec-decode path (#41233). No-op for plain "all".
-            mamba_utils.postprocess_mamba(
+            assert self.num_accepted_tokens_event is not None
+            self.num_accepted_tokens_event.record()
+
+            mamba_utils.postprocess_mamba_all(
                 scheduler_output,
                 self.kv_cache_config,
-                self.cache_config,
                 self.input_batch,
                 self.requests,
                 self.mamba_state_idx,
                 self.num_spec_tokens,
                 num_reqs,
             )
-
-        # In both cases we do a non-blocking copy of results to CPU for next iteration's
-        # preprocess (self.input_batch.num_accepted_tokens_cpu_tensor). So we need to
-        # record the event for proper synchronization.
-        assert self.num_accepted_tokens_event is not None
-        self.num_accepted_tokens_event.record()
 
     def _update_streaming_request(
         self, req_id: str, new_req_data: NewRequestData
@@ -4141,11 +4136,11 @@ class GPUModelRunner(
                 # Stage per-request inputs for the fused postprocess kernel
                 # only when that kernel will actually run. The kernel is
                 # gated on spec-decode + hybrid (see MambaBuffers.create);
-                # without it, ``mamba_bufs.postprocess`` is None and the
-                # staging buffers don't exist.
-                if mamba_bufs.postprocess is not None:
+                # without it, ``mamba_bufs.postprocess_align`` is None and
+                # the staging buffers don't exist.
+                if mamba_bufs.postprocess_align is not None:
                     mamba_utils.stage_postprocess_inputs_to_gpu(
-                        mamba_bufs.postprocess,
+                        mamba_bufs.postprocess_align,
                         scheduler_output,
                         self.input_batch.req_ids,
                         num_reqs,

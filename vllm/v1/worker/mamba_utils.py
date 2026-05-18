@@ -534,12 +534,12 @@ class MambaBuffers:
 
     The two sub-objects have different gates:
     ``preprocess`` is needed whenever ``mamba_cache_mode == "align"``;
-    ``postprocess`` is needed only when align is combined with
+    ``postprocess_align`` is needed only when align is combined with
     speculative decoding on a hybrid model, and is ``None`` otherwise.
     """
 
     preprocess: MambaCopyBuffers
-    postprocess: MambaSpecDecodeGPUContext | None
+    postprocess_align: MambaSpecDecodeGPUContext | None
 
     @classmethod
     def create(
@@ -549,13 +549,13 @@ class MambaBuffers:
         copy_funcs: tuple[MambaStateCopyFunc, ...],
         make_buffer: Callable[..., CpuGpuBuffer],
         device: torch.device,
-        with_postprocess: bool,
+        with_postprocess_align: bool,
     ) -> "MambaBuffers":
         return cls(
             preprocess=MambaCopyBuffers.create(
                 max_num_reqs, kv_cache_config, copy_funcs, make_buffer
             ),
-            postprocess=(
+            postprocess_align=(
                 MambaSpecDecodeGPUContext.create(
                     max_num_reqs=max_num_reqs,
                     kv_cache_config=kv_cache_config,
@@ -563,7 +563,7 @@ class MambaBuffers:
                     device=device,
                     make_buffer=make_buffer,
                 )
-                if with_postprocess
+                if with_postprocess_align
                 else None
             ),
         )
@@ -703,91 +703,34 @@ def preprocess_mamba(
     do_mamba_copy_block(copy_bufs)
 
 
-def postprocess_mamba(
+def postprocess_mamba_all(
     scheduler_output: SchedulerOutput,
     kv_cache_config: KVCacheConfig,
-    cache_config: CacheConfig,
     input_batch: GPUInputBatch,
     requests: dict[str, CachedRequestState],
     mamba_state_idx: dict[str, int],
     num_spec_tokens: int,
     num_reqs: int,
-    *,
-    forward_context: dict[str, Any] | None = None,
-    mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...] | None = None,
-    copy_bufs: MambaCopyBuffers | None = None,
 ):
+    """All-mode postprocess (only meaningful with num_spec_tokens > 0):
+    record per-request the block index of the last token scheduled this
+    step, so the next step can anchor its in-place writes when accepted
+    drafts leave the sequence at a non-block-aligned position.
     """
-    Post-model-execute mamba prefix-caching bookkeeping. Dispatched by
-    cache_config.mamba_cache_mode:
-      - "align": if a block is converted from partial to full this step,
-        copy the running state into the new full block.
-      - "all" + num_spec_tokens > 0: record per-request the block index of
-        the last token scheduled this step, so the next step can anchor
-        its in-place writes when accepted drafts leave the sequence at a
-        non-block-aligned position.
-    """
-    if cache_config.mamba_cache_mode == "align":
-        assert forward_context is not None
-        assert mamba_state_copy_funcs is not None
-        assert copy_bufs is not None
-        num_scheduled_tokens_dict = scheduler_output.num_scheduled_tokens
-        scheduled_spec_decode_tokens_dict = (
-            scheduler_output.scheduled_spec_decode_tokens
-        )
-        num_accepted_tokens_cpu = input_batch.num_accepted_tokens_cpu
-        mamba_group_ids = copy_bufs.mamba_group_ids
-        mamba_spec = copy_bufs.mamba_spec
-        copy_bufs.offset = 0
-        for i, req_id in enumerate(input_batch.req_ids):
-            req_state = requests[req_id]
-            num_computed_tokens = req_state.num_computed_tokens
-            num_draft_tokens = len(scheduled_spec_decode_tokens_dict.get(req_id, []))
-            num_scheduled_tokens = num_scheduled_tokens_dict[req_id]
-            num_accepted_tokens = num_accepted_tokens_cpu[i]
-            num_tokens_running_state = (
-                num_computed_tokens + num_scheduled_tokens - num_draft_tokens
-            )
-            new_num_computed_tokens = num_tokens_running_state + num_accepted_tokens - 1
-            aligned_new_computed_tokens = (
-                new_num_computed_tokens // mamba_spec.block_size * mamba_spec.block_size
-            )
-            # TODO: how to ensure all blocks that cache_blocks called are cached here?
-            if aligned_new_computed_tokens >= num_tokens_running_state:
-                accept_token_bias = (
-                    aligned_new_computed_tokens - num_tokens_running_state
-                )
-                src_block_idx = mamba_state_idx[req_id]
-                dest_block_idx = (
-                    aligned_new_computed_tokens // mamba_spec.block_size - 1
-                )
-                collect_mamba_copy_meta(
-                    copy_bufs,
-                    kv_cache_config,
-                    mamba_state_copy_funcs,
-                    mamba_group_ids,
-                    src_block_idx,
-                    dest_block_idx,
-                    accept_token_bias,
-                    req_state,
-                    forward_context,
-                )
-                if src_block_idx == dest_block_idx:
-                    num_accepted_tokens_cpu[i] = 1
-        do_mamba_copy_block(copy_bufs)
-    elif cache_config.mamba_cache_mode == "all" and num_spec_tokens > 0:
-        _, mamba_spec = get_mamba_groups(kv_cache_config)
-        block_size = mamba_spec.block_size
-        full_decode_len = 1 + num_spec_tokens
-        scheduled = scheduler_output.num_scheduled_tokens
-        for req_id in input_batch.req_ids[:num_reqs]:
-            num_query = scheduled.get(req_id, 0)
-            if num_query == full_decode_len:
-                req = requests[req_id]
-                seq_len = req.num_computed_tokens + num_query
-                mamba_state_idx[req_id] = max(0, (seq_len - 1) // block_size)
-            else:
-                mamba_state_idx.pop(req_id, None)
+    if num_spec_tokens <= 0:
+        return
+    _, mamba_spec = get_mamba_groups(kv_cache_config)
+    block_size = mamba_spec.block_size
+    full_decode_len = 1 + num_spec_tokens
+    scheduled = scheduler_output.num_scheduled_tokens
+    for req_id in input_batch.req_ids[:num_reqs]:
+        num_query = scheduled.get(req_id, 0)
+        if num_query == full_decode_len:
+            req = requests[req_id]
+            seq_len = req.num_computed_tokens + num_query
+            mamba_state_idx[req_id] = max(0, (seq_len - 1) // block_size)
+        else:
+            mamba_state_idx.pop(req_id, None)
 
 
 def preprocess_mamba_all_specdec(
@@ -805,7 +748,7 @@ def preprocess_mamba_all_specdec(
     prev_last_scheduled_idx_buf.copy_to_gpu()
 
 
-def postprocess_mamba_gpu(
+def postprocess_mamba_align_gpu(
     *,
     bufs: "MambaBuffers",
     num_reqs: int,
@@ -823,7 +766,7 @@ def postprocess_mamba_gpu(
     and async-copies the per-request accepted-token counts back to the input
     batch's CPU tensor for the next iteration's preprocess.
     """
-    ctx = bufs.postprocess
+    ctx = bufs.postprocess_align
     # Caller is responsible for gating on spec decode + hybrid; this assert is
     # a tripwire if those gates ever drift apart.
     assert ctx is not None

@@ -41,10 +41,11 @@ def postprocess_mamba(
     mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
     copy_bufs: "MambaCopyBuffers",
 ):
-    """CPU reference implementation for postprocess_mamba.
+    """CPU reference for the align-mode postprocess.
 
-    Moved from vllm.v1.worker.mamba_utils — used only in tests as a golden
-    reference for the GPU fused kernel.
+    Used as a golden against the GPU fused kernel (``postprocess_mamba_align_gpu``).
+    Mirrors what the production code did before the fused kernel replaced it;
+    kept here because production no longer has a CPU implementation.
     """
     assert input_batch.mamba_state_idx_cpu is not None
     num_scheduled_tokens_dict = scheduler_output.num_scheduled_tokens
