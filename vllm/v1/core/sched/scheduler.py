@@ -131,6 +131,8 @@ class Scheduler(SchedulerInterface):
             raise ValueError(
                 f"Unknown scheduling policy: {self.scheduler_config.policy}"
             ) from e
+        # Preemption mode
+        self.preemption_mode = self.scheduler_config.preemption_mode
         # Priority queues for requests.
         self.waiting = create_request_queue(self.policy)
         self.running: list[Request] = []
@@ -185,6 +187,53 @@ class Scheduler(SchedulerInterface):
             dcp_world_size=self.dcp_world_size,
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
+
+    def _preempt_request(
+        self,
+        request: Request,
+        scheduled_timestamp: float,
+    ) -> None:
+        """Handle preemption of a request based on preemption_mode.
+
+        Args:
+            request: The request to preempt.
+            scheduled_timestamp: The timestamp for logging events.
+        """
+        offload_success = False
+
+        if self.preemption_mode == "offload" and self.connector is not None:
+            # Try to offload KV cache to CPU
+            offload_success = self.connector.offload_preempted_request(request)
+
+        if offload_success:
+            # Offload successful: keep num_computed_tokens
+            request.status = RequestStatus.PREEMPTED_OFFLOADED
+            # Free GPU KV cache after offload is initiated
+            self.kv_cache_manager.free(request)
+            self.encoder_cache_manager.free(request)
+            logger.debug(
+                "Request %s preempted with KV cache offloaded to CPU "
+                "(num_computed_tokens=%d)",
+                request.request_id,
+                request.num_computed_tokens,
+            )
+        else:
+            # Offload failed or not enabled: discard KV cache
+            self.kv_cache_manager.free(request)
+            self.encoder_cache_manager.free(request)
+            request.status = RequestStatus.PREEMPTED
+            request.num_computed_tokens = 0
+            if self.preemption_mode == "offload":
+                logger.warning(
+                    "Request %s: offload failed, falling back to discard",
+                    request.request_id,
+                )
+
+        request.num_preemptions += 1
+        if self.log_stats:
+            request.record_event(
+                EngineCoreEventType.PREEMPTED, scheduled_timestamp
+            )
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -318,15 +367,8 @@ class Scheduler(SchedulerInterface):
                     else:
                         preempted_req = self.running.pop()
 
-                    self.kv_cache_manager.free(preempted_req)
-                    self.encoder_cache_manager.free(preempted_req)
-                    preempted_req.status = RequestStatus.PREEMPTED
-                    preempted_req.num_computed_tokens = 0
-                    preempted_req.num_preemptions += 1
-                    if self.log_stats:
-                        preempted_req.record_event(
-                            EngineCoreEventType.PREEMPTED, scheduled_timestamp
-                        )
+                    # Handle preemption based on preemption_mode
+                    self._preempt_request(preempted_req, scheduled_timestamp)
 
                     self.waiting.prepend_request(preempted_req)
                     preempted_reqs.append(preempted_req)

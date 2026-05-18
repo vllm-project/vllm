@@ -127,6 +127,33 @@ class OffloadingConnector(KVConnectorBase_V1):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.take_events()
 
+    def offload_preempted_request(self, request: "Request") -> bool:
+        """Offload KV cache of a preempted request to CPU.
+
+        Args:
+            request: The preempted request.
+
+        Returns:
+            True if offload was successfully initiated, False otherwise.
+        """
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.offload_preempted_request(request)
+
+    def reload_preempted_request(
+        self, request: "Request", block_ids: list[int]
+    ) -> bool:
+        """Reload KV cache of a preempted request from CPU.
+
+        Args:
+            request: The request to reload.
+            block_ids: The GPU block IDs to reload into.
+
+        Returns:
+            True if reload was successfully initiated, False otherwise.
+        """
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.reload_preempted_request(request, block_ids)
+
 
 class OffloadingConnectorScheduler:
     """Implementation of Scheduler side methods"""
@@ -397,6 +424,165 @@ class OffloadingConnectorScheduler:
                     block_size=event.block_size,
                     medium=event.medium,
                 )
+
+    def offload_preempted_request(self, request: Request) -> bool:
+        """Offload KV cache of a preempted request to CPU.
+
+        This method is called when a request is preempted and preemption_mode
+        is set to "offload". It stores the KV cache to CPU memory so that
+        the request can resume from where it was preempted.
+
+        Args:
+            request: The preempted request.
+
+        Returns:
+            True if offload was successfully initiated, False otherwise.
+        """
+        req_id = request.request_id
+
+        # Check if request has any computed tokens to offload
+        if request.num_computed_tokens == 0:
+            return False
+
+        # Check if request is tracked
+        if req_id not in self._requests:
+            logger.warning(
+                "Request %s not found in connector, cannot offload", req_id
+            )
+            return False
+
+        block_ids = self._request_block_ids.get(req_id, [])
+        if not block_ids:
+            logger.warning(
+                "Request %s has no block IDs, cannot offload", req_id
+            )
+            return False
+
+        # Calculate number of full blocks to offload
+        num_blocks = request.num_computed_tokens // self.offloaded_block_size
+        if num_blocks == 0:
+            # Not enough tokens for a full block
+            return False
+
+        # Get block hashes for the blocks to offload
+        block_hashes = list(self._get_block_hashes(request, end_idx=num_blocks))
+        if not block_hashes:
+            return False
+
+        # Prepare store operation
+        store_output = self.manager.prepare_store(iter(block_hashes))
+        if store_output is None:
+            logger.warning(
+                "Request %s: cannot offload, CPU memory full", req_id
+            )
+            return False
+
+        if not store_output.block_hashes_to_store:
+            # All blocks already in CPU cache
+            logger.debug(
+                "Request %s: all blocks already offloaded", req_id
+            )
+            return True
+
+        block_hashes_to_store = set(store_output.block_hashes_to_store)
+
+        # Build source spec (GPU block IDs)
+        src_block_ids: list[int] = []
+        block_hashes_iter = list(self._get_block_hashes(request, end_idx=num_blocks))
+        for idx, blk_hash in enumerate(block_hashes_iter):
+            if blk_hash not in block_hashes_to_store:
+                continue
+            gpu_block_idx = idx * self.block_size_factor
+            for i in range(self.block_size_factor):
+                if gpu_block_idx + i < len(block_ids):
+                    src_block_ids.append(block_ids[gpu_block_idx + i])
+
+        if not src_block_ids:
+            return False
+
+        src_spec = GPULoadStoreSpec(src_block_ids)
+        dst_spec = store_output.store_spec
+
+        # Queue the offload operation
+        self._reqs_to_load[req_id] = (src_spec, dst_spec)
+        self._reqs_being_stored[req_id].update(block_hashes_to_store)
+
+        logger.debug(
+            "Request %s: offloading %d blocks (%d tokens) to CPU",
+            req_id,
+            len(block_hashes_to_store),
+            request.num_computed_tokens,
+        )
+
+        return True
+
+    def reload_preempted_request(
+        self, request: Request, block_ids: list[int]
+    ) -> bool:
+        """Reload KV cache of a preempted request from CPU.
+
+        This method is called when a preempted request (with offloaded KV cache)
+        is being resumed. It loads the KV cache from CPU memory back to GPU.
+
+        Args:
+            request: The request to reload.
+            block_ids: The GPU block IDs to reload into.
+
+        Returns:
+            True if reload was successfully initiated, False otherwise.
+        """
+        req_id = request.request_id
+
+        # Calculate number of blocks to reload
+        num_blocks = request.num_computed_tokens // self.offloaded_block_size
+        if num_blocks == 0:
+            return False
+
+        # Get block hashes
+        block_hashes = list(self._get_block_hashes(request, end_idx=num_blocks))
+        if not block_hashes:
+            return False
+
+        # Check if blocks are available in CPU cache
+        hits = self.manager.lookup(iter(block_hashes))
+        if hits < num_blocks:
+            logger.warning(
+                "Request %s: only %d/%d blocks available in CPU cache",
+                req_id,
+                hits,
+                num_blocks,
+            )
+            return False
+
+        # Prepare load operation
+        src_spec = self.manager.prepare_load(iter(block_hashes))
+        if src_spec is None:
+            logger.warning(
+                "Request %s: failed to prepare load from CPU", req_id
+            )
+            return False
+
+        # Build destination spec (GPU block IDs)
+        dst_block_ids = block_ids[: num_blocks * self.block_size_factor]
+        dst_spec = GPULoadStoreSpec(dst_block_ids)
+
+        # Queue the reload operation
+        self._reqs_to_load[req_id] = (src_spec, dst_spec)
+        self._reqs_being_loaded[req_id].update(block_hashes)
+
+        # Re-register the request
+        self._requests[req_id] = request
+        self._request_block_ids[req_id] = list(block_ids)
+        self._next_stored_block_idx[req_id] = num_blocks
+
+        logger.debug(
+            "Request %s: reloading %d blocks (%d tokens) from CPU",
+            req_id,
+            num_blocks,
+            request.num_computed_tokens,
+        )
+
+        return True
 
 
 class OffloadingConnectorWorker:

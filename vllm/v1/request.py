@@ -211,9 +211,11 @@ class RequestStatus(enum.IntEnum):
     WAITING = enum.auto()
     WAITING_FOR_FSM = enum.auto()
     WAITING_FOR_REMOTE_KVS = enum.auto()
+    WAITING_FOR_RELOAD = enum.auto()  # Waiting for offloaded KV cache to reload
     RUNNING = enum.auto()
     PREEMPTED = enum.auto()
-    # Note: anything after PREEMPTED will be considered
+    PREEMPTED_OFFLOADED = enum.auto()  # Preempted with KV cache offloaded to CPU
+    # Note: anything after PREEMPTED_OFFLOADED will be considered
     # as a finished status.
     FINISHED_STOPPED = enum.auto()
     FINISHED_LENGTH_CAPPED = enum.auto()
@@ -225,7 +227,7 @@ class RequestStatus(enum.IntEnum):
 
     @staticmethod
     def is_finished(status: "RequestStatus") -> bool:
-        return status > RequestStatus.PREEMPTED
+        return status > RequestStatus.PREEMPTED_OFFLOADED
 
     @staticmethod
     def get_finished_reason(status: "RequestStatus") -> FinishReason | None:

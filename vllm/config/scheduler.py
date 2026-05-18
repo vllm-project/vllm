@@ -26,6 +26,7 @@ logger = init_logger(__name__)
 
 RunnerType = Literal["generate", "pooling", "draft"]
 SchedulerPolicy = Literal["fcfs", "priority"]
+PreemptionMode = Literal["discard", "offload"]
 
 
 @config
@@ -141,6 +142,14 @@ class SchedulerConfig:
     Async scheduling is currently not supported with some features such as
     speculative decoding and pipeline parallelism.
     """
+
+    preemption_mode: PreemptionMode = "discard"
+    """The preemption mode to use when a request needs to be preempted:\n
+    - "discard": Discard the KV cache of the preempted request (default).
+      The request will need to recompute from scratch when resumed.\n
+    - "offload": Offload the KV cache to CPU memory. The request can resume
+      from where it was preempted by reloading the KV cache from CPU.
+      This requires additional CPU memory but avoids recomputation."""
 
     def get_scheduler_cls(self) -> type["SchedulerInterface"]:
         if self.scheduler_cls is None:
