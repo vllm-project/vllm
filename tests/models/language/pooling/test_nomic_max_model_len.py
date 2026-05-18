@@ -55,6 +55,20 @@ def test_set_max_model_len_legal(model_info, vllm_runner):
         model_config = vllm_model.llm.llm_engine.model_config
         assert model_config.max_model_len == 256
 
+    # For nomic-embed-text-v2-moe the length is set to 512
+    # by sentence_bert_config.json.
+    if model_info.name == "nomic-ai/nomic-embed-text-v2-moe":
+        with pytest.raises(ValueError):
+            with vllm_runner(
+                model_info.name,
+                revision=model_info.revision,
+                runner="pooling",
+                max_model_len=1024,
+            ):
+                pass
+        return
+
+    # set 512 < max_model_len <= 2048
     with vllm_runner(
         model_info.name,
         revision=model_info.revision,
