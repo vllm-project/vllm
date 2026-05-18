@@ -88,6 +88,38 @@ from .utils import (
 logger = init_logger(__name__)
 
 
+def _build_expert_mapping(
+    model: nn.Module,
+    num_experts: int,
+    num_redundant_experts: int,
+) -> list[tuple[str, str, int, str]]:
+    """Return the expert weight mapping consumed by FusedMoE.load_weights.
+
+    Combines the per-expert mapping (experts.<i>.{gate_proj,up_proj,down_proj})
+    with three aliases for HF's fused-MoE checkpoint layout (transformers
+    >= v5, and any v4 checkpoint re-saved with save_original_format=False):
+    experts.gate_up_proj of shape (E, 2*I, H) and experts.down_proj of
+    shape (E, H, I). For the fused aliases expert_id is repurposed as
+    shard_idx (0=gate, 1=up) by FusedMoE.load_weights' dim()==3 branch.
+    See vllm/model_executor/models/transformers/moe.py for the same
+    pattern.
+    """
+    per_expert_mapping = fused_moe_make_expert_params_mapping(
+        model,
+        ckpt_gate_proj_name="gate_proj",
+        ckpt_down_proj_name="down_proj",
+        ckpt_up_proj_name="up_proj",
+        num_experts=num_experts,
+        num_redundant_experts=num_redundant_experts,
+    )
+    fused_mapping = [
+        ("experts.w13_weight", "experts.gate_up_proj", 0, "w1"),
+        ("experts.w13_weight", "experts.gate_up_proj", 1, "w3"),
+        ("experts.w2_weight", "experts.down_proj", 0, "w2"),
+    ]
+    return per_expert_mapping + fused_mapping
+
+
 class Qwen3MoeMLP(nn.Module):
     def __init__(
         self,
@@ -220,6 +252,9 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
+            expert_mapping=_build_expert_mapping(
+                self, self.n_routed_experts, self.n_redundant_experts
+            ),
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -516,26 +551,10 @@ class Qwen3MoeModel(nn.Module, EagleModelMixin):
         return hidden_states
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        per_expert_mapping = fused_moe_make_expert_params_mapping(
-            self,
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.num_experts,
-            num_redundant_experts=self.num_redundant_experts,
+        return _build_expert_mapping(
+            self, self.config.num_experts, self.num_redundant_experts
         )
-        # HF fused-MoE layout (transformers ≥ v5, and any v4 checkpoint
-        # re-saved with save_original_format=False) packs experts into two
-        # 3-D tensors per layer: experts.gate_up_proj (E, 2*I, H) and
-        # experts.down_proj (E, H, I).
-        fused_mapping = [
-            ("experts.w13_weight", "experts.gate_up_proj", 0, "w1"),
-            ("experts.w13_weight", "experts.gate_up_proj", 1, "w3"),
-            ("experts.w2_weight", "experts.down_proj", 0, "w2"),
-        ]
-        return per_expert_mapping + fused_mapping
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
@@ -560,12 +579,6 @@ class Qwen3MoeModel(nn.Module, EagleModelMixin):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         expert_params_mapping = self.get_expert_mapping()
-        # Plumb the (augmented) mapping into each FusedMoE so its load_weights
-        # can run. The mapping is built lazily at load time because base_layer
-        # detection (for LoRA) needs the fully-constructed model.
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
-            if isinstance(layer.mlp, Qwen3MoeSparseMoeBlock):
-                layer.mlp.experts.expert_mapping = expert_params_mapping
         expert_weight_substrings = {w for _, w, _, _ in expert_params_mapping}
         for name, loaded_weight in weights:
             if self.quant_config is not None and (
