@@ -27,14 +27,8 @@ def prepare_fp8_moe_layer_for_cpu(
     w2: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """VNNI-prepack FP8 MoE weights for CPU kernel."""
-    num_experts = w13.size(0)
-    packed_w13_list = []
-    packed_w2_list = []
-    for i in range(num_experts):
-        packed_w13_list.append(torch.ops._C.convert_weight_packed(w13[i]))
-        packed_w2_list.append(torch.ops._C.convert_weight_packed(w2[i]))
-    packed_w13 = torch.stack(packed_w13_list)
-    packed_w2 = torch.stack(packed_w2_list)
+    packed_w13 = torch.ops._C.convert_weight_packed(w13)
+    packed_w2 = torch.ops._C.convert_weight_packed(w2)
     return packed_w13, packed_w2
 
 
@@ -187,14 +181,8 @@ def prepare_mxfp4_moe_layer_for_cpu(
     w2_scale: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """VNNI-prepack MXFP4 MoE weights and repack scales for CPU AMX kernel."""
-    num_experts = w13.size(0)
-    packed_w13_list = []
-    packed_w2_list = []
-    for i in range(num_experts):
-        packed_w13_list.append(torch.ops._C.convert_weight_packed(w13[i]))
-        packed_w2_list.append(torch.ops._C.convert_weight_packed(w2[i]))
-    packed_w13 = torch.stack(packed_w13_list)
-    packed_w2 = torch.stack(packed_w2_list)
+    packed_w13 = torch.ops._C.convert_weight_packed(w13)
+    packed_w2 = torch.ops._C.convert_weight_packed(w2)
     packed_w13_scale = torch.ops._C.convert_scale_packed(w13_scale)
     packed_w2_scale = torch.ops._C.convert_scale_packed(w2_scale)
     return packed_w13, packed_w2, packed_w13_scale, packed_w2_scale
