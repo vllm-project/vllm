@@ -1024,7 +1024,7 @@ def test_batch_memcpy_cpu_fallback() -> None:
     copy each src into its dst, validating the (src_ptrs, dst_ptrs, sizes)
     argument order against ctypes.memmove(dst, src, size).
     """
-    from vllm.utils.cpu_triton_utils import batch_memcpy_kernel
+    from vllm.utils.cpu_triton_utils import _batch_memcpy_impl as batch_memcpy
 
     # Varied byte sizes, including a non-power-of-two run.
     sizes_bytes = [256, 1024, 17 * 4, 4096]
@@ -1035,7 +1035,7 @@ def test_batch_memcpy_cpu_fallback() -> None:
     dst_ptrs = torch.tensor([d.data_ptr() for d in dsts], dtype=torch.uint64)
     sizes = torch.tensor(sizes_bytes, dtype=torch.int32)
 
-    batch_memcpy_kernel[(len(srcs),)](src_ptrs, dst_ptrs, sizes, BLOCK_SIZE=1024)
+    batch_memcpy(src_ptrs, dst_ptrs, sizes)
 
     for src, dst in zip(srcs, dsts):
         torch.testing.assert_close(dst, src)
