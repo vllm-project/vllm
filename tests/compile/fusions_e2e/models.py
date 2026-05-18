@@ -214,4 +214,9 @@ gpt_oss_20b = ModelFusionInfo(
         sequence_parallel=n_layers * 2 + 1,
         async_tp=n_layers * 2,
     ),
+    model_kwargs=(
+        {"quantization_config": {"moe": {"activation": "mxfp8"}}}
+        if is_blackwell()
+        else {}
+    ),
 )
