@@ -87,11 +87,17 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
             if input_ids[i] == tool_call_token_id:
                 # We're generating a tool call, so reasoning must be ended.
                 return True
-            if input_ids[i] in (new_turn_token_id, tool_response_token_id):
-                # We found a new turn or tool response token so don't consider
-                # reasoning ended yet, since the model starts new reasoning
-                # after these tokens.
+            if input_ids[i] == new_turn_token_id:
+                # A new conversation turn is starting; new reasoning may follow.
                 return False
+            if input_ids[i] == tool_response_token_id:
+                # <|tool_response> is the stop token that terminates a tool call
+                # sequence.  Do NOT return False here — keep searching backward
+                # so we can find the preceding <|tool_call> token and return True.
+                # (In multi-turn scenarios this token appears in the user's prompt
+                # context, never in the model's generated delta, so skipping it is
+                # safe.)
+                continue
             if input_ids[i] == end_token_id:
                 return True
         return False
