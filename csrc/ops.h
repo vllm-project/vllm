@@ -149,6 +149,16 @@ void persistent_masked_m_silu_mul_quant(
     at::Tensor& y_s,           // (E, T, H//group_size) [OUT]
     bool use_ue8m0);
 
+void silu_mul_fp8_quant_tma_ws_persistent(
+    const at::Tensor& input,         // (N, 2*H) FP8 input
+    const at::Tensor& input_scales,  // (N, 2*G) float32 input scales
+    at::Tensor& output,              // (N, H) FP8 output
+    at::Tensor& output_scales,       // (N, G) float32 output scales
+    const at::Tensor& n_tokens,      // int32 number of tokens
+    int64_t n_compute,               // consumer warps per CTA
+    int64_t batch_size,              // tokens per pipeline stage
+    bool use_tanh_silu);             // tanh approximation
+
 void mul_and_silu(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_and_mul(torch::Tensor& out, torch::Tensor& input);

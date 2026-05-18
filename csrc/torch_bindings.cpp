@@ -104,6 +104,20 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("silu_and_mul_per_block_quant", torch::kCUDA,
            &silu_and_mul_per_block_quant);
 
+  // FP8 TMA warp-specialized persistent SiLU+Mul+FP8Quant kernel
+  ops.def(
+      "silu_mul_fp8_quant_tma_ws_persistent("
+      "Tensor input, "
+      "Tensor input_scales, "
+      "Tensor! output, "
+      "Tensor! output_scales, "
+      "Tensor n_tokens, "
+      "int n_compute, "
+      "int batch_size, "
+      "bool use_tanh_silu) -> ()");
+  ops.impl("silu_mul_fp8_quant_tma_ws_persistent", torch::kCUDA,
+           &silu_mul_fp8_quant_tma_ws_persistent);
+
   ops.def("mul_and_silu(Tensor! out, Tensor input) -> ()");
   ops.impl("mul_and_silu", torch::kCUDA, &mul_and_silu);
 

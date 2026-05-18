@@ -1070,7 +1070,10 @@ set(VLLM_MOE_EXT_SRC
   "csrc/moe/torch_bindings.cpp"
   "csrc/moe/moe_align_sum_kernels.cu"
   "csrc/moe/topk_softmax_kernels.cu"
-  "csrc/moe/topk_softplus_sqrt_kernels.cu")
+  "csrc/moe/topk_softplus_sqrt_kernels.cu"
+  "csrc/moe/silu_mul_fp8_quant/silu_mul_fp8_quant_ops.cu"
+  "csrc/moe/silu_mul_fp8_quant/silu_mul_fp8_persistent_launcher.cu"
+  "csrc/moe/silu_mul_fp8_quant/silu_mul_fp8_quant_launcher.cu")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_MOE_EXT_SRC
