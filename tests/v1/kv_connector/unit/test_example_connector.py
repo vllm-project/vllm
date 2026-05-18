@@ -1,15 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from types import SimpleNamespace
 from typing import NamedTuple
 
 import pytest
+import safetensors.torch
+import torch
 from PIL import Image
 
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.config import AttentionConfig, KVTransferConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (
+    ExampleConnector,
+    ExampleConnectorMetadata,
+    ReqMeta,
+)
 from vllm.multimodal.utils import encode_image_url
 from vllm.platforms import current_platform
+from vllm.v1.kv_cache_interface import KVCacheConfig
 
 MODEL_NAME = "RedHatAI/Qwen2.5-VL-3B-Instruct-quantized.w8a8"
 
@@ -36,6 +46,46 @@ def _check_path_len(path):
 def _list_path(path):
     """Return the list of foldername (hashes generated) under the path"""
     return list(path.iterdir())
+
+
+def test_start_load_kv_uses_destination_device(tmp_path):
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=2),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="ExampleConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"shared_storage_path": str(tmp_path)},
+        ),
+    )
+    connector = ExampleConnector(
+        config,
+        KVConnectorRole.WORKER,
+        KVCacheConfig(num_blocks=1, kv_cache_tensors=[], kv_cache_groups=[]),
+    )
+
+    req_meta = ReqMeta(
+        token_ids=torch.tensor([1, 2]),
+        slot_mapping=torch.tensor([0, 1]),
+        is_store=False,
+        mm_hashes=[],
+    )
+    connector.bind_connector_metadata(ExampleConnectorMetadata(requests=[req_meta]))
+
+    filename = connector._generate_filename_debug(
+        "layer", req_meta.token_ids, req_meta.mm_hashes
+    )
+    saved_kv = torch.tensor([[[1.0], [2.0]], [[3.0], [4.0]]])
+    safetensors.torch.save_file({"kv_cache": saved_kv}, filename)
+
+    layer = SimpleNamespace(kv_cache=torch.zeros(2, 1, 2, 1))
+    forward_context = SimpleNamespace(
+        attn_metadata={"layer": object()},
+        no_compile_layers={"layer": layer},
+    )
+
+    connector.start_load_kv(forward_context)
+
+    assert torch.equal(layer.kv_cache[:, 0, :, :], saved_kv)
 
 
 def run_test(
