@@ -370,6 +370,19 @@ class Platform:
             import vllm._moe_C_stable_libtorch  # noqa: F401
 
     @classmethod
+    def register_triton_kernel_overrides(cls) -> None:
+        """Override core Triton kernels with platform implementations.
+
+        Platforms whose Triton kernels need replacement implementations
+        (e.g. CPU fallbacks when the Triton-CPU backend is unavailable)
+        override this method and call
+        :func:`vllm.model_executor.triton_dispatcher.register_kernels`
+        with their overrides. It runs during model runner init, before any
+        kernel launch. The default implementation does nothing.
+        """
+        return
+
+    @classmethod
     def get_attn_backend_cls(
         cls,
         selected_backend: "AttentionBackendEnum",
