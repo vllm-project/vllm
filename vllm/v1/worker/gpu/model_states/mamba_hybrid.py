@@ -110,7 +110,9 @@ class MambaHybridModelState(DefaultModelState):
                     input_batch.num_draft_tokens_per_req > 0
                 ) & ~input_batch.is_prefilling_np
                 num_decode_draft_tokens_np[: input_batch.num_reqs] = np.where(
-                    spec_decode_mask, input_batch.num_draft_tokens_per_req, -1
+                    spec_decode_mask,
+                    input_batch.num_draft_tokens_per_req,
+                    -1,
                 )
             num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
 
@@ -137,8 +139,12 @@ class MambaHybridModelState(DefaultModelState):
         )
 
     def postprocess_state(
-        self, idx_mapping: torch.Tensor, num_sampled: torch.Tensor
+        self,
+        input_batch: InputBatch,
+        num_sampled: torch.Tensor,
     ) -> None:
         # Chunked prefill does not sample a token, so num_sampled can be 0.
         # Mamba treats num_accepted_tokens=1 as the neutral non-spec value.
-        self.num_accepted_tokens_gpu[idx_mapping] = torch.clamp(num_sampled, min=1)
+        self.num_accepted_tokens_gpu[input_batch.idx_mapping] = torch.clamp(
+            num_sampled, min=1
+        )

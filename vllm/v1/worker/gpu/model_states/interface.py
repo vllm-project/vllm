@@ -21,12 +21,16 @@ class ModelSpecificAttnMetadata:
     """Base class for model-specific attention metadata."""
 
     def get_extra_common_attn_kwargs(
-        self, kv_cache_group_id: int, num_reqs: int
+        self,
+        kv_cache_group_id: int,
+        num_reqs: int,
     ) -> dict[str, Any]:
         return {}
 
     def get_extra_attn_kwargs(
-        self, attn_metadata_builder: Any, num_reqs: int
+        self,
+        attn_metadata_builder: Any,
+        num_reqs: int,
     ) -> dict[str, Any]:
         return {}
 
@@ -53,7 +57,9 @@ class ModelState(ABC):
         return None
 
     def postprocess_state(
-        self, idx_mapping: torch.Tensor, num_sampled: torch.Tensor
+        self,
+        input_batch: InputBatch,
+        num_sampled: torch.Tensor,
     ) -> None:
         return None
 
