@@ -390,7 +390,7 @@ def ace_compress(
                 s = max(s, 0.7)
             scored.append((i, s))
 
-    elif query is not None:
+    elif query:
         # Mode 2: BM25 query-relevance
         bm25_scores = _bm25.score_lines(query, lines)
         scored = []
