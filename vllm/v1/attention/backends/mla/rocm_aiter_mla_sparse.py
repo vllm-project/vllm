@@ -375,7 +375,11 @@ class ROCMAiterMLASparseMetadataBuilder(
             (1, 1), dtype=torch.int32, device=self.device
         )
 
-        self.req_id_per_token_buffer = torch.empty(
+        # Allocated zero-filled so the shrink-tail logic in `build()` only has
+        # to re-zero regions it previously wrote. A torch.empty allocation
+        # here would leak garbage into CUDA-graph-captured kernels that read
+        # padded positions beyond the active token range.
+        self.req_id_per_token_buffer = torch.zeros(
             (vllm_config.scheduler_config.max_num_batched_tokens,),
             dtype=torch.int32,
             device=device,
@@ -551,20 +555,25 @@ class ROCMAiterMLASparseMetadataBuilder(
         #    the schedule is fully shape-determined.
         # We fingerprint the inputs CPU-side and skip the kernel when the
         # schedule would be identical to the previous step.
-        seq_lens_cpu = common_attn_metadata.seq_lens_cpu
+        #
+        # `common_attn_metadata.seq_lens_cpu` is a property that lazily
+        # materializes from `self.seq_lens.to("cpu")` and is guaranteed
+        # non-None on access (see CommonAttentionMetadata in
+        # vllm/v1/attention/backend.py). It is therefore safe to index
+        # directly without a None branch -- a None branch would produce a
+        # cache key that ignores actual schedule changes (stale-metadata
+        # correctness bug) and would only be reachable if that property
+        # contract were later broken.
         num_reqs = common_attn_metadata.num_reqs
-        if seq_lens_cpu is not None:
-            clamped_seq_lens = np.minimum(
-                seq_lens_cpu[:num_reqs].numpy(), self.topk_tokens
-            )
-            seq_fingerprint: bytes | None = clamped_seq_lens.tobytes()
-        else:
-            seq_fingerprint = None
+        clamped_seq_lens = np.minimum(
+            common_attn_metadata.seq_lens_cpu[:num_reqs].numpy(),
+            self.topk_tokens,
+        )
         metadata_key = (
             num_tokens,
             int(common_attn_metadata.max_query_len),
             self._num_attention_heads,
-            seq_fingerprint,
+            clamped_seq_lens.tobytes(),
         )
         if metadata_key != self._prev_metadata_key:
             from aiter import get_mla_metadata_v1
