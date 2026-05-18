@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
@@ -10,6 +11,7 @@ import torch.nn as nn
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig, get_current_vllm_config
+import vllm.envs as envs
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -401,6 +403,27 @@ def make_deepseek_v4_expert_params_mapping(
     ]
 
 
+_MEGA_MOE_DG_ENV_APPLIED = False
+
+
+def _apply_mega_moe_dg_env() -> None:
+    """Forward VLLM_DEEPGEMM_MEGA_MOE_* env vars to sgl-deep-gemm internals.
+
+    PoC: upstream DeepGEMM does not yet support FP4 activations
+    (use_fp8_dispatch is accepted but ignored). Uses sgl-deep-gemm
+    for FP4-aware buffer sizing and mega_moe_pre_dispatch.
+    Remove once upstream wires use_fp8_dispatch=False end-to-end.
+    """
+    global _MEGA_MOE_DG_ENV_APPLIED
+    if _MEGA_MOE_DG_ENV_APPLIED:
+        return
+    if envs.VLLM_DEEPGEMM_MEGA_MOE_USE_FP4_ACTS:
+        os.environ.setdefault("DG_USE_FP4_ACTS", "1")
+    if envs.VLLM_DEEPGEMM_MEGA_MOE_USE_MXF4_KIND:
+        os.environ.setdefault("DG_USE_MXF4_KIND", "1")
+    _MEGA_MOE_DG_ENV_APPLIED = True
+
+
 class DeepseekV4MegaMoEExperts(nn.Module):
     _symm_buffer_cache: dict[tuple[int, int, int, int, int, int, int], object] = {}
 
@@ -582,7 +605,13 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         self.w2_weight_scale = None
 
     def get_symm_buffer(self):
-        import vllm.third_party.deep_gemm as deep_gemm
+        _apply_mega_moe_dg_env()
+        # PoC: sgl-deep-gemm for FP4 buffer sizing (upstream ignores
+        # use_fp8_dispatch). Remove branch when upstream supports it.
+        if envs.VLLM_DEEPGEMM_MEGA_MOE_USE_FP4_ACTS:
+            import deep_gemm
+        else:
+            import vllm.third_party.deep_gemm as deep_gemm
 
         group = get_ep_group().device_group
         device = torch.accelerator.current_device_index()
@@ -643,19 +672,41 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         activation_clamp: float | None,
         fast_math: bool,
     ) -> None:
-        import vllm.third_party.deep_gemm as deep_gemm
+        # PoC: sgl-deep-gemm provides mega_moe_pre_dispatch for FP4
+        # packing. Remove branch when upstream supports FP4 acts.
+        if envs.VLLM_DEEPGEMM_MEGA_MOE_USE_FP4_ACTS:
+            import deep_gemm
+        else:
+            import vllm.third_party.deep_gemm as deep_gemm
 
         symm_buffer = self.get_symm_buffer()
         num_tokens = hidden_states.shape[0]
-        _stage_deepseek_v4_mega_moe_inputs(
-            hidden_states,
-            topk_weights,
-            topk_ids,
-            symm_buffer.x[:num_tokens],
-            symm_buffer.x_sf[:num_tokens],
-            symm_buffer.topk_idx[:num_tokens],
-            symm_buffer.topk_weights[:num_tokens],
-        )
+
+        use_fp4_acts = envs.VLLM_DEEPGEMM_MEGA_MOE_USE_FP4_ACTS
+        if use_fp4_acts:
+            topk_ids_i32 = topk_ids.to(torch.int32)
+            deep_gemm.mega_moe_pre_dispatch(
+                hidden_states,
+                topk_ids_i32,
+                topk_weights,
+                symm_buffer.x,
+                symm_buffer.x_sf,
+                symm_buffer.topk_idx,
+                symm_buffer.topk_weights,
+                num_tokens=num_tokens,
+                group_size=32,
+                use_fp4_acts=True,
+            )
+        else:
+            _stage_deepseek_v4_mega_moe_inputs(
+                hidden_states,
+                topk_weights,
+                topk_ids,
+                symm_buffer.x[:num_tokens],
+                symm_buffer.x_sf[:num_tokens],
+                symm_buffer.topk_idx[:num_tokens],
+                symm_buffer.topk_weights[:num_tokens],
+            )
 
         # This method must have been already called during the weight loading phase.
         # We call it again here to cover the dummy weight loading case.
