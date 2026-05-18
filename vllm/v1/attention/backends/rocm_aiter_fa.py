@@ -358,11 +358,8 @@ def create_shuffle_view_k(cache_tensor: torch.Tensor, dtype: torch.dtype) -> tor
     num_blocks, block_size, num_kv_heads, head_size = cache_tensor.shape
 
     # Determine X-packing factor based on dtype
-    if dtype in [torch.float8_e4m3fn, torch.float8_e5m2]:
-        X = 16
-    elif dtype == torch.float16:
-        X = 8
-    else:
+    X = 16 // cache_tensor.element_size()
+    if X not in [8, 16]:
         raise ValueError(f"Unsupported dtype for SHUFFLE: {dtype}")
 
     assert head_size % X == 0, f"head_size {head_size} not divisible by X={X}"
@@ -380,20 +377,11 @@ def create_shuffle_view_k(cache_tensor: torch.Tensor, dtype: torch.dtype) -> tor
     stride_0 = num_kv_heads * stride_1     # num_blocks (outermost)
 
     # Create tensor with correct shape and strides
-    result = torch.as_strided(
+    return torch.as_strided(
         cache_tensor,
         size=(num_blocks, num_kv_heads, dim_groups, block_size, X),
         stride=(stride_0, stride_1, stride_2, stride_3, stride_4),
     )
-
-    # Debug logging (CUDA-graph safe - no tensor value access!)
-    import os
-    if os.environ.get("VLLM_DEBUG_SHUFFLE") == "1":
-        print(f"[DEBUG SHUFFLE K] Input: shape={cache_tensor.shape}, dtype={dtype}")
-        print(f"[DEBUG SHUFFLE K] Output: shape={result.shape}, strides={result.stride()}")
-        print(f"[DEBUG SHUFFLE K] X={X}, dim_groups={dim_groups}")
-
-    return result
 
 
 def create_shuffle_view_v(cache_tensor: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
@@ -418,11 +406,8 @@ def create_shuffle_view_v(cache_tensor: torch.Tensor, dtype: torch.dtype) -> tor
     num_blocks, block_size, num_kv_heads, head_size = cache_tensor.shape
 
     # Determine X-packing factor based on dtype
-    if dtype in [torch.float8_e4m3fn, torch.float8_e5m2]:
-        X = 16
-    elif dtype == torch.float16:
-        X = 8
-    else:
+    X = 16 // cache_tensor.element_size()
+    if X not in [8, 16]:
         raise ValueError(f"Unsupported dtype for SHUFFLE: {dtype}")
 
     assert block_size % X == 0, f"block_size {block_size} not divisible by X={X}"
@@ -440,20 +425,11 @@ def create_shuffle_view_v(cache_tensor: torch.Tensor, dtype: torch.dtype) -> tor
     stride_0 = num_kv_heads * stride_1      # num_blocks (outermost)
 
     # Create tensor with correct shape and strides
-    result = torch.as_strided(
+    return torch.as_strided(
         cache_tensor,
         size=(num_blocks, num_kv_heads, block_tokens, head_size, X),
         stride=(stride_0, stride_1, stride_2, stride_3, stride_4),
     )
-
-    # Debug logging (CUDA-graph safe - no tensor value access!)
-    import os
-    if os.environ.get("VLLM_DEBUG_SHUFFLE") == "1":
-        print(f"[DEBUG SHUFFLE V] Input: shape={cache_tensor.shape}, dtype={dtype}")
-        print(f"[DEBUG SHUFFLE V] Output: shape={result.shape}, strides={result.stride()}")
-        print(f"[DEBUG SHUFFLE V] X={X}, block_tokens={block_tokens}")
-
-    return result
 
 
 @dataclass
@@ -1327,28 +1303,12 @@ class AiterFlashAttentionImpl(AttentionImpl):
                         )
 
                         # Create SHUFFLE views if enabled
-                        import os
                         if rocm_aiter_ops.is_shuffle_kv_cache_enabled():
-                            if os.environ.get("VLLM_DEBUG_SHUFFLE") == "1":
-                                print(f"\n[DEBUG MTP DECODE] SHUFFLE enabled, creating 5D views")
-                                print(f"  decode_max_query_len={decode_max_query_len}")
-                                print(f"  num_decode_tokens={num_decode_tokens}")
-                                print(f"  num_decodes={num_decodes}")
-                                print(f"  query shape: {query[:num_decode_tokens].shape}")
-                                print(f"  key_cache input shape: {key_cache.shape}")
-                                print(f"  value_cache input shape: {value_cache.shape}")
-
                             k_cache = create_shuffle_view_k(key_cache, key_cache.dtype)
                             v_cache = create_shuffle_view_v(value_cache, value_cache.dtype)
-
-                            if os.environ.get("VLLM_DEBUG_SHUFFLE") == "1":
-                                print(f"  k_cache output shape: {k_cache.shape}")
-                                print(f"  v_cache output shape: {v_cache.shape}")
                         else:
                             k_cache = key_cache
                             v_cache = value_cache
-                            if os.environ.get("VLLM_DEBUG_SHUFFLE") == "1":
-                                print(f"\n[DEBUG MTP DECODE] SHUFFLE disabled, using NHD")
 
                         unified_attention(
                             q=query[:num_decode_tokens],
@@ -1566,15 +1526,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 "k_scale and v_scale are required for shuffled update"
             )
 
-            # Debug logging (CUDA-graph safe - no tensor value access!)
-            import os
-            if os.environ.get("VLLM_DEBUG_SHUFFLE") == "1":
-                print(f"\n[DEBUG PREFILL] Writing to SHUFFLE KV cache")
-                print(f"  key shape: {key.shape}, value shape: {value.shape}")
-                print(f"  key_cache shape: {key_cache.shape}, value_cache shape: {value_cache.shape}")
-                print(f"  slot_mapping shape: {slot_mapping.shape}")
-                print(f"  kv_cache_dtype: {self.kv_cache_dtype}")
-
             # TODO: Add correct KV cache handling for hybrid model. KV cache
             # may not be contiguous if mamba state exists.
             reshape_and_cache_shuffle_triton(
@@ -1587,9 +1538,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 k_scale,
                 v_scale,
             )
-
-            if os.environ.get("VLLM_DEBUG_SHUFFLE") == "1":
-                print(f"  ✓ SHUFFLE cache write completed")
         else:
             torch.ops._C_cache_ops.reshape_and_cache_flash(
                 key,
