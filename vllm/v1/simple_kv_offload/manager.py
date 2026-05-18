@@ -131,15 +131,8 @@ class SimpleCPUOffloadScheduler:
         # the worker reports completions by event index, not request id.
         self._load_event_to_reqs: dict[int, list[str]] = {}
 
-        # Pending CPU hits keyed by request_id, awaiting consumption in
-        # update_state_after_alloc(). Found blocks are temporarily pinned
-        # via touch() to survive LRU eviction in the window between the two
-        # scheduler phases. Value layout:
-        #   (cpu_hit_blocks, hit_length_tokens)
-        # where cpu_hit_blocks is the per-group structure returned by
-        # find_longest_cache_hit (outer tuple = kv cache groups, inner list =
-        # consecutive blocks per group, possibly with null_block sentinels);
-        # hit_length_tokens is the block-aligned token count of the match.
+        # Pending (cpu_hit_blocks, hit_length) tuples from find_longest_cache_hit,
+        # kept pinned via touch() while awaiting update_state_after_alloc().
         self._pending_cpu_hits: dict[
             str, tuple[tuple[list[KVCacheBlock], ...], int]
         ] = {}
@@ -226,14 +219,10 @@ class SimpleCPUOffloadScheduler:
     ) -> tuple[int | None, bool]:
         """Return (num_new_tokens, is_async) from consecutive CPU cache hits.
 
-        Pins found CPU blocks via touch() so they survive LRU eviction in the
-        window between this call and the matching update_state_after_alloc().
-        The temporary pin is released in update_state_after_alloc() once the
-        persistent load pin takes over, or in request_finished() if the request
-        never reaches update_state_after_alloc().
-
-        Defensively drops any pin recorded by an earlier call on the same
-        request (e.g., retry after allocate_slots failure).
+        Pins found CPU blocks via touch() so they survive LRU eviction until
+        update_state_after_alloc() consumes them. Any pin from an earlier
+        call on the same request (e.g. retry after a failed allocate_slots)
+        is dropped first.
         """
         stale = self._pending_cpu_hits.pop(request.request_id, None)
         if stale is not None:
@@ -293,9 +282,14 @@ class SimpleCPUOffloadScheduler:
         pending = self._pending_cpu_hits.pop(req_id, None)
 
         if num_external_tokens == 0:
-            # get_num_new_matched_tokens() reported no external hit.
-            # Release any unexpected pending pin.
             if pending is not None:
+                logger.warning(
+                    "SimpleCPUOffloadScheduler: update_state_after_alloc "
+                    "called for req_id=%s with no external tokens but "
+                    "get_num_new_matched_tokens() unexpectedly recorded "
+                    "a pending CPU hit; releasing the stale pin.",
+                    req_id,
+                )
                 self._free_pending_cpu_hit(pending)
             return
 
