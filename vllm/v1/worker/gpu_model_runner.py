@@ -4911,7 +4911,7 @@ class GPUModelRunner(
                         )
                         eplb_models += 1
 
-                self._setup_aux_hidden_state_outputs()
+                self._setup_eagle3_aux_hidden_state_outputs()
 
                 if (
                     is_mixture_of_experts(self.model)
@@ -5008,7 +5008,7 @@ class GPUModelRunner(
 
         get_offloader().post_init()
 
-    def _setup_aux_hidden_state_outputs(self) -> None:
+    def _setup_eagle3_aux_hidden_state_outputs(self) -> None:
         if not self.use_aux_hidden_state_outputs:
             return
 
