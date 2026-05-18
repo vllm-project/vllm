@@ -12,7 +12,6 @@ from vllm._custom_ops import (
     cpu_attn_get_scheduler_metadata,
     cpu_attn_reshape_and_cache,
 )
-from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, set_random_seed
 from vllm.v1.attention.backends.cpu_attn import CPUAttentionBackend, _get_attn_isa
@@ -22,15 +21,14 @@ def get_attn_isa(
     block_size: int | None = None,
     dtype: torch.dtype | None = None,
 ):
-    if block_size and dtype:
-        return _get_attn_isa(dtype, block_size)
-    else:
-        if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
-            return "neon"
-        elif torch.cpu._is_amx_tile_supported():
-            return "amx"
-        else:
-            return "vec"
+    # Delegate to _get_attn_isa so the fallback path applies the same arch
+    # gating (e.g. RISC-V RVV is only chosen when the build's hardcoded
+    # VLEN=128 kernel is actually present; on VLEN=256 / scalar hosts it
+    # correctly falls through to vec/vec16).
+    return _get_attn_isa(
+        dtype if dtype is not None else torch.bfloat16,
+        block_size if block_size else 32,
+    )
 
 
 # rand number generation takes too much time, cache rand tensors
@@ -235,7 +233,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--use-sink", action="store_true")
     parser.add_argument(
-        "--isa", type=str, choices=["vec", "neon", "amx", "vec16"], default=None
+        "--isa", type=str, choices=["vec", "neon", "amx", "vec16", "rvv"], default=None
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--iters", type=int, default=20)

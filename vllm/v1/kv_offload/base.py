@@ -4,8 +4,6 @@
 Core abstractions for KV cache offloading in vLLM v1.
 """
 
-from __future__ import annotations
-
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable, Iterator, Sequence
 from dataclasses import dataclass
@@ -46,6 +44,7 @@ def get_offload_group_idx(key: OffloadKey) -> int:
 
 @dataclass
 class ReqContext:
+    req_id: str
     kv_transfer_params: dict[str, Any] | None = None
 
 
@@ -200,7 +199,7 @@ class OffloadingManager(ABC):
         """
         Marks blocks which were previously prepared to be stored, as stored.
         Following this call, the blocks become loadable.
-        If if_success is False, blocks that were not marked as stored will be
+        If success is False, blocks that were not marked as stored will be
         removed.
 
         Args:
@@ -218,6 +217,10 @@ class OffloadingManager(ABC):
             New OffloadingEvents collected since the last call.
         """
         return ()
+
+    def reset_cache(self) -> None:
+        """Evict all tracked blocks and reset internal state."""
+        return
 
     def shutdown(self) -> None:
         """Shutdown the manager and release any resources."""
@@ -327,7 +330,7 @@ class CanonicalKVCaches:
 class OffloadingSpec(ABC):
     """Spec for an offloading connector"""
 
-    def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig):
+    def __init__(self, vllm_config: "VllmConfig", kv_cache_config: "KVCacheConfig"):
         logger.warning(
             "Initializing OffloadingSpec. This API is experimental and "
             "subject to change in the future as we iterate the design."
@@ -393,7 +396,7 @@ class OffloadingSpec(ABC):
     @abstractmethod
     def get_handlers(
         self, kv_caches: CanonicalKVCaches
-    ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
+    ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], "OffloadingHandler"]]:
         """
         Get offloading handlers along with their respective src and dst types.
 
