@@ -150,12 +150,11 @@ def generate_header_file() -> str:
   #include "cpu_attn_vxe.hpp"
 #endif
 
-// cpu_attn_rvv.hpp is hardcoded to VLEN==128 (m1/m2 intrinsics, vl=8) and
-// itself includes <riscv_vector.h>, which is unavailable on scalar
-// (-march=rv64gc) builds. Gate the include the same way as the dispatch
-// macro below, so non-128 / scalar RISC-V builds skip it entirely.
-#if defined(__riscv) && defined(__riscv_v_min_vlen) && \
-    __riscv_v_min_vlen == 128
+// cpu_attn_rvv.hpp uses VLEN-agnostic RVVI() macros and supports any
+// VLEN (128, 256, ...).  It requires <riscv_vector.h>, which is only
+// available when __riscv_v_min_vlen is defined (i.e. RVV is enabled).
+// Scalar RISC-V builds (-march=rv64gc) skip it entirely.
+#if defined(__riscv) && defined(__riscv_v_min_vlen)
   #include "cpu_attn_rvv.hpp"
 #endif
 
@@ -222,15 +221,12 @@ def generate_header_file() -> str:
         ["VXE", "VEC", "VEC16"],
         fp8=False,
     )
-    # RISC-V with RVV.  cpu_attn_rvv.hpp is hardcoded to VLEN==128
-    # (riscv_rvv_vector_bits(128) typedefs + vl=8 m1/m2 intrinsics), so
-    # we split the dispatch into two top-level branches: VLEN==128 builds
-    # get the full RVV+VEC+VEC16 case set, other VLEN builds get a
-    # VEC/VEC16-only fallback.  Preprocessor directives cannot appear
-    # inside a #define body, so this duplication is necessary.
+    # RISC-V with RVV.  cpu_attn_rvv.hpp uses VLEN-agnostic RVVI()
+    # macros, so the RVV path works for any VLEN (128, 256, ...).
+    # Builds with __riscv_v_min_vlen get RVV+VEC+VEC16; scalar RISC-V
+    # builds (no __riscv_v_min_vlen) fall back to VEC/VEC16 only.
     header += _macro_block(
-        "#elif defined(__riscv) && defined(__riscv_v_min_vlen) "
-        "&& __riscv_v_min_vlen == 128",
+        "#elif defined(__riscv) && defined(__riscv_v_min_vlen)",
         ["RVV", "VEC", "VEC16"],
         fp8=False,
     )
