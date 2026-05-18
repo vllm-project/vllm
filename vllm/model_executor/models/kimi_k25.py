@@ -53,6 +53,10 @@ from vllm.multimodal.processing import (
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.model_executor.models.preprocessing.kimi_k25_preprocessing import (
+    KimiK25PreprocessConfig,
+    KimiK25Preprocessor,
+)
 from vllm.transformers_utils.configs.kimi_k25 import KimiK25Config
 from vllm.transformers_utils.processor import cached_get_image_processor
 from vllm.transformers_utils.processors.kimi_k25 import KimiK25Processor
@@ -140,12 +144,20 @@ class KimiK25ProcessingInfo(BaseProcessingInfo):
         self.media_token = tokenizer.decode(media_token_id)
 
         self.image_processor = image_processor
-        self.hf_processor = KimiK25Processor(
+        self.preprocessor = KimiK25Preprocessor(
             tokenizer=tokenizer,
             image_processor=image_processor,
-            media_token_id=media_token_id,
+            config=KimiK25PreprocessConfig(
+                media_token_id=media_token_id,
+                video_placeholder=getattr(
+                    hf_config,
+                    "video_placeholder",
+                    "<|kimi_k25_video_placeholder|>",
+                ),
+            ),
         )
-        self.media_tokens_calculator = image_processor.media_tokens_calculator
+        self.hf_processor = KimiK25Processor(self.preprocessor)
+        self.media_tokens_calculator = self.preprocessor.media_tokens_calculator
 
     def get_hf_processor(self):
         return self.hf_processor
@@ -245,9 +257,20 @@ class KimiK25MultiModalProcessor(BaseMultiModalProcessor[KimiK25ProcessingInfo])
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        # Override to use the text path instead of token path because vision chunk
-        # is not considered
-        return super()._call_hf_processor(prompt, mm_data, mm_kwargs, tok_kwargs)
+        merged_kwargs = self.info.ctx.get_merged_mm_kwargs(
+            {**mm_kwargs, **tok_kwargs}
+        )
+        return_tensors = merged_kwargs.get("return_tensors", "pt")
+        vision_chunks = mm_data.get("vision_chunks")
+        result = self.info.preprocessor.preprocess(
+            prompt,
+            vision_chunks=vision_chunks,  # type: ignore[arg-type]
+            return_tensors=return_tensors,
+        )
+        return self.info.preprocessor.to_batch_feature(
+            result,
+            return_tensors=return_tensors,
+        )
 
     def _get_prompt_updates(
         self,
