@@ -71,7 +71,7 @@ from vllm.config.cache import (
     PrefixCachingHashAlgo,
 )
 from vllm.config.device import Device
-from vllm.config.kernel import IrOpPriorityConfig, MoEBackend
+from vllm.config.kernel import IrOpPriorityConfig, LinearBackend, MoEBackend
 from vllm.config.lora import MaxLoRARanks
 from vllm.config.mamba import MambaBackendEnum
 from vllm.config.model import (
@@ -477,6 +477,7 @@ class EngineArgs:
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     enable_ep_weight_filter: bool = ParallelConfig.enable_ep_weight_filter
     moe_backend: MoEBackend = KernelConfig.moe_backend
+    linear_backend: LinearBackend = KernelConfig.linear_backend
     all2all_backend: All2AllBackend = ParallelConfig.all2all_backend
     enable_elastic_ep: bool = ParallelConfig.enable_elastic_ep
     enable_dbo: bool = ParallelConfig.enable_dbo
@@ -583,6 +584,7 @@ class EngineArgs:
     lora_target_modules: list[str] | None = LoRAConfig.target_modules
     enable_tower_connector_lora: bool = LoRAConfig.enable_tower_connector_lora
     specialize_active_lora: bool = LoRAConfig.specialize_active_lora
+    enable_mixed_moe_lora_format: bool = LoRAConfig.enable_mixed_moe_lora_format
 
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
     num_gpu_blocks_override: int | None = CacheConfig.num_gpu_blocks_override
@@ -1271,6 +1273,10 @@ class EngineArgs:
         lora_group.add_argument(
             "--specialize-active-lora", **lora_kwargs["specialize_active_lora"]
         )
+        lora_group.add_argument(
+            "--enable-mixed-moe-lora-format",
+            **lora_kwargs["enable_mixed_moe_lora_format"],
+        )
 
         # Observability arguments
         observability_kwargs = get_kwargs(ObservabilityConfig)
@@ -1412,6 +1418,9 @@ class EngineArgs:
         moe_backend_kwargs = kernel_kwargs["moe_backend"]
         moe_backend_kwargs["type"] = lambda s: s.lower().replace("-", "_")
         kernel_group.add_argument("--moe-backend", **moe_backend_kwargs)
+        linear_backend_kwargs = kernel_kwargs["linear_backend"]
+        linear_backend_kwargs["type"] = lambda s: s.lower().replace("-", "_")
+        kernel_group.add_argument("--linear-backend", **linear_backend_kwargs)
 
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)
@@ -2005,6 +2014,7 @@ class EngineArgs:
                 target_modules=self.lora_target_modules,
                 enable_tower_connector_lora=self.enable_tower_connector_lora,
                 specialize_active_lora=self.specialize_active_lora,
+                enable_mixed_moe_lora_format=self.enable_mixed_moe_lora_format,
                 max_cpu_loras=self.max_cpu_loras
                 if self.max_cpu_loras and self.max_cpu_loras > 0
                 else None,
@@ -2085,6 +2095,8 @@ class EngineArgs:
             kernel_config.enable_flashinfer_autotune = self.enable_flashinfer_autotune
         if self.moe_backend != "auto":
             kernel_config.moe_backend = self.moe_backend
+        if self.linear_backend != "auto":
+            kernel_config.linear_backend = self.linear_backend
 
         # Transfer top-level ir_op_priority into KernelConfig.ir_op_priority
         for op_name, op_priority in asdict(self.ir_op_priority).items():
