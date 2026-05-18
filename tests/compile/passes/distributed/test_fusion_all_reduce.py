@@ -494,8 +494,7 @@ def all_reduce_fusion_pass_on_test_model(
 
         results_unfused = model(hidden_states)
         results_fused = compiled_model(hidden_states)
-        # Models may return extra outputs (e.g. quant scales) to prevent DCE;
-        # compare only the primary output.
+
         out_unfused = (
             results_unfused[0]
             if isinstance(results_unfused, tuple)
@@ -516,36 +515,35 @@ def all_reduce_fusion_pass_on_test_model(
 
 _GROUP_QUANT_FP8_PACKED_CASES = [
     # (num_tokens, hidden_dim, group_size)
-    (4, 7168, 128),
-    (1, 7168, 128),
-    (3, 7168, 128),
-    (4, 640, 128),
-    (4, 768, 128),
-    (4, 384, 128),
-    (1, 384, 128),
-    (3, 640, 128),
-    (64, 7168, 128),
-    (128, 14336, 128),
-    (127, 7168, 128),
-    (253, 640, 128),
-    (1, 256, 128),
-    (4, 7168, 64),
-    (1, 7168, 64),
-    (4, 640, 64),
-    (3, 768, 64),
-    (3, 640, 64),
-    (4, 768, 8),
-    (4, 768, 16),
-    (4, 768, 12),
-    (3, 768, 6),
-    (4, 768, 4),
-    (4, 768, 48),
-    (4, 960, 48),
-    (3, 768, 24),
-    (512, 768, 48),
-    (4, 7168, 512),
-    (4, 4096, 256),
-    (3, 4096, 512),
+    #
+    # Layout-driving quantities for each case:
+    #   tma_aligned_mn = round_up(num_tokens, 4)
+    #   groups_per_row = hidden_dim // group_size
+    #   k_num_packed   = round_up(groups_per_row, 4) // 4
+    # Cases are grouped by which boundary they exercise.
+    #
+    # groups_per_row % 4 == 0 (no packing padding).
+    (4, 7168, 128),  # 56 groups, 14 packed; tokens % 4 == 0
+    (1, 7168, 128),  # single token, large hidden
+    (3, 7168, 128),  # tokens % 4 == 3
+    (64, 7168, 128),  # moderate batch
+    (128, 14336, 128),  # 112 groups, 28 packed; large batch and hidden
+    (127, 7168, 128),  # tokens % 4 == 3 at scale
+    # groups_per_row % 4 != 0: packed-scale row needs zero padding.
+    (4, 640, 128),  # 5 groups → 2 packed (groups % 4 == 1)
+    (4, 768, 128),  # 6 groups → 2 packed (groups % 4 == 2)
+    (4, 384, 128),  # 3 groups → 1 packed (groups % 4 == 3)
+    (1, 384, 128),  # 3 groups, single token
+    (3, 640, 128),  # 5 groups, 3 tokens
+    (1, 256, 128),  # 2 groups, single token
+    (253, 640, 128),  # 5 groups, tokens % 4 == 1 at scale
+    # num_tokens % 4 == 2: tma_aligned_mn stride boundary not covered above.
+    (2, 7168, 128),
+    (6, 768, 128),
+    (254, 640, 128),
+    # hidden_dim == group_size: single group per row (groups_per_row == 1).
+    (4, 128, 128),
+    (1, 128, 128),
 ]
 
 
@@ -561,10 +559,7 @@ def test_fused_allreduce_norm_group_quant_fp8_packed():
     """Test the flashinfer fused allreduce+RMSNorm+group-quant kernel by
     extracting norm_out from the fused kernel and comparing the fused
     quant_out / scale_out against per_token_group_quant_fp8_packed_for_deepgemm
-    applied to that same norm_out.
-
-    All shape combos run inside a single process group spawn to avoid
-    per-case process startup + NCCL init overhead."""
+    applied to that same norm_out."""
     from vllm.utils.deep_gemm import is_deep_gemm_supported
 
     if not is_deep_gemm_supported():

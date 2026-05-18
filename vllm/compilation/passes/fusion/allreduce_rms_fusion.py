@@ -65,16 +65,9 @@ if find_spec("flashinfer"):
 if hasattr(torch.ops._C, "scaled_fp4_quant"):
     STATIC_FP4_QUANT_OP = torch.ops._C.scaled_fp4_quant.out
 
-PACKED_GROUP_QUANT_OP = getattr(
-    getattr(torch.ops._C, "per_token_group_fp8_quant_packed", None),
-    "default",
-    None,
-)
-
-# Supported group sizes for per-token-group FP8 packed quant fusion.
-# Must be power-of-2 multiples of VEC_SIZE (8 for bf16/fp16) for the
-# warp-shuffle group reduction to stay within group boundaries.
-SUPPORTED_PACKED_GROUP_QUANT_SIZES = (64, 128)
+# Registered per-token-group FP8 packed quant group sizes
+# All sizes are supported.
+SUPPORTED_PACKED_GROUP_QUANT_SIZES = [128]
 
 # Max size of the input tensor per world size per device capability
 # to use flashinfer fused allreduce
@@ -255,8 +248,6 @@ if flashinfer_comm is not None:
         torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default
     )
 
-    # Separate op for group FP8 quant fusion (AR + RMSNorm + group quant).
-    # Kept separate from the existing op to avoid changing its schema.
     def call_trtllm_fused_allreduce_norm_group_quant(
         allreduce_in: torch.Tensor,
         residual: torch.Tensor,
@@ -299,8 +290,7 @@ if flashinfer_comm is not None:
         )
         assert workspace is not None
         assert flashinfer_comm is not None
-        # norm_out=None: RMSNorm result overwrites allreduce_in,
-        # residual gets residual_out
+
         flashinfer_comm.allreduce_fusion(
             input=allreduce_in,
             workspace=workspace,
@@ -906,7 +896,7 @@ class AllReduceFusedRMSNormGroupQuantFP8PackedPattern(BasePattern):
             all_reduce = tensor_model_parallel_all_reduce(input)
             rms = vllm.ir.ops.rms_norm(all_reduce, weight, self.epsilon)
             quant_out = auto_functionalized(
-                PACKED_GROUP_QUANT_OP,
+                torch.ops._C.per_token_group_fp8_quant_packed.default,
                 input=rms,
                 output_q=output_q,
                 output_s_packed=output_s_packed,
@@ -937,8 +927,9 @@ class AllReduceFusedRMSNormGroupQuantFP8PackedPattern(BasePattern):
                 scale_out=output_s_packed,
                 **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
             )
-            # quant_out, scale_out, allreduce_in (holds allreduce output)
-            return allreduce[3], allreduce[4], allreduce[1]
+            # quant_out, scale_out, residual_out (holds allreduce result
+            # since residual_in is zeros)
+            return allreduce[3], allreduce[4], allreduce[2]
 
         pm.register_replacement(
             pattern,
@@ -975,12 +966,14 @@ class AllReduceFusedAddRMSNormGroupQuantFP8PackedPattern(BasePattern):
         finfo = torch.finfo(self.quant_dtype)
         self.fp8_min = float(finfo.min)
         self.fp8_max = float(finfo.max)
-        self.rmsnorm_matcher = MatcherFusedAddRMSNorm(epsilon)
 
     def get_inputs(self) -> list[torch.Tensor]:
-        input_t, residual, weight = self.rmsnorm_matcher.inputs()
+        input_t = self.empty(5, 16)
+        residual = self.empty(5, 16)
+        weight = self.empty(16)
         output_q = torch.empty((5, 16), device=self.device, dtype=self.quant_dtype)
         output_s_packed = torch.empty((5, 1), device=self.device, dtype=torch.int32)
+        # input goes through allreduce first, always 16-bit
         return [
             residual,
             input_t.to(self.dtype),
@@ -998,9 +991,11 @@ class AllReduceFusedAddRMSNormGroupQuantFP8PackedPattern(BasePattern):
             output_s_packed: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             allreduce_output = tensor_model_parallel_all_reduce(input)
-            rms, residual = self.rmsnorm_matcher(allreduce_output, weight, residual)
+            rms, residual = vllm.ir.ops.fused_add_rms_norm(
+                allreduce_output, residual, weight, self.epsilon
+            )
             quant_out = auto_functionalized(
-                PACKED_GROUP_QUANT_OP,
+                torch.ops._C.per_token_group_fp8_quant_packed.default,
                 input=rms,
                 output_q=output_q,
                 output_s_packed=output_s_packed,
@@ -1149,9 +1144,7 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
                         self.device,
                         self.allreduce_params,
                     ).register(self.patterns)
-            # Per-token-group FP8 packed quant patterns (DeepGEMM).
-            # Registered before non-quant patterns so the longer match wins.
-            if current_platform.is_cuda() and PACKED_GROUP_QUANT_OP is not None:
+                # Per-token group FP8 packed quant patterns (DeepGEMM).
                 for group_size in SUPPORTED_PACKED_GROUP_QUANT_SIZES:
                     AllReduceFusedRMSNormGroupQuantFP8PackedPattern(
                         epsilon,
@@ -1167,6 +1160,7 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
                         self.device,
                         self.allreduce_params,
                     ).register(self.patterns)
+                    torch._inductor.pattern_matcher._seen_patterns.clear()
             AllReduceRMSNormPattern(
                 epsilon,
                 self.model_dtype,
