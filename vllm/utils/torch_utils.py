@@ -612,6 +612,13 @@ def async_tensor_h2d(
     pin_memory: bool = PIN_MEMORY,
 ) -> torch.Tensor:
     """Asynchronously create a tensor and copy it from host to device."""
+    # On CPU-only platforms (e.g. PowerPC, RISC-V) there is no pinned-memory
+    # allocator, so torch.tensor(..., pin_memory=True) raises RuntimeError.
+    # PIN_MEMORY only guards against WSL; check the platform at call time too.
+    if pin_memory:
+        from vllm.platforms import current_platform
+
+        pin_memory = current_platform.is_pin_memory_available()
     t = torch.tensor(data, dtype=dtype, pin_memory=pin_memory, device="cpu")
     return t.to(device=device, non_blocking=True)
 

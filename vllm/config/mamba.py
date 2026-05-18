@@ -27,6 +27,10 @@ class MambaBackendEnum(Enum, metaclass=_MambaBackendEnumMeta):
 
     TRITON = "triton"
     FLASHINFER = "flashinfer"
+    # Pure-PyTorch fallback for CPU-only platforms (PowerPC, no CUDA, etc.).
+    # Avoids Triton JIT compilation which is unstable / unsupported on those
+    # architectures.
+    CPU = "cpu"
 
 
 @config
@@ -34,7 +38,11 @@ class MambaConfig:
     """Configuration for Mamba SSM backends."""
 
     backend: MambaBackendEnum = MambaBackendEnum.TRITON
-    """Mamba SSU backend to use."""
+    """Mamba SSU backend to use.
+
+    On CPU-only platforms (e.g. PowerPC, x86 without CUDA) the default is
+    automatically overridden to 'cpu' by ``__post_init__``.
+    """
 
     enable_stochastic_rounding: bool = False
     """Enable stochastic rounding when writing SSM state to fp16 cache.
@@ -54,9 +62,18 @@ class MambaConfig:
         return value
 
     def __post_init__(self):
-        if self.enable_stochastic_rounding:
-            from vllm.platforms import current_platform
+        from vllm.platforms import current_platform
 
+        # On CPU-only platforms, silently override the backend to 'cpu' unless
+        # the user explicitly chose a different backend. Triton JIT is unstable
+        # (and often unavailable) on platforms like PowerPC.
+        if (
+            self.backend == MambaBackendEnum.TRITON
+            and current_platform.is_cpu()
+        ):
+            object.__setattr__(self, "backend", MambaBackendEnum.CPU)
+
+        if self.enable_stochastic_rounding:
             if not current_platform.is_cuda():
                 raise ValueError(
                     "Stochastic rounding for Mamba cache is only supported "

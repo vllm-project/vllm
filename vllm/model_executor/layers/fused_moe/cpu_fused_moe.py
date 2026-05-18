@@ -46,11 +46,18 @@ def _gelu_and_mul(
     return F.gelu(x[..., :d], approximate="none") * x[..., d:]
 
 
+def _silu_and_mul(x: torch.Tensor) -> torch.Tensor:
+    """Standalone SiluAndMul forward to avoid instantiating CustomOp
+    (which calls get_current_vllm_config()) at model-forward time."""
+    d = x.shape[-1] // 2
+    return F.silu(x[..., :d]) * x[..., d:]
+
+
 # Map activation names to their native forward functions.
 # Uses static methods or standalone functions to avoid instantiating CustomOp
 # classes, which would call get_current_vllm_config() before config is set.
 _CPU_MOE_ACT_FN: dict[MoEActivation, Callable[[torch.Tensor], torch.Tensor]] = {
-    MoEActivation.SILU: lambda x: SiluAndMul(compile_native=False).forward_native(x),
+    MoEActivation.SILU: _silu_and_mul,
     MoEActivation.SWIGLUOAI: _swigluoai_forward_native,
     MoEActivation.GELU: _gelu_and_mul,
 }

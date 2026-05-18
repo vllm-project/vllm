@@ -371,6 +371,7 @@ class MambaMixer(MambaBase, PluggableLayer):
             time_proj_bias = self._time_proj_bias()
 
             # 4. Perform the recurrence y ← SSM(A, B, C, Δ)(x)
+            # Keep D in native dtype to avoid expensive conversions
             scan_out_p = selective_scan_fn(
                 conv_out_p,
                 ssm_state,
@@ -378,7 +379,7 @@ class MambaMixer(MambaBase, PluggableLayer):
                 self.A,
                 B_p.transpose(-2, -1),
                 C_p.transpose(-2, -1),
-                self.D.float(),
+                self.D,
                 gate_p,
                 time_proj_bias,
                 delta_softplus=True,

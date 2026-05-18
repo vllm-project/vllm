@@ -4,8 +4,10 @@
 Dispatch module for Mamba selective state update (SSU) backends.
 
 Provides a unified `selective_state_update` function that dispatches to
-either the Triton or FlashInfer backend based on the configured
-`MambaBackendEnum`. Follows SGLang's dispatch pattern adapted for vLLM.
+the Triton, FlashInfer, or CPU backend based on the configured
+`MambaBackendEnum`. On CPU-only platforms (PowerPC, x86 without CUDA)
+the backend defaults to 'cpu', which uses a pure-PyTorch fallback that
+avoids Triton JIT compilation entirely.
 """
 
 from abc import ABC, abstractmethod
@@ -182,9 +184,71 @@ class FlashInferSSUBackend(MambaSSUBackend):
         )
 
 
+class CPUSSUBackend(MambaSSUBackend):
+    """Pure-PyTorch CPU SSU backend.
+
+    Used on CPU-only platforms (PowerPC, x86 without CUDA, etc.) where
+    Triton JIT is unavailable or unstable.  Delegates to the pure-PyTorch
+    reference implementation in cpu_fallbacks.py which is numerically
+    equivalent to the Triton path.
+    """
+
+    def __init__(self, mamba_config: MambaConfig):
+        super().__init__(mamba_config)
+        from vllm.model_executor.layers.mamba.ops.cpu_fallbacks import (
+            _selective_state_update_cpu,
+        )
+
+        self._kernel = _selective_state_update_cpu
+
+    @property
+    def name(self) -> str:
+        return "cpu"
+
+    def __call__(
+        self,
+        state: torch.Tensor,
+        x: torch.Tensor,
+        dt: torch.Tensor,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        C: torch.Tensor,
+        D: torch.Tensor,
+        dt_bias: torch.Tensor,
+        z: torch.Tensor | None = None,
+        dt_softplus: bool = False,
+        state_batch_indices: torch.Tensor | None = None,
+        dst_state_batch_indices: torch.Tensor | None = None,
+        null_block_id: int = NULL_BLOCK_ID,
+        out: torch.Tensor | None = None,
+        num_accepted_tokens: torch.Tensor | None = None,
+        cu_seqlens: torch.Tensor | None = None,
+        is_blackwell: bool = False,
+    ) -> None:
+        self._kernel(
+            state,
+            x,
+            dt,
+            A,
+            B,
+            C,
+            D=D,
+            z=z,
+            dt_bias=dt_bias,
+            dt_softplus=dt_softplus,
+            state_batch_indices=state_batch_indices,
+            dst_state_batch_indices=dst_state_batch_indices,
+            null_block_id=null_block_id,
+            out=out,
+            num_accepted_tokens=num_accepted_tokens,
+            cu_seqlens=cu_seqlens,
+        )
+
+
 _BACKEND_REGISTRY: dict[MambaBackendEnum, type[MambaSSUBackend]] = {
     MambaBackendEnum.TRITON: TritonSSUBackend,
     MambaBackendEnum.FLASHINFER: FlashInferSSUBackend,
+    MambaBackendEnum.CPU: CPUSSUBackend,
 }
 
 _mamba_ssu_backend: MambaSSUBackend | None = None
