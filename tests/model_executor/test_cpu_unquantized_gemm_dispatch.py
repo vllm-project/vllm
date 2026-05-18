@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for CPU unquantized GEMM dispatch behavior."""
+"""Tests for CPU unquantized GEMM dispatch via the w16a16 kernel abstraction."""
 
 import pytest
 import torch
 
-from vllm.model_executor.layers import utils
-from vllm.platforms import current_platform
+import vllm.model_executor.kernels.linear.base.w16a16 as w16a16
+import vllm.model_executor.kernels.linear.zentorch.w16a16 as zentorch_w16a16
+from vllm.model_executor.kernels.linear import choose_w16a16_kernel
+from vllm.platforms import PlatformEnum, current_platform
 
 
 @pytest.fixture(scope="module")
@@ -44,25 +46,42 @@ def _mock_zentorch_linear_unary():
     lib_def._destroy()
 
 
-@pytest.mark.usefixtures("_mock_zentorch_linear_unary")
-def test_dispatch_cpu_unquantized_gemm_uses_zentorch_on_zen(monkeypatch):
+@pytest.fixture
+def _force_zen_cpu(monkeypatch):
+    """Make `current_platform` look like a Zen CPU for dispatch selection."""
+    monkeypatch.setattr(current_platform, "_enum", PlatformEnum.CPU)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: True)
     monkeypatch.setattr(current_platform, "is_zen_cpu", lambda: True)
 
+
+def _config(layer: torch.nn.Linear, *, clear_weight: bool) -> w16a16.Config:
+    return w16a16.Config(
+        weight_dtype=layer.weight.dtype,
+        weight_shape=tuple(layer.weight.shape),
+        clear_weight_after_processing=clear_weight,
+    )
+
+
+@pytest.mark.usefixtures("_mock_zentorch_linear_unary", "_force_zen_cpu")
+def test_choose_w16a16_kernel_uses_zentorch_on_zen():
     layer = torch.nn.Linear(16, 8, bias=True)
     x = torch.randn(4, 16)
     expected = torch.nn.functional.linear(x, layer.weight, layer.bias)
 
-    utils.dispatch_cpu_unquantized_gemm(layer, remove_weight=False)
-    output = layer.cpu_linear(x, layer.weight, layer.bias)
+    kernel = choose_w16a16_kernel(_config(layer, clear_weight=False))
+    assert isinstance(kernel, zentorch_w16a16.Kernel)
+
+    kernel.process_weights_after_loading(layer)
+    output = kernel.apply_weights(layer, x, layer.bias)
 
     torch.testing.assert_close(output, expected)
 
 
-@pytest.mark.usefixtures("_mock_zentorch_linear_unary")
-def test_dispatch_cpu_unquantized_gemm_zen_remove_weight(monkeypatch):
-    monkeypatch.setattr(current_platform, "is_zen_cpu", lambda: True)
-
+@pytest.mark.usefixtures("_mock_zentorch_linear_unary", "_force_zen_cpu")
+def test_zentorch_kernel_clears_weight_when_configured():
     layer = torch.nn.Linear(16, 8, bias=True)
-    utils.dispatch_cpu_unquantized_gemm(layer, remove_weight=True)
+
+    kernel = choose_w16a16_kernel(_config(layer, clear_weight=True))
+    kernel.process_weights_after_loading(layer)
 
     assert layer.weight.numel() == 0

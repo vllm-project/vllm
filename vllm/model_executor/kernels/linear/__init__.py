@@ -19,6 +19,12 @@ from typing import TypeVar
 import torch
 
 import vllm.envs as envs
+import vllm.model_executor.kernels.linear.base.w16a16 as w16a16
+import vllm.model_executor.kernels.linear.composed.w16a16 as composed_w16a16
+import vllm.model_executor.kernels.linear.onednn.w16a16 as onednn_w16a16
+import vllm.model_executor.kernels.linear.sgl.w16a16 as sgl_w16a16
+import vllm.model_executor.kernels.linear.triton.w16a16 as triton_w16a16
+import vllm.model_executor.kernels.linear.zentorch.w16a16 as zentorch_w16a16
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear.base import (
     MMLinearKernel,
@@ -984,6 +990,54 @@ def register_linear_kernel(
         _POSSIBLE_MXFP4_KERNELS[platform].append(kernel_class)
     else:
         raise ValueError(f"Unrecognized kernel type: {kernel_type}")
+
+
+_POSSIBLE_W16A16_KERNELS: dict[PlatformEnum, list[type[w16a16.Kernel]]] = {
+    PlatformEnum.ROCM: [
+        triton_w16a16.Kernel,
+        composed_w16a16.Kernel,
+        w16a16.Kernel,
+    ],
+    PlatformEnum.CUDA: [triton_w16a16.Kernel, w16a16.Kernel],
+    PlatformEnum.CPU: [
+        zentorch_w16a16.Kernel,
+        sgl_w16a16.Kernel,
+        onednn_w16a16.Kernel,
+        w16a16.Kernel,
+    ],
+}
+
+
+def choose_w16a16_kernel(
+    config: w16a16.Config,
+    compute_capability: int | None = None,
+) -> w16a16.Kernel:
+    if compute_capability is None:
+        _cc = current_platform.get_device_capability()
+        if _cc is not None:
+            compute_capability = _cc[0] * 10 + _cc[1]
+
+    possible = _POSSIBLE_W16A16_KERNELS.get(current_platform._enum, [w16a16.Kernel])
+    failure_reasons = []
+
+    for kernel_cls in possible:
+        name = kernel_cls.get_name()
+        if name in envs.VLLM_DISABLED_KERNELS:
+            failure_reasons.append(f"{name} is disabled")
+            continue
+        ok, reason = kernel_cls.is_supported(compute_capability)
+        if not ok:
+            failure_reasons.append(f"{name}: {reason}")
+            continue
+        ok, reason = kernel_cls.can_implement(config)
+        if not ok:
+            failure_reasons.append(f"{name}: {reason}")
+            continue
+        return kernel_cls(config)
+
+    raise ValueError(
+        "Failed to find a w16a16 kernel. Reasons:\n" + "\n".join(failure_reasons)
+    )
 
 
 __all__ = [

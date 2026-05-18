@@ -1,6 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+# TODO: all utilities in this module (MMLinearLayerConfig, Params, FP8Params,
+# Int8Params, MMLinearKernel) will be removed once the remaining scaled_mm /
+# mixed_precision kernels are ported to the new Kernel abstraction in
+# base/common.py.
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, ClassVar, Generic, TypeVar

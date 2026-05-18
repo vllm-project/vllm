@@ -1,0 +1,58 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from __future__ import annotations
+
+import torch
+
+import vllm.model_executor.kernels.linear.base.w16a16 as w16a16
+from vllm import envs
+from vllm.model_executor.utils import replace_parameter
+from vllm.platforms import current_platform
+
+
+class Kernel(w16a16.Kernel):
+    @classmethod
+    def is_supported(
+        cls,
+        compute_capability: int | None = None,
+    ) -> tuple[bool, str | None]:
+        if not current_platform.is_cpu():
+            return False, "CPU platform not available"
+        if not current_platform.is_zen_cpu():
+            return False, "not a Zen CPU"
+        if not hasattr(torch.ops.zentorch, "zentorch_linear_unary"):
+            return False, "zentorch_linear_unary not available"
+        return True, None
+
+    @classmethod
+    def can_implement(cls, config: w16a16.Config) -> tuple[bool, str | None]:
+        if config.is_weight_meta:
+            return False, "weight is meta"
+        return True, None
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        super().process_weights_after_loading(layer)
+        processed = layer.processed_weight.detach()
+        is_prepacked = False
+
+        if envs.VLLM_ZENTORCH_WEIGHT_PREPACK and hasattr(
+            torch.ops.zentorch, "zentorch_weight_prepack_for_linear"
+        ):
+            processed = torch.ops.zentorch.zentorch_weight_prepack_for_linear(processed)
+            is_prepacked = True
+
+        replace_parameter(layer, "processed_weight", processed)
+        layer.extras = {"is_prepacked": is_prepacked}
+
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return torch.ops.zentorch.zentorch_linear_unary(
+            x,
+            layer.processed_weight,
+            bias,
+            is_weight_prepacked=layer.extras["is_prepacked"],
+        )
