@@ -29,7 +29,9 @@ from vllm.v1.kv_offload.base import (
     OffloadingManager,
     OffloadingSpec,
     OffloadKey,
+    OffloadPolicy,
     ReqContext,
+    RequestOffloadingContext,
     get_offload_block_hash,
     make_offload_key,
 )
@@ -128,6 +130,7 @@ class RequestOffloadState:
     req: Request
     group_states: tuple[RequestGroupState, ...] = field(init=False)
     req_context: ReqContext = field(init=False)
+    offloading_context: RequestOffloadingContext = field(init=False)
     # number of hits in the GPU cache
     num_locally_computed_tokens: int = 0
     # In-flight job IDs. Per the connector's invariant, at any given time
@@ -142,6 +145,7 @@ class RequestOffloadState:
             req_id=self.req.request_id,
             kv_transfer_params=self.req.kv_transfer_params,
         )
+        self.offloading_context = RequestOffloadingContext()
 
     def update_offload_keys(self) -> None:
         for group_config, group_state in zip(
@@ -479,6 +483,9 @@ class OffloadingConnectorScheduler:
         else:
             is_new_request = True
             req_status = RequestOffloadState(config=self.config, req=request)
+            req_status.offloading_context = self.manager.get_request_offloading_context(
+                req_status.req_context
+            )
             self._req_status[request.request_id] = req_status
 
         req_status.update_offload_keys()
@@ -504,9 +511,6 @@ class OffloadingConnectorScheduler:
 
         num_locally_computed_tokens = req_status.num_locally_computed_tokens
         num_cached_tokens = num_locally_computed_tokens + num_external_tokens
-
-        params = req_status.req_context.kv_transfer_params
-        do_remote_decode = params is not None and params.get("do_remote_decode")
 
         keys_to_load: list[OffloadKey] = []
         dst_block_ids: list[int] = []
@@ -561,10 +565,10 @@ class OffloadingConnectorScheduler:
             group_sizes.append(num_pending_gpu_blocks)
             block_indices.append(num_locally_computed_gpu_blocks)
 
-            if not do_remote_decode:
-                # For P/D prefill requests (do_remote_decode=True), we do
-                # NOT skip saving the hit prefix, as we need to stream the
-                # entire KV cache so a remote decode node can consume it.
+            # Skip prefix-hit blocks for block-level policy; for
+            # request-level, next_stored_block_idx stays at 0 so all
+            # blocks (including hits) are offloaded.
+            if req_status.offloading_context.policy == OffloadPolicy.BLOCK_LEVEL:
                 group_state.next_stored_block_idx = num_blocks
 
         # Fence dst blocks against finished-request pending stores.

@@ -7,6 +7,7 @@ Core abstractions for KV cache offloading in vLLM v1.
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable, Iterator, Sequence
 from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING, Any, NewType
 
 import numpy as np
@@ -46,6 +47,16 @@ def get_offload_group_idx(key: OffloadKey) -> int:
 class ReqContext:
     req_id: str
     kv_transfer_params: dict[str, Any] | None = None
+
+
+class OffloadPolicy(Enum):
+    BLOCK_LEVEL = "block_level"
+    REQUEST_LEVEL = "request_level"
+
+
+@dataclass
+class RequestOffloadingContext:
+    policy: OffloadPolicy = OffloadPolicy.BLOCK_LEVEL
 
 
 class LoadStoreSpec(ABC):
@@ -208,6 +219,20 @@ class OffloadingManager(ABC):
             success: whether the blocks were stored successfully.
         """
         return
+
+    def get_request_offloading_context(
+        self, req_context: ReqContext
+    ) -> RequestOffloadingContext:
+        """
+        Called when a new request is first seen by the scheduler.
+
+        Returns a RequestOffloadingContext indicating how this request's
+        blocks should be offloaded.
+
+        Args:
+            req_context: per-request context.
+        """
+        return RequestOffloadingContext()
 
     def request_finished(self, req_context: ReqContext) -> None:
         """

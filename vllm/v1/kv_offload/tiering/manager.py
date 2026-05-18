@@ -31,8 +31,10 @@ from vllm.v1.kv_offload.base import (
     OffloadingEvent,
     OffloadingManager,
     OffloadKey,
+    OffloadPolicy,
     PrepareStoreOutput,
     ReqContext,
+    RequestOffloadingContext,
 )
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
@@ -157,6 +159,13 @@ class TieringOffloadingManager(OffloadingManager):
         # Gate for once-per-step execution of _maybe_process_finished_jobs().
         # Reset at the end of each step in take_events().
         self._processed_jobs_this_step: bool = False
+
+        # Per-request per-tier offload policy decisions from
+        # get_request_offloading_context().
+        # Cleaned up in request_finished().
+        self._per_request_tier_policy: dict[
+            str, dict[SecondaryTierManager, OffloadPolicy]
+        ] = {}
 
     def _next_job_id(self) -> JobId:
         """Generate a unique job ID for async transfer tracking."""
@@ -387,6 +396,9 @@ class TieringOffloadingManager(OffloadingManager):
         that any completed async transfers have their ref_cnt decremented
         before the primary tier makes eviction decisions.
 
+        For request-level tiers, blocks already present in the primary tier
+        are immediately cascaded via submit_store().
+
         Args:
             keys: Blocks to prepare for storing.
             req_context: Per-request context.
@@ -400,13 +412,63 @@ class TieringOffloadingManager(OffloadingManager):
         # successfully transferred to secondary tiers.
         self._maybe_process_finished_jobs()
 
-        # Step 2: Store to primary tier
+        # Step 2: Store to primary tier (new blocks only).
+        # Cascading of these newly-stored blocks to ALL secondary tiers
+        # happens later in complete_store(), after the GPU→Primary transfer
+        # completes.
         primary_result = self.primary_tier.prepare_store(keys, req_context)
 
-        # Note: Secondary tier cascading will happen in complete_store()
-        # after the GPU→Primary transfer completes and blocks are ready.
+        if primary_result is None:
+            return None
+
+        # Step 3: For request-level tiers, cascade blocks already in primary
+        tier_policies = self._per_request_tier_policy.get(req_context.req_id)
+        if tier_policies:
+            keys_to_store_set = set(primary_result.keys_to_store)
+            keys_already_in_primary = [k for k in keys if k not in keys_to_store_set]
+            if keys_already_in_primary:
+                self._cascade_existing_blocks_to_request_level_tiers(
+                    keys_already_in_primary, req_context, tier_policies
+                )
 
         return primary_result
+
+    def _cascade_existing_blocks_to_request_level_tiers(
+        self,
+        keys: list[OffloadKey],
+        req_context: ReqContext,
+        tier_policies: dict[SecondaryTierManager, OffloadPolicy],
+    ) -> None:
+        """
+        For tiers that requested request-level policy, submit_store() for
+        blocks that are already present in the primary tier.
+        """
+        # Filter out keys that are not ready in primary (e.g. in-flight)
+        ready_keys = [
+            k for k in keys if self.primary_tier.lookup(k, req_context) is True
+        ]
+        if not ready_keys:
+            return
+
+        for tier, policy in tier_policies.items():
+            if policy != OffloadPolicy.REQUEST_LEVEL:
+                continue
+
+            primary_blocks_spec = self.primary_tier.prepare_read(
+                ready_keys, req_context
+            )
+
+            job_id = self._next_job_id()
+            assert isinstance(primary_blocks_spec, CPULoadStoreSpec)
+            job_metadata = JobMetadata(
+                job_id=job_id,
+                keys=ready_keys,
+                block_ids=primary_blocks_spec.block_ids,
+                is_promotion=False,
+                req_context=req_context,
+            )
+            self._transfer_jobs[job_id] = job_metadata
+            tier.submit_store(job_metadata)
 
     def complete_store(
         self,
@@ -466,10 +528,34 @@ class TieringOffloadingManager(OffloadingManager):
         # Note: The async transfers are now in flight. Their completion is
         # tracked via get_finished() / _maybe_process_finished_jobs().
 
+    def get_request_offloading_context(
+        self, req_context: ReqContext
+    ) -> RequestOffloadingContext:
+        """
+        Query each secondary tier for its offload policy preference.
+
+        Returns REQUEST_LEVEL if the base or ANY secondary tier wants
+        request-level. Stores per-tier decisions for use in prepare_store.
+        """
+        base_ctx = super().get_request_offloading_context(req_context)
+        result_policy = base_ctx.policy
+
+        tier_policies: dict[SecondaryTierManager, OffloadPolicy] = {}
+        for tier in self.secondary_tiers:
+            tier_ctx = tier.get_request_offloading_context(req_context)
+            tier_policies[tier] = tier_ctx.policy
+            if tier_ctx.policy == OffloadPolicy.REQUEST_LEVEL:
+                result_policy = OffloadPolicy.REQUEST_LEVEL
+
+        self._per_request_tier_policy[req_context.req_id] = tier_policies
+
+        return RequestOffloadingContext(policy=result_policy)
+
     def request_finished(self, req_context: ReqContext) -> None:
         self.primary_tier.request_finished(req_context)
         for tier in self.secondary_tiers:
             tier.request_finished(req_context)
+        self._per_request_tier_policy.pop(req_context.req_id, None)
 
     def take_events(self) -> Iterable[OffloadingEvent]:
         """

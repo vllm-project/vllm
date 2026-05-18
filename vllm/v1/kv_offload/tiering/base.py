@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from vllm.v1.kv_offload.base import OffloadKey, ReqContext
+from vllm.v1.kv_offload.base import OffloadKey, ReqContext, RequestOffloadingContext
 
 if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import OffloadingSpec
@@ -163,6 +163,23 @@ class SecondaryTierManager(ABC):
         """
         return
 
+    def get_request_offloading_context(
+        self, req_context: ReqContext
+    ) -> RequestOffloadingContext:
+        """
+        Called when a new request is first seen by the scheduler.
+
+        Returns a RequestOffloadingContext expressing this tier's preference
+        for how blocks should be offloaded for this request.
+
+        Args:
+            req_context: Per-request context.
+        """
+        return RequestOffloadingContext()
+
+    # PR NOTE: "request_finished" and "get_finished" are easy to confuse.
+    # get_finished() polls for completed async jobs; request_finished() is
+    # a request lifecycle hook. Consider renaming one of them.
     def request_finished(self, req_context: ReqContext) -> None:
         """
         Called when a request has finished.
