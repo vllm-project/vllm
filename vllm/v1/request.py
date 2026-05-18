@@ -77,8 +77,12 @@ class Request:
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
         abort_immediately: bool = False,
+        external_req_id: str | None = None,
     ) -> None:
         self.request_id = request_id
+        self.external_req_id: str = (
+            external_req_id if external_req_id is not None else request_id
+        )
         self.client_index = client_index
         self.priority = priority
         self.sampling_params = sampling_params
@@ -194,6 +198,7 @@ class Request:
     ) -> "Request":
         return cls(
             request_id=request.request_id,
+            external_req_id=request.external_req_id,
             client_index=request.client_index,
             prompt_token_ids=request.prompt_token_ids,
             prompt_embeds=request.prompt_embeds,
