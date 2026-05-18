@@ -60,13 +60,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import SupportsPP
-from vllm.model_executor.utils import set_weight_attrs
-from vllm.platforms import current_platform
-from vllm.sequence import IntermediateTensors
-from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import direct_register_custom_op
-
-from .utils import (
+from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
@@ -75,6 +69,11 @@ from .utils import (
     make_layers,
     maybe_prefix,
 )
+from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
+from vllm.sequence import IntermediateTensors
+from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import direct_register_custom_op
 
 _DEEPSEEK_V4_EXPERT_DTYPES = ("fp4", "fp8")
 
@@ -1531,7 +1530,7 @@ class DeepseekV4Model(nn.Module):
                     ):
                         loaded_weight = loaded_weight.view(torch.uint8)
                     for mapping in expert_mapping:
-                        param_name, weight_name, expert_id, shard_id = mapping
+                        param_name, weight_name, expert_id, shard_id = mapping  # type: ignore[assignment]
                         if weight_name not in name:
                             continue
                         name_mapped = name.replace(weight_name, param_name)
@@ -1669,7 +1668,7 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP):
         else:
             self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.make_empty_intermediate_tensors = (
+        self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
             self.model.make_empty_intermediate_tensors
         )
 
