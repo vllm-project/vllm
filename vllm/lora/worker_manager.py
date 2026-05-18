@@ -141,6 +141,10 @@ class WorkerLoRAManager:
                 weights_mapper=hf_to_vllm_mapper,
                 skip_prefixes=lora_skip_prefixes,
             )
+            # Stamp the on-disk MoE layout onto the loaded model so the
+            # adapter manager can route 3D-format checkpoints through the
+            # 3D->2D conversion when running under the universal 2D wrapper.
+            lora.is_3d_lora_weight = lora_request.is_3d_lora_weight
 
         except FileNotFoundError as e:
             # FileNotFoundError should be raised if both

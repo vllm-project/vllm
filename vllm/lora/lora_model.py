@@ -29,12 +29,17 @@ class LoRAModel:
         lora_model_id: int,
         rank: int,
         loras: dict[str, LoRALayerWeights],
+        is_3d_lora_weight: bool = False,
     ) -> None:
         """
         Args:
             lora_model_id: The integer id for the lora model.
             rank: lora rank.
             loras: module name -> weights for lora-replaced layers.
+            is_3d_lora_weight: Whether the on-disk MoE adapter is in the 3D
+                fused (gate_up_proj / down_proj) layout. Propagated from the
+                originating LoRARequest. Only consulted by the LoRA model
+                manager when enable_mixed_moe_lora_format is on.
 
         """
         self.id = lora_model_id
@@ -44,6 +49,7 @@ class LoRAModel:
         )
         self.rank = rank
         self.loras: dict[str, LoRALayerWeights] = loras
+        self.is_3d_lora_weight = is_3d_lora_weight
 
     def clone(self, lora_model_id: int) -> "LoRAModel":
         """Return a copy of the object with different ids.
@@ -53,6 +59,7 @@ class LoRAModel:
             lora_model_id,
             rank=self.rank,
             loras=self.loras.copy(),
+            is_3d_lora_weight=self.is_3d_lora_weight,
         )
 
     def get_lora(self, module_name: str) -> LoRALayerWeights | None:
