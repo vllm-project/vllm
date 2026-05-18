@@ -275,9 +275,9 @@ class MiniMaxM2DecoderLayer(nn.Module):
         layer_idx = int(prefix.split(sep=".")[-1])
 
         self.layer_idx = layer_idx
-        # When True, do explicit TP allreduce on hidden_states before
-        # input_layernorm, so torch.compile Pattern 1 can fuse AR +
-        # fused_add_rms_norm into trtllm_allreduce_fusion.
+        # When True the previous MoE deferred its TP allreduce; fuse
+        # AR + residual + RMSNorm via forward_with_allreduce_fusion
+        # (direct FlashInfer call) before input_layernorm.
         self._defer_ar: bool = False
         self.self_attn = MiniMaxM2Attention(
             hidden_size=self.hidden_size,
@@ -310,12 +310,16 @@ class MiniMaxM2DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> torch.Tensor:
-        # Deferred AR: the previous MoE skipped cross_device_reduce_1stage,
-        # so hidden_states is partial.  Use forward_with_allreduce_fusion to
-        # fuse AR + residual + RMSNorm directly via FlashInfer, bypassing
-        # torch.compile pattern matching (which breaks when fused_add_rms_norm
-        # is decomposed to native ops, e.g. under rms_norm=['native'] priority).
-        if self._defer_ar and residual is not None and hidden_states.shape[0] <= 128:
+        # Mirroring SGLang's pattern: when the previous layer's MoE deferred
+        # its TP allreduce, fuse AR + residual + RMSNorm in one FI kernel.
+        # Only for decode (≤128 tokens); prefill & TP+EP fall back to the
+        # regular path.
+        _fuse = (
+            self._defer_ar
+            and residual is not None
+            and hidden_states.shape[0] <= 128
+        )
+        if _fuse:
             hidden_states, residual = self.input_layernorm.forward_with_allreduce_fusion(
                 hidden_states, residual
             )
