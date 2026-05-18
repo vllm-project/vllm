@@ -133,6 +133,18 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
   // conditionally compiled so impl registration is in source file
 #endif
 
+  // FP8 baseline SiLU+Mul+FP8Quant kernel (flashinfer vectorized)
+  m.def(
+      "silu_mul_fp8_quant_baseline("
+      "Tensor input, "
+      "Tensor input_scales, "
+      "Tensor! output, "
+      "Tensor! output_scales, "
+      "Tensor n_tokens, "
+      "bool use_tanh_silu) -> ()");
+  m.impl("silu_mul_fp8_quant_baseline", torch::kCUDA,
+         &silu_mul_fp8_quant_baseline);
+
   // FP8 TMA warp-specialized persistent SiLU+Mul+FP8Quant kernel
   m.def(
       "silu_mul_fp8_quant_tma_ws_persistent("

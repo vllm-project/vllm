@@ -66,6 +66,12 @@ void shuffle_rows(const torch::Tensor& input_tensor,
                   const torch::Tensor& dst2src_map,
                   torch::Tensor& output_tensor);
 
+void silu_mul_fp8_quant_baseline(const at::Tensor& input,
+                                 const at::Tensor& input_scales,
+                                 at::Tensor& output, at::Tensor& output_scales,
+                                 const at::Tensor& n_tokens,
+                                 bool use_tanh_silu);
+
 void silu_mul_fp8_quant_tma_ws_persistent(
     const at::Tensor& input, const at::Tensor& input_scales, at::Tensor& output,
     at::Tensor& output_scales, const at::Tensor& n_tokens, int64_t n_compute,
