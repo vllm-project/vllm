@@ -195,7 +195,7 @@ impl ChatBackend for FakeTextBackend {
         Ok(Box::new(DefaultChatOutputProcessor::new(
             request,
             self.model_id(),
-            options.tokenizer,
+            self.tokenizer(),
             options.tool_call_parser,
             options.reasoning_parser,
         )?))

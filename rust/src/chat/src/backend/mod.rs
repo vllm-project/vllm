@@ -2,10 +2,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::Value;
-use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{DynTextBackend, TextBackend};
 
 use crate::error::Result;
+use crate::multimodal::MultimodalModelInfo;
 use crate::output::DynChatOutputProcessor;
 use crate::renderer::DynChatRenderer;
 use crate::request::ChatRequest;
@@ -15,7 +15,6 @@ pub mod hf;
 
 /// Options for creating a new chat output processor.
 pub struct NewChatOutputProcessorOptions<'a> {
-    pub tokenizer: DynTokenizer,
     pub tool_call_parser: &'a ParserSelection,
     pub reasoning_parser: &'a ParserSelection,
 }
@@ -24,6 +23,12 @@ pub struct NewChatOutputProcessorOptions<'a> {
 pub trait ChatBackend: Send + Sync {
     /// Return the renderer used for chat-prompt construction.
     fn chat_renderer(&self) -> DynChatRenderer;
+
+    /// Return model files/config needed for request-scoped multimodal
+    /// preprocessing, if supported.
+    fn multimodal_model_info(&self) -> Option<&MultimodalModelInfo> {
+        None
+    }
 
     /// Create a request-scoped output processor after request-level adjustments
     /// are applied.

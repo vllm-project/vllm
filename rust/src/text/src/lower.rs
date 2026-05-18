@@ -30,6 +30,7 @@ pub fn lower_text_request(
     let generate_request = GenerateRequest {
         request_id: request.request_id.clone(),
         prompt_token_ids,
+        mm_features: request.mm_features.clone(),
         sampling_params: lower_sampling_params(
             request.sampling_params.clone(),
             sampling_hints,

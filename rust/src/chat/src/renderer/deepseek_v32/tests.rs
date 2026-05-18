@@ -9,7 +9,9 @@ use thiserror_ext::AsReport;
 use super::DeepSeekV32ChatRenderer;
 use crate::error::Error;
 use crate::event::{AssistantContentBlock, AssistantToolCall};
-use crate::request::{ChatMessage, ChatRequest, ChatTool, ChatToolChoice, GenerationPromptMode};
+use crate::request::{
+    ChatContentPart, ChatMessage, ChatRequest, ChatTool, ChatToolChoice, GenerationPromptMode,
+};
 use crate::{ChatRenderer, ChatRole};
 
 #[derive(Debug, Deserialize)]
@@ -401,4 +403,20 @@ fn assistant_after_last_user_requires_reasoning_or_tool_calls() {
 
     expect!["chat template error: invalid DeepSeek V3.2 assistant message after last user message: expected reasoning or tool calls"]
         .assert_eq(&error.to_report_string());
+}
+#[test]
+fn render_rejects_multimodal_input() {
+    let request = ChatRequest {
+        messages: vec![ChatMessage::user(vec![ChatContentPart::image_url(
+            "data:image/png;base64,test",
+        )])],
+        ..ChatRequest::for_test()
+    };
+
+    let error = DeepSeekV32ChatRenderer::new().render(&request).unwrap_err();
+
+    assert!(matches!(
+        error,
+        Error::UnsupportedMultimodalContent("image_url")
+    ));
 }

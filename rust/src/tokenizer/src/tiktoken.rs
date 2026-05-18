@@ -140,6 +140,10 @@ struct TokenMetadata {
     /// Reserved-slot placeholders are not in this set (they default to
     /// special and get skipped).
     non_special_added_ids: FxHashSet<u32>,
+    /// Raw token string by token id. Base BPE tokens are represented with
+    /// lossy UTF-8, matching decode behavior for byte sequences that are not
+    /// valid UTF-8 on their own.
+    token_by_id: FxHashMap<u32, String>,
 }
 
 impl TokenMetadata {
@@ -159,6 +163,10 @@ impl TokenMetadata {
         token_id >= self.num_base_tokens
             && token_id < self.vocab_upper_bound
             && !self.non_special_added_ids.contains(&token_id)
+    }
+
+    fn id_to_token(&self, token_id: u32) -> Option<String> {
+        self.token_by_id.get(&token_id).cloned()
     }
 }
 
@@ -414,6 +422,17 @@ impl LoadedTiktokenConfig {
             special_tokens_encoder.insert(name, id);
         }
 
+        let mut token_by_id: FxHashMap<u32, String> = FxHashMap::with_capacity_and_hasher(
+            encoder.len() + special_tokens_encoder.len(),
+            Default::default(),
+        );
+        for (token_bytes, &id) in &encoder {
+            token_by_id.insert(id, String::from_utf8_lossy(token_bytes).into_owned());
+        }
+        for (token, &id) in &special_tokens_encoder {
+            token_by_id.insert(id, token.clone());
+        }
+
         let pattern = model_config.as_ref().map_or(CL100K_BASE_PATTERN, detect_bpe_pattern);
 
         Ok(Self {
@@ -423,6 +442,7 @@ impl LoadedTiktokenConfig {
                 num_base_tokens,
                 vocab_upper_bound: reserved_end,
                 non_special_added_ids,
+                token_by_id,
             },
             pattern,
         })
@@ -476,6 +496,10 @@ impl Tokenizer for TiktokenTokenizer {
             Backend::Riptoken(backend) => backend.token_to_id(token),
             Backend::TiktokenRs(backend) => backend.token_to_id(token),
         }
+    }
+
+    fn id_to_token(&self, id: u32) -> Option<String> {
+        self.metadata.id_to_token(id)
     }
 
     fn is_special_id(&self, token_id: u32) -> bool {
@@ -616,6 +640,10 @@ mod tests {
                 backend.encode(&placeholder, false).unwrap(),
                 vec![in_range_id]
             );
+            assert_eq!(
+                backend.id_to_token(in_range_id).as_deref(),
+                Some(placeholder.as_str())
+            );
 
             // Outside the configured range: not registered as a reserved slot — falls
             // through to the backend's unknown-id behavior. The point is that we *don't*
@@ -624,6 +652,7 @@ mod tests {
             let out_of_range_placeholder = format!("<|reserved_token_{out_of_range_id}|>");
             assert_eq!(backend.decode(&[out_of_range_id], false).unwrap(), "");
             assert_eq!(backend.token_to_id(&out_of_range_placeholder), None);
+            assert_eq!(backend.id_to_token(out_of_range_id), None);
         }
     }
 
@@ -645,6 +674,7 @@ mod tests {
         for backend in explicit_backends(&bpe_path) {
             let sparse_id = backend.token_to_id("SPARSE");
             assert_eq!(sparse_id, Some(1000));
+            assert_eq!(backend.id_to_token(1000).as_deref(), Some("SPARSE"));
             assert!(!backend.is_special_id(1000));
             assert_eq!(backend.decode(&[1000], false).unwrap(), "SPARSE");
             assert_eq!(backend.decode(&[1000], true).unwrap(), "SPARSE");
@@ -818,6 +848,10 @@ mod tests {
             assert_eq!(encoded, vec![reserved_id]);
 
             assert_eq!(backend.token_to_id(&placeholder), Some(reserved_id));
+            assert_eq!(
+                backend.id_to_token(reserved_id).as_deref(),
+                Some(placeholder.as_str())
+            );
         }
     }
 
@@ -932,6 +966,8 @@ mod tests {
         for backend in explicit_backends(&bpe_path) {
             assert_eq!(backend.token_to_id("<think>"), Some(257));
             assert_eq!(backend.token_to_id("</think>"), Some(258));
+            assert_eq!(backend.id_to_token(257).as_deref(), Some("<think>"));
+            assert_eq!(backend.id_to_token(258).as_deref(), Some("</think>"));
             assert_eq!(
                 backend.decode(&[257, 258], true).unwrap(),
                 "<think></think>"
@@ -957,7 +993,9 @@ mod tests {
         let backend = TiktokenTokenizer::new_riptoken(&bpe_path).expect("load riptoken backend");
 
         assert_eq!(backend.token_to_id("H"), Some(b'H' as u32));
+        assert_eq!(backend.id_to_token(b'H' as u32).as_deref(), Some("H"));
         assert_eq!(backend.token_to_id("<think>"), Some(257));
+        assert_eq!(backend.id_to_token(257).as_deref(), Some("<think>"));
     }
 
     #[test]

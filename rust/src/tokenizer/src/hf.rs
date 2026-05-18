@@ -169,6 +169,15 @@ impl Tokenizer for HuggingFaceTokenizer {
         }
     }
 
+    fn id_to_token(&self, id: u32) -> Option<String> {
+        match &self.backend {
+            Backend::Hf(t) => t.id_to_token(id),
+            Backend::Fastokens(t) | Backend::FastokensByteLevel(t) => {
+                t.id_to_token(id).map(ToOwned::to_owned)
+            }
+        }
+    }
+
     fn is_special_id(&self, token_id: u32) -> bool {
         self.special_token_ids.binary_search(&token_id).is_ok()
     }

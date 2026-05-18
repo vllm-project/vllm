@@ -173,6 +173,7 @@ fn sample_generate_request(request_id: &str, max_tokens: u32) -> GenerateRequest
             max_tokens,
             ..EngineCoreSamplingParams::for_test()
         },
+        mm_features: None,
         arrival_time: Some(42.5),
         cache_salt: None,
         trace_headers: None,

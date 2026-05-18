@@ -12,7 +12,7 @@ use thiserror_ext::AsReport;
 
 use crate::error::{Error, Result};
 use crate::protocol::logprobs::MaybeWireLogprobs;
-use crate::protocol::multimodal::MultiModalFeatures;
+use crate::protocol::multimodal::MmFeatures;
 use crate::protocol::stats::{PrefillStats, SchedulerStats};
 
 // TODO: This module currently mixes reusable frontend-facing semantic types
@@ -307,7 +307,7 @@ pub struct EngineCoreRequest {
     pub request_id: String,
     pub prompt_token_ids: Option<Vec<u32>>,
     /// Multimodal features attached to the request.
-    pub mm_features: Option<MultiModalFeatures>,
+    pub mm_features: Option<MmFeatures>,
     pub sampling_params: Option<EngineCoreSamplingParams>,
     /// Pooling parameters are preserved in the schema but not yet strongly
     /// typed.

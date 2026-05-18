@@ -34,6 +34,7 @@ pub fn prepare_generate_request(
     let text_request = TextRequest {
         request_id: ctx.request_id.clone(),
         prompt: Prompt::TokenIds(request.token_ids),
+        mm_features: None,
         sampling_params,
         decode_options: TextDecodeOptions::default(),
         intermediate: false,

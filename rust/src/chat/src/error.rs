@@ -1,8 +1,10 @@
 use thiserror::Error;
+use thiserror_ext::Macro;
 
 type BoxedError = Box<dyn std::error::Error + Send + Sync>;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Macro)]
+#[thiserror_ext(macro(path = "crate::error"))]
 pub enum Error {
     #[error("chat request must contain at least one message")]
     EmptyMessages,
@@ -12,6 +14,12 @@ pub enum Error {
     MissingChatTemplate,
     #[error("chat template error: {0}")]
     ChatTemplate(String),
+    #[error("multimodal input is not supported by this chat renderer")]
+    UnsupportedMultimodalRenderer,
+    #[error("unsupported multimodal content: {0}")]
+    UnsupportedMultimodalContent(&'static str),
+    #[error("multimodal preprocessing error: {0}")]
+    Multimodal(#[message] String),
     #[error("{kind} parsing is not available for model `{model_id}`")]
     ParserUnavailableForModel {
         kind: &'static str,

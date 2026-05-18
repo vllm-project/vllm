@@ -40,6 +40,7 @@ pub struct ResolvedModelFiles {
     pub tokenizer: TokenizerSource,
     pub tokenizer_config_path: Option<PathBuf>,
     pub generation_config_path: Option<PathBuf>,
+    pub preprocessor_config_path: Option<PathBuf>,
     pub chat_template_path: Option<PathBuf>,
     pub config_path: Option<PathBuf>,
 }
@@ -68,6 +69,7 @@ fn resolve_local_model_files(model_dir: &Path) -> Result<ResolvedModelFiles> {
         tokenizer,
         tokenizer_config_path,
         generation_config_path: local_file_if_exists(model_dir, "generation_config.json"),
+        preprocessor_config_path: local_file_if_exists(model_dir, "preprocessor_config.json"),
         chat_template_path: discover_chat_template_in_dir(model_dir),
         config_path: local_file_if_exists(model_dir, "config.json"),
     })
@@ -103,6 +105,8 @@ async fn resolve_remote_model_files(model_id: &str) -> Result<ResolvedModelFiles
 
     let generation_config_path =
         download_if_present(&repo, model_id, &siblings, "generation_config.json").await?;
+    let preprocessor_config_path =
+        download_if_present(&repo, model_id, &siblings, "preprocessor_config.json").await?;
     let chat_template_name = siblings
         .contains("chat_template.json")
         .then_some("chat_template.json")
@@ -118,6 +122,7 @@ async fn resolve_remote_model_files(model_id: &str) -> Result<ResolvedModelFiles
         tokenizer,
         tokenizer_config_path,
         generation_config_path,
+        preprocessor_config_path,
         chat_template_path,
         config_path,
     })
@@ -137,6 +142,7 @@ fn resolve_cached_model_files(model_id: &str) -> Result<Option<ResolvedModelFile
         Error::Tokenizer("resolved tokenizer file has no parent directory".to_string())
     })?;
     let generation_config_path = cache_repo.get("generation_config.json");
+    let preprocessor_config_path = cache_repo.get("preprocessor_config.json");
     let chat_template_path = discover_chat_template_in_dir(model_dir);
     let config_path = cache_repo.get("config.json");
 
@@ -144,6 +150,7 @@ fn resolve_cached_model_files(model_id: &str) -> Result<Option<ResolvedModelFile
         tokenizer,
         tokenizer_config_path,
         generation_config_path,
+        preprocessor_config_path,
         chat_template_path,
         config_path,
     }))

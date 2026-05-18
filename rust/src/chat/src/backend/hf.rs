@@ -1,18 +1,20 @@
 use std::sync::Arc;
 
 use tracing::info;
-use vllm_text::DynTextBackend;
 use vllm_text::backend::hf::{HfTextBackend, ResolvedModelFiles, load_model_config};
+use vllm_text::tokenizer::DynTokenizer;
+use vllm_text::{DynTextBackend, TextBackend as _};
 
 use crate::backend::{
     ChatBackend, DynChatBackend, LoadModelBackendsOptions, LoadedModelBackends,
     NewChatOutputProcessorOptions,
 };
 use crate::error::Result;
+use crate::multimodal::MultimodalModelInfo;
 use crate::output::{
     DefaultChatOutputProcessor, HarmonyChatOutputProcessor, validate_harmony_parser_overrides,
 };
-use crate::renderer::hf::HfChatRenderer;
+use crate::renderer::hf::{HfChatRenderer, MultimodalRenderInfo};
 use crate::renderer::{DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DynChatRenderer};
 use crate::request::ChatRequest;
 use crate::{DynChatOutputProcessor, RendererSelection};
@@ -21,29 +23,38 @@ use crate::{DynChatOutputProcessor, RendererSelection};
 pub struct HfChatBackend {
     model_id: String,
     model_type: String,
+    tokenizer: DynTokenizer,
     chat_renderer: DynChatRenderer,
+    multimodal_model_info: Option<MultimodalModelInfo>,
 }
 
 impl HfChatBackend {
-    /// Load the chat backend with the given model id.
-    pub async fn from_model(model_id: &str) -> Result<Self> {
-        let files = ResolvedModelFiles::new(model_id).await?;
-        Self::from_resolved_model_files(files, model_id.to_string(), Default::default())
-    }
-
     /// Load the chat backend from resolved Hugging Face model files.
     pub fn from_resolved_model_files(
         files: ResolvedModelFiles,
         model_id: String,
         options: LoadModelBackendsOptions,
+        tokenizer: DynTokenizer,
     ) -> Result<Self> {
         let model_config = load_model_config(files.config_path.as_deref())?;
         let model_type = model_config.model_type().unwrap_or_default();
+        let multimodal_model_info = MultimodalModelInfo::from_paths(
+            model_id.clone(),
+            (!model_type.is_empty()).then_some(model_type.to_string()),
+            files.config_path.as_deref(),
+            files.preprocessor_config_path.as_deref(),
+            tokenizer.clone(),
+        )?;
+        let multimodal_render_info = resolve_multimodal_render_info(multimodal_model_info.as_ref());
 
         let renderer = options.renderer.resolve(model_type);
         let chat_renderer: DynChatRenderer = match renderer {
             RendererSelection::Auto => unreachable!("renderer auto should be resolved above"),
-            RendererSelection::Hf => Arc::new(HfChatRenderer::load(&files, options)?),
+            RendererSelection::Hf => Arc::new(HfChatRenderer::load(
+                &files,
+                options,
+                multimodal_render_info,
+            )?),
             RendererSelection::DeepSeekV32 => Arc::new(DeepSeekV32ChatRenderer::new()),
             RendererSelection::DeepSeekV4 => Arc::new(DeepSeekV4ChatRenderer::new()),
         };
@@ -58,7 +69,9 @@ impl HfChatBackend {
         Ok(Self {
             model_id,
             model_type: model_type.to_string(),
+            tokenizer,
             chat_renderer,
+            multimodal_model_info,
         })
     }
 }
@@ -66,6 +79,10 @@ impl HfChatBackend {
 impl ChatBackend for HfChatBackend {
     fn chat_renderer(&self) -> DynChatRenderer {
         self.chat_renderer.clone()
+    }
+
+    fn multimodal_model_info(&self) -> Option<&MultimodalModelInfo> {
+        self.multimodal_model_info.as_ref()
     }
 
     fn new_chat_output_processor(
@@ -81,7 +98,7 @@ impl ChatBackend for HfChatBackend {
         Ok(Box::new(DefaultChatOutputProcessor::new(
             request,
             &self.model_id,
-            options.tokenizer,
+            self.tokenizer.clone(),
             options.tool_call_parser,
             options.reasoning_parser,
         )?))
@@ -94,14 +111,16 @@ pub(super) async fn load_model_backends(
     options: LoadModelBackendsOptions,
 ) -> Result<LoadedModelBackends> {
     let files = ResolvedModelFiles::new(model_id).await?;
-    let text_backend: DynTextBackend = Arc::new(HfTextBackend::from_resolved_model_files(
-        files.clone(),
-        model_id.to_string(),
-    )?);
+    let text_backend =
+        HfTextBackend::from_resolved_model_files(files.clone(), model_id.to_string())?;
+    let tokenizer = text_backend.tokenizer();
+    let text_backend: DynTextBackend = Arc::new(text_backend);
+
     let chat_backend: DynChatBackend = Arc::new(HfChatBackend::from_resolved_model_files(
         files,
         model_id.to_string(),
         options,
+        tokenizer,
     )?);
 
     Ok(LoadedModelBackends {
@@ -110,13 +129,23 @@ pub(super) async fn load_model_backends(
     })
 }
 
+fn resolve_multimodal_render_info(
+    info: Option<&MultimodalModelInfo>,
+) -> Option<MultimodalRenderInfo> {
+    info.map(|info| MultimodalRenderInfo {
+        placeholder_token: info.placeholder_token().to_string(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     use tempfile::tempdir;
     use vllm_text::backend::hf::TokenizerSource;
+    use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
 
     use super::HfChatBackend;
     use crate::RendererSelection;
@@ -152,9 +181,38 @@ mod tests {
             tokenizer: TokenizerSource::HuggingFace(PathBuf::from("/tmp/unused-tokenizer.json")),
             tokenizer_config_path: Some(tokenizer_config_path),
             generation_config_path: None,
+            preprocessor_config_path: None,
             chat_template_path: None,
             config_path: Some(config_path),
         }
+    }
+
+    struct TestTokenizer;
+
+    impl Tokenizer for TestTokenizer {
+        fn encode(
+            &self,
+            _text: &str,
+            _add_special_tokens: bool,
+        ) -> vllm_text::tokenizer::Result<Vec<u32>> {
+            Ok(Vec::new())
+        }
+
+        fn decode(
+            &self,
+            _token_ids: &[u32],
+            _skip_special_tokens: bool,
+        ) -> vllm_text::tokenizer::Result<String> {
+            Ok(String::new())
+        }
+
+        fn token_to_id(&self, _token: &str) -> Option<u32> {
+            None
+        }
+    }
+
+    fn test_tokenizer() -> DynTokenizer {
+        Arc::new(TestTokenizer)
     }
 
     fn render_prompt(
@@ -171,6 +229,7 @@ mod tests {
                 chat_template: None,
                 default_chat_template_kwargs: HashMap::new(),
             },
+            test_tokenizer(),
         )
         .unwrap();
 

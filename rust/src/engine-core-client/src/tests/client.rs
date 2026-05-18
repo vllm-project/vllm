@@ -19,8 +19,8 @@ use zeromq::{DealerSocket, PushSocket, SocketOptions, SubSocket, XPubSocket, Zmq
 use crate::protocol::handshake::{HandshakeInitMessage, ReadyMessage};
 use crate::protocol::logprobs::MaybeWireLogprobs;
 use crate::protocol::multimodal::{
-    MultiModalFeatureSpec, MultiModalField, MultiModalFieldElem, MultiModalFlatField,
-    MultiModalSlice, NestedTensorValue, PlaceholderRange, SliceSpec,
+    MmFeatureSpec, MmField, MmFieldElem, MmFlatField, MmKwargValue, MmSlice, PlaceholderRange,
+    SliceSpec,
 };
 use crate::protocol::stats::SchedulerStats;
 use crate::protocol::tensor_wire::WireTensor;
@@ -164,16 +164,16 @@ fn sample_multimodal_request() -> EngineCoreRequest {
     EngineCoreRequest {
         request_id: "req-mm".to_string(),
         prompt_token_ids: Some(vec![101, 102, 103, 104]),
-        mm_features: Some(vec![MultiModalFeatureSpec {
+        mm_features: Some(vec![MmFeatureSpec {
             data: Some(BTreeMap::from([(
                 "pixel_values".to_string(),
-                MultiModalFieldElem {
-                    data: Some(NestedTensorValue::Tensor(
+                MmFieldElem {
+                    data: Some(MmKwargValue::Tensor(
                         WireTensor::from_f32(vec![2, 2], vec![1.0, 2.0, 3.5, 4.25])
                             .expect("valid tensor shape"),
                     )),
-                    field: MultiModalField::Flat(MultiModalFlatField {
-                        slices: vec![MultiModalSlice::Slice(SliceSpec {
+                    field: MmField::Flat(MmFlatField {
+                        slices: vec![MmSlice::Slice(SliceSpec {
                             start: Some(0),
                             stop: Some(2),
                             step: None,

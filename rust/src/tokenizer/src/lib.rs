@@ -27,6 +27,13 @@ pub trait Tokenizer: Send + Sync {
     /// is not in the tokenizer vocabulary.
     fn token_to_id(&self, token: &str) -> Option<u32>;
 
+    /// Convert one token ID into the tokenizer's raw token string.
+    fn id_to_token(&self, _id: u32) -> Option<String> {
+        // TODO: remove default impl and require this to be implemented by all
+        // tokenizers
+        None
+    }
+
     /// Return whether the given token ID is special.
     fn is_special_id(&self, _token_id: u32) -> bool {
         false

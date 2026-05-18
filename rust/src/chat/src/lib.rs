@@ -42,6 +42,7 @@ pub use vllm_llm::FinishReason;
 mod backend;
 mod error;
 mod event;
+pub mod multimodal;
 mod output;
 mod parser;
 mod renderer;
@@ -151,16 +152,23 @@ impl ChatLlm {
         let output_processor = self.backend.new_chat_output_processor(
             &mut request,
             NewChatOutputProcessorOptions {
-                tokenizer: self.text.tokenizer(),
                 tool_call_parser: &self.tool_call_parser,
                 reasoning_parser: &self.reasoning_parser,
             },
         )?;
         let rendered = self.backend.chat_renderer().render(&request)?;
 
+        let (prompt, mm_features) = multimodal::finalize_rendered_prompt(
+            &request,
+            rendered,
+            self.backend.multimodal_model_info(),
+        )
+        .await?;
+
         let text_request = TextRequest {
             request_id: request.request_id.clone(),
-            prompt: rendered.prompt,
+            prompt,
+            mm_features,
             sampling_params: request.sampling_params,
             decode_options: request.decode_options,
             intermediate: request.intermediate,

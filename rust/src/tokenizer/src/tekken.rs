@@ -52,6 +52,10 @@ impl Tokenizer for TekkenTokenizer {
         })
     }
 
+    fn id_to_token(&self, id: u32) -> Option<String> {
+        self.inner.id_to_piece(id).ok()
+    }
+
     fn is_special_id(&self, token_id: u32) -> bool {
         self.inner.is_special_token(token_id)
     }

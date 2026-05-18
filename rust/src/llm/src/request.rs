@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use uuid::Uuid;
+use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 use vllm_engine_core_client::protocol::{EngineCoreRequest, EngineCoreSamplingParams, OpaqueValue};
 
 use crate::error::{Error, Result};
@@ -23,6 +24,8 @@ pub struct GenerateRequest {
     pub prompt_token_ids: Vec<u32>,
     /// Sampling parameters forwarded to engine-core.
     pub sampling_params: EngineCoreSamplingParams,
+    /// Optional multimodal features already prepared by `vllm-chat`.
+    pub mm_features: Option<MmFeatures>,
 
     // Fields below are currently likely unused by callers.
     pub arrival_time: Option<f64>,
@@ -51,6 +54,7 @@ impl GenerateRequest {
             request_id,
             prompt_token_ids,
             sampling_params,
+            mm_features,
             arrival_time,
             cache_salt,
             trace_headers,
@@ -72,7 +76,7 @@ impl GenerateRequest {
             engine_request: EngineCoreRequest {
                 request_id: engine_request_id,
                 prompt_token_ids: Some(prompt_token_ids),
-                mm_features: None,
+                mm_features,
                 sampling_params: Some(sampling_params),
                 pooling_params: None,
                 arrival_time: arrival_time.unwrap_or_else(current_unix_timestamp_secs),
@@ -126,6 +130,7 @@ mod tests {
             request_id: "req-1".to_string(),
             prompt_token_ids: vec![11, 22, 33],
             sampling_params: EngineCoreSamplingParams::for_test(),
+            mm_features: None,
             arrival_time: Some(42.5),
             cache_salt: Some("salt".to_string()),
             trace_headers: Some(BTreeMap::from([(
@@ -182,5 +187,15 @@ mod tests {
         let request = prepared.engine_request;
         assert_eq!(request.external_req_id.as_deref(), Some("req-1"));
         assert_eq!(request.request_id, "req-1");
+    }
+
+    #[test]
+    fn prepare_forwards_multimodal_features() {
+        let mut request = sample_request();
+        request.mm_features = Some(Vec::new());
+
+        let prepared = request.prepare(false).unwrap();
+
+        assert_eq!(prepared.engine_request.mm_features, Some(Vec::new()));
     }
 }

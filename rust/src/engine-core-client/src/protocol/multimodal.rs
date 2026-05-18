@@ -9,23 +9,23 @@ use super::tensor_wire::WireTensor;
 ///
 /// Original Python definition:
 /// <https://github.com/vllm-project/vllm/blob/5a0a8fc1ea7542394ff315138bd5677b7b53bca1/vllm/v1/engine/__init__.py#L88>
-pub type MultiModalFeatures = Vec<MultiModalFeatureSpec>;
+pub type MmFeatures = Vec<MmFeatureSpec>;
 
 /// Represents a single multimodal input with its processed data and metadata.
 ///
 /// Used to track multimodal data through processing and caching. A request
-/// containing multiple multimodal items will have one `MultiModalFeatureSpec`
+/// containing multiple multimodal items will have one `MmFeatureSpec`
 /// per item.
 ///
 /// Original Python definition:
 /// <https://github.com/vllm-project/vllm/blob/5a0a8fc1ea7542394ff315138bd5677b7b53bca1/vllm/multimodal/inputs.py#L301-L332>
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MultiModalFeatureSpec {
+pub struct MmFeatureSpec {
     /// Represents multimodal data for this feature.
     ///
     /// Can be `None` if the item is cached, to skip IPC between API server
     /// and engine core processes.
-    pub data: Option<MultiModalKwargsItem>,
+    pub data: Option<MmKwargsItem>,
 
     /// The input modality, e.g., `"image"`, `"audio"`, `"video"`.
     pub modality: String,
@@ -65,40 +65,40 @@ pub struct PlaceholderRange {
 ///
 /// Original Python definition:
 /// <https://github.com/vllm-project/vllm/blob/5a0a8fc1ea7542394ff315138bd5677b7b53bca1/vllm/multimodal/inputs.py#L854-L871>
-pub type MultiModalKwargsItem = BTreeMap<String, MultiModalFieldElem>;
+pub type MmKwargsItem = BTreeMap<String, MmFieldElem>;
 
 /// Represents a processed keyword argument to pass to a model for a
-/// `MultiModalKwargsItem`.
+/// `MmKwargsItem`.
 ///
 /// Original Python definition:
 /// <https://github.com/vllm-project/vllm/blob/5a0a8fc1ea7542394ff315138bd5677b7b53bca1/vllm/multimodal/inputs.py#L348-L369>
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MultiModalFieldElem {
-    /// The tensor data of this field in `MultiModalKwargsItem`, i.e. the value
-    /// of the keyword argument to be passed to the model.
+pub struct MmFieldElem {
+    /// The processed value of this field in `MmKwargsItem`, i.e. the
+    /// keyword argument value to be passed to the model.
     ///
     /// It may be set to `None` if it is determined that the item is cached
     /// in `EngineCore`.
-    pub data: Option<NestedTensorValue>,
+    pub data: Option<MmKwargValue>,
 
-    /// Defines how to combine the tensor data of this field with others
-    /// in order to batch multi-modal items together for model inference.
-    pub field: MultiModalField,
+    /// Defines how to combine this field's processed values with others in
+    /// order to batch multi-modal items together for model inference.
+    pub field: MmField,
 }
 
-/// Nested tensor payload used by multimodal keyword arguments.
+/// Processed multimodal keyword argument value.
 ///
-/// Original Python type alias and wire encoding:
+/// Original Python definition (`NestedTensors`) and wire encoding:
 /// <https://github.com/vllm-project/vllm/blob/5a0a8fc1ea7542394ff315138bd5677b7b53bca1/vllm/multimodal/inputs.py#L218-L226>
 /// <https://github.com/vllm-project/vllm/blob/5a0a8fc1ea7542394ff315138bd5677b7b53bca1/vllm/v1/serial_utils.py#L292-L299>
 /// <https://github.com/vllm-project/vllm/blob/5a0a8fc1ea7542394ff315138bd5677b7b53bca1/vllm/v1/serial_utils.py#L456-L465>
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
-pub enum NestedTensorValue {
+pub enum MmKwargValue {
     Tensor(WireTensor),
     Int(i64),
     Float(f64),
-    List(Vec<NestedTensorValue>),
+    List(Vec<MmKwargValue>),
 }
 
 /// Defines how to interpret tensor data belonging to a keyword argument for
@@ -109,11 +109,11 @@ pub enum NestedTensorValue {
 /// <https://github.com/vllm-project/vllm/blob/5a0a8fc1ea7542394ff315138bd5677b7b53bca1/vllm/v1/serial_utils.py#L301-L310>
 /// <https://github.com/vllm-project/vllm/blob/5a0a8fc1ea7542394ff315138bd5677b7b53bca1/vllm/v1/serial_utils.py#L440-L454>
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "MultiModalFieldWire", into = "MultiModalFieldWire")]
-pub enum MultiModalField {
-    Batched(MultiModalBatchedField),
-    Flat(MultiModalFlatField),
-    Shared(MultiModalSharedField),
+#[serde(try_from = "MmFieldWire", into = "MmFieldWire")]
+pub enum MmField {
+    Batched(MmBatchedField),
+    Flat(MmFlatField),
+    Shared(MmSharedField),
 }
 
 /// Info: `MultiModalFieldConfig.batched`.
@@ -122,7 +122,7 @@ pub enum MultiModalField {
 /// <https://github.com/vllm-project/vllm/blob/5a0a8fc1ea7542394ff315138bd5677b7b53bca1/vllm/multimodal/inputs.py#L385-L502>
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct MultiModalBatchedField {
+pub struct MmBatchedField {
     /// If `True`, then this field is excluded from being moved to the
     /// accelerator when multimodal items are grouped and batched.
     pub keep_on_cpu: bool,
@@ -136,10 +136,10 @@ pub struct MultiModalBatchedField {
 /// <https://github.com/vllm-project/vllm/blob/5a0a8fc1ea7542394ff315138bd5677b7b53bca1/vllm/multimodal/inputs.py#L505-L603>
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct MultiModalFlatField {
+pub struct MmFlatField {
     /// For each multi-modal item, a slice (`dim=0`) or a tuple of slices
     /// (`dim>0`) that is used to extract the data corresponding to it.
-    pub slices: Vec<MultiModalSlice>,
+    pub slices: Vec<MmSlice>,
 
     /// The dimension to extract data, default to 0.
     pub dim: i32,
@@ -156,7 +156,7 @@ pub struct MultiModalFlatField {
 /// <https://github.com/vllm-project/vllm/blob/5a0a8fc1ea7542394ff315138bd5677b7b53bca1/vllm/multimodal/inputs.py#L606-L630>
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct MultiModalSharedField {
+pub struct MmSharedField {
     pub batch_size: usize,
 
     /// If `True`, then this field is excluded from being moved to the
@@ -175,36 +175,36 @@ pub struct SliceSpec {
     pub step: Option<isize>,
 }
 
-/// A single slice or a tuple of slices used by `MultiModalFlatField`.
+/// A single slice or a tuple of slices used by `MmFlatField`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
-pub enum MultiModalSlice {
+pub enum MmSlice {
     Slice(SliceSpec),
     Slices(Vec<SliceSpec>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize_tuple, Deserialize_tuple)]
-struct MultiModalFieldWire {
+struct MmFieldWire {
     name: String,
-    inner: MultiModalFieldWireInner,
+    inner: MmFieldWireInner,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
-enum MultiModalFieldWireInner {
-    Batched(MultiModalBatchedField),
-    Flat(MultiModalFlatField),
-    Shared(MultiModalSharedField),
+enum MmFieldWireInner {
+    Batched(MmBatchedField),
+    Flat(MmFlatField),
+    Shared(MmSharedField),
 }
 
-impl TryFrom<MultiModalFieldWire> for MultiModalField {
+impl TryFrom<MmFieldWire> for MmField {
     type Error = String;
 
-    fn try_from(value: MultiModalFieldWire) -> Result<Self, Self::Error> {
+    fn try_from(value: MmFieldWire) -> Result<Self, Self::Error> {
         match (value.name.as_str(), value.inner) {
-            ("batched", MultiModalFieldWireInner::Batched(kwargs)) => Ok(Self::Batched(kwargs)),
-            ("flat", MultiModalFieldWireInner::Flat(kwargs)) => Ok(Self::Flat(kwargs)),
-            ("shared", MultiModalFieldWireInner::Shared(kwargs)) => Ok(Self::Shared(kwargs)),
+            ("batched", MmFieldWireInner::Batched(kwargs)) => Ok(Self::Batched(kwargs)),
+            ("flat", MmFieldWireInner::Flat(kwargs)) => Ok(Self::Flat(kwargs)),
+            ("shared", MmFieldWireInner::Shared(kwargs)) => Ok(Self::Shared(kwargs)),
             (name, _) => Err(format!(
                 "mismatched or unknown multimodal field factory {name:?}"
             )),
@@ -212,20 +212,20 @@ impl TryFrom<MultiModalFieldWire> for MultiModalField {
     }
 }
 
-impl From<MultiModalField> for MultiModalFieldWire {
-    fn from(value: MultiModalField) -> Self {
+impl From<MmField> for MmFieldWire {
+    fn from(value: MmField) -> Self {
         match value {
-            MultiModalField::Batched(kwargs) => Self {
+            MmField::Batched(kwargs) => Self {
                 name: "batched".to_string(),
-                inner: MultiModalFieldWireInner::Batched(kwargs),
+                inner: MmFieldWireInner::Batched(kwargs),
             },
-            MultiModalField::Flat(kwargs) => Self {
+            MmField::Flat(kwargs) => Self {
                 name: "flat".to_string(),
-                inner: MultiModalFieldWireInner::Flat(kwargs),
+                inner: MmFieldWireInner::Flat(kwargs),
             },
-            MultiModalField::Shared(kwargs) => Self {
+            MmField::Shared(kwargs) => Self {
                 name: "shared".to_string(),
-                inner: MultiModalFieldWireInner::Shared(kwargs),
+                inner: MmFieldWireInner::Shared(kwargs),
             },
         }
     }
@@ -246,8 +246,8 @@ mod tests {
 
     #[test]
     fn multimodal_field_serializes_to_python_factory_tuple() {
-        let field = MultiModalField::Flat(MultiModalFlatField {
-            slices: vec![MultiModalSlice::Slice(SliceSpec {
+        let field = MmField::Flat(MmFlatField {
+            slices: vec![MmSlice::Slice(SliceSpec {
                 start: Some(0),
                 stop: Some(1200),
                 step: None,
@@ -273,9 +273,9 @@ mod tests {
 
     #[test]
     fn multimodal_field_round_trips_python_factory_tuple() {
-        let field = MultiModalField::Batched(MultiModalBatchedField { keep_on_cpu: true });
+        let field = MmField::Batched(MmBatchedField { keep_on_cpu: true });
         let encoded = rmp_serde::to_vec_named(&field).expect("encode field");
-        let decoded: MultiModalField = rmp_serde::from_slice(&encoded).expect("decode field");
+        let decoded: MmField = rmp_serde::from_slice(&encoded).expect("decode field");
         assert_eq!(decoded, field);
     }
 }

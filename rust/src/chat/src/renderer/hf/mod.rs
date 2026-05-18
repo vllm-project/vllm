@@ -15,7 +15,7 @@ use self::format::{
 use self::template::{CompiledChatTemplate, TemplateContext};
 use super::{ChatRenderer, RenderedPrompt};
 use crate::error::Result;
-use crate::request::{ChatContent, ChatMessage, ChatRequest};
+use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest};
 use crate::{
     AssistantContentBlock, AssistantMessageExt, ChatTool, Error, LoadModelBackendsOptions,
 };
@@ -29,6 +29,11 @@ pub use template::{load_chat_template, resolve_chat_template};
 
 pub use self::format::ChatTemplateContentFormatOption;
 
+#[derive(Debug, Clone)]
+pub struct MultimodalRenderInfo {
+    pub placeholder_token: String,
+}
+
 /// Hugging Face chat-template renderer backed by the local Jinja chat-template
 /// state.
 pub struct HfChatRenderer {
@@ -36,6 +41,7 @@ pub struct HfChatRenderer {
     default_template_kwargs: HashMap<String, Value>,
     content_format: ContentFormatOption,
     special_tokens: Option<HfSpecialTokens>,
+    multimodal: Option<MultimodalRenderInfo>,
 }
 
 impl HfChatRenderer {
@@ -44,7 +50,6 @@ impl HfChatRenderer {
         template: Option<String>,
         default_template_kwargs: HashMap<String, Value>,
         content_format: ContentFormatOption,
-        special_tokens: Option<HfSpecialTokens>,
     ) -> Result<Self> {
         Ok(Self {
             default_template: template
@@ -55,12 +60,27 @@ impl HfChatRenderer {
                 .transpose()?,
             default_template_kwargs,
             content_format,
-            special_tokens,
+            special_tokens: None,
+            multimodal: None,
         })
     }
 
+    pub fn with_special_tokens(mut self, special_tokens: Option<HfSpecialTokens>) -> Self {
+        self.special_tokens = special_tokens;
+        self
+    }
+
+    pub fn with_multimodal(mut self, multimodal: Option<MultimodalRenderInfo>) -> Self {
+        self.multimodal = multimodal;
+        self
+    }
+
     /// Create a renderer from the given model files and loading options.
-    pub fn load(files: &ResolvedModelFiles, options: LoadModelBackendsOptions) -> Result<Self> {
+    pub fn load(
+        files: &ResolvedModelFiles,
+        options: LoadModelBackendsOptions,
+        multimodal: Option<MultimodalRenderInfo>,
+    ) -> Result<Self> {
         let HfTokenizerConfig {
             special_tokens,
             chat_template,
@@ -95,12 +115,13 @@ impl HfChatRenderer {
             }
         }
 
-        Self::new(
+        Ok(Self::new(
             template,
             options.default_chat_template_kwargs,
             options.chat_template_content_format,
-            special_tokens,
-        )
+        )?
+        .with_special_tokens(special_tokens)
+        .with_multimodal(multimodal))
     }
 
     /// Apply the chat template to one chat request, rendering the prompt string
@@ -132,8 +153,11 @@ impl HfChatRenderer {
         effective_template: &CompiledChatTemplate,
         request: &ChatRequest,
     ) -> Result<RenderedPrompt> {
-        let messages =
-            to_template_messages(&request.messages, effective_template.content_format())?;
+        let messages = to_template_messages(
+            &request.messages,
+            effective_template.content_format(),
+            self.multimodal.as_ref(),
+        )?;
         let tools = request.tool_parsing_enabled().then(|| to_template_tools(&request.tools));
         trace!(
             message_count = messages.len(),
@@ -235,21 +259,23 @@ struct TemplateToolDefinition {
 fn to_template_messages(
     messages: &[ChatMessage],
     content_format: ChatTemplateContentFormat,
+    multimodal: Option<&MultimodalRenderInfo>,
 ) -> Result<Vec<TemplateMessage>> {
     messages
         .iter()
-        .map(|message| to_template_message(message, content_format))
+        .map(|message| to_template_message(message, content_format, multimodal))
         .collect()
 }
 
 fn to_template_message(
     message: &ChatMessage,
     content_format: ChatTemplateContentFormat,
+    multimodal: Option<&MultimodalRenderInfo>,
 ) -> Result<TemplateMessage> {
     Ok(match message {
         ChatMessage::System { content } => TemplateMessage {
             role: "system",
-            content: to_template_content(content, content_format)?,
+            content: to_template_content(content, content_format, multimodal)?,
             tools: None,
             reasoning: None,
             reasoning_content: None,
@@ -258,7 +284,7 @@ fn to_template_message(
         },
         ChatMessage::Developer { content, tools } => TemplateMessage {
             role: "developer",
-            content: to_template_content(content, content_format)?,
+            content: to_template_content(content, content_format, multimodal)?,
             tools: tools.as_deref().map(to_template_tools),
             reasoning: None,
             reasoning_content: None,
@@ -267,7 +293,7 @@ fn to_template_message(
         },
         ChatMessage::User { content } => TemplateMessage {
             role: "user",
-            content: to_template_content(content, content_format)?,
+            content: to_template_content(content, content_format, multimodal)?,
             tools: None,
             reasoning: None,
             reasoning_content: None,
@@ -278,7 +304,8 @@ fn to_template_message(
             let text = content.text();
             let reasoning = content.reasoning();
             let tool_calls = to_template_tool_calls(content)?;
-            let content = to_template_content(&ChatContent::Text(text), content_format)?;
+            let content =
+                to_template_content(&ChatContent::Text(text), content_format, multimodal)?;
             TemplateMessage {
                 role: "assistant",
                 content,
@@ -294,7 +321,7 @@ fn to_template_message(
             tool_call_id,
         } => TemplateMessage {
             role: "tool",
-            content: to_template_content(content, content_format)?,
+            content: to_template_content(content, content_format, multimodal)?,
             tools: None,
             reasoning: None,
             reasoning_content: None,
@@ -334,13 +361,39 @@ fn to_template_tool_calls(
 fn to_template_content(
     content: &ChatContent,
     content_format: ChatTemplateContentFormat,
+    multimodal: Option<&MultimodalRenderInfo>,
 ) -> Result<TemplateContent> {
     Ok(match content_format {
         ChatTemplateContentFormat::String => {
-            TemplateContent::String(content.try_flatten_to_text()?)
+            TemplateContent::String(to_template_string_content(content, multimodal)?)
         }
+        // TODO: some models may expect `type: "image"` here instead of passing through OpenAI
+        // content types like `image_url`.
         ChatTemplateContentFormat::OpenAi => TemplateContent::OpenAi(content.clone()),
     })
+}
+
+fn to_template_string_content(
+    content: &ChatContent,
+    multimodal: Option<&MultimodalRenderInfo>,
+) -> Result<String> {
+    match content {
+        ChatContent::Text(text) => Ok(text.clone()),
+        ChatContent::Parts(parts) => {
+            let mut out = String::new();
+            for part in parts {
+                match part {
+                    ChatContentPart::Text { text } => out.push_str(text),
+                    ChatContentPart::ImageUrl { .. } => {
+                        let multimodal =
+                            multimodal.ok_or(Error::UnsupportedMultimodalContent("image_url"))?;
+                        out.push_str(&multimodal.placeholder_token);
+                    }
+                }
+            }
+            Ok(out)
+        }
+    }
 }
 
 fn to_template_tools(tools: &[ChatTool]) -> Vec<TemplateTool> {
@@ -367,7 +420,7 @@ mod tests {
     use vllm_text::Prompt;
     use vllm_text::backend::hf::{HfSpecialTokens, NamedSpecialToken};
 
-    use super::{ChatTemplateContentFormatOption, HfChatRenderer};
+    use super::{ChatTemplateContentFormatOption, HfChatRenderer, MultimodalRenderInfo};
     use crate::request::{
         ChatContentPart, ChatMessage, ChatRequest, ChatRole, ChatTool, ChatToolChoice,
         GenerationPromptMode, ReasoningEffort,
@@ -390,12 +443,55 @@ mod tests {
             template.map(str::to_owned),
             HashMap::new(),
             ChatTemplateContentFormatOption::Auto,
-            None,
         )?
         .render(request)?
         .prompt
         .into_text()
         .map_err(|_| unreachable!("HF renderer should return text prompt"))
+    }
+
+    fn render_mm(
+        template: &str,
+        request: &ChatRequest,
+        content_format: ChatTemplateContentFormatOption,
+    ) -> Result<crate::RenderedPrompt> {
+        HfChatRenderer::new(Some(template.to_string()), HashMap::new(), content_format)?
+            .with_multimodal(Some(MultimodalRenderInfo {
+                placeholder_token: "<image>".to_string(),
+            }))
+            .render(request)
+    }
+
+    fn image_request() -> ChatRequest {
+        sample_request(vec![ChatMessage::user(vec![
+            ChatContentPart::text("a"),
+            ChatContentPart::image_url("data:image/png;base64,test"),
+            ChatContentPart::text("b"),
+        ])])
+    }
+
+    #[test]
+    fn string_content_format_replaces_image_with_placeholder_text() {
+        let rendered = render_mm(
+            "{{ messages[0].content }}",
+            &image_request(),
+            ChatTemplateContentFormatOption::String,
+        )
+        .unwrap();
+
+        assert_eq!(rendered.prompt, Prompt::Text("a<image>b".to_string()));
+    }
+
+    #[test]
+    fn openai_content_format_preserves_image_object_for_template() {
+        let rendered = render_mm(
+            "{% for item in messages[0].content %}{% if item.type == 'image_url' %}<|image_pad|>{% else %}{{ item.text }}{% endif %}{% endfor %}",
+            &image_request(),
+            ChatTemplateContentFormatOption::OpenAi,
+        )
+        .unwrap();
+
+        assert_eq!(rendered.prompt, Prompt::Text("a<|image_pad|>b".to_string()));
     }
 
     #[test]
@@ -555,9 +651,9 @@ mod tests {
             Some("{{ bos_token }}|{{ bos_token is defined }}".to_string()),
             HashMap::new(),
             ChatTemplateContentFormatOption::Auto,
-            Some(special_tokens),
         )
         .unwrap()
+        .with_special_tokens(Some(special_tokens))
         .apply_chat_template(&request)
         .unwrap();
 
@@ -597,7 +693,6 @@ mod tests {
             ),
             HashMap::new(),
             ChatTemplateContentFormatOption::String,
-            None,
         )
         .unwrap()
         .render(&request)
@@ -618,7 +713,6 @@ mod tests {
             Some("{{ messages[0].content[0].text }}{{ messages[0].content[1].text }}".to_string()),
             HashMap::new(),
             ChatTemplateContentFormatOption::OpenAi,
-            None,
         )
         .unwrap()
         .render(&request)
@@ -643,7 +737,6 @@ mod tests {
                 ("default_only".to_string(), Value::String("x".to_string())),
             ]),
             ChatTemplateContentFormatOption::Auto,
-            None,
         )
         .unwrap();
 
@@ -668,7 +761,6 @@ mod tests {
                 Value::String("medium".to_string()),
             )]),
             ChatTemplateContentFormatOption::Auto,
-            None,
         )
         .unwrap();
 

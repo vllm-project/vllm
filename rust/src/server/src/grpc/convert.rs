@@ -83,6 +83,7 @@ pub fn to_text_request(
     Ok(TextRequest {
         request_id,
         prompt,
+        mm_features: None,
         sampling_params,
         decode_options,
         intermediate: stream,

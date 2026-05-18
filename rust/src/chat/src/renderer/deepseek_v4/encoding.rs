@@ -516,7 +516,7 @@ fn write_chat_content(out: &mut String, content: &ChatContent) -> Result<()> {
         ChatContent::Text(text) => out.push_str(text),
         ChatContent::Parts(parts) => {
             for part in parts {
-                out.push_str(part.as_text());
+                out.push_str(part.as_text()?);
             }
         }
     }

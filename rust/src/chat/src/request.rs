@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use llm_multimodal::ImageDetail;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 pub use vllm_text::SamplingParams;
@@ -22,22 +23,56 @@ pub enum ChatRole {
 }
 
 /// One text-only chat content part in OpenAI-style block format.
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChatContentPart {
     /// One plain-text content block.
     Text { text: String },
-    // Image...
+    /// One image URL/data URL content block.
+    ImageUrl {
+        image_url: String,
+        detail: Option<ImageDetail>,
+        uuid: Option<String>,
+    },
+    // ImageData...
+    // ImageEmbeds...
 }
 
 impl ChatContentPart {
+    /// Construct one text content part with plain string content.
     pub fn text(text: impl Into<String>) -> Self {
         Self::Text { text: text.into() }
     }
 
-    pub(crate) fn as_text(&self) -> &str {
+    /// Construct one image URL content part with the given URL string.
+    pub fn image_url(image_url: impl Into<String>) -> Self {
+        Self::ImageUrl {
+            image_url: image_url.into(),
+            detail: None,
+            uuid: None,
+        }
+    }
+
+    /// Return the text content of this part when it's a text block, or an
+    /// "unsupported multimodal content" error otherwise.
+    pub(crate) fn as_text(&self) -> Result<&str> {
         match self {
-            Self::Text { text } => text,
+            Self::Text { text } => Ok(text),
+            Self::ImageUrl { .. } => Err(Error::UnsupportedMultimodalContent("image_url")),
+        }
+    }
+
+    /// Return whether this part is a text block with empty content.
+    pub(crate) fn is_empty_text(&self) -> bool {
+        matches!(self, Self::Text { text } if text.is_empty())
+    }
+
+    /// Return whether this part contains any multimodal content.
+    pub(crate) fn is_multimodal(&self) -> bool {
+        match self {
+            Self::Text { .. } => false,
+            Self::ImageUrl { .. } => true,
         }
     }
 }
@@ -61,16 +96,25 @@ impl ChatContent {
     pub fn try_flatten_to_text(&self) -> Result<String> {
         Ok(match self {
             Self::Text(text) => text.clone(),
-            Self::Parts(parts) => parts.iter().map(ChatContentPart::as_text).collect(),
+            Self::Parts(parts) => {
+                parts.iter().map(ChatContentPart::as_text).collect::<Result<Vec<_>>>()?.concat()
+            }
         })
     }
 
-    /// Return whether flattening this chat content would produce an empty
-    /// string.
+    /// Return whether there's no text content or only empty text blocks.
     pub fn is_empty(&self) -> bool {
         match self {
             Self::Text(text) => text.is_empty(),
-            Self::Parts(parts) => parts.iter().all(|part| part.as_text().is_empty()),
+            Self::Parts(parts) => parts.iter().all(ChatContentPart::is_empty_text),
+        }
+    }
+
+    /// Return whether this content contains any multimodal parts.
+    pub fn has_multimodal(&self) -> bool {
+        match self {
+            Self::Text(_) => false,
+            Self::Parts(parts) => parts.iter().any(ChatContentPart::is_multimodal),
         }
     }
 }
@@ -210,6 +254,17 @@ impl ChatMessage {
             | Self::Developer { .. }
             | Self::User { .. }
             | Self::ToolResponse { .. } => None,
+        }
+    }
+
+    /// Return whether this message contains any multimodal content.
+    pub fn has_multimodal(&self) -> bool {
+        match self {
+            Self::System { content }
+            | Self::Developer { content, .. }
+            | Self::User { content }
+            | Self::ToolResponse { content, .. } => content.has_multimodal(),
+            Self::Assistant { .. } => false,
         }
     }
 }
@@ -410,6 +465,12 @@ impl ChatRequest {
             | (GenerationPromptMode::StartNewAssistant, _) => {}
         }
         Ok(())
+    }
+
+    /// Return true if this request contains any multimodal content in its
+    /// messages.
+    pub fn has_multimodal(&self) -> bool {
+        self.messages.iter().any(ChatMessage::has_multimodal)
     }
 
     /// Return true if this request should enable tool parsing based on the tool
