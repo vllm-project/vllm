@@ -952,6 +952,13 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
         rather than topk ids and weights).
     """
 
+    # Optional callback invoked by ``apply`` with the captured routed expert
+    # IDs (int16, shape ``(num_tokens, top_k)``) when the underlying kernel
+    # supports replay capture (e.g. the FlashInfer TRT-LLM fused MoE kernels
+    # with ``routing_replay_out``). Default is ``None``; subclasses that
+    # cannot route through this hook simply ignore it.
+    routing_replay_capture_fn: Callable[[torch.Tensor], None] | None = None
+
     @staticmethod
     def _supports_routing_method(
         routing_method: RoutingMethodType,
@@ -980,6 +987,66 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
     @staticmethod
     def is_monolithic() -> bool:
         return True
+
+    def supports_routing_replay_capture(self) -> bool:
+        """Whether ``set_routing_replay_capture_fn`` actually wires up
+        capture. Subclasses backed by a kernel that exposes routed expert
+        IDs (e.g. FlashInfer's ``routing_replay_out``) should override.
+
+        Note for FlashInfer TRT-LLM backends: as of FlashInfer 0.7 only the
+        DeepSeekV3 routing path implements the kernel-side write to
+        ``routing_replay_out`` (see ``trtllm_fused_moe_routing_deepseek.cu``).
+        The Llama4 / common (Renormalize / RenormalizeNaive / SigmoidRenorm
+        / Sigmoid / TopK) and custom routing paths set the pointer but skip
+        the write, so capture would silently observe uninitialized memory.
+        Subclasses must therefore gate this on the active routing method.
+        """
+        return False
+
+    def set_routing_replay_capture_fn(
+        self,
+        capture_fn: Callable[[torch.Tensor], None] | None,
+    ) -> None:
+        """Install a callback that receives the routed expert IDs.
+
+        The callback is invoked with an int16 tensor of shape
+        ``(num_tokens, top_k)`` after each ``apply`` call. ``None`` removes
+        any installed callback.
+        """
+        self.routing_replay_capture_fn = capture_fn
+
+    def _maybe_make_routing_replay_buffer(
+        self,
+        num_tokens: int,
+        device: torch.device,
+    ) -> torch.Tensor | None:
+        """Allocate the int16 ``routing_replay_out`` tensor expected by the
+        FlashInfer TRT-LLM kernels, or return ``None`` if no capture is
+        installed.
+
+        Shape is ``(num_tokens, top_k)``; the kernel only writes rows
+        ``[0, num_tokens)``. A fresh tensor is allocated per call to keep
+        the apply path free of hidden state across CUDA streams.
+        """
+        if self.routing_replay_capture_fn is None:
+            return None
+        return torch.empty(
+            (num_tokens, self.moe_config.experts_per_token),
+            dtype=torch.int16,
+            device=device,
+        )
+
+    def _maybe_dispatch_routing_replay(
+        self,
+        routing_replay_out: torch.Tensor | None,
+        num_tokens: int,
+    ) -> None:
+        """Invoke the installed capture callback with the active rows of
+        the replay tensor. No-op when no buffer was allocated.
+        """
+        if routing_replay_out is None or self.routing_replay_capture_fn is None:
+            return
+        self.routing_replay_capture_fn(routing_replay_out[:num_tokens])
 
     def apply(
         self,
