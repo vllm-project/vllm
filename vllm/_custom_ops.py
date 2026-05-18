@@ -3401,6 +3401,135 @@ def fp8_scaled_mm_cpu(
     )
 
 
+def chunk_gated_delta_rule_cpu(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    initial_state: torch.Tensor,
+    output_final_state: bool,
+    cu_seqlens: torch.Tensor,
+    head_first: bool,
+    use_qk_l2norm_in_kernel: bool,
+    eps: float = 1e-5,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.ops._C.chunk_gated_delta_rule_cpu(
+        query,
+        key,
+        value,
+        g,
+        beta,
+        initial_state,
+        output_final_state,
+        cu_seqlens,
+        head_first,
+        use_qk_l2norm_in_kernel,
+        eps,
+    )
+
+
+def fused_sigmoid_gating_delta_rule_update_cpu(
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    initial_state_source: torch.Tensor,
+    initial_state_indices: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    use_qk_l2norm_in_kernel: bool,
+    softplus_beta: float = 1.0,
+    softplus_threshold: float = 20.0,
+) -> torch.Tensor:
+    return torch.ops._C.fused_sigmoid_gating_delta_rule_update_cpu(
+        A_log,
+        dt_bias,
+        q,
+        k,
+        v,
+        a,
+        b,
+        initial_state_source,
+        initial_state_indices,
+        cu_seqlens,
+        use_qk_l2norm_in_kernel,
+        softplus_beta,
+        softplus_threshold,
+    )
+
+
+def fused_gdn_gating_cpu(
+    A_log: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    dt_bias: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.ops._C.fused_gdn_gating_cpu(
+        A_log,
+        a,
+        b,
+        dt_bias,
+    )
+
+
+def causal_conv1d_weight_pack(
+    weight: torch.Tensor,
+) -> torch.Tensor:
+    return torch.ops._C.causal_conv1d_weight_pack(
+        weight,
+    )
+
+
+def causal_conv1d_fwd_cpu(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    conv_states: torch.Tensor | None,
+    query_start_loc: torch.Tensor | None,
+    cache_indices: torch.Tensor | None,
+    has_initial_state: torch.Tensor | None,
+    silu_activation: bool,
+    is_vnni: bool,
+) -> torch.Tensor:
+    return torch.ops._C.causal_conv1d_fwd_cpu(
+        x,
+        weight,
+        bias,
+        conv_states,
+        query_start_loc,
+        cache_indices,
+        has_initial_state,
+        silu_activation,
+        -1,
+        is_vnni,
+    )
+
+
+def causal_conv1d_update_cpu(
+    x: torch.Tensor,
+    conv_states: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    silu_activation: bool,
+    conv_state_indices: torch.Tensor | None,
+    is_vnni: bool,
+) -> torch.Tensor:
+    return torch.ops._C.causal_conv1d_update_cpu(
+        x,
+        conv_states,
+        weight,
+        bias,
+        silu_activation,
+        None,
+        conv_state_indices,
+        -1,
+        is_vnni,
+    )
+
+
 class CPUDNNLGEMMHandler:
     def __init__(self) -> None:
         self.handler_tensor: torch.Tensor | None = None
