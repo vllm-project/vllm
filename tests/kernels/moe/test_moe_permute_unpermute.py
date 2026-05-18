@@ -225,7 +225,15 @@ def test_moe_permute_reuses_scratch_buffers(dtype: torch.dtype):
     gating_output = torch.randn((n_token, n_expert), device="cuda").to(dtype)
     _, topk_ids, _ = fused_topk(hidden_states, gating_output, topk, False)
 
-    scratch = MoEPermuteScratch()
+    scratch = MoEPermuteScratch(
+        max_num_tokens=n_token,
+        topk=topk,
+        num_experts=n_expert,
+        num_local_experts=n_expert,
+        device=hidden_states.device,
+        hidden_size=n_hidden,
+        hidden_dtype=hidden_states.dtype,
+    )
 
     first = moe_permute(
         hidden_states=hidden_states,

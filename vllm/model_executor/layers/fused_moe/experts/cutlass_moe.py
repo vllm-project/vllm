@@ -296,7 +296,13 @@ class CutlassExpertsFp8Base(mk.FusedMoEExpertsModular):
         self.ab_strides2 = ab_strides2
         self.c_strides1 = c_strides1
         self.c_strides2 = ab_strides1_c_strides2
-        self._permute_scratch = MoEPermuteScratch()
+        self._permute_scratch = MoEPermuteScratch(
+            max_num_tokens=moe_config.max_num_tokens,
+            topk=moe_config.experts_per_token,
+            num_experts=moe_config.num_experts,
+            num_local_experts=moe_config.num_local_experts,
+            device=torch.device(moe_config.device),
+        )
 
     @staticmethod
     def _supports_current_device() -> bool:
@@ -1268,7 +1274,13 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
         self.s_strides1 = s_strides1
         self.s_strides2 = s_strides2
         self.group_size = group_size
-        self._permute_scratch = MoEPermuteScratch()
+        self._permute_scratch = MoEPermuteScratch(
+            max_num_tokens=moe_config.max_num_tokens,
+            topk=moe_config.experts_per_token,
+            num_experts=moe_config.num_experts,
+            num_local_experts=moe_config.num_local_experts,
+            device=torch.device(moe_config.device),
+        )
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:

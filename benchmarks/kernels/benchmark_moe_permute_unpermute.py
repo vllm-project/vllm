@@ -55,7 +55,15 @@ def benchmark_permute(
     topk_weights, topk_ids, token_expert_indices = fused_topk(
         qhidden_states, input_gating, topk, False
     )
-    scratch = MoEPermuteScratch()
+    scratch = MoEPermuteScratch(
+        max_num_tokens=num_tokens,
+        topk=topk,
+        num_experts=num_experts,
+        num_local_experts=num_experts,
+        device=qhidden_states.device,
+        hidden_size=hidden_size,
+        hidden_dtype=qhidden_states.dtype,
+    )
 
     def prepare(i: int):
         input_gating.copy_(gating_output[i])
@@ -126,7 +134,15 @@ def benchmark_unpermute(
     topk_weights, topk_ids, token_expert_indices = fused_topk(
         qhidden_states, input_gating, topk, False
     )
-    scratch = MoEPermuteScratch()
+    scratch = MoEPermuteScratch(
+        max_num_tokens=num_tokens,
+        topk=topk,
+        num_experts=num_experts,
+        num_local_experts=num_experts,
+        device=qhidden_states.device,
+        hidden_size=hidden_size,
+        hidden_dtype=qhidden_states.dtype,
+    )
 
     def prepare():
         (

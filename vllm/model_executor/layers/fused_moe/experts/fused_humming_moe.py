@@ -86,7 +86,15 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
         )
-        self._permute_scratch = MoEPermuteScratch()
+        self._permute_scratch = MoEPermuteScratch(
+            max_num_tokens=moe_config.max_num_tokens,
+            topk=moe_config.experts_per_token,
+            num_experts=moe_config.num_experts,
+            num_local_experts=moe_config.num_local_experts,
+            device=torch.device(moe_config.device),
+            hidden_size=moe_config.hidden_dim,
+            hidden_dtype=moe_config.in_dtype,
+        )
 
     def init_humming_moe(self):
         self.compute_config = {

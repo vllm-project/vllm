@@ -6,64 +6,93 @@ from dataclasses import dataclass, field
 import torch
 
 
-def _may_grow_buffer(
-    buffer: torch.Tensor | None,
-    numel: int,
-    dtype: torch.dtype,
-    device: torch.device,
-) -> tuple[torch.Tensor, bool]:
-    needs_realloc = (
-        buffer is None
-        or buffer.device != device
-        or buffer.dtype != dtype
-        or buffer.numel() < numel
-    )
-    if needs_realloc:
-        return torch.empty((numel,), dtype=dtype, device=device), True
-    return buffer, False
-
-
 @dataclass
 class MoEPermuteScratch:
     # Reused metadata buffers for repeated grouped-MoE permutes.
-    token_expert_indices: torch.Tensor | None = None
-    expert_first_token_offset: torch.Tensor | None = None
-    permuted_idx: torch.Tensor | None = None
-    inv_permuted_idx: torch.Tensor | None = None
-    permuted_hidden_states: torch.Tensor | None = None
-    sort_workspace: torch.Tensor | None = None
-    permuted_experts_id: torch.Tensor | None = None
-    sorted_row_idx: torch.Tensor | None = None
-    topk_ids_int32: torch.Tensor | None = None
-    topk_ids_for_sort: torch.Tensor | None = None
-    _token_expert_indices_initialized: int = field(default=0, init=False)
+    max_num_tokens: int
+    topk: int
+    num_experts: int
+    num_local_experts: int
+    device: torch.device
+    hidden_size: int | None = None
+    hidden_dtype: torch.dtype | None = None
+    token_expert_indices: torch.Tensor = field(init=False)
+    expert_first_token_offset: torch.Tensor = field(init=False)
+    permuted_idx: torch.Tensor = field(init=False)
+    inv_permuted_idx: torch.Tensor = field(init=False)
+    permuted_hidden_states: torch.Tensor | None = field(init=False, default=None)
+    sort_workspace: torch.Tensor = field(init=False)
+    permuted_experts_id: torch.Tensor = field(init=False)
+    sorted_row_idx: torch.Tensor = field(init=False)
+    topk_ids_int32: torch.Tensor = field(init=False)
+    topk_ids_for_sort: torch.Tensor = field(init=False)
+    max_expanded_rows: int = field(init=False)
 
-    def _prepare_token_expert_indices(
-        self, n_token: int, topk: int, device: torch.device
-    ) -> torch.Tensor:
-        numel = n_token * topk
-        self.token_expert_indices, reallocated = _may_grow_buffer(
-            self.token_expert_indices, numel, torch.int32, device
+    def __post_init__(self) -> None:
+        assert self.max_num_tokens > 0
+        assert self.topk > 0
+        assert self.num_experts > 0
+        assert self.num_local_experts > 0
+        if self.hidden_size is None:
+            assert self.hidden_dtype is None
+        else:
+            assert self.hidden_dtype is not None
+
+        self.max_expanded_rows = self.max_num_tokens * self.topk
+        self.token_expert_indices = torch.arange(
+            self.max_expanded_rows, dtype=torch.int32, device=self.device
         )
-        if reallocated:
-            self._token_expert_indices_initialized = 0
-        if self._token_expert_indices_initialized < numel:
-            torch.arange(
-                numel,
-                dtype=torch.int32,
-                device=device,
-                out=self.token_expert_indices[:numel],
+        self.expert_first_token_offset = torch.empty(
+            self.num_local_experts + 1, dtype=torch.int64, device=self.device
+        )
+        self.permuted_idx = torch.empty(
+            self.max_expanded_rows, dtype=torch.int32, device=self.device
+        )
+        self.inv_permuted_idx = torch.empty(
+            self.max_expanded_rows, dtype=torch.int32, device=self.device
+        )
+        if self.hidden_size is not None:
+            hidden_numel = self.max_expanded_rows * self.hidden_size
+            self.permuted_hidden_states = torch.empty(
+                hidden_numel, dtype=self.hidden_dtype, device=self.device
             )
-            self._token_expert_indices_initialized = numel
-        return self.token_expert_indices[:numel].view(n_token, topk)
+        self.permuted_experts_id = torch.empty(
+            self.max_expanded_rows, dtype=torch.int32, device=self.device
+        )
+        self.sorted_row_idx = torch.empty(
+            self.max_expanded_rows, dtype=torch.int32, device=self.device
+        )
+        self.topk_ids_int32 = torch.empty(
+            self.max_expanded_rows, dtype=torch.int32, device=self.device
+        )
+        self.topk_ids_for_sort = torch.empty(
+            self.max_expanded_rows, dtype=torch.int32, device=self.device
+        )
+        sorter_size = torch.ops._moe_C.moe_permute_sort_workspace_size(
+            self.max_expanded_rows, self.num_experts
+        )
+        self.sort_workspace = torch.empty(
+            sorter_size, dtype=torch.int8, device=self.device
+        )
+
+    def validate(self, hidden_states: torch.Tensor, topk_ids: torch.Tensor) -> None:
+        n_token, n_hidden = hidden_states.shape
+        assert hidden_states.device == self.device
+        assert topk_ids.device == self.device
+        assert n_token <= self.max_num_tokens
+        assert topk_ids.size(1) == self.topk
+        assert topk_ids.size(0) == n_token
+        if self.hidden_size is not None:
+            assert n_hidden == self.hidden_size
+            assert hidden_states.dtype == self.hidden_dtype
+
+    def token_expert_indices_view(self, n_token: int) -> torch.Tensor:
+        return self.token_expert_indices[: n_token * self.topk].view(n_token, self.topk)
 
     def prepare_topk_ids(self, topk_ids: torch.Tensor) -> torch.Tensor:
         if topk_ids.dtype == torch.int32:
             return topk_ids
         numel = topk_ids.numel()
-        self.topk_ids_int32, _ = _may_grow_buffer(
-            self.topk_ids_int32, numel, torch.int32, topk_ids.device
-        )
         topk_ids_int32 = self.topk_ids_int32[:numel].view_as(topk_ids)
         topk_ids_int32.copy_(topk_ids)
         return topk_ids_int32
@@ -118,13 +147,12 @@ def moe_permute(
                 device=hidden_states.device,
             )
         else:
-            hidden_numel = permuted_row_size * n_hidden
-            scratch.permuted_hidden_states, _ = _may_grow_buffer(
-                scratch.permuted_hidden_states,
-                hidden_numel,
-                hidden_states.dtype,
-                hidden_states.device,
+            scratch.validate(hidden_states, topk_ids)
+            assert (
+                scratch.hidden_size is not None
+                and scratch.permuted_hidden_states is not None
             )
+            hidden_numel = permuted_row_size * n_hidden
             permuted_hidden_states = scratch.permuted_hidden_states[:hidden_numel].view(
                 permuted_row_size, n_hidden
             )
@@ -165,61 +193,24 @@ def moe_permute(
             permuted_idx,
         )
     else:
-        token_expert_indices = scratch._prepare_token_expert_indices(
-            n_token, topk, hidden_states.device
-        )
-        scratch.expert_first_token_offset, _ = _may_grow_buffer(
-            scratch.expert_first_token_offset,
-            n_local_expert + 1,
-            torch.int64,
-            hidden_states.device,
-        )
-        expert_first_token_offset = scratch.expert_first_token_offset[
-            : n_local_expert + 1
-        ]
-        scratch.permuted_idx, _ = _may_grow_buffer(
-            scratch.permuted_idx, permuted_row_size, torch.int32, hidden_states.device
-        )
+        scratch.validate(hidden_states, topk_ids)
+        assert n_expert == scratch.num_experts
+        assert n_local_expert == scratch.num_local_experts
+        token_expert_indices = scratch.token_expert_indices_view(n_token)
+        expert_first_token_offset = scratch.expert_first_token_offset
         permuted_idx = scratch.permuted_idx[:permuted_row_size]
         permuted_idx.fill_(permuted_row_size)
-        scratch.inv_permuted_idx, _ = _may_grow_buffer(
-            scratch.inv_permuted_idx,
-            permuted_row_size,
-            torch.int32,
-            hidden_states.device,
-        )
         inv_permuted_idx = scratch.inv_permuted_idx[:permuted_row_size].view(
             n_token, topk
-        )
-        scratch.permuted_experts_id, _ = _may_grow_buffer(
-            scratch.permuted_experts_id,
-            permuted_row_size,
-            torch.int32,
-            hidden_states.device,
         )
         permuted_experts_id = scratch.permuted_experts_id[:permuted_row_size].view(
             n_token, topk
         )
-        scratch.sorted_row_idx, _ = _may_grow_buffer(
-            scratch.sorted_row_idx, permuted_row_size, torch.int32, hidden_states.device
-        )
         sorted_row_idx = scratch.sorted_row_idx[:permuted_row_size].view(n_token, topk)
-        scratch.topk_ids_for_sort, _ = _may_grow_buffer(
-            scratch.topk_ids_for_sort,
-            permuted_row_size,
-            torch.int32,
-            hidden_states.device,
-        )
         topk_ids_for_sort = scratch.topk_ids_for_sort[:permuted_row_size].view(
             n_token, topk
         )
         topk_ids_int32 = scratch.prepare_topk_ids(topk_ids)
-        sorter_size = torch.ops._moe_C.moe_permute_sort_workspace_size(
-            permuted_row_size, n_expert
-        )
-        scratch.sort_workspace, _ = _may_grow_buffer(
-            scratch.sort_workspace, sorter_size, torch.int8, hidden_states.device
-        )
         torch.ops._moe_C.moe_permute_with_scratch(
             hidden_states,
             topk_ids_int32,
@@ -232,7 +223,7 @@ def moe_permute(
             expert_first_token_offset,
             inv_permuted_idx,
             permuted_idx,
-            scratch.sort_workspace[:sorter_size],
+            scratch.sort_workspace,
             permuted_experts_id,
             sorted_row_idx,
             topk_ids_for_sort,
