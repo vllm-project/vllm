@@ -1261,10 +1261,12 @@ class DeepseekV4DecoderLayer(nn.Module):
         x: torch.Tensor,
         positions: torch.Tensor,
         input_ids: torch.Tensor | None,
-        post_mix: torch.Tensor | None,
-        res_mix: torch.Tensor | None,
-        residual: torch.Tensor | None,
-    ) -> torch.Tensor:
+        post_mix: torch.Tensor | None = None,
+        res_mix: torch.Tensor | None = None,
+        residual: torch.Tensor | None = None,
+    ) -> tuple[
+        torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None
+    ]:
         residual = x
         x, post, comb = self.hc_pre(
             x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
@@ -1277,7 +1279,8 @@ class DeepseekV4DecoderLayer(nn.Module):
         x, post, comb = self.hc_pre(
             x, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base
         )
-        x = self.ffn_norm(x)
+        # ffn_norm is now folded into self.ffn.norm_gate; ffn() takes
+        # the pre-norm activation directly.
         x = self.ffn(x, input_ids)
         x = self.hc_post(x, residual, post, comb)
         return x, None, None, None
@@ -1287,10 +1290,12 @@ class DeepseekV4DecoderLayer(nn.Module):
         x: torch.Tensor,
         positions: torch.Tensor,
         input_ids: torch.Tensor | None,
-        post_mix: torch.Tensor | None,
-        res_mix: torch.Tensor | None,
-        residual: torch.Tensor | None,
-    ) -> torch.Tensor:
+        post_mix: torch.Tensor | None = None,
+        res_mix: torch.Tensor | None = None,
+        residual: torch.Tensor | None = None,
+    ) -> tuple[
+        torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None
+    ]:
         if current_platform.is_rocm():
             return self._forward_rocm(
                 x, positions, input_ids, post_mix, res_mix, residual

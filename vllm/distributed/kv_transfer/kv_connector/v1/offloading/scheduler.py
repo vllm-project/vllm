@@ -710,7 +710,6 @@ class OffloadingConnectorScheduler:
 
                     offloaded_block_idx = start_block_idx + idx
                     gpu_block_idx = offloaded_block_idx * block_size_factor
-                    num_group_blocks += block_size_factor
                     for i in range(block_size_factor):
                         block_id = block_ids[gpu_block_idx + i]
                         if block_id == 0:
@@ -720,6 +719,7 @@ class OffloadingConnectorScheduler:
                         elif start_gpu_block_idx is None:
                             start_gpu_block_idx = gpu_block_idx + i
                         src_block_ids.append(block_id)
+                        num_group_blocks += 1
                         if is_sliding_window:
                             sliding_window_block_ids.append(block_id)
                         else:
@@ -781,6 +781,14 @@ class OffloadingConnectorScheduler:
             any_jid = next(iter(req_status.transfer_jobs))
             assert self._jobs[any_jid].is_store
             self._current_batch_jobs_to_flush.update(req_status.transfer_jobs)
+
+        # If all tracked requests are finished, flush all pending jobs
+        # (both store and load) - there might not be a future scheduler
+        # step to trigger their completion.
+        if self._req_status and all(
+            rs.req.is_finished() for rs in self._req_status.values()
+        ):
+            self._current_batch_jobs_to_flush.update(self._jobs.keys())
 
         meta = OffloadingConnectorMetadata(
             load_jobs=self._current_batch_load_jobs,
