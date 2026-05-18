@@ -656,14 +656,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         req_index = self.req_states.req_id_to_index.get(req_id)
         if req_index is None:
             return False
-        if not self.req_states.remove_request(req_id):
-            return False
+        # Clear all index-keyed auxiliary state BEFORE freeing the index back
+        # to req_states, so a subsequent add_request cannot reuse this index
+        # while we are still cleaning up.
         self.model_state.remove_request(req_index)
         if self.encoder_cache is not None:
             self.encoder_cache.remove_request(req_id)
         if self.prompt_logprobs_worker is not None:
             self.prompt_logprobs_worker.remove_request(req_id)
         self.lora_state.remove_request(req_id)
+        self.req_states.remove_request(req_id)
         return True
 
     def finish_requests(self, scheduler_output: SchedulerOutput) -> None:
