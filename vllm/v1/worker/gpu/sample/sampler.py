@@ -224,7 +224,7 @@ class Sampler:
 
         # Sample the next token.
         if use_flashinfer:
-            sampled = flashinfer_sample(processed_logits, top_k, top_p)
+            sampled = flashinfer_sample(processed_logits, top_k, top_p).to(torch.int64)
         else:
             sampled = gumbel_sample(
                 processed_logits,
