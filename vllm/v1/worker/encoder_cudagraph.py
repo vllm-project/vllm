@@ -14,10 +14,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.models.interfaces import (
-    SupportsEncoderCudaGraph,
-)
-from vllm.model_executor.models.utils import scatter_output_slices
+from vllm.model_executor.models.interfaces import SupportsEncoderCudaGraph
 from vllm.model_executor.models.vision import get_load_balance_assignment
 from vllm.v1.worker.encoder_cudagraph_defs import (
     EncoderCudaGraphConfig,
@@ -257,6 +254,22 @@ class EncoderCudaGraphManager:
             for t in self.model.get_encoder_cudagraph_per_item_output_tokens(mm_kwargs)
         ]
 
+    @staticmethod
+    def _scatter_output_slices(
+        output: torch.Tensor,
+        indices: list[int],
+        per_item_out_tokens: list[int],
+        dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
+        clone: bool = False,
+    ) -> None:
+        """Slice a concatenated output tensor and scatter into dest by index."""
+        offset = 0
+        for idx in indices:
+            n_tok = per_item_out_tokens[idx]
+            sliced = output[offset : offset + n_tok]
+            dest[idx] = sliced.clone() if clone else sliced
+            offset += n_tok
+
     def _run_budget_graph(
         self,
         mm_kwargs: dict[str, Any],
@@ -401,7 +414,7 @@ class EncoderCudaGraphManager:
                 self.graph_misses += len(batch_orig_indices)
                 with torch.inference_mode():
                     raw = self.model.encoder_eager_forward(batch_mm_kwargs)
-                scatter_output_slices(
+                self._scatter_output_slices(
                     raw,
                     batch_orig_indices,
                     per_item_out_tokens,
@@ -427,13 +440,12 @@ class EncoderCudaGraphManager:
                     batch_mm_kwargs, token_budget, replay.buffers
                 )
                 assert output is not None
-                self.model.postprocess_encoder_output(
+                self._scatter_output_slices(
                     output,
                     batch_orig_indices,
                     per_item_out_tokens,
                     outputs_by_orig_idx,
                     clone=True,
-                    batch_mm_kwargs=batch_mm_kwargs,
                 )
 
         # Return in original batch order (caller maps outputs to token positions)
@@ -561,7 +573,7 @@ class EncoderCudaGraphManager:
             count = images_per_rank[rank]
             if count > 0:
                 rank_items = image_rank_assignment[current_idx : current_idx + count]
-                scatter_output_slices(
+                self._scatter_output_slices(
                     rank_outputs[rank],
                     rank_items,
                     per_item_out_tokens,
