@@ -921,6 +921,13 @@ class CompilationSettings(BaseSettings):
             "https://github.com/pytorch/pytorch/issues/174502"
         ),
     )
+    use_breakable_cudagraph: bool = Field(
+        default=False,
+        description=(
+            "Experimental: use breakable cudagraph capture/replay that does "
+            "not rely on torch.compile."
+        ),
+    )
     enable_inductor_max_autotune: bool = Field(
         default=True,
         description=(
@@ -1861,6 +1868,34 @@ class ConnectorSettings(BaseSettings):
         default=480,
         description=(
             "Timeout (in seconds) for MooncakeConnector in PD disaggregated setup."
+        ),
+    )
+    mooncake_store_tier_log: bool = Field(
+        default=False,
+        description=(
+            "Log per-batch memory/disk tier breakdown on external GETs in "
+            "the Mooncake store connector."
+        ),
+    )
+    mooncake_disk_staging_usable_ratio: float = Field(
+        default=0.9,
+        description=(
+            "Fraction of the owner's DirectIO staging buffer to fill per "
+            "GET batch in the Mooncake store connector."
+        ),
+    )
+    preferred_segment: str | None = Field(
+        default=None,
+        alias="MOONCAKE_PREFERRED_SEGMENT",
+        description=(
+            'Pin this rank to a specific Mooncake owner segment ("host:port").'
+        ),
+    )
+    requester_local_hostname: str | None = Field(
+        default=None,
+        alias="MOONCAKE_REQUESTER_LOCAL_HOSTNAME",
+        description=(
+            "Override the hostname the rank registers as a Mooncake requester."
         ),
     )
     moriio_connector_read_mode: bool = Field(
