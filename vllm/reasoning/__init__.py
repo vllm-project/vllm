@@ -53,8 +53,8 @@ _REASONING_PARSERS_TO_REGISTER = {
         "Gemma4ReasoningParser",
     ),
     "glm45": (
-        "deepseek_v3_reasoning_parser",
-        "DeepSeekV3ReasoningWithThinkingParser",
+        "glm_reasoning_parser",
+        "GLMReasoningParser",
     ),
     "openai_gptoss": (
         "gptoss_reasoning_parser",
@@ -65,8 +65,8 @@ _REASONING_PARSERS_TO_REGISTER = {
         "GraniteReasoningParser",
     ),
     "holo2": (
-        "deepseek_v3_reasoning_parser",
-        "DeepSeekV3ReasoningWithThinkingParser",
+        "glm_reasoning_parser",
+        "GLMReasoningParser",
     ),
     "hunyuan_a13b": (
         "hunyuan_a13b_reasoning_parser",
