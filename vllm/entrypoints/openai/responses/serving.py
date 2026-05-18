@@ -467,13 +467,8 @@ class OpenAIServingResponses(OpenAIServing):
                     context = ParsableContext(
                         response_messages=messages,
                         tokenizer=tokenizer,
-                        reasoning_parser_cls=self.parser.reasoning_parser_cls
-                        if self.parser
-                        else None,
+                        parser_cls=self.parser,
                         request=request,
-                        tool_parser_cls=self.parser.tool_parser_cls
-                        if self.parser
-                        else None,
                         available_tools=available_tools,
                         chat_template=self.chat_template,
                         chat_template_content_format=self.chat_template_content_format,
@@ -715,7 +710,7 @@ class OpenAIServingResponses(OpenAIServing):
                     context.request,
                     context.parser.response_messages,
                     context.tool_dicts,
-                    context.tool_parser_cls,
+                    context.parser_cls.tool_parser_cls if context.parser_cls else None,
                     context.chat_template,
                     context.chat_template_content_format,
                 )
