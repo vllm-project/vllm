@@ -442,33 +442,38 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         # downstream reads q on default). Indexer/compressor go on aux for
         # overlap with default's GEMM + cache write.
         if self.indexer is not None:
-            aux_stream = (
-                self.aux_stream_list[0] if self.aux_stream_list is not None else None
-            )
+            aux_streams = self.aux_stream_list
             indexer = self.indexer
             # Local ref so the closure keeps a non-None type for mypy.
             assert self.compressor is not None
             compressor = self.compressor
 
-            def wq_b_kv_insert_and_compress() -> torch.Tensor:
+            def wq_b_kv_insert() -> torch.Tensor:
                 q = self.wq_b(qr).view(-1, self.n_local_heads, self.head_dim)
                 self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
-                compressor(kv_score, positions, self.rotary_emb)
                 return q
 
-            q, _ = maybe_execute_in_parallel(
-                wq_b_kv_insert_and_compress,
-                lambda: indexer(
-                    hidden_states,
-                    qr,
-                    indexer_kv_score,
-                    indexer_weights,
-                    positions,
-                    self.indexer_rotary_emb,
-                ),
+            # 3-way overlap (matches TRT-LLM PR #14142 Level 1): default runs
+            # wq_b+kv_insert; slot [0] runs the full indexer; slot [1] runs the
+            # MLA compressor. Slot [2] is reserved for the indexer's inner
+            # overlap. ROCm (aux_streams is None) falls back to sequential.
+            q, _ = execute_in_parallel(
+                wq_b_kv_insert,
+                [
+                    lambda: indexer(
+                        hidden_states,
+                        qr,
+                        indexer_kv_score,
+                        indexer_weights,
+                        positions,
+                        self.indexer_rotary_emb,
+                    ),
+                    lambda: compressor(kv_score, positions, self.rotary_emb),
+                ],
                 self.ln_events[0],
-                self.ln_events[1],
-                aux_stream,
+                [self.ln_events[1], self.ln_events[2]],
+                [aux_streams[0], aux_streams[1]] if aux_streams is not None else None,
+                enable=aux_streams is not None,
             )
         elif self.compressor is not None:
             # wq_b + kv_insert on default, compressor on aux.
