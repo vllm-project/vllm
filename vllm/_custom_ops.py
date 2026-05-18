@@ -1761,6 +1761,7 @@ def scaled_fp4_quant(
 
     use_8x4_sf_layout = True if "trtllm" in backend and m <= 32 else False  # noqa: SIM210
     if use_8x4_sf_layout and padded_n is not None and padded_n != n:
+        # TODO: support this case
         raise ValueError("padded_n is not supported with TRTLLM 8x4 scale layout.")
     if use_8x4_sf_layout:
         output, output_scale = flashinfer_quant_nvfp4_8x4_sf_layout(
