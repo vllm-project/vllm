@@ -1268,6 +1268,12 @@ class FusedMoEConfig:
     # kernel is free to use inplace or not.
     disable_inplace: bool = True
 
+    # When True, the final allreduce in _maybe_reduce_final_output is
+    # skipped for decode batches (≤128 tokens). The model is expected
+    # to handle the allreduce later, typically fused with the next
+    # layer's input layernorm via trtllm_allreduce_fusion.
+    defer_allreduce: bool = False
+
     def __post_init__(self):
         if self.dp_size > 1:
             logger.debug_once(
