@@ -49,6 +49,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         )
         self.is_fp8 = False
         self.is_mxfp4 = False
+        self.is_block_fp8 = False
 
     @property
     def expects_unquantized_inputs(self) -> bool:
