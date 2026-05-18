@@ -277,7 +277,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
     ) -> bool:
         """
         The FlashInfer TRTLLM NvFp4 kernel expects bfloat16 router_logits by default.
-        DeepSeekV3 routing supports float32 router_logits (converted internally).
+        DeepSeekV3 routing also supports float32 router_logits for compatibility.
         Simulated routing generates synthetic decisions and is agnostic to dtype.
         """
         if router_logits_dtype == torch.float32:
@@ -322,12 +322,12 @@ class TrtLlmNvFp4ExpertsMonolithic(
             and self.routing_method_type != RoutingMethodType.Llama4
         )
 
-        # Prepare router logits for kernel format.
-        router_logits = (
-            router_logits.to(torch.float32)
-            if self.routing_method_type == RoutingMethodType.DeepSeekV3
-            else router_logits
-        )
+        # FlashInfer's NVFP4 path accepts the BF16 logits produced by the
+        # router GEMM.  Keep FP32 logits working for callers that still request
+        # them explicitly, but avoid converting the Kimi latency path back to
+        # FP32.
+        if router_logits.dtype not in (torch.bfloat16, torch.float32):
+            router_logits = router_logits.to(torch.bfloat16)
 
         # Currently FI requires bfloat16 routing bias.
         # https://github.com/flashinfer-ai/flashinfer/issues/2909

@@ -2279,7 +2279,7 @@ class KimiK25Nvfp4RoutedExperts(nn.Module):
             moe_parallel_config=self.moe_parallel_config,
             in_dtype=vllm_config.model_config.dtype,
             moe_backend=vllm_config.kernel_config.moe_backend,
-            router_logits_dtype=torch.float32,
+            router_logits_dtype=torch.bfloat16,
             max_num_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
             has_bias=False,
             is_act_and_mul=True,
@@ -2541,7 +2541,7 @@ class KimiK25Nvfp4RoutedExperts(nn.Module):
         from flashinfer.fused_moe.core import get_trtllm_moe_sm100_module
 
         return get_trtllm_moe_sm100_module().trtllm_fp4_block_scale_moe(
-            router_logits.to(torch.float32),
+            router_logits,
             None,
             expert_weights,
             routing_bias,
@@ -2669,7 +2669,7 @@ class KimiK25Nvfp4MoE(nn.Module):
         self.gate = GateLinear(
             config.hidden_size,
             config.n_routed_experts,
-            out_dtype=torch.float32,
+            out_dtype=torch.bfloat16,
             prefix=f"{prefix}.gate",
         )
         if getattr(config, "topk_method", None) == "noaux_tc":
@@ -2713,11 +2713,8 @@ class KimiK25Nvfp4MoE(nn.Module):
         )
 
     def _router_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        return torch.mm(
-            hidden_states,
-            self.gate.weight.t(),
-            out_dtype=torch.float32,
-        )
+        router_logits, _ = self.gate(hidden_states)
+        return router_logits
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return torch.ops.vllm.kimi_k25_nvfp4_moe(
