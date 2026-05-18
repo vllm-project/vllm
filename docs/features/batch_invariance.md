@@ -24,13 +24,7 @@ Batch invariance currently requires NVIDIA GPUs with compute capability 9.0 or h
 
 ### Intel XPU (Experimental)
 
-Partial batch invariance is supported on Intel XPU devices with Triton support.
-The following ops are overridden: `bmm`, `log_softmax`, `softmax`, `mean`.
-Note that `mm`/`matmul`/`linear` overrides are not yet enabled on XPU due to
-insufficient performance of the Triton persistent matmul kernel on Intel GPUs
-(~40x slower than native oneMKL). Native `torch.mm` on XPU is not
-batch-invariant at larger matrix sizes — this is a known gap under active
-investigation.
+Batch invariance is supported on Intel XPU devices with Triton support.
 
 ## Enabling Batch Invariance
 
