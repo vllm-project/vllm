@@ -80,8 +80,8 @@ RERANK_CONFIGS = [
             "512",
             "--trust-remote-code",
         ],
-        # Tokenizer snapshots for this model differ by one token on this
-        # query boundary. Accept both cached and refreshed snapshots.
+        # This model has produced both prompt-token totals in CI/local cache;
+        # keep truncation checks exact while tolerating the boundary delta.
         without_truncated_prompt_tokens=(285, 286),
         with_max_tokens_per_query_prompt_tokens=(155, 156),
         with_max_tokens_per_doc_prompt_tokens=155,
