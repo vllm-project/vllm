@@ -621,19 +621,20 @@ class TritonAttentionImpl(AttentionImpl):
 
         mm_prefix_range_tensor = attn_metadata.mm_prefix_range_tensor
 
-        # When Q is FP8, the kernel does not support a separate q_descale
-        # parameter and assumes the query is already in the correct range.
-        # We fold q_scale into softmax_scale unconditionally.  Additionally,
-        # for the per-tensor FP8 path, _cast_kv_tile keeps K/V in FP8 for
-        # FP8 MMA and skips k_scale/v_scale — we fold k_scale into
-        # softmax_scale and v_scale into output_scale (FlashInfer strategy).
+        # When Q is FP8 (quantized via QuantFP8 with a calibrated q_scale
+        # loaded from the checkpoint), the Triton kernel has no q_descale
+        # parameter — it performs FP8 MMA directly on Q.  We fold q_scale
+        # into softmax_scale so the dot-product result is correctly scaled.
         #
-        # NOTE: softmax_scale is a host-side scalar baked into the kernel
-        # launch.  For static quantization (scales loaded from disk), this
-        # is perfectly safe with CUDA Graphs since the value never changes.
-        # For dynamic calibration (calculate_kv_scales=True), scales
-        # stabilize during warmup before graph capture, matching
-        # FlashInfer's existing approach (bmm1_scale/bmm2_scale).
+        # For the per-tensor FP8 KV cache path, _cast_kv_tile also skips
+        # k_scale/v_scale when Q is FP8 (keeps K/V in FP8 for FP8 MMA).
+        # We fold k_scale into softmax_scale and handle v_scale via
+        # output_scale (FP8 output) or post-kernel mul (bf16 output).
+        # This matches FlashInfer's bmm1_scale/bmm2_scale strategy.
+        #
+        # These scales are static (loaded from disk or set once during
+        # warmup), so folding into a host-side scalar is safe with CUDA
+        # Graphs — the value is constant across all replays.
         is_quantized_per_tensor = (
             is_quantized_kv_cache(self.kv_cache_dtype)
             and not self._is_per_token_head_quant
