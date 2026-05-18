@@ -113,9 +113,7 @@ def _fp8_paged_mqa_logits_kernel(
         block_table_ptr + batch * block_table_stride_b + logical_block
     )
     block_base = kv_cache_ptr + physical_block.to(tl.int64) * KV_CACHE_STRIDE_B
-    scale_base = (block_base + KV_BLOCK_SIZE * HEAD_DIM).to(
-        tl.pointer_type(tl.float32)
-    )
+    scale_base = (block_base + KV_BLOCK_SIZE * HEAD_DIM).to(tl.pointer_type(tl.float32))
 
     h = tl.arange(0, NUM_HEADS)
     d = tl.arange(0, HEAD_DIM)
@@ -233,9 +231,7 @@ def _fp4_paged_mqa_logits_kernel(
         other=0,
     )
     block_base = kv_cache_ptr + physical_block.to(tl.int64) * KV_CACHE_STRIDE_B
-    scale_base = (block_base + KV_BLOCK_SIZE * value_dim).to(
-        tl.pointer_type(tl.int32)
-    )
+    scale_base = (block_base + KV_BLOCK_SIZE * value_dim).to(tl.pointer_type(tl.int32))
 
     q_packed = tl.load(
         q_ptr
@@ -296,7 +292,6 @@ def rocm_get_paged_mqa_logits_metadata(
     context_lens: torch.Tensor,
     block_size: int,
     num_sms: int,
-    indices: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Return a DeepGEMM-compatible metadata tensor for ROCm.
 
@@ -305,7 +300,7 @@ def rocm_get_paged_mqa_logits_metadata(
     same ``[num_sms + 1, 2]`` int32 shape keeps callers compatible with
     DeepGEMM's API and shape checks.
     """
-    del block_size, indices
+    del block_size
     return torch.empty(
         (int(num_sms) + 1, 2), dtype=torch.int32, device=context_lens.device
     )
@@ -548,10 +543,9 @@ def rocm_fp8_fp4_paged_mqa_logits(
     max_context_len: int,
     clean_logits: bool = False,
     logits_dtype: torch.dtype = torch.float32,
-    indices: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Compute DeepGEMM-compatible paged MQA logits on ROCm."""
-    del schedule_metadata, indices
+    del schedule_metadata
 
     q_values, q_scales = q
     is_fp4 = q_scales is not None

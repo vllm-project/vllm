@@ -83,9 +83,7 @@ def _deepgemm_paged_mqa_cases() -> list[PagedMQACase]:
 
 
 DEEPGEMM_PAGED_MQA_CASES = _deepgemm_paged_mqa_cases()
-FULL_DEEPGEMM_SHAPES = os.getenv(
-    "VLLM_ROCM_PAGED_MQA_FULL_DEEPGEMM_SHAPES", "0"
-) == "1"
+FULL_DEEPGEMM_SHAPES = os.getenv("VLLM_ROCM_PAGED_MQA_FULL_DEEPGEMM_SHAPES", "0") == "1"
 
 
 def _scaled_case_dims(case: PagedMQACase) -> tuple[int, int, int]:
@@ -272,11 +270,14 @@ def test_rocm_fp4_mqa_logits_matches_reference() -> None:
     seq_len_kv = 19
     num_heads = 8
     head_dim = 128
-    q = torch.randn(
-        (seq_len, num_heads, head_dim),
-        device=device,
-        dtype=torch.bfloat16,
-    ) * 0.125
+    q = (
+        torch.randn(
+            (seq_len, num_heads, head_dim),
+            device=device,
+            dtype=torch.bfloat16,
+        )
+        * 0.125
+    )
     k = torch.randn((seq_len_kv, head_dim), device=device, dtype=torch.bfloat16)
     k = k * 0.125
     weights = torch.randn((seq_len, num_heads), device=device, dtype=torch.float32)
@@ -407,13 +408,10 @@ def test_rocm_fp8_fp4_paged_mqa_logits_deepgemm_cases(case: PagedMQACase) -> Non
             device=device,
             dtype=torch.int32,
         )
-        indices = torch.arange(raw_batch_size, device=device, dtype=torch.int32)
-        indices = indices.repeat_interleave(tokens_per_seq)
         batch_size = int(tokens_per_seq.sum().item())
         next_n = 1
     else:
         tokens_per_seq = None
-        indices = None
         batch_size = raw_batch_size
         next_n = raw_next_n
 
@@ -447,9 +445,9 @@ def test_rocm_fp8_fp4_paged_mqa_logits_deepgemm_cases(case: PagedMQACase) -> Non
     else:
         max_ctx_len_per_seq = context_lens
 
-    num_blocks_per_query = torch.ceil(
-        max_ctx_len_per_seq.float() / case.block_kv
-    ).to(torch.int32)
+    num_blocks_per_query = torch.ceil(max_ctx_len_per_seq.float() / case.block_kv).to(
+        torch.int32
+    )
     total_used_blocks = int(num_blocks_per_query.sum().item())
     num_total_blocks = total_used_blocks + 8
     kv_cache = torch.randn(
@@ -499,8 +497,8 @@ def test_rocm_fp8_fp4_paged_mqa_logits_deepgemm_cases(case: PagedMQACase) -> Non
             ),
             q_scales_u8.view(torch.int32).squeeze(-1),
         )
-        q_simulated = _dequantize_mxfp4(q_packed, q_scales_u8).view_as(q).to(
-            torch.bfloat16
+        q_simulated = (
+            _dequantize_mxfp4(q_packed, q_scales_u8).view_as(q).to(torch.bfloat16)
         )
         kv_in, kv_simulated = _kv_cache_cast_to_fp4(kv_cache)
     else:
@@ -512,7 +510,6 @@ def test_rocm_fp8_fp4_paged_mqa_logits_deepgemm_cases(case: PagedMQACase) -> Non
         context_lens_nextn,
         case.block_kv,
         get_num_sms(),
-        indices=indices,
     )
     assert schedule_metadata.shape == (get_num_sms() + 1, 2)
     assert schedule_metadata.dtype == torch.int32
@@ -527,7 +524,6 @@ def test_rocm_fp8_fp4_paged_mqa_logits_deepgemm_cases(case: PagedMQACase) -> Non
         max_model_len,
         clean_logits=False,
         logits_dtype=case.logits_dtype,
-        indices=indices,
     )
     assert logits.dtype == case.logits_dtype
 

@@ -403,7 +403,6 @@ def get_paged_mqa_logits_metadata(
     context_lens: torch.Tensor,
     block_size: int,
     num_sms: int,
-    indices: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Build scheduling metadata for paged MQA logits.
 
@@ -412,8 +411,6 @@ def get_paged_mqa_logits_metadata(
             effective context length per batch element or per decoded token.
         block_size: KV-cache block size in tokens (e.g., 64).
         num_sms: Number of SMs/CUs available.
-        indices: Optional varlen token-to-sequence indices for DeepGEMM SM100
-            style scheduling. ROCm accepts this for API compatibility.
 
     Returns:
         Backend-specific tensor consumed by `fp8_fp4_paged_mqa_logits` to
@@ -428,17 +425,12 @@ def get_paged_mqa_logits_metadata(
             context_lens,
             block_size,
             num_sms,
-            indices=indices,
         )
 
     _lazy_init()
     if _get_paged_mqa_logits_metadata_impl is None:
         return _missing()
-    if indices is None:
-        return _get_paged_mqa_logits_metadata_impl(context_lens, block_size, num_sms)
-    return _get_paged_mqa_logits_metadata_impl(
-        context_lens, block_size, num_sms, indices=indices
-    )
+    return _get_paged_mqa_logits_metadata_impl(context_lens, block_size, num_sms)
 
 
 def fp8_fp4_paged_mqa_logits(
@@ -451,7 +443,6 @@ def fp8_fp4_paged_mqa_logits(
     max_model_len: int,
     clean_logits: bool,
     logits_dtype: torch.dtype = torch.float32,
-    indices: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Compute MQA logits using a paged KV-cache.
 
@@ -478,7 +469,6 @@ def fp8_fp4_paged_mqa_logits(
         max_model_len: Maximum sequence length used to size the logits output.
         clean_logits: Whether to clean the unfilled logits into `-inf`.
         logits_dtype: Output dtype, matching DeepGEMM's float32/bfloat16 API.
-        indices: Optional varlen token-to-sequence indices.
 
     Returns:
         Logits tensor of shape [B * next_n, max_model_len], dtype
@@ -499,7 +489,6 @@ def fp8_fp4_paged_mqa_logits(
             max_model_len,
             clean_logits=clean_logits,
             logits_dtype=logits_dtype,
-            indices=indices,
         )
 
     _lazy_init()
@@ -508,8 +497,6 @@ def fp8_fp4_paged_mqa_logits(
     kwargs: dict[str, Any] = {"clean_logits": clean_logits}
     if logits_dtype is not torch.float32:
         kwargs["logits_dtype"] = logits_dtype
-    if indices is not None:
-        kwargs["indices"] = indices
     return _fp8_fp4_paged_mqa_logits_impl(
         q,
         kv_cache,
