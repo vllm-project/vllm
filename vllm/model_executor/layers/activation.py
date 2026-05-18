@@ -169,7 +169,9 @@ class SiluAndMulWithClamp(CustomOp):
     def __init__(self, swiglu_limit: float, *, compile_native: bool = True):
         super().__init__(compile_native=compile_native)
         self.swiglu_limit = float(swiglu_limit)
-        if current_platform.is_cuda_alike() or current_platform.is_xpu():
+        if current_platform.is_rocm():
+            self._forward_method = self.forward_native
+        elif current_platform.is_cuda_alike() or current_platform.is_xpu():
             self.op = torch.ops._C.silu_and_mul_with_clamp
         elif current_platform.is_cpu():
             self._forward_method = self.forward_native
@@ -710,6 +712,7 @@ _ACTIVATION_REGISTRY = LazyDict(
         "relu": lambda: nn.ReLU(),
         "relu2": lambda: ReLUSquaredActivation(),
         "silu": lambda: nn.SiLU(),
+        "swish": lambda: nn.SiLU(),
         "quick_gelu": lambda: QuickGELU(),
         "tanh": lambda: nn.Tanh(),
         "sigmoid": lambda: nn.Sigmoid(),
@@ -749,7 +752,9 @@ def get_act_fn(act_fn_name: str) -> nn.Module:
 _ACTIVATION_AND_MUL_REGISTRY: LazyDict[nn.Module] = LazyDict(
     {
         "gelu": lambda: GeluAndMul(),
+        "gelu_pytorch_tanh": lambda: GeluAndMul(approximate="tanh"),
         "silu": lambda: SiluAndMul(),
+        "swish": lambda: SiluAndMul(),
         "geglu": lambda: GeluAndMul(),
         "swigluoai": lambda: SwigluOAIAndMul(),
     }

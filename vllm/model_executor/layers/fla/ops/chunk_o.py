@@ -148,6 +148,7 @@ def chunk_fwd_o(
     cu_seqlens: torch.Tensor | None = None,
     chunk_indices: torch.Tensor | None = None,
     chunk_size: int = FLA_CHUNK_SIZE,
+    core_attn_out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     B, T, Hg, K, V = *q.shape, v.shape[-1]
     H = v.shape[-2]
@@ -158,7 +159,13 @@ def chunk_fwd_o(
     if scale is None:
         scale = k.shape[-1] ** -0.5
 
-    o = torch.empty_like(v)
+    if core_attn_out is not None:
+        assert core_attn_out.numel() >= v.numel(), (
+            f"core_attn_out too small: {core_attn_out.numel()} < {v.numel()}"
+        )
+        o = core_attn_out[: v.numel()].view(*v.shape)
+    else:
+        o = torch.empty_like(v)
 
     def grid(meta):
         return (triton.cdiv(V, meta["BV"]), NT, B * H)

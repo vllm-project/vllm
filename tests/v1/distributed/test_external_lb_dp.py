@@ -14,7 +14,7 @@ import requests
 from tests.utils import RemoteOpenAIServer
 from vllm.platforms import current_platform
 
-MODEL_NAME = "ibm-research/PowerMoE-3b"
+MODEL_NAME = os.getenv("MODEL_NAME", "ibm-research/PowerMoE-3b")
 
 # Number of data parallel ranks for external LB testing
 DP_SIZE = int(os.getenv("DP_SIZE", "2"))
