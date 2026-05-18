@@ -101,7 +101,18 @@ if(DEFINED CMAKE_CUDA_COMPILER_VERSION AND
    # starting from CUDA 12.9 and Blackwell (10.0), we use family-specific targets (10.0f, 12.0f, etc)
    # to support the whole generation without specifying all sub-architectures
    # see: https://developer.nvidia.com/blog/nvidia-blackwell-and-nvidia-cuda-12-9-introduce-family-specific-architecture-features/
-  set(CUDA_SUPPORTED_ARCHS "7.5;8.0;8.6;8.7;8.9;9.0;10.0;11.0;12.0")
+   # 12.1 is listed explicitly because the FP8 Marlin kernels (MARLIN_FP8_ARCHS,
+   # MARLIN_MOE_FP8_ARCHS) request plain 12.1 (no suffix) and need it to survive the
+   # intersection at line 185 below. Without 12.1 here, sm_121a is dropped from
+   # CUDA_ARCHS and no sm_121a Marlin SASS is generated; the matching runtime
+   # arch check in csrc/quantization/marlin/marlin.cu is also relaxed to allow
+   # the whole sm_12x family (matching the existing MoE path in
+   # csrc/moe/marlin_moe_wna16/ops.cu). Without both, FP8 quant inference on
+   # GB10 / DGX Spark (sm_121a) fails with cudaErrorNoKernelImageForDevice
+   # (binary missing) or a TORCH_CHECK failure (runtime guard). The 12.0f
+   # family targets used by MLA/SCALED_MM/FP4/CUTLASS_MOE_DATA already cover
+   # sm_121 via family-compatibility and are unaffected by this change.
+  set(CUDA_SUPPORTED_ARCHS "7.5;8.0;8.6;8.7;8.9;9.0;10.0;11.0;12.0;12.1")
 elseif(DEFINED CMAKE_CUDA_COMPILER_VERSION AND
    CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.8)
   set(CUDA_SUPPORTED_ARCHS "7.5;8.0;8.6;8.7;8.9;9.0;10.0;10.1;10.3;12.0;12.1")
