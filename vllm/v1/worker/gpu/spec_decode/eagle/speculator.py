@@ -63,6 +63,7 @@ class EagleSpeculator:
         self.hidden_size = self.hidden_size * hc_mult
         self.vocab_size = self.draft_model_config.get_vocab_size()
         self.dtype = vllm_config.model_config.dtype
+        self.use_fp64_gumbel = vllm_config.model_config.use_fp64_gumbel
 
         # DP configuration
         self.dp_size = vllm_config.parallel_config.data_parallel_size
@@ -247,6 +248,7 @@ class EagleSpeculator:
                 apply_temperature=True,
                 output_processed_logits=draft_logits,
                 output_processed_logits_col=draft_step,
+                use_fp64=self.use_fp64_gumbel,
             )
         else:
             return logits.argmax(dim=-1)
