@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Object store secondary tier implementation."""
 
-import hashlib
-import json
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -12,12 +10,8 @@ import torch
 from nixl._api import nixl_agent, nixl_agent_config, nixl_xfer_handle
 
 from vllm.logger import init_logger
-from vllm.v1.kv_offload.base import (
-    OffloadKey,
-    ReqContext,
-    get_offload_block_hash,
-    get_offload_group_idx,
-)
+from vllm.v1.kv_offload.base import OffloadKey, ReqContext
+from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.base import JobMetadata, JobResult, SecondaryTierManager
 from vllm.v1.kv_offload.tiering.obj.config import ObjStoreConfig
 
@@ -62,8 +56,8 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         self._primary_reg = None
         self._base_addr: int = 0
         self._stride: int = 0
-        self._root_dir = f"{prefix}/" if prefix else ""
-        self._base_path = self._compute_base_path(vllm_config, self._root_dir)
+        root_dir = f"{prefix}/" if prefix else ""
+        self._file_mapper = FileMapper(root_dir, vllm_config)
         self._next_obj_dev_id: int = 0  # unique devId for each OBJ registration
 
         self._probe_connectivity()
@@ -98,44 +92,8 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
     def _exists(self, obj_key: str) -> bool:
         return self._agent.query_memory([(0, 1, 0, obj_key)], "OBJ", "OBJ")[0] is not None
 
-    @staticmethod
-    def _compute_base_path(vllm_config: "VllmConfig", root_dir: str) -> str | None:
-        """Compute a FileMapper-compatible base path from vllm_config.
-
-        Uses parallel_agnostic convention (all TP/PP sizes=1, rank=0) since
-        this tier stores the full interleaved CPU buffer, not per-rank slices.
-        Returns None when vllm_config is unavailable (e.g. in tests).
-        """
-        if vllm_config is None:
-            return None
-        try:
-            fields = {
-                "model_name": vllm_config.model_config.model,
-                "hash_block_size": vllm_config.cache_config.block_size,
-                "gpu_blocks_per_file": 1,
-                "tp_size": 1,
-                "pp_size": 1,
-                "pcp_size": 1,
-                "dcp_size": 1,
-                "dtype": str(vllm_config.cache_config.cache_dtype).replace("torch.", ""),
-                "kv_cache_groups": [],
-                "inference_engine": "vllm",
-            }
-            canonical = json.dumps(fields, sort_keys=True, separators=(",", ":"))
-            digest = hashlib.sha256(canonical.encode()).hexdigest()[:12]
-            safe_model = fields["model_name"].replace("/", "_")
-            return f"{root_dir}{safe_model}_{digest}"
-        except Exception as e:
-            logger.warning("Failed to compute base path from vllm_config: %s", e)
-            return None
-
     def _get_obj_key(self, key: OffloadKey) -> str:
-        hash_hex = get_offload_block_hash(key).hex()
-        g = get_offload_group_idx(key)
-        if self._base_path is not None:
-            return f"{self._base_path}_r0/{hash_hex[:3]}/{hash_hex[3:5]}_g{g}/{hash_hex}.bin"
-        # fallback when vllm_config is unavailable (tests)
-        return f"{self._root_dir}group_{g}/{hash_hex[:3]}/{hash_hex[3:5]}/{hash_hex}.bin"
+        return self._file_mapper.get_file_name(key)
 
     def _submit_transfer(
         self,

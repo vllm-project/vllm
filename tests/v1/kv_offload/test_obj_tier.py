@@ -19,6 +19,7 @@ Required environment variables (tests are skipped if any are absent):
 import os
 import time
 import uuid
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -27,6 +28,17 @@ import torch
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext, make_offload_key
 from vllm.v1.kv_offload.tiering.base import JobMetadata, JobResult
 from vllm.v1.kv_offload.tiering.obj.manager import ObjectStoreSecondaryTierManager
+
+
+def _make_vllm_config():
+    return SimpleNamespace(
+        model_config=SimpleNamespace(model="test/model"),
+        cache_config=SimpleNamespace(block_size=16, cache_dtype="float16"),
+        parallel_config=SimpleNamespace(tensor_parallel_size=1, pipeline_parallel_size=1),
+    )
+
+
+_VLLM_CONFIG = _make_vllm_config()
 
 # ---------------------------------------------------------------------------
 # S3 credentials — skip entire module if not configured
@@ -59,7 +71,7 @@ _STORE_CONFIG = {
 try:
     _probe_view = memoryview(torch.zeros(1, 1, dtype=torch.float32).numpy())
     _probe = ObjectStoreSecondaryTierManager(
-        vllm_config=None,
+        vllm_config=_VLLM_CONFIG,
         primary_kv_view=_probe_view,
         store_config=_STORE_CONFIG,
     )
@@ -108,7 +120,7 @@ def make_tier(
 ) -> ObjectStoreSecondaryTierManager:
     view = memoryview(torch.zeros(num_blocks, _BLOCK_ELEMENTS, dtype=_DTYPE).numpy())
     return ObjectStoreSecondaryTierManager(
-        vllm_config=None,
+        vllm_config=_VLLM_CONFIG,
         primary_kv_view=view,
         store_config=_STORE_CONFIG,
         prefix=key_prefix,
@@ -123,7 +135,7 @@ def make_tier_with_view(
 ) -> tuple[ObjectStoreSecondaryTierManager, torch.Tensor]:
     tensor = torch.zeros((num_total_blocks, _BLOCK_ELEMENTS), dtype=_DTYPE)
     tier = ObjectStoreSecondaryTierManager(
-        vllm_config=None,
+        vllm_config=_VLLM_CONFIG,
         primary_kv_view=memoryview(tensor.numpy()),
         store_config=_STORE_CONFIG,
         prefix=key_prefix,
