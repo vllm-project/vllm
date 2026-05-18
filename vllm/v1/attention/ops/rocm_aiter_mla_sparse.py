@@ -844,6 +844,7 @@ def rocm_aiter_sparse_attn_indexer_fake(
     max_model_len: int,
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor | None,
+    skip_k_cache_insert: bool = False,
     use_fp4_cache: bool = False,
 ) -> torch.Tensor:
     del (
@@ -915,6 +916,7 @@ def rocm_aiter_sparse_attn_indexer_native(
             max_model_len,
             total_seq_lens,
             topk_indices_buffer,
+            skip_k_cache_insert=skip_k_cache_insert,
             use_fp4_cache=use_fp4_cache,
         )
     layer_attn_metadata = attn_metadata[k_cache_prefix]
@@ -1083,8 +1085,12 @@ def rocm_aiter_sparse_attn_indexer_native(
                     out=topk_indices,
                 )
             else:
-                topk_indices.copy_(
-                    _topk_indices_torch(logits, topk_tokens, chunk.cu_seqlen_ks)
+                _topk_indices_vllm_prefill(
+                    logits,
+                    topk_tokens,
+                    chunk.cu_seqlen_ks,
+                    chunk.cu_seqlen_ke,
+                    out=topk_indices,
                 )
 
     if has_decode:
@@ -1152,23 +1158,16 @@ def rocm_aiter_sparse_attn_indexer_native(
         assert batch_size == decode_metadata.seq_lens.shape[0]
         num_padded_tokens = batch_size * next_n
 
-        topk_indices = topk_indices_buffer[:num_decode_tokens, :topk_tokens]
+        topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
         if use_fp4_cache:
             if decode_metadata.max_seq_len <= topk_tokens:
-                topk_out = (
-                    topk_indices
-                    if num_padded_tokens == topk_indices.shape[0]
-                    else None
-                )
-                decoded_topk = _fill_decode_topk_indices(
+                _fill_decode_topk_indices(
                     decode_metadata.seq_lens,
                     topk_tokens,
                     next_n,
                     num_padded_tokens,
-                    out=topk_out,
+                    out=topk_indices,
                 )
-                if topk_out is None:
-                    topk_indices.copy_(decoded_topk[:num_decode_tokens])
             else:
                 use_vllm_topk = _has_vllm_topk_ops()
                 active_paged_width = (
@@ -1188,20 +1187,13 @@ def rocm_aiter_sparse_attn_indexer_native(
                     max_model_len=logits_width,
                     clean_logits=not use_vllm_topk,
                 )
-                topk_out = (
-                    topk_indices
-                    if logits.shape[0] == topk_indices.shape[0]
-                    else None
-                )
-                decoded_topk = _topk_indices_vllm_decode(
+                _topk_indices_vllm_decode(
                     logits,
                     topk_tokens,
                     next_n,
                     decode_metadata.seq_lens,
-                    out=topk_out,
+                    out=topk_indices,
                 )
-                if topk_out is None:
-                    topk_indices.copy_(decoded_topk[:num_decode_tokens])
         else:
             logits = rocm_fp8_paged_mqa_logits(
                 padded_q_decode_tokens,
@@ -1212,8 +1204,12 @@ def rocm_aiter_sparse_attn_indexer_native(
                 decode_metadata.schedule_metadata,
                 max_model_len=max_model_len,
             )
-            topk_indices.copy_(
-                _topk_indices_torch(logits, topk_tokens)[:num_decode_tokens]
+            _topk_indices_vllm_decode(
+                logits,
+                topk_tokens,
+                next_n,
+                decode_metadata.seq_lens,
+                out=topk_indices,
             )
 
         if decode_metadata.requires_padding:
@@ -1245,6 +1241,7 @@ def rocm_aiter_sparse_attn_indexer(
     max_model_len: int,
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor | None,
+    skip_k_cache_insert: bool = False,
 ) -> torch.Tensor:
     return rocm_aiter_sparse_attn_indexer_native(
         hidden_states,
@@ -1260,7 +1257,7 @@ def rocm_aiter_sparse_attn_indexer(
         max_model_len,
         total_seq_lens,
         topk_indices_buffer,
-        skip_k_cache_insert=False,
+        skip_k_cache_insert=skip_k_cache_insert,
         use_fp4_cache=False,
     )
 
