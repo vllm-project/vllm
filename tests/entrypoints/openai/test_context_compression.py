@@ -131,7 +131,8 @@ def _make_messages(tool_content_size: int = 500, n_tools: int = 4) -> list[dict]
         messages.append(
             {
                 "role": "tool",
-                "content": f"Tool {i} result:\n" + ("data " * (tool_content_size // 5)),
+                "content": f"Tool {i} result:\n"
+                + "\n".join(f"output line {j}: data value {j}" for j in range(tool_content_size // 20)),
             }
         )
     messages.append({"role": "user", "content": "What is the answer?"})
