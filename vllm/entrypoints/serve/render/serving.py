@@ -247,23 +247,29 @@ class OpenAIServingRender:
             if error_check_ret is not None:
                 return error_check_ret
 
-            conversation, engine_inputs = await self.preprocess_chat(
-                request,
-                request.messages,
-                default_template=self.chat_template,
-                default_template_content_format=self.chat_template_content_format,
-                default_template_kwargs=self.default_chat_template_kwargs,
-                tool_dicts=tool_dicts,
-                tool_parser=tool_parser,
-                skip_mm_cache=skip_mm_cache,
-                reasoning_parser=self.reasoning_parser,
-            )
+            try:
+                conversation, engine_inputs = await self.preprocess_chat(
+                    request,
+                    request.messages,
+                    default_template=self.chat_template,
+                    default_template_content_format=self.chat_template_content_format,
+                    default_template_kwargs=self.default_chat_template_kwargs,
+                    tool_dicts=tool_dicts,
+                    tool_parser=tool_parser,
+                    skip_mm_cache=skip_mm_cache,
+                    reasoning_parser=self.reasoning_parser,
+                )
+            except ValueError as e:
+                return self.create_error_response(e)
         else:
             # For GPT-OSS.
             should_include_tools = tool_dicts is not None
-            conversation, engine_inputs = self._make_request_with_harmony(
-                request, should_include_tools
-            )
+            try:
+                conversation, engine_inputs = self._make_request_with_harmony(
+                    request, should_include_tools
+                )
+            except ValueError as e:
+                return self.create_error_response(e)
 
         return conversation, engine_inputs
 
@@ -346,12 +352,15 @@ class OpenAIServingRender:
                 "prompt_logprobs is not compatible with prompt embeds."
             )
 
-        engine_inputs = await self.preprocess_completion(
-            request,
-            prompt_input=request.prompt,
-            prompt_embeds=request.prompt_embeds,
-            skip_mm_cache=skip_mm_cache,
-        )
+        try:
+            engine_inputs = await self.preprocess_completion(
+                request,
+                prompt_input=request.prompt,
+                prompt_embeds=request.prompt_embeds,
+                skip_mm_cache=skip_mm_cache,
+            )
+        except ValueError as e:
+            return self.create_error_response(e)
 
         return engine_inputs
 

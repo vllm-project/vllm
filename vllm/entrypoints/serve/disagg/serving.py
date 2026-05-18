@@ -125,6 +125,14 @@ class ServingTokens(OpenAIServing):
         if raw_request:
             raw_request.state.request_metadata = request_metadata
 
+        sampling_params = request.sampling_params
+        max_num_seqs = self.engine_client.vllm_config.scheduler_config.max_num_seqs
+        if sampling_params.n > max_num_seqs:
+            return self.create_error_response(
+                f"sampling_params.n must be at most the server's max_num_seqs "
+                f"({max_num_seqs}), got {sampling_params.n}."
+            )
+
         engine_input: EngineInput
         if features := request.features:
             # Convert PlaceholderRangeInfo → PlaceholderRange per modality.
@@ -155,16 +163,20 @@ class ServingTokens(OpenAIServing):
                 cache_salt=request.cache_salt,
             )
         else:
-            (engine_input,) = await self.openai_serving_render.preprocess_completion(
-                request,
-                prompt_input=request.token_ids,
-                prompt_embeds=None,
-                skip_mm_cache=True,
-            )
+            try:
+                (
+                    engine_input,
+                ) = await self.openai_serving_render.preprocess_completion(
+                    request,
+                    prompt_input=request.token_ids,
+                    prompt_embeds=None,
+                    skip_mm_cache=True,
+                )
+            except ValueError as e:
+                return self.create_error_response(e)
 
         # Schedule the request and get the result generator.
         result_generator: AsyncGenerator[RequestOutput, None] | None = None
-        sampling_params = request.sampling_params
 
         # Apply server-side ``max_tokens`` defaulting when the client did
         # not set it, matching the OpenAI-compat endpoints. ``SamplingParams``
