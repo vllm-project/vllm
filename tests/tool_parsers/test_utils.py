@@ -65,10 +65,10 @@ class TestCoerceToSchemaType:
         def test_invalid_integer_fallback(self):
             assert coerce_to_schema_type("not_a_number", "integer") == "not_a_number"
 
-        def test_uint_prefix(self):
+        def test_uint32_alias(self):
             assert coerce_to_schema_type("5", "uint32") == 5
 
-        def test_long_prefix(self):
+        def test_long_alias(self):
             assert coerce_to_schema_type("100", "long") == 100
 
     class TestNumberType:
@@ -77,6 +77,9 @@ class TestCoerceToSchemaType:
 
         def test_float_alias(self):
             assert coerce_to_schema_type("2.5", "float") == 2.5
+
+        def test_double_alias(self):
+            assert coerce_to_schema_type("2.5", "double") == 2.5
 
         def test_whole_float_returns_int(self):
             assert coerce_to_schema_type("5.0", "number") == 5
@@ -94,9 +97,6 @@ class TestCoerceToSchemaType:
 
         def test_bool_alias(self):
             assert coerce_to_schema_type("true", "bool") is True
-
-        def test_binary_alias(self):
-            assert coerce_to_schema_type("false", "binary") is False
 
         def test_one_is_true(self):
             assert coerce_to_schema_type("1", "boolean") is True
@@ -117,10 +117,10 @@ class TestCoerceToSchemaType:
         def test_invalid_json_fallback(self):
             assert coerce_to_schema_type("not json", "object") == "not json"
 
-        def test_dict_prefix(self):
+        def test_dict_alias(self):
             assert coerce_to_schema_type('{"k": "v"}', "dict") == {"k": "v"}
 
-        def test_list_prefix(self):
+        def test_list_alias(self):
             assert coerce_to_schema_type("[1]", "list") == [1]
 
     class TestMultiType:
@@ -140,6 +140,9 @@ class TestCoerceToSchemaType:
         def test_json_fallback_for_unknown_type(self):
             assert coerce_to_schema_type('{"a": 1}', "unknown_type") == {"a": 1}
 
-        @pytest.mark.parametrize("param_type", ["string", "str", "text"])
-        def test_string_types_preserve_value(self, param_type):
-            assert coerce_to_schema_type("anything", param_type) == "anything"
+        @pytest.mark.parametrize("schema_type", ["string", "str", "text"])
+        def test_string_types_preserve_value(self, schema_type):
+            assert coerce_to_schema_type("anything", schema_type) == "anything"
+
+        def test_unrecognized_type_falls_back_to_json(self):
+            assert coerce_to_schema_type("42", "interval") == 42

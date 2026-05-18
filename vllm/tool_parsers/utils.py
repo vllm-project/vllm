@@ -450,24 +450,31 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
     return candidate, added_text
 
 
-def _normalize_type(raw_type: str) -> str:
-    """Map a raw type alias to its canonical JSON Schema type name."""
-    t = raw_type.strip().lower()
-    if t in ("string", "str", "text", "varchar", "char", "enum"):
-        return "string"
-    if t.startswith(("int", "uint", "long", "short", "unsigned")):
-        return "integer"
-    if t.startswith(("num", "float")):
-        return "number"
-    if t in ("boolean", "bool", "binary"):
-        return "boolean"
-    if t in ("object",) or t.startswith("dict"):
-        return "object"
-    if t in ("array", "arr", "sequence") or t.startswith("list"):
-        return "array"
-    if t == "null":
-        return "null"
-    return t
+_TYPE_ALIASES: dict[str, str] = {
+    "str": "string",
+    "text": "string",
+    "varchar": "string",
+    "char": "string",
+    "enum": "string",
+    "int": "integer",
+    "int32": "integer",
+    "int64": "integer",
+    "uint": "integer",
+    "uint32": "integer",
+    "uint64": "integer",
+    "long": "integer",
+    "short": "integer",
+    "unsigned": "integer",
+    "float": "number",
+    "float32": "number",
+    "float64": "number",
+    "double": "number",
+    "bool": "boolean",
+    "dict": "object",
+    "arr": "array",
+    "list": "array",
+    "sequence": "array",
+}
 
 
 def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
@@ -481,13 +488,13 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
         value: The raw string value from the model output.
         schema_type: One or more JSON Schema type strings
             (e.g. ``"string"`` or ``["string", "null"]``).
-            Common aliases (``"int"``, ``"bool"``, ``"varchar"``, …)
-            are normalized internally.
     """
     if isinstance(schema_type, str):
         schema_type = [schema_type]
 
-    normalized_types = {_normalize_type(t) for t in schema_type}
+    normalized_types = {
+        _TYPE_ALIASES.get(key, key) for t in schema_type for key in [t.strip().lower()]
+    }
 
     # Priority: null > integer > number > boolean > object > array > string
     type_priority = [
