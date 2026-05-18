@@ -352,7 +352,10 @@ class RequestRunner:
                 # store flush
                 for block_id in src_spec.block_ids:
                     self.flushed_gpu_blocks.add(self.gpu_blocks[block_id.item()])
-            # load flush: no block tracking needed
+            else:
+                # load flush
+                for block_id in dst_spec.block_ids:
+                    self.flushed_gpu_blocks.add(self.gpu_blocks[block_id.item()])
 
         block_size_factor = self.block_size_factor
 
