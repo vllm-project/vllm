@@ -125,7 +125,10 @@ class IPCWeightTransferEngine(
     update_info_cls = IPCWeightTransferUpdateInfo
 
     def __init__(
-        self, config: WeightTransferConfig, parallel_config: ParallelConfig
+        self,
+        config: WeightTransferConfig,
+        parallel_config: ParallelConfig,
+        model: torch.nn.Module,
     ) -> None:
         """
         Initialize the IPC weight transfer engine.
@@ -133,8 +136,9 @@ class IPCWeightTransferEngine(
         Args:
             config: The configuration for the weight transfer engine
             parallel_config: The configuration for the parallel setup
+            model: The local model instance which will receive the weights
         """
-        super().__init__(config, parallel_config)
+        super().__init__(config, parallel_config, model)
 
     def parse_update_info(
         self, update_dict: dict[str, Any]
