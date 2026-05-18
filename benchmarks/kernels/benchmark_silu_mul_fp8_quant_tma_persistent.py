@@ -81,8 +81,8 @@ def benchmark_kernel(
         )
     torch.accelerator.synchronize()
 
-    start = torch.accelerator.Event(enable_timing=True)
-    end = torch.accelerator.Event(enable_timing=True)
+    start = torch.Event("cuda", enable_timing=True)
+    end = torch.Event("cuda", enable_timing=True)
     start.record()
     for _ in range(iters):
         torch.ops._moe_C.silu_mul_fp8_quant_tma_ws_persistent(
