@@ -14,6 +14,7 @@ Usage:
 import argparse
 
 import torch
+import vllm._moe_C  # noqa: F401 — loads the _moe_C extension
 
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
