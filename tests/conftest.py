@@ -224,19 +224,28 @@ def init_test_http_connection():
 def dist_init():
     from tests.utils import ensure_current_vllm_config
 
-    temp_file = tempfile.mkstemp()[1]
+    # Close the fd returned by mkstemp; FileStore opens the path itself.
+    # Leaving it open leaks one FD per test and eventually exhausts the
+    # ulimit, causing FileStore's destructor to throw c10::DistStoreError
+    # ("Too many open files") during gc and abort the process.
+    fd, temp_file = tempfile.mkstemp()
+    os.close(fd)
 
-    with ensure_current_vllm_config():
-        init_distributed_environment(
-            world_size=1,
-            rank=0,
-            distributed_init_method=f"file://{temp_file}",
-            local_rank=0,
-            backend="nccl",
-        )
-        initialize_model_parallel(1, 1)
-        yield
-    cleanup_dist_env_and_memory()
+    try:
+        with ensure_current_vllm_config():
+            init_distributed_environment(
+                world_size=1,
+                rank=0,
+                distributed_init_method=f"file://{temp_file}",
+                local_rank=0,
+                backend="nccl",
+            )
+            initialize_model_parallel(1, 1)
+            yield
+        cleanup_dist_env_and_memory()
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(temp_file)
 
 
 @pytest.fixture
@@ -785,10 +794,15 @@ class HfRunner:
         audios: PromptAudioInput | None = None,
         videos: PromptVideoInput | None = None,
         use_cache: bool = True,
+        tokenization_kwargs: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> list[TokensTextLogprobs]:
         all_inputs = self.get_inputs(
-            prompts, images=images, videos=videos, audios=audios
+            prompts,
+            images=images,
+            videos=videos,
+            audios=audios,
+            tokenization_kwargs=tokenization_kwargs,
         )
 
         all_logprobs: list[list[dict[int, float]]] = []
@@ -1686,3 +1700,44 @@ def disable_log_dedup(monkeypatch):
     logger._print_warning_once = original_print_warning_once
     logger._print_info_once = original_print_info_once
     logger._print_debug_once = original_print_debug_once
+
+
+@pytest.fixture(scope="function")
+def fake_vllm_ir(monkeypatch):
+    """
+    Pytest fixture to allow isolated IR op registration in tests.
+
+    Replaces IrOp.registry with an empty dict and swaps ``vllm_ir_torch_lib`` for a
+    fresh ``Library`` with a unique namespace per test (see ``Library.ns``).
+
+    Torch keeps registrations for the process lifetime; reusing the fragment
+    name ``vllm_ir`` and defining the same op string again can segfault. A
+    random library name keeps each fixture run on a disjoint namespace.
+
+    The test Library is kept alive until after monkeypatch teardown so PyTorch's
+    C++ state is not freed while references may still exist.
+
+    Usage:
+        def test_my_ir_op(fake_vllm_ir):
+            @vllm.ir.register_op
+            def my_test_op(x: torch.Tensor) -> torch.Tensor:
+                return x * 2
+
+            result = my_test_op(torch.tensor([1, 2, 3]))
+            # Registry and library cleaned up automatically after the test
+    """
+    import secrets
+
+    from torch.library import Library
+    from vllm.ir.op import IrOp
+
+    monkeypatch.setattr(IrOp, "registry", {})
+
+    # Keep a local reference so the Library is not GC'd before monkeypatch
+    # teardown restores the original reference.
+    test_lib = Library(f"vllm_ir_{secrets.token_hex(8)}", "FRAGMENT")
+    monkeypatch.setattr("vllm.ir.op.vllm_ir_torch_lib", test_lib)
+
+    yield
+
+    del test_lib
