@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import gc
 import os
 import queue
 import signal
@@ -22,7 +21,10 @@ import zmq
 
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
-from vllm.distributed import stateless_destroy_torch_distributed_process_group
+from vllm.distributed import (
+    cleanup_dist_env_and_memory,
+    stateless_destroy_torch_distributed_process_group,
+)
 from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
@@ -598,11 +600,9 @@ class EngineCore:
         if self.scheduler:
             self.scheduler.shutdown()
 
-        # Undo the gc.freeze() from __init__ so that the objects allocated
-        # during engine startup (model weights, KV caches, etc.) become
-        # visible to the garbage collector again. Without this, deleting
-        # the engine in-process (e.g. unit tests) leaks GPU memory.
-        gc.unfreeze()
+        # Undo the gc.freeze() from __init__ and tear down distributed state
+        # initialized in this EngineCore process before it exits.
+        cleanup_dist_env_and_memory()
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
         self.model_executor.profile(is_start, profile_prefix)
