@@ -478,7 +478,7 @@ class MultiprocExecutor(Executor):
         if self.scheduler_config.async_scheduling:
             if pp_size <= 1:
                 return 2
-            if envs.VLLM_USE_V2_MODEL_RUNNER:
+            if self.vllm_config.use_v2_model_runner:
                 # So that we can overlap scheduling of per-request decode steps
                 # which are scheduled at a pp_size cadence.
                 return pp_size + 1

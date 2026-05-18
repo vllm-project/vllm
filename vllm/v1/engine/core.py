@@ -523,9 +523,8 @@ class EngineCore:
                 if len(batch_queue) < self.batch_queue_size and (
                     model_executed or self.scheduler.has_requests()
                 ):
-                    # Don't block on next worker response unless the queue is
-                    # full or there are no more requests to schedule.
-                    # The `model_executed` gate is required for DP.
+                    # Don't block on next worker response unless the queue is full
+                    # or there are no more requests to schedule.
                     return None, True
 
         elif not batch_queue:
