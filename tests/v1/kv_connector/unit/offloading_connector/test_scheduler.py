@@ -355,6 +355,7 @@ def test_abort_loading_requests(request_runner, async_scheduling: bool):
     runner.run(
         decoded_tokens=[],
         expected_loaded=(0, 1, 2),
+        expected_flushed=(0, 1, 2),
     )
 
     # assert request is deleted
