@@ -5,8 +5,6 @@
 #include "cuda_compat.h"
 #include "silu_mul_fp8_quant_launcher.h"
 
-namespace vllm {
-
 void silu_mul_fp8_quant_tma_ws_persistent(
     const at::Tensor& input, const at::Tensor& input_scales, at::Tensor& output,
     at::Tensor& output_scales, const at::Tensor& n_tokens, int64_t n_compute,
@@ -32,5 +30,3 @@ void silu_mul_fp8_quant_tma_ws_persistent(
       scale_stride, n_compute, batch_size, use_tanh_silu, input.size(0),
       stream);
 }
-
-}  // namespace vllm
