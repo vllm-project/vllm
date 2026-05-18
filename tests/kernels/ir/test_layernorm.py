@@ -142,8 +142,8 @@ def test_aiter_rejects_unsupported_dtypes():
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda_alike(),
-    reason="vllm_c RMSNorm kernels are only supported on CUDA-like platforms",
+    not current_platform.is_rocm(),
+    reason="ROCm vllm_c RMSNorm needs explicit ND input handling",
 )
 def test_vllm_c_rms_norm_accepts_nd_input():
     torch.set_default_device(current_platform.device_type)
@@ -151,8 +151,10 @@ def test_vllm_c_rms_norm_accepts_nd_input():
     if not impl.supported:
         pytest.skip("vllm_c impl not supported on this platform")
 
-    x = torch.randn(1, 8, 64, dtype=torch.float16)
-    weight = torch.randn(64, dtype=torch.float16)
+    base = torch.randn(3, 8, 192, dtype=torch.float16)
+    x = base.split(64, dim=-1)[0].view(3, 8, 4, 16)
+    assert not x.is_contiguous()
+    weight = torch.randn(16, dtype=torch.float16)
     epsilon = 1e-5
 
     output = impl.impl_fn(x, weight, epsilon)
@@ -189,8 +191,8 @@ def test_fused_add_rms_norm_registration():
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda_alike(),
-    reason="vllm_c RMSNorm kernels are only supported on CUDA-like platforms",
+    not current_platform.is_rocm(),
+    reason="ROCm vllm_c fused_add_rms_norm needs explicit ND input handling",
 )
 def test_vllm_c_fused_add_rms_norm_accepts_nd_input():
     torch.set_default_device(current_platform.device_type)
@@ -198,9 +200,13 @@ def test_vllm_c_fused_add_rms_norm_accepts_nd_input():
     if not impl.supported:
         pytest.skip("vllm_c impl not supported on this platform")
 
-    x = torch.randn(1, 8, 64, dtype=torch.float16)
-    x_residual = torch.randn(1, 8, 64, dtype=torch.float16)
-    weight = torch.randn(64, dtype=torch.float16)
+    base = torch.randn(3, 8, 192, dtype=torch.float16)
+    residual_base = torch.randn(3, 8, 192, dtype=torch.float16)
+    x = base.split(64, dim=-1)[0].view(3, 8, 4, 16)
+    x_residual = residual_base.split(64, dim=-1)[0].view(3, 8, 4, 16)
+    assert not x.is_contiguous()
+    assert not x_residual.is_contiguous()
+    weight = torch.randn(16, dtype=torch.float16)
     epsilon = 1e-5
 
     output, residual = impl.impl_fn(x.clone(), x_residual.clone(), weight, epsilon)
