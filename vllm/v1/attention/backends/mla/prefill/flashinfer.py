@@ -77,6 +77,9 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
         self._prefill_main: BatchPrefillWithRaggedKVCacheWrapper | None = None
         self._prefill_chunks: list[BatchPrefillWithRaggedKVCacheWrapper] = []
         self._global_hyperparameters: PerLayerParameters | None = None
+        (self._workspace_buffer,) = current_workspace_manager().get_simultaneous(
+            ((envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,), torch.uint8),
+        )
 
     def _ensure_chunks(
         self,
@@ -123,21 +126,17 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
         global_hyperparameters = self._resolve_global_hyperparameters()
         qo_indptr = prefill_metadata.query_start_loc
         has_context = prefill_metadata.chunked_context is not None
-        (workspace_buffer,) = current_workspace_manager().get_simultaneous(
-            ((envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,), torch.uint8),
-        )
-
         if self._prefill_main is None:
             self._prefill_main = BatchPrefillWithRaggedKVCacheWrapper(
-                workspace_buffer, "NHD", backend="cutlass"
+                self._workspace_buffer, "NHD", backend="cutlass"
             )
-            self._ensure_chunks(_DEFAULT_NUM_CHUNKS, workspace_buffer)
+            self._ensure_chunks(_DEFAULT_NUM_CHUNKS, self._workspace_buffer)
 
         if has_context:
             chunked_context = prefill_metadata.chunked_context
             assert chunked_context is not None
             num_chunks = chunked_context.cu_seq_lens.shape[0]
-            self._ensure_chunks(num_chunks, workspace_buffer)
+            self._ensure_chunks(num_chunks, self._workspace_buffer)
 
         num_qo_heads = self.num_heads
         num_kv_heads = num_qo_heads
