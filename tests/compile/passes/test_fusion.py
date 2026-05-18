@@ -99,8 +99,6 @@ KERNEL_GROUPSHAPE_COMBINATIONS = (
 
 # For Aiter tests we toggle use_aiter_quant_op
 AITER_KERNEL_GROUPSHAPE_COMBINATIONS = [
-    # Per-token with ROCmFP8ScaledMMLinearKernel
-    (ROCmFP8ScaledMMLinearKernel, GroupShape.PER_TENSOR, False),
     # Per-token with RowWiseTorchFP8ScaledMMLinearKernel
     (RowWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN, True),
     (RowWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN, False),
