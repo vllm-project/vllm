@@ -175,6 +175,36 @@ def _import_deep_gemm():
     return None
 
 
+def _apply_pdl(enable: bool) -> None:
+    """Set PDL on every DeepGEMM module currently importable.
+
+    The external (pip-installed) ``deep_gemm`` and the vendored
+    ``vllm.third_party.deep_gemm`` are independent C extensions with
+    independent global PDL state. Apply the flag to both so model code
+    that imports either module sees the same setting.
+    """
+    applied_to: list[str] = []
+    for mod_name in ("deep_gemm", "vllm.third_party.deep_gemm"):
+        try:
+            mod = importlib.import_module(mod_name)
+        except Exception:  # noqa: BLE001
+            continue
+        set_pdl_fn = getattr(mod, "set_pdl", None)
+        if set_pdl_fn is None:
+            continue
+        try:
+            set_pdl_fn(enable)
+            applied_to.append(mod_name)
+        except Exception as e:  # noqa: BLE001
+            logger.warning_once("Failed to set DeepGEMM PDL on %s: %s", mod_name, e)
+    if applied_to:
+        logger.info_once(
+            "DeepGEMM PDL %s on %s.",
+            "enabled" if enable else "disabled",
+            ", ".join(applied_to),
+        )
+
+
 def _lazy_init() -> None:
     """Import deep_gemm and resolve symbols on first use."""
     global _cublaslt_gemm_nt_impl
@@ -217,6 +247,18 @@ def _lazy_init() -> None:
     if _dg is None:
         return
 
+    # Apply DeepGEMM PDL setting once per process, before any kernel launches
+    # or CUDA-graph capture. PDL state is global in DeepGEMM and is read at
+    # each kernel launch; flipping it later would diverge from launches
+    # captured into CUDA graphs.
+    #
+    # NOTE: vLLM may load two independent DeepGEMM C extensions in the same
+    # process — the pip-installed ``deep_gemm`` and the vendored
+    # ``vllm.third_party.deep_gemm`` (e.g. deepseek_v4.py imports the
+    # vendored module directly). Each has its own global PDL state, so we
+    # apply set_pdl to whichever modules are already importable.
+    _apply_pdl(envs.VLLM_USE_DEEP_GEMM_PDL)
+
     _cublaslt_gemm_nt_impl = getattr(_dg, "cublaslt_gemm_nt", None)
     _fp8_gemm_nt_impl = getattr(_dg, "fp8_gemm_nt", None)
     _fp8_einsum_impl = getattr(_dg, "fp8_einsum", None)
@@ -241,6 +283,15 @@ def _lazy_init() -> None:
         _dg, "transform_sf_into_required_layout", None
     )
     DeepGemmQuantScaleFMT.init_oracle_cache()
+
+
+def configure_deep_gemm() -> None:
+    """Eagerly initialize DeepGEMM so process-global settings (PDL, JIT
+    cache dir) are applied before profile_run / warmup / CUDA graph
+    capture. Safe to call when DeepGEMM is unsupported — it becomes a
+    no-op.
+    """
+    _lazy_init()
 
 
 def get_num_sms() -> int:
@@ -563,6 +614,7 @@ def should_use_deepgemm_for_fp8_linear(
 
 __all__ = [
     "calc_diff",
+    "configure_deep_gemm",
     "DeepGemmQuantScaleFMT",
     "fp8_gemm_nt",
     "fp8_einsum",

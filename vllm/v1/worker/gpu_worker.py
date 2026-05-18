@@ -45,6 +45,7 @@ from vllm.profiler.wrapper import CudaProfilerWrapper, TorchProfilerWrapper
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.tracing import instrument
+from vllm.utils.deep_gemm import configure_deep_gemm
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import set_random_seed
@@ -293,6 +294,10 @@ class Worker(WorkerBase):
 
             # Set random seed.
             set_random_seed(self.model_config.seed)
+
+            # Apply DeepGEMM process-global settings (PDL, JIT cache dir)
+            # before profile_run / warmup / CUDA graph capture.
+            configure_deep_gemm()
 
             # Now take memory snapshot after NCCL is initialized
             gc.collect()
