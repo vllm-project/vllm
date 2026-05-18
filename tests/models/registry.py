@@ -728,6 +728,7 @@ _TOKEN_CLASSIFICATION_EXAMPLE_MODELS = {
     "ModernBertForTokenClassification": _HfExamplesInfo(
         "disham993/electrical-ner-ModernBERT-base"
     ),
+    "RFM": _HfExamplesInfo("aliangdw/Robometer-4B"),
 }
 
 _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
