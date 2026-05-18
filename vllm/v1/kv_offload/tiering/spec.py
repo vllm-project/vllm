@@ -32,6 +32,7 @@ Example configuration:
 """
 
 import torch
+from typing_extensions import override
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -75,6 +76,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         # Scheduler-side mmap (rank=None); kept for cleanup
         self._scheduler_mmap: SharedOffloadRegion | None = None
 
+    @override
     def get_manager(self) -> OffloadingManager:
         """
         Get the TieringOffloadingManager.
@@ -162,9 +164,8 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
         return self._manager
 
-    def _create_handlers(
-        self, kv_caches: CanonicalKVCaches
-    ) -> CpuGpuOffloadingHandlers:
+    @override
+    def create_handlers(self, kv_caches: CanonicalKVCaches) -> CpuGpuOffloadingHandlers:
         world_size = self.vllm_config.parallel_config.world_size
         rank = torch.accelerator.current_device_index()
         worker_mmap = SharedOffloadRegion(
