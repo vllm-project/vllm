@@ -3,11 +3,12 @@
 """
 Round-trip tests for compressor → FP8 quant + KV cache insert → gather + dequant.
 
-Four test functions cover five paths:
+These tests cover:
   A) DeepseekV4 Attention: head_dim=512 (448 FP8 nope + 64 bf16 rope), quant_block=64
-  B) Indexer:       head_dim=128 (all FP8), quant_block=128
-  C) DeepseekV4 Attention magnitude range: correctness across small/large values
-  D) Indexer fused Triton kernel: compress+norm+rope+quant+insert
+  B) Fused dequant+gather K cache
+  C) Indexer:       head_dim=128 (all FP8), quant_block=128
+  D) DeepseekV4 Attention magnitude range: correctness across small/large values
+  E) Indexer fused Triton kernel: compress+norm+rope+quant+insert
 """
 
 import math
@@ -134,7 +135,140 @@ def test_deepseek_v4_attention_quant_cache_roundtrip(num_tokens: int, block_size
     )
 
 
-# ── Test B: Indexer path ────────────────────────────────────────────────────
+# ── Test B: Fused dequant+gather K cache ────────────────────────────────────
+
+
+def _dequantize_and_gather_k_cache_reference(
+    out: torch.Tensor,
+    k_cache: torch.Tensor,
+    seq_lens: torch.Tensor,
+    gather_lens: torch.Tensor | None,
+    block_table: torch.Tensor,
+    block_size: int,
+    offset: int,
+) -> None:
+    fp8_dim = 448
+    bf16_dim = 64
+    scale_dim = 8
+    quant_block = 64
+    token_data_size = fp8_dim + bf16_dim * 2
+
+    for req_id in range(seq_lens.shape[0]):
+        seq_len = seq_lens[req_id].item()
+        gather_len = gather_lens[req_id].item() if gather_lens is not None else seq_len
+        start_pos = seq_len - gather_len
+
+        for i in range(gather_len):
+            pos = start_pos + i
+            pos_in_block = pos % block_size
+            block_idx = block_table[req_id, pos // block_size].item()
+            cache_block = k_cache[block_idx].view(-1)
+
+            token_data_start = pos_in_block * token_data_size
+            fp8_bytes = cache_block[token_data_start : token_data_start + fp8_dim]
+            fp8_vals = fp8_bytes.view(torch.float8_e4m3fn).float()
+
+            scale_start = block_size * token_data_size + pos_in_block * scale_dim
+            encoded_scales = cache_block[scale_start : scale_start + scale_dim]
+            scales = torch.exp2(encoded_scales[:7].float() - 127.0)
+            dequant = fp8_vals * scales.repeat_interleave(quant_block)
+
+            bf16_start = token_data_start + fp8_dim
+            bf16_bytes = cache_block[bf16_start : bf16_start + bf16_dim * 2]
+            bf16_tail = bf16_bytes.view(torch.bfloat16)
+
+            out[req_id, offset + i, :fp8_dim] = dequant
+            out[req_id, offset + i, fp8_dim:] = bf16_tail
+
+
+@pytest.mark.parametrize(
+    ("seq_lens_host", "gather_lens_host", "offset"),
+    [
+        ([9, 23, 7], None, 0),
+        ([19, 8, 257], [6, 8, 129], 5),
+    ],
+)
+def test_dequantize_and_gather_k_cache(
+    seq_lens_host: list[int],
+    gather_lens_host: list[int] | None,
+    offset: int,
+):
+    block_size = 64
+    head_dim = 512
+    nope_dim = 448
+    scale_dim = 8
+    head_bytes = nope_dim + (head_dim - nope_dim) * 2 + scale_dim
+    device = "cuda"
+    num_reqs = len(seq_lens_host)
+    num_tokens = sum(seq_lens_host)
+    max_gather_len = max(gather_lens_host or seq_lens_host)
+    max_blocks_per_seq = math.ceil(max(seq_lens_host) / block_size)
+    num_blocks = sum(math.ceil(seq_len / block_size) for seq_len in seq_lens_host)
+
+    compressed_kv = torch.randn(
+        num_tokens, head_dim, dtype=torch.bfloat16, device=device
+    )
+
+    # Randomize physical pages so the test covers block-table translation.
+    # Keep padded block-table entries invalid to catch accidental reads.
+    physical_blocks = torch.randperm(num_blocks, device=device)
+    block_table = torch.full(
+        (num_reqs, max_blocks_per_seq), int(-1e6), dtype=torch.int32, device=device
+    )
+    start = 0
+    for req_id, seq_len in enumerate(seq_lens_host):
+        num_req_blocks = math.ceil(seq_len / block_size)
+        req_blocks = physical_blocks[start : start + num_req_blocks]
+        block_table[req_id, :num_req_blocks] = req_blocks
+        start += num_req_blocks
+
+    # Build slot_mapping for quantize_and_insert_k_cache.
+    slot_mapping = torch.empty(num_tokens, dtype=torch.int64, device=device)
+    start = 0
+    for req_id, seq_len in enumerate(seq_lens_host):
+        logical_pos = torch.arange(seq_len, dtype=torch.int64, device=device)
+        block_idx = block_table[req_id, logical_pos // block_size].to(torch.int64)
+        token_slots = block_idx * block_size + logical_pos % block_size
+        slot_mapping[start : start + seq_len] = token_slots
+        start += seq_len
+
+    # Insert compressed K into the paged cache layout used by the gather op.
+    k_cache = torch.empty(
+        num_blocks, block_size, head_bytes, dtype=torch.uint8, device=device
+    )
+    k_cache_2d = k_cache.view(num_blocks, -1)
+    quantize_and_insert_k_cache(compressed_kv, k_cache_2d, slot_mapping, block_size)
+
+    out_shape = (num_reqs, offset + max_gather_len + 3, head_dim)
+    ref_out = torch.empty(out_shape, dtype=torch.bfloat16, device=device)
+    actual_out = torch.empty_like(ref_out)
+    seq_lens = torch.tensor(seq_lens_host, dtype=torch.int32, device=device)
+    gather_lens = (
+        torch.tensor(gather_lens_host, dtype=torch.int32, device=device)
+        if gather_lens_host is not None
+        else None
+    )
+
+    # Compare production gather against a PyTorch reference for valid output rows.
+    _dequantize_and_gather_k_cache_reference(
+        ref_out, k_cache, seq_lens, gather_lens, block_table, block_size, offset
+    )
+    dequantize_and_gather_k_cache(
+        actual_out, k_cache, seq_lens, gather_lens, block_table, block_size, offset
+    )
+    torch.accelerator.synchronize()
+
+    # only check non-padded content
+    for req_id, seq_len in enumerate(seq_lens_host):
+        gather_len = (
+            gather_lens_host[req_id] if gather_lens_host is not None else seq_len
+        )
+        actual = actual_out[req_id, offset : offset + gather_len]
+        expected = ref_out[req_id, offset : offset + gather_len]
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+# ── Test C: Indexer path ────────────────────────────────────────────────────
 
 
 @pytest.mark.parametrize("num_tokens", [1, 4, 8, 17])
@@ -254,7 +388,7 @@ def test_indexer_gather_accepts_upper_bound_output():
     assert torch.all(dst_scale[valid_tokens:] == sentinel)
 
 
-# ── Test C: DeepseekV4 attention with values at different magnitudes ───────────
+# ── Test D: DeepseekV4 attention with values at different magnitudes ───────────
 
 
 def test_deepseek_v4_quant_magnitude_range():
@@ -316,7 +450,7 @@ def test_deepseek_v4_quant_magnitude_range():
             )
 
 
-# ── Test D: Indexer fused K-cache insert (Triton kernels) ────────────────────
+# ── Test E: Indexer fused K-cache insert (Triton kernels) ────────────────────
 #
 # Both kernels share the same Triton signature; use_fp4 selects between them.
 # Full pipeline: state-cache gather → softmax-weighted compress → RMSNorm →

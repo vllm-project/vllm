@@ -102,6 +102,7 @@ def create_vllm_config(
     attention_backend: str | None = None,
     kv_load_failure_policy: Literal["recompute", "fail"] = "fail",
     kv_connector: str = "NixlConnector",
+    kv_connector_module_path: str | None = None,
     kv_role: str = "kv_both",
     disable_hybrid_kv_cache_manager: bool | None = None,
 ) -> VllmConfig:
@@ -130,6 +131,7 @@ def create_vllm_config(
     )
     kv_transfer_config = KVTransferConfig(
         kv_connector=kv_connector,
+        kv_connector_module_path=kv_connector_module_path,
         kv_role=kv_role,
         enable_permute_local_kv=enable_permute_local_kv,
         kv_connector_extra_config=kv_connector_extra_config or {},

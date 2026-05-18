@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-import vllm.model_executor.layers.mhc as mhc_ops  # noqa: F401
+import vllm.model_executor.kernels.mhc  # noqa: F401
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -74,6 +74,23 @@ def mhc_post_ref(
     return (x.float().unsqueeze(-2) * post_layer_mix + term2).bfloat16()
 
 
+def hc_head_ref(
+    residual: torch.Tensor,
+    fn: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    rms_eps: float,
+    hc_eps: float,
+) -> torch.Tensor:
+    residual_flat = residual.flatten(-2).float()
+    residual_norm = residual_flat * torch.rsqrt(
+        residual_flat.square().mean(dim=-1, keepdim=True) + rms_eps
+    )
+    pre_mix = torch.nn.functional.linear(residual_norm, fn)
+    pre_mix = torch.sigmoid(pre_mix * hc_scale + hc_base) + hc_eps
+    return torch.sum(pre_mix.unsqueeze(-1) * residual.float(), dim=-2).bfloat16()
+
+
 @pytest.mark.skipif(
     not current_platform.is_cuda(),
     reason="CUDA required",
@@ -121,7 +138,7 @@ def test_mhc_fused_post_pre(num_tokens, hidden_size, hc_mult):
 
     residual_ref, post_mix_ref, res_mix_ref, layer_input_ref = run_ref()
 
-    residual, post_mix, res_mix, x = torch.ops.vllm.mhc_fused_post_pre(
+    residual, post_mix, res_mix, x = torch.ops.vllm.mhc_fused_post_pre_tilelang(
         x,
         residual,
         post_layer_mix,
@@ -140,3 +157,42 @@ def test_mhc_fused_post_pre(num_tokens, hidden_size, hc_mult):
     torch.testing.assert_close(post_mix, post_mix_ref, atol=1e-2, rtol=1e-2)
     torch.testing.assert_close(res_mix, res_mix_ref, atol=1e-2, rtol=1e-2)
     torch.testing.assert_close(x, layer_input_ref, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="ROCm required",
+)
+@pytest.mark.parametrize("num_tokens", [1, 4, 8, 128])
+@pytest.mark.parametrize("hidden_size", [4096, 7168])
+@pytest.mark.parametrize("hc_mult", [4])
+def test_hc_head_triton(num_tokens, hidden_size, hc_mult):
+    torch.set_default_device(DEVICE)
+    set_random_seed(0)
+
+    residual = torch.randn((num_tokens, hc_mult, hidden_size), dtype=torch.bfloat16)
+    fn = torch.randn((hc_mult, hc_mult * hidden_size), dtype=torch.float32) * 1e-4
+    hc_scale = torch.randn((1,), dtype=torch.float32) * 0.1
+    hc_base = torch.randn((hc_mult,), dtype=torch.float32) * 0.1
+    rms_eps = hc_eps = 1e-6
+
+    out = torch.empty((num_tokens, hidden_size), dtype=torch.bfloat16)
+    out.fill_(float("nan"))
+
+    result = torch.ops.vllm.hc_head_triton(
+        residual,
+        fn,
+        hc_scale,
+        hc_base,
+        out,
+        hidden_size,
+        rms_eps,
+        hc_eps,
+        hc_mult,
+    )
+
+    assert result is None
+    assert not torch.isnan(out).any()
+
+    out_ref = hc_head_ref(residual, fn, hc_scale, hc_base, rms_eps, hc_eps)
+    torch.testing.assert_close(out, out_ref, atol=5e-2, rtol=1e-2)
