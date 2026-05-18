@@ -705,12 +705,13 @@ class HummingMoEMethod(FusedMoEMethodBase):
                         input_scale_group_size=input_scale_group_size,
                         shape_k=shape_k,
                     )
-                    loaded_weight = humming.ops.hadamard_transform(
-                        inputs=loaded_weight.cuda(),
-                        block_size=hadamard_block_size,
-                    )
-                    attr_name = f"{sublayer_name}_hadamard_block_size"
-                    setattr(layer, attr_name, hadamard_block_size)
+                    if hadamard_block_size >= 4:
+                        loaded_weight = humming.ops.hadamard_transform(
+                            inputs=loaded_weight.cuda(),
+                            block_size=hadamard_block_size,
+                        )
+                        attr_name = f"{sublayer_name}_hadamard_block_size"
+                        setattr(layer, attr_name, hadamard_block_size)
 
                 tensor_list = quantize_weight(
                     weight=loaded_weight,
