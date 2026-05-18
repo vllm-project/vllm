@@ -186,6 +186,8 @@ class CuMemAllocator:
 
         assert isinstance(offload_tags, tuple)
 
+        torch.cuda.synchronize()
+
         total_bytes = 0
         backup_bytes = 0
 
