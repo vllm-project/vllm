@@ -7,7 +7,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
-#SBATCH --time=00:15:00
+#SBATCH --time=00:25:00
 #SBATCH --signal=B:TERM@120
 #SBATCH --output=results/%x-%j.out
 #SBATCH --error=results/%x-%j.err
@@ -18,12 +18,13 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="v100-ray-worker-nsys-debug"
+SCRIPT_VERSION="v100-ray-worker-nsys-debug-readiness-loop"
 
 MODEL_ID="${MODEL_ID:-Qwen/Qwen2.5-0.5B-Instruct}"
 PORT="${PORT:-8000}"
 RAY_PORT="${RAY_PORT:-6389}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-1024}"
+
 TP="${TP:-1}"
 PP="${PP:-2}"
 
@@ -33,8 +34,10 @@ NSYS_PROFILE_RAY="${NSYS_PROFILE_RAY:-0}"
 NSYS_TRACE="${NSYS_TRACE:-cuda,nvtx,osrt,cudnn,cublas}"
 
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-600}"
+RAY_READY_TIMEOUT="${RAY_READY_TIMEOUT:-450}"
 NODE_COPY_INTERVAL="${NODE_COPY_INTERVAL:-10}"
 WORKER_REPORT_FLUSH_SLEEP="${WORKER_REPORT_FLUSH_SLEEP:-45}"
+SERVER_SHUTDOWN_TIMEOUT="${SERVER_SHUTDOWN_TIMEOUT:-240}"
 
 HEAD_NODE="$(scontrol show hostnames "${SLURM_NODELIST}" | head -n1)"
 WORKER_NODES="$(scontrol show hostnames "${SLURM_NODELIST}" | tail -n+2)"
@@ -48,7 +51,9 @@ mkdir -p \
   "${TRACE_RUN_DIR}/ray_worker_nsight" \
   "${TRACE_RUN_DIR}/ray_step_logs" \
   "${TRACE_RUN_DIR}/server" \
-  "${NSYS_DIR}"
+  "${TRACE_RUN_DIR}/nccl_logs" \
+  "${NSYS_DIR}" \
+  results
 
 echo "=== V100 Ray/vLLM Nsight debug ==="
 echo "SCRIPT_VERSION=${SCRIPT_VERSION}"
@@ -56,12 +61,15 @@ echo "SLURM_JOB_ID=${SLURM_JOB_ID}"
 echo "SLURM_JOB_NODELIST=${SLURM_JOB_NODELIST}"
 echo "HEAD_NODE=${HEAD_NODE}"
 echo "WORKER_NODES=${WORKER_NODES}"
+echo "NUM_NODES=${NUM_NODES}"
 echo "TRACE_RUN_DIR=${TRACE_RUN_DIR}"
 echo "MODEL_ID=${MODEL_ID}"
 echo "TP=${TP} PP=${PP}"
 echo "NSYS_PROFILE_SERVER=${NSYS_PROFILE_SERVER}"
 echo "NSYS_PROFILE_WORKERS=${NSYS_PROFILE_WORKERS}"
 echo "NSYS_PROFILE_RAY=${NSYS_PROFILE_RAY}"
+echo "RAY_READY_TIMEOUT=${RAY_READY_TIMEOUT}"
+echo "HEALTH_TIMEOUT=${HEALTH_TIMEOUT}"
 
 resolve_host_ip() {
   local nodename="$1"
@@ -112,6 +120,8 @@ if [ ! -x "${RAY_BIN}" ]; then
   exit 1
 fi
 
+echo "REPO_ROOT=${REPO_ROOT}"
+echo "VENV_DIR=${VENV_DIR}"
 echo "python=$(command -v python)"
 echo "ray=${RAY_BIN}"
 echo "nsys=$(command -v nsys || true)"
@@ -130,11 +140,9 @@ export VLLM_DEEP_GEMM_WARMUP=skip
 export NCCL_DEBUG="${NCCL_DEBUG:-INFO}"
 export NCCL_DEBUG_SUBSYS="${NCCL_DEBUG_SUBSYS:-INIT,NET,COLL,P2P,TUNING}"
 export NCCL_DEBUG_FILE="${TRACE_RUN_DIR}/nccl_logs/nccl_%h_%p.log"
-mkdir -p "${TRACE_RUN_DIR}/nccl_logs"
 
-# Patch vLLM's Ray-worker Nsight trace list to include NVTX, if your checkout hardcodes cuda,cudnn,cublas.
+echo "Patching vLLM Ray-worker Nsight trace list if needed..."
 if [ "${PATCH_VLLM_RAY_NSYS:-1}" = "1" ]; then
-  echo "Patching vLLM Ray-worker Nsight trace list if needed..."
   python - <<'PY' || true
 import pathlib
 import vllm
@@ -178,57 +186,90 @@ print_reports() {
   find "${NSYS_DIR}" \
     -type f \
     -printf "%p %s bytes\n" 2>/dev/null | sort || true
+
+  echo "=== NCCL logs ==="
+  find "${TRACE_RUN_DIR}/nccl_logs" \
+    -type f \
+    -printf "%p %s bytes\n" 2>/dev/null | sort || true
 }
 
 stop_server() {
   set +e
+
   if [ -n "${SERVER_PID}" ] && kill -0 "${SERVER_PID}" 2>/dev/null; then
     echo "Stopping vLLM server..."
     kill -INT "${SERVER_PID}" 2>/dev/null || true
-    for _ in $(seq 1 180); do
+
+    for _ in $(seq 1 "${SERVER_SHUTDOWN_TIMEOUT}"); do
       kill -0 "${SERVER_PID}" 2>/dev/null || break
       sleep 1
     done
+
     if kill -0 "${SERVER_PID}" 2>/dev/null; then
+      echo "Server still alive after ${SERVER_SHUTDOWN_TIMEOUT}s; sending SIGTERM"
       kill -TERM "${SERVER_PID}" 2>/dev/null || true
       sleep 10
     fi
+
     if kill -0 "${SERVER_PID}" 2>/dev/null; then
+      echo "Server still alive after SIGTERM; sending SIGKILL"
       kill -KILL "${SERVER_PID}" 2>/dev/null || true
     fi
+
     wait "${SERVER_PID}" 2>/dev/null || true
     SERVER_PID=""
   fi
+
   set -e
 }
 
 stop_ray_steps() {
   set +e
+
   echo "Stopping Ray srun steps..."
-  [ -n "${HEAD_RAY_PID}" ] && kill -TERM "${HEAD_RAY_PID}" 2>/dev/null || true
+
+  if [ -n "${HEAD_RAY_PID}" ]; then
+    kill -TERM "${HEAD_RAY_PID}" 2>/dev/null || true
+  fi
+
   for pid in ${WORKER_RAY_PIDS}; do
     kill -TERM "${pid}" 2>/dev/null || true
   done
+
   sleep 15
-  [ -n "${HEAD_RAY_PID}" ] && wait "${HEAD_RAY_PID}" 2>/dev/null || true
+
+  if [ -n "${HEAD_RAY_PID}" ]; then
+    wait "${HEAD_RAY_PID}" 2>/dev/null || true
+    HEAD_RAY_PID=""
+  fi
+
   for pid in ${WORKER_RAY_PIDS}; do
     wait "${pid}" 2>/dev/null || true
   done
-  HEAD_RAY_PID=""
   WORKER_RAY_PIDS=""
+
   set -e
 }
 
 cleanup() {
   set +e
   echo "=== cleanup ==="
+
   stop_server
-  echo "Waiting for worker report copy before stopping Ray..."
+
+  echo "Waiting ${WORKER_REPORT_FLUSH_SLEEP}s for worker report copy before stopping Ray..."
   sleep "${WORKER_REPORT_FLUSH_SLEEP}"
   print_reports
+
   stop_ray_steps
+
+  echo "Waiting briefly after Ray shutdown for final report copy..."
   sleep 10
   print_reports
+
+  echo "=== Ray step logs ==="
+  find "${TRACE_RUN_DIR}/ray_step_logs" -type f -printf "%p %s bytes\n" 2>/dev/null | sort || true
+
   echo "=== all trace files ==="
   find "${TRACE_RUN_DIR}" -maxdepth 6 -type f -printf "%p %s bytes\n" 2>/dev/null | sort || true
 }
@@ -239,7 +280,7 @@ make_ray_node_command() {
   local node_ip="$2"
   local role="$3"
 
-  cat <<EOF
+  cat <<EOF_NODE
 set -Eeuo pipefail
 
 module purge
@@ -294,13 +335,20 @@ COPIER_PID=""
 ray_step_cleanup() {
   set +e
   trap - EXIT TERM INT
+
   echo "\${NODE_NAME}: ray_step_cleanup"
   copy_ray_nsight_once || true
-  [ -n "\${COPIER_PID}" ] && kill "\${COPIER_PID}" 2>/dev/null || true
-  [ -n "\${COPIER_PID}" ] && wait "\${COPIER_PID}" 2>/dev/null || true
+
+  if [ -n "\${COPIER_PID}" ]; then
+    kill "\${COPIER_PID}" 2>/dev/null || true
+    wait "\${COPIER_PID}" 2>/dev/null || true
+  fi
+
   "${RAY_BIN}" stop --force >/dev/null 2>&1 || true
+
   sleep 10
   copy_ray_nsight_once || true
+
   echo "\${NODE_NAME}: cleanup complete"
   exit 0
 }
@@ -313,7 +361,7 @@ echo "Ray ${role}: copying worker reports to \${NODE_NSIGHT_DEST}"
 copy_ray_nsight_loop &
 COPIER_PID="\$!"
 
-EOF
+EOF_NODE
 }
 
 echo "=== starting Ray head ==="
@@ -356,11 +404,18 @@ srun \
 
 HEAD_RAY_PID=$!
 echo "HEAD_RAY_PID=${HEAD_RAY_PID}"
+
 sleep 20
 
 echo "=== starting Ray workers ==="
 for WORKER in ${WORKER_NODES}; do
   WORKER_IP="$(resolve_host_ip "${WORKER}")"
+
+  if [ -z "${WORKER_IP}" ]; then
+    echo "ERROR: could not resolve worker IP for ${WORKER}" >&2
+    exit 1
+  fi
+
   echo "WORKER=${WORKER} WORKER_IP=${WORKER_IP}"
 
   RAY_WORKER_CMD="$(make_ray_node_command "${WORKER}" "${WORKER_IP}" "worker")
@@ -386,21 +441,59 @@ for WORKER in ${WORKER_NODES}; do
   WORKER_RAY_PIDS="${WORKER_RAY_PIDS} $!"
 done
 
-sleep 25
+echo "=== waiting for Ray cluster ==="
+echo "Waiting for Ray to show ${NUM_NODES} GPUs at ${RAY_ADDRESS}..."
 
-echo "=== Ray status ==="
-"${RAY_BIN}" status --address="${RAY_ADDRESS}" || true
+RAY_READY_START="$(date +%s)"
+RAY_READY_ATTEMPT=0
 
-python - <<PY
+while true; do
+  RAY_READY_ATTEMPT=$((RAY_READY_ATTEMPT + 1))
+
+  if python - <<PY
 import ray
 ray.init(address="${RAY_ADDRESS}", ignore_reinit_error=True)
-print("cluster_resources:", ray.cluster_resources())
-print("available_resources:", ray.available_resources())
-assert ray.cluster_resources().get("GPU", 0) >= ${NUM_NODES}
+resources = ray.cluster_resources()
+available = ray.available_resources()
+print("attempt ${RAY_READY_ATTEMPT}")
+print("cluster_resources:", resources)
+print("available_resources:", available)
 ray.shutdown()
+assert resources.get("GPU", 0) >= ${NUM_NODES}
 PY
+  then
+    echo "Ray cluster is ready with ${NUM_NODES} GPUs."
+    break
+  fi
+
+  now="$(date +%s)"
+  if [ $((now - RAY_READY_START)) -gt "${RAY_READY_TIMEOUT}" ]; then
+    echo "ERROR: Ray cluster did not reach ${NUM_NODES} GPUs within ${RAY_READY_TIMEOUT}s." >&2
+
+    for WORKER in ${WORKER_NODES}; do
+      echo "--- worker ${WORKER} out tail ---"
+      tail -n 120 "${TRACE_RUN_DIR}/ray_step_logs/ray_worker_${WORKER}.out" 2>/dev/null || true
+      echo "--- worker ${WORKER} err tail ---"
+      tail -n 120 "${TRACE_RUN_DIR}/ray_step_logs/ray_worker_${WORKER}.err" 2>/dev/null || true
+    done
+
+    exit 1
+  fi
+
+  echo "Ray cluster not ready yet; sleeping 5s."
+
+  for WORKER in ${WORKER_NODES}; do
+    echo "--- worker ${WORKER} out tail ---"
+    tail -n 30 "${TRACE_RUN_DIR}/ray_step_logs/ray_worker_${WORKER}.out" 2>/dev/null || true
+    echo "--- worker ${WORKER} err tail ---"
+    tail -n 30 "${TRACE_RUN_DIR}/ray_step_logs/ray_worker_${WORKER}.err" 2>/dev/null || true
+  done
+
+  sleep 5
+done
 
 echo "=== starting vLLM ==="
+
 VLLM_TRACE_FLAGS=()
 if [ "${NSYS_PROFILE_WORKERS}" = "1" ]; then
   VLLM_TRACE_FLAGS+=(
@@ -453,21 +546,23 @@ SERVER_PID=$!
 echo "SERVER_PID=${SERVER_PID}"
 
 echo "Waiting for health..."
-_health_start=$(date +%s)
+HEALTH_START="$(date +%s)"
+
 while ! curl -fsS "http://${HOST}:${PORT}/health" >/dev/null 2>&1; do
   if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
     echo "Server died before health"
-    tail -n 200 "${TRACE_RUN_DIR}/server/vllm_server.log" || true
+    tail -n 240 "${TRACE_RUN_DIR}/server/vllm_server.log" || true
     exit 1
   fi
 
-  now=$(date +%s)
-  if [ $((now - _health_start)) -gt "${HEALTH_TIMEOUT}" ]; then
+  now="$(date +%s)"
+  if [ $((now - HEALTH_START)) -gt "${HEALTH_TIMEOUT}" ]; then
     echo "Timed out waiting for health"
-    tail -n 200 "${TRACE_RUN_DIR}/server/vllm_server.log" || true
+    tail -n 240 "${TRACE_RUN_DIR}/server/vllm_server.log" || true
     exit 1
   fi
 
+  echo "Still waiting for health..."
   sleep 5
 done
 
@@ -501,4 +596,5 @@ echo "Trace files:"
 find "${TRACE_RUN_DIR}" -maxdepth 6 -type f -printf "%p %s bytes\n" 2>/dev/null | sort || true
 
 trap - EXIT TERM INT
+
 echo "Done: ${TRACE_RUN_DIR}"
