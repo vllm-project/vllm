@@ -466,6 +466,11 @@ class TieringOffloadingManager(OffloadingManager):
         # Note: The async transfers are now in flight. Their completion is
         # tracked via get_finished() / _maybe_process_finished_jobs().
 
+    def request_finished(self, req_context: ReqContext) -> None:
+        self.primary_tier.request_finished(req_context)
+        for tier in self.secondary_tiers:
+            tier.request_finished(req_context)
+
     def take_events(self) -> Iterable[OffloadingEvent]:
         """
         End-of-step hook: flush deferred work, yield events, reset per-step state.

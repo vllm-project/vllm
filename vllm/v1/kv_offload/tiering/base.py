@@ -163,6 +163,15 @@ class SecondaryTierManager(ABC):
         """
         return
 
+    def request_finished(self, req_context: ReqContext) -> None:
+        """
+        Called when a request has finished.
+
+        Args:
+            req_context: per-request context.
+        """
+        return
+
     def shutdown(self) -> None:
         """Release resources held by this tier (threads, connections, etc.)."""
         return

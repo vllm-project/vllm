@@ -868,6 +868,7 @@ class OffloadingConnectorScheduler:
         req_status = self._req_status.get(request.request_id)
         if req_status is None:
             return False, None
+        self.manager.request_finished(req_status.req_context)
         if not req_status.transfer_jobs:
             del self._req_status[request.request_id]
             return False, None
