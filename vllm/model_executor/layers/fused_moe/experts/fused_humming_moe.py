@@ -26,6 +26,7 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
 )
 from vllm.model_executor.layers.fused_moe.moe_fused_mul_sum import moe_fused_mul_sum
 from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
+    MoEPermuteScratch,
     moe_permute,
     moe_unpermute,
 )
@@ -85,6 +86,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
         )
+        self._permute_scratch = MoEPermuteScratch()
 
     def init_humming_moe(self):
         self.compute_config = {
@@ -598,6 +600,7 @@ class HummingGroupedExperts(HummingExpertsBase):
             n_expert=self.global_num_experts,
             n_local_expert=self.num_experts,
             expert_map=self.layer.expert_map,
+            scratch=self._permute_scratch,
         )
 
         inputs, input_scale = HummingMethod.may_quant_input(

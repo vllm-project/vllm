@@ -17,6 +17,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
+    MoEPermuteScratch,
     moe_permute,
     moe_unpermute,
 )
@@ -75,6 +76,7 @@ def run_cutlass_moe_fp8(
     per_out_ch: bool,
     use_batched_format: bool,
     topk_weights: torch.Tensor | None,
+    permute_scratch: MoEPermuteScratch,
 ):
     a1q = hidden_states
 
@@ -200,6 +202,7 @@ def run_cutlass_moe_fp8(
             local_E,
             expert_map,
             permuted_hidden_states=a1q_perm,
+            scratch=permute_scratch,
         )
         # swap_ab is a CUTLASS grouped-GEMM optimization (M <= 64 reduces padding).
         swap_ab = a1q.size(0) <= 64
@@ -293,6 +296,7 @@ class CutlassExpertsFp8Base(mk.FusedMoEExpertsModular):
         self.ab_strides2 = ab_strides2
         self.c_strides1 = c_strides1
         self.c_strides2 = ab_strides1_c_strides2
+        self._permute_scratch = MoEPermuteScratch()
 
     @staticmethod
     def _supports_current_device() -> bool:
@@ -381,6 +385,7 @@ class CutlassExpertsFp8Base(mk.FusedMoEExpertsModular):
             self.per_out_ch_quant,
             use_batched_format,
             topk_weights,
+            self._permute_scratch,
         )
 
 
@@ -1123,6 +1128,7 @@ def run_cutlass_moe_w4a8_fp8(
     use_batched_format: bool,
     topk_weights: torch.Tensor | None,
     group_size: int,
+    permute_scratch: MoEPermuteScratch,
 ):
     a1q = hidden_states
     M = a1q.size(0)
@@ -1178,6 +1184,7 @@ def run_cutlass_moe_w4a8_fp8(
         local_E,
         expert_map,
         permuted_hidden_states=a1q_perm,
+        scratch=permute_scratch,
     )
     # for RS gemm SwapAB is always enabled (swap logical M, N in the problem shape).
     ops.get_cutlass_moe_mm_problem_sizes_from_expert_offsets(
@@ -1261,6 +1268,7 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
         self.s_strides1 = s_strides1
         self.s_strides2 = s_strides2
         self.group_size = group_size
+        self._permute_scratch = MoEPermuteScratch()
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -1393,6 +1401,7 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
             use_batched_format,
             topk_weights,
             self.group_size,
+            self._permute_scratch,
         )
 
 
