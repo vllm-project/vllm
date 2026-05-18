@@ -424,11 +424,13 @@ class MoERunner(MoERunnerInterface):
             # after changing the defer flag or toggling fuse_moe_allreduce:
             #   rm -rf /root/.cache/vllm/torch_compile_cache/*
             if not (
-                self.defer_allreduce
+                self.moe_config.defer_allreduce
                 and self.moe_config.ep_size <= 1
                 and states.shape[0] <= 128
             ):
+                torch.cuda.nvtx.range_push("moe_ar")
                 states = tensor_model_parallel_all_reduce(states)
+                torch.cuda.nvtx.range_pop()
 
         return states[..., :trunc_size]
 

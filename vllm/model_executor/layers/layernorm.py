@@ -167,6 +167,7 @@ class RMSNorm(CustomOp):
         if workspace is None:
             return self._allreduce_then_norm(x, residual)
 
+        torch.cuda.nvtx.range_push("moe_ar_fused")
         fi_comm.allreduce_fusion(
             input=x,
             workspace=workspace,
@@ -180,6 +181,7 @@ class RMSNorm(CustomOp):
             rms_gamma=self.weight.data,
             rms_eps=self.variance_epsilon,
         )
+        torch.cuda.nvtx.range_pop()
         return x, residual
 
     def _allreduce_then_norm(
