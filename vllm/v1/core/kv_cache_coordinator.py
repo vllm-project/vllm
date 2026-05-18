@@ -48,11 +48,11 @@ class KVCacheCoordinator(ABC):
         self.enable_caching = enable_caching
 
         self.block_pool = BlockPool(
-            kv_cache_config.num_blocks,
-            enable_caching,
-            hash_block_size,
-            enable_kv_cache_events,
-            metrics_collector,
+            num_gpu_blocks=kv_cache_config.num_blocks,
+            enable_caching=enable_caching,
+            hash_block_size=hash_block_size,
+            enable_kv_cache_events=enable_kv_cache_events,
+            metrics_collector=metrics_collector,
         )
 
         # KV cache group indices that get the EAGLE last-block drop.
@@ -483,6 +483,22 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             for i, (_, group_ids, _) in enumerate(self.attention_groups)
             if any(gid in self.eagle_group_ids for gid in group_ids)
         }
+
+    def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
+        # Cache hits in this coordinator are always a multiple of
+        # ``lcm_block_size`` tokens (see ``find_longest_cache_hit``). Within an
+        # aligned region, SWA groups only consult a subset of blocks per
+        # ``lcm_block_size``-segment so the unused blocks also stay out of the
+        # prefix-cache hash map.
+        num_computed_tokens = (
+            num_computed_tokens // self.lcm_block_size * self.lcm_block_size
+        )
+        for manager in self.single_type_managers:
+            manager.cache_blocks(
+                request,
+                num_computed_tokens,
+                alignment_tokens=self.lcm_block_size,
+            )
 
     def find_longest_cache_hit(
         self,
