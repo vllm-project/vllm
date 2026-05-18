@@ -17,6 +17,7 @@ from http import HTTPStatus
 from multiprocessing.process import BaseProcess
 
 import aiohttp
+import psutil
 import uvicorn
 import uvloop
 from fastapi import FastAPI, Response
@@ -168,35 +169,32 @@ async def _probe_endpoint(
     args: argparse.Namespace,
     port: int,
     path: str,
-    failure_threshold: int = 3,
-    retry_delay: float = 1.0,
+    conn_err_failure_threshold: int = 3,
+    conn_err_retry_delay: float = 5.0,
 ) -> bool:
     """
-    Probe endpoint failure_threshold times looking for 200 status.
+    Probe /health endpoint for 200 status.
+
+    If there is a connection error, retry every N seconds.
     """
-    for iteration in range(failure_threshold):
+    for iteration in range(conn_err_failure_threshold):
         try:
             async with session.get(_child_base_url(args, port) + path) as response:
-                if response.status == HTTPStatus.OK:
-                    return True
-                logger.debug(
-                    "Probe got status %d on port %d (attempt %d/%d)",
-                    response.status,
-                    port,
-                    iteration + 1,
-                    failure_threshold,
-                )
+                # vLLM returns 503 on EngineDeadError, so we should return
+                # immediately if vLLM responds with a non-200 status code.
+                return response.status == HTTPStatus.OK
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            # Allow retry of connection errors.
             logger.debug(
                 "Probe attempt %d/%d failed on port %d: %r",
                 iteration + 1,
-                failure_threshold,
+                conn_err_failure_threshold,
                 port,
                 e,
             )
 
-        if iteration < failure_threshold - 1:
-            await asyncio.sleep(retry_delay)
+        if iteration < conn_err_failure_threshold - 1:
+            await asyncio.sleep(conn_err_retry_delay)
 
     return False
 
@@ -232,7 +230,8 @@ def _run_vllm_dp_server(
     """
     from vllm.entrypoints.openai.api_server import run_server
 
-    # Create a fresh process group for the vLLM DP Server.
+    # Create a fresh process group for the vLLM DP Server,
+    # so that CTRL-C is propagated cleanly.
     os.setpgrp()
 
     name = f"APIServer_DP{child_args.data_parallel_rank}"
@@ -322,10 +321,12 @@ class DPSupervisor:
 
         self._shutdown_signal = signal.Signals(signum)
         logger.info(
-            "DPSupervisor received signal %s, starting shutdown.", self._shutdown_signal
+            "DPSupervisor received signal %s, starting shutdown.",
+            self._shutdown_signal.name,
         )
 
         self._shutdown_event.set()
+        self._is_ready = False
 
     def _start_children(self) -> None:
         """
@@ -365,13 +366,19 @@ class DPSupervisor:
                 # Monitor for any processes that died.
                 n_failed = len([p for p in self._processes if not p.is_alive()])
                 if n_failed > 0:
-                    logger.info("DPSupervisor found %s dead vLLM DP Servers.", n_failed)
+                    logger.info("DPSupervisor found %s exited DP Servers.", n_failed)
                     return
 
                 # Probe the endpoint to confirm the server is still active.
                 results = await asyncio.gather(
                     *(
-                        _probe_endpoint(session, self.args, port, "/health")
+                        _probe_endpoint(
+                            session,
+                            self.args,
+                            port,
+                            "/health",
+                            conn_err_failure_threshold=3 if self._is_ready else 1,
+                        )
                         for port in self.child_ports
                     ),
                     return_exceptions=True,
@@ -381,11 +388,16 @@ class DPSupervisor:
                 if all_healthy:
                     self._is_ready = True
                 elif self._is_ready:
-                    logger.info("DPSupervisor found unhealthy vLLM DP Server")
+                    logger.info("DPSupervisor found unhealthy DP Server.")
+                    self._is_ready = False
                     return
 
                 # Sleep for the probe interval or until a shutdown event.
                 with contextlib.suppress(asyncio.TimeoutError):
+                    logger.debug(
+                        "Waiting for %s seconds before next probe",
+                        self.args.data_parallel_probe_interval_s,
+                    )
                     await asyncio.wait_for(
                         self._shutdown_event.wait(),
                         timeout=self.args.data_parallel_probe_interval_s,
@@ -397,8 +409,8 @@ class DPSupervisor:
 
         try:
             logger.info(
-                "Forwarding signal %s to %d vLLM DP Servers.",
-                self._shutdown_signal,
+                "Forwarding signal %s to %d DP Servers.",
+                self._shutdown_signal.name,
                 len(self._processes),
             )
             for process in self._processes:
@@ -423,7 +435,12 @@ class DPSupervisor:
                     process.name,
                     timeout,
                 )
-                with contextlib.suppress(ProcessLookupError, OSError):
+                with contextlib.suppress(
+                    ProcessLookupError,
+                    OSError,
+                    psutil.NoSuchProcess,
+                    psutil.AccessDenied,
+                ):
                     kill_process_tree(pid)
 
 
