@@ -350,7 +350,11 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
 
         return self.wo_b(z.flatten(1))
 
-    def attn_gemm_parallel_execute(self, hidden_states) -> tuple[Any, ...]:
+    def attn_gemm_parallel_execute(
+        self,
+        hidden_states: torch.Tensor,
+        skip_indexer_scores: bool = False,
+    ) -> tuple[Any, ...]:
         aux_streams = self.aux_stream_list
         if aux_streams is not None:
             assert len(aux_streams) >= 3
@@ -390,7 +394,8 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
                     out_dtype=torch.float32,
                 )
 
-            aux_fns[1] = indexer_weights_proj
+            if not skip_indexer_scores:
+                aux_fns[1] = indexer_weights_proj
             aux_fns[2] = indexer_compressor_kv_score
 
         def fused_wqa_wkv() -> torch.Tensor:
@@ -410,6 +415,43 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
 
         return qr_kv, kv_score, indexer_kv_score, indexer_weights
 
+    def _can_skip_c4a_indexer(
+        self,
+        attn_metadata: (
+            dict[str, AttentionMetadata] | list[dict[str, AttentionMetadata]] | None
+        ),
+    ) -> bool:
+        if (
+            not current_platform.is_rocm()
+            or self.compress_ratio != 4
+            or self.indexer is None
+            or not isinstance(attn_metadata, dict)
+        ):
+            return False
+
+        indexer = self.indexer
+        if not getattr(indexer, "use_fp4_kv", False):
+            return False
+
+        metadata = attn_metadata.get(indexer.k_cache.prefix)
+        if metadata is None:
+            return False
+
+        topk_tokens = indexer.topk_tokens
+        if metadata.num_prefills > 0:
+            prefill = metadata.prefill
+            if prefill is None:
+                return False
+            if any(chunk.max_valid_len > topk_tokens for chunk in prefill.chunks):
+                return False
+
+        if metadata.num_decodes > 0:
+            decode = metadata.decode
+            if decode is None or decode.max_seq_len > topk_tokens:
+                return False
+
+        return True
+
     def attention_impl(
         self,
         hidden_states: torch.Tensor,
@@ -418,9 +460,14 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
     ) -> None:
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
+        skip_indexer_scores = self._can_skip_c4a_indexer(attn_metadata)
+        self.mla_attn.use_trivial_c4a_topk = skip_indexer_scores
 
         qr_kv, kv_score, indexer_kv_score, indexer_weights = (
-            self.attn_gemm_parallel_execute(hidden_states)
+            self.attn_gemm_parallel_execute(
+                hidden_states,
+                skip_indexer_scores=skip_indexer_scores,
+            )
         )
 
         qr, kv = qr_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
@@ -451,20 +498,42 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
                 compressor(kv_score, positions, self.rotary_emb)
                 return q
 
-            q, _ = maybe_execute_in_parallel(
-                wq_b_kv_insert_and_compress,
-                lambda: indexer(
-                    hidden_states,
-                    qr,
-                    indexer_kv_score,
-                    indexer_weights,
-                    positions,
-                    self.indexer_rotary_emb,
-                ),
-                self.ln_events[0],
-                self.ln_events[1],
-                aux_stream,
-            )
+            if skip_indexer_scores:
+                assert indexer_kv_score is not None
+
+                def compress_indexer_kv_cache() -> torch.Tensor:
+                    indexer.compressor(
+                        indexer_kv_score,
+                        positions,
+                        self.indexer_rotary_emb,
+                    )
+                    assert indexer.topk_indices_buffer is not None
+                    return indexer.topk_indices_buffer
+
+                q, _ = maybe_execute_in_parallel(
+                    wq_b_kv_insert_and_compress,
+                    compress_indexer_kv_cache,
+                    self.ln_events[0],
+                    self.ln_events[1],
+                    aux_stream,
+                )
+            else:
+                assert indexer_kv_score is not None
+                assert indexer_weights is not None
+                q, _ = maybe_execute_in_parallel(
+                    wq_b_kv_insert_and_compress,
+                    lambda: indexer(
+                        hidden_states,
+                        qr,
+                        indexer_kv_score,
+                        indexer_weights,
+                        positions,
+                        self.indexer_rotary_emb,
+                    ),
+                    self.ln_events[0],
+                    self.ln_events[1],
+                    aux_stream,
+                )
         elif self.compressor is not None:
             # wq_b + kv_insert on default, compressor on aux.
             aux_stream = (
@@ -656,6 +725,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         self.rope_head_dim = qk_rope_head_dim
         self.indexer = indexer
         self.topk_indices_buffer = topk_indices_buffer
+        self.use_trivial_c4a_topk = False
 
         self.prefix = prefix  # Alias for compatibility with compressor
 
@@ -1129,8 +1199,8 @@ class DeepseekV4Indexer(nn.Module):
         assert cache_config is not None, "Deepseek V4 indexer requires cache_config"
         # NOTE(yifan): FP8 indxer cache use the same layout as V3.2:
         # head_dim bytes = 128 fp8 + 4 fp32 scale = 132.
-        # For FP4 indexer cache, we still allocate the same amount of memory as FP8,
-        # but only use the first half of the memory.
+        # For FP4 indexer cache, keep the same allocation width as CUDA and
+        # only use the MXFP4 value/scale prefix.
         k_cache_head_dim = self.head_dim + self.head_dim // self.quant_block_size * 4
         self.k_cache = DeepseekV4IndexerCache(
             head_dim=k_cache_head_dim,

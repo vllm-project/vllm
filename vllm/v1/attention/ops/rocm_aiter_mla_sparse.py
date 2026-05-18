@@ -12,15 +12,21 @@ from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.forward_context import get_forward_context
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.deep_gemm import fp8_fp4_paged_mqa_logits
 from vllm.utils.torch_utils import LayerNameType
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
+from vllm.v1.attention.ops.rocm_fp8_fp4_paged_mqa_logits import (
+    rocm_fp4_mqa_logits,
+)
 
 if current_platform.is_rocm():
     from vllm.platforms.rocm import _ON_GFX942, _ON_GFX950
 else:
     _ON_GFX942 = False
     _ON_GFX950 = False
+
+MXFP4_BLOCK_SIZE = 32
 
 
 @triton.jit
@@ -223,6 +229,75 @@ def cp_gather_indexer_k_quant_cache_triton(
         head_dim,
         block_tile_size,
         head_tile_size,
+    )
+
+
+@triton.jit
+def _cp_gather_indexer_mxfp4_cache_kernel(
+    kv_cache_ptr,
+    k_fp4_ptr,
+    k_scale_ptr,
+    block_table_ptr,
+    cu_seqlen_ptr,
+    token_to_seq_ptr,
+    block_size,
+    block_table_stride,
+    kv_cache_stride,
+    HEAD_BYTES: tl.constexpr,
+    SCALE_BYTES: tl.constexpr,
+    BLOCK_HEAD: tl.constexpr,
+):
+    tid = tl.program_id(0)
+    offsets = tl.arange(0, BLOCK_HEAD)
+    batch_id = tl.load(token_to_seq_ptr + tid)
+    batch_start = tl.load(cu_seqlen_ptr + batch_id)
+    batch_end = tl.load(cu_seqlen_ptr + batch_id + 1)
+    if tid >= batch_end:
+        return
+
+    batch_offset = tid - batch_start
+    block_table_id = batch_offset // block_size
+    block_offset = batch_offset % block_size
+    block_id = tl.load(block_table_ptr + batch_id * block_table_stride + block_table_id)
+    block_base = kv_cache_ptr + block_id.to(tl.int64) * kv_cache_stride
+
+    src_values = block_base + block_offset * HEAD_BYTES
+    dst_values = k_fp4_ptr + tid * HEAD_BYTES
+    value_mask = offsets < HEAD_BYTES
+    values = tl.load(src_values + offsets, mask=value_mask, other=0)
+    tl.store(dst_values + offsets, values, mask=value_mask)
+
+    scale_offsets = tl.arange(0, SCALE_BYTES)
+    src_scales = block_base + block_size * HEAD_BYTES + block_offset * SCALE_BYTES
+    dst_scales = k_scale_ptr + tid * SCALE_BYTES
+    scales = tl.load(src_scales + scale_offsets)
+    tl.store(dst_scales + scale_offsets, scales)
+
+
+def cp_gather_indexer_mxfp4_cache_triton(
+    k_cache: torch.Tensor,
+    k_fp4: torch.Tensor,
+    k_scale: torch.Tensor,
+    block_table: torch.Tensor,
+    cu_seqlen: torch.Tensor,
+    token_to_seq: torch.Tensor,
+):
+    head_bytes = k_fp4.shape[-1]
+    scale_bytes = k_scale.shape[-1]
+    num_tokens = k_fp4.size(0)
+    _cp_gather_indexer_mxfp4_cache_kernel[(num_tokens,)](
+        k_cache,
+        k_fp4,
+        k_scale,
+        block_table,
+        cu_seqlen,
+        token_to_seq,
+        k_cache.shape[1],
+        block_table.stride(0),
+        k_cache.stride(0),
+        HEAD_BYTES=head_bytes,
+        SCALE_BYTES=scale_bytes,
+        BLOCK_HEAD=triton.next_power_of_2(head_bytes),
     )
 
 
@@ -542,42 +617,117 @@ def rocm_fp8_mqa_logits(
         return fp8_mqa_logits_torch(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke)
 
 
-def _topk_indices_torch(
-    logits: torch.Tensor,
+@triton.jit
+def _fill_prefill_topk_indices_kernel(
+    row_starts_ptr,
+    row_ends_ptr,
+    out_ptr,
+    out_stride,
+    topk_tokens: tl.constexpr,
+    BLOCK_TOPK: tl.constexpr,
+):
+    row = tl.program_id(0)
+    block = tl.program_id(1)
+    offsets = block * BLOCK_TOPK + tl.arange(0, BLOCK_TOPK)
+    row_len = tl.load(row_ends_ptr + row) - tl.load(row_starts_ptr + row)
+    row_len = tl.maximum(row_len, 0)
+    values = tl.where(offsets < row_len, offsets, -1)
+    tl.store(
+        out_ptr + row * out_stride + offsets,
+        values,
+        mask=offsets < topk_tokens,
+    )
+
+
+def _fill_prefill_topk_indices(
+    row_starts: torch.Tensor,
+    row_ends: torch.Tensor,
+    out: torch.Tensor,
     topk_tokens: int,
-    row_starts: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    k = min(topk_tokens, logits.shape[-1])
-    values, indices = torch.topk(logits, k=k, dim=-1)
-    indices = indices.to(torch.int32)
-    indices = torch.where(
-        values == float("-inf"),
-        torch.full_like(indices, -1, dtype=torch.int32),
+    block_topk = 256
+    grid = (out.shape[0], triton.cdiv(topk_tokens, block_topk))
+    _fill_prefill_topk_indices_kernel[grid](
+        row_starts,
+        row_ends,
+        out,
+        out.stride(0),
+        topk_tokens,
+        BLOCK_TOPK=block_topk,
+    )
+    return out
+
+
+@triton.jit
+def _fill_decode_topk_indices_kernel(
+    seq_lens_ptr,
+    out_ptr,
+    seq_lens_stride_b,
+    seq_lens_stride_n,
+    out_stride,
+    topk_tokens: tl.constexpr,
+    next_n: tl.constexpr,
+    SEQ_LENS_2D: tl.constexpr,
+    BLOCK_TOPK: tl.constexpr,
+):
+    row = tl.program_id(0)
+    block = tl.program_id(1)
+    batch = row // next_n
+    next_idx = row - batch * next_n
+    if SEQ_LENS_2D:
+        seq_len = tl.load(
+            seq_lens_ptr + batch * seq_lens_stride_b + next_idx * seq_lens_stride_n
+        )
+    else:
+        batch_seq_len = tl.load(seq_lens_ptr + batch * seq_lens_stride_b)
+        seq_len = batch_seq_len - next_n + next_idx + 1
+    seq_len = tl.maximum(seq_len, 0)
+
+    offsets = block * BLOCK_TOPK + tl.arange(0, BLOCK_TOPK)
+    values = tl.where(offsets < seq_len, offsets, -1)
+    tl.store(
+        out_ptr + row * out_stride + offsets,
+        values,
+        mask=offsets < topk_tokens,
+    )
+
+
+def _fill_decode_topk_indices(
+    seq_lens: torch.Tensor,
+    topk_tokens: int,
+    next_n: int,
+    num_rows: int,
+    out: torch.Tensor | None = None,
+) -> torch.Tensor:
+    indices = out
+    if indices is None:
+        indices = torch.empty(
+            (num_rows, topk_tokens),
+            dtype=torch.int32,
+            device=seq_lens.device,
+        )
+
+    block_topk = 256
+    grid = (num_rows, triton.cdiv(topk_tokens, block_topk))
+    _fill_decode_topk_indices_kernel[grid](
+        seq_lens,
         indices,
+        seq_lens.stride(0),
+        seq_lens.stride(1) if seq_lens.dim() == 2 else 0,
+        indices.stride(0),
+        topk_tokens,
+        next_n,
+        SEQ_LENS_2D=seq_lens.dim() == 2,
+        BLOCK_TOPK=block_topk,
     )
-    if row_starts is not None:
-        # Match the CUDA top_k_per_row_prefill contract: indices are local to
-        # each row's valid [row_start, row_end) range, not columns in the
-        # concatenated chunk logits matrix.
-        starts = row_starts.to(dtype=torch.int32).view(-1, 1)
-        indices = torch.where(indices < 0, indices, indices - starts)
-    if k == topk_tokens:
-        return indices
-    padded = torch.full(
-        (logits.shape[0], topk_tokens),
-        -1,
-        dtype=torch.int32,
-        device=logits.device,
-    )
-    padded[:, :k] = indices
-    return padded
+    return indices
 
 
 def rocm_aiter_sparse_attn_indexer_fake(
     hidden_states: torch.Tensor,
     k_cache_prefix: LayerNameType,
     kv_cache: torch.Tensor,
-    q_fp8: torch.Tensor,
+    q_quant: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
     k: torch.Tensor,
     weights: torch.Tensor,
     quant_block_size: int,
@@ -588,7 +738,380 @@ def rocm_aiter_sparse_attn_indexer_fake(
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor | None,
     skip_k_cache_insert: bool = False,
+    use_fp4_cache: bool = False,
 ) -> torch.Tensor:
+    del (
+        k_cache_prefix,
+        kv_cache,
+        q_quant,
+        weights,
+        quant_block_size,
+        scale_fmt,
+        topk_tokens,
+        max_model_len,
+    )
+    device = hidden_states.device if k is None else k.device
+    flattened_width = (
+        head_dim // 2 + head_dim // MXFP4_BLOCK_SIZE if use_fp4_cache else head_dim + 4
+    )
+    _flattened_kv = torch.empty(
+        [total_seq_lens, flattened_width], device=device, dtype=torch.uint8
+    )
+    if use_fp4_cache:
+        _k_fp4 = _flattened_kv[..., : head_dim // 2].contiguous()
+        _k_scale = _flattened_kv[..., head_dim // 2 :].contiguous()
+    else:
+        fp8_dtype = current_platform.fp8_dtype()
+        _k_fp8 = _flattened_kv[..., :head_dim].view(fp8_dtype).contiguous()
+        _k_scale = _flattened_kv[..., head_dim:].view(torch.float32).contiguous()
+    return topk_indices_buffer
+
+
+def rocm_aiter_sparse_attn_indexer_native(
+    hidden_states: torch.Tensor,
+    k_cache_prefix: LayerNameType,
+    kv_cache: torch.Tensor,
+    q_quant: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+    k: torch.Tensor,
+    weights: torch.Tensor,
+    quant_block_size: int,
+    scale_fmt: str | None,
+    topk_tokens: int,
+    head_dim: int,
+    max_model_len: int,
+    total_seq_lens: int,
+    topk_indices_buffer: torch.Tensor | None,
+    skip_k_cache_insert: bool = False,
+    use_fp4_cache: bool = False,
+) -> torch.Tensor:
+    # careful! this will be None in dummy run
+    attn_metadata = get_forward_context().attn_metadata
+    fp8_dtype = current_platform.fp8_dtype()
+    from vllm import _custom_ops as ops
+    from vllm.utils.torch_utils import _resolve_layer_name
+
+    k_cache_prefix = _resolve_layer_name(k_cache_prefix)
+    # assert isinstance(attn_metadata, dict)
+    if not isinstance(attn_metadata, dict):
+        return rocm_aiter_sparse_attn_indexer_fake(
+            hidden_states,
+            k_cache_prefix,
+            kv_cache,
+            q_quant,
+            k,
+            weights,
+            quant_block_size,
+            scale_fmt,
+            topk_tokens,
+            head_dim,
+            max_model_len,
+            total_seq_lens,
+            topk_indices_buffer,
+            skip_k_cache_insert=skip_k_cache_insert,
+            use_fp4_cache=use_fp4_cache,
+        )
+    layer_attn_metadata = attn_metadata[k_cache_prefix]
+    assert isinstance(layer_attn_metadata, DeepseekV32IndexerMetadata)
+    assert topk_indices_buffer is not None
+    assert scale_fmt is not None
+    slot_mapping = layer_attn_metadata.slot_mapping
+    has_decode = layer_attn_metadata.num_decodes > 0
+    has_prefill = layer_attn_metadata.num_prefills > 0
+    num_decode_tokens = layer_attn_metadata.num_decode_tokens
+    device = hidden_states.device if k is None else k.device
+    if use_fp4_cache:
+        assert isinstance(q_quant, tuple), (
+            "MXFP4 sparse_attn_indexer expects (q_values, q_scales)"
+        )
+        q_values, q_scale = q_quant
+        assert q_scale.dtype == torch.int32
+    else:
+        assert isinstance(q_quant, torch.Tensor), (
+            "FP8 sparse_attn_indexer expects a single q tensor"
+        )
+        q_values, q_scale = q_quant, None
+
+    # during speculative decoding, k may be padded to the CUDA graph batch
+    # size while slot_mapping only covers actual tokens.
+    num_tokens = slot_mapping.shape[0]
+    if k is not None:
+        k = k[:num_tokens]
+    elif not skip_k_cache_insert:
+        raise ValueError("k must be provided when skip_k_cache_insert is False")
+
+    if not skip_k_cache_insert:
+        assert not use_fp4_cache, "Unfused FP4 indexer cache insert is unsupported"
+        if _ON_GFX942:
+            ops.indexer_k_quant_and_cache(
+                k,
+                kv_cache,
+                slot_mapping,
+                quant_block_size,
+                scale_fmt,
+            )
+        else:
+            indexer_k_quant_and_cache_triton(
+                k,
+                kv_cache,
+                slot_mapping,
+                quant_block_size,
+                scale_fmt,
+            )
+
+    if hidden_states.shape[0] > num_tokens:
+        topk_indices_buffer[num_tokens : hidden_states.shape[0], :topk_tokens] = -1
+    if has_prefill:
+        prefill_metadata = layer_attn_metadata.prefill
+        assert prefill_metadata is not None
+        prefill_chunks = prefill_metadata.chunks
+        needs_prefill_logits = not (
+            use_fp4_cache
+            and all(chunk.max_valid_len <= topk_tokens for chunk in prefill_chunks)
+        )
+        max_total_seq_lens = max(
+            (chunk.total_seq_lens for chunk in prefill_chunks),
+            default=0,
+        )
+        if use_fp4_cache and needs_prefill_logits:
+            k_quant_full = torch.empty(
+                [max_total_seq_lens, head_dim // 2],
+                device=device,
+                dtype=torch.uint8,
+            )
+            k_scale_full = torch.empty(
+                [max_total_seq_lens, head_dim // MXFP4_BLOCK_SIZE],
+                device=device,
+                dtype=torch.uint8,
+            )
+        elif not use_fp4_cache:
+            k_quant_full = torch.zeros(
+                [max_total_seq_lens, head_dim],
+                device=device,
+                dtype=fp8_dtype,
+            )
+            k_scale_full = torch.zeros(
+                [max_total_seq_lens, 4],
+                device=device,
+                dtype=torch.uint8,
+            )
+        else:
+            k_quant_full = None
+            k_scale_full = None
+        for chunk in prefill_chunks:
+            topk_indices = topk_indices_buffer[
+                chunk.token_start : chunk.token_end, :topk_tokens
+            ]
+            if use_fp4_cache and chunk.max_valid_len <= topk_tokens:
+                _fill_prefill_topk_indices(
+                    chunk.cu_seqlen_ks,
+                    chunk.cu_seqlen_ke,
+                    topk_indices,
+                    topk_tokens,
+                )
+                continue
+
+            assert k_quant_full is not None
+            assert k_scale_full is not None
+            k_quant = k_quant_full[: chunk.total_seq_lens]
+            k_scale = k_scale_full[: chunk.total_seq_lens]
+            if not chunk.skip_kv_gather:
+                if use_fp4_cache:
+                    cp_gather_indexer_mxfp4_cache_triton(
+                        kv_cache,
+                        k_quant,
+                        k_scale,
+                        chunk.block_table,
+                        chunk.cu_seq_lens,
+                        token_to_seq=chunk.token_to_seq,
+                    )
+                elif _ON_GFX942:
+                    ops.cp_gather_indexer_k_quant_cache(
+                        kv_cache,
+                        k_quant,
+                        k_scale,
+                        chunk.block_table,
+                        chunk.cu_seq_lens,
+                    )
+                else:
+                    cp_gather_indexer_k_quant_cache_triton(
+                        kv_cache,
+                        k_quant,
+                        k_scale,
+                        chunk.block_table,
+                        chunk.cu_seq_lens,
+                        token_to_seq=chunk.token_to_seq,
+                    )
+
+            q_slice = q_values[chunk.token_start : chunk.token_end]
+            weight_slice = weights[chunk.token_start : chunk.token_end]
+            if use_fp4_cache:
+                assert q_scale is not None
+                q_scale_slice = q_scale[chunk.token_start : chunk.token_end]
+                logits = rocm_fp4_mqa_logits(
+                    (q_slice.view(torch.int8), q_scale_slice),
+                    (
+                        k_quant.view(torch.int8),
+                        k_scale.view(torch.int32).squeeze(-1),
+                    ),
+                    weight_slice,
+                    chunk.cu_seqlen_ks,
+                    chunk.cu_seqlen_ke,
+                    clean_logits=False,
+                )
+            else:
+                logits = rocm_fp8_mqa_logits(
+                    q_slice,
+                    (k_quant, k_scale.view(torch.float32)),
+                    weight_slice,
+                    chunk.cu_seqlen_ks,
+                    chunk.cu_seqlen_ke,
+                )
+            torch.ops._C.top_k_per_row_prefill(
+                logits,
+                chunk.cu_seqlen_ks,
+                chunk.cu_seqlen_ke,
+                topk_indices,
+                logits.shape[0],
+                logits.stride(0),
+                logits.stride(1),
+                topk_tokens,
+            )
+
+    if has_decode:
+        decode_metadata = layer_attn_metadata.decode
+        assert decode_metadata is not None
+        if use_fp4_cache:
+            num_blocks, block_size, _ = kv_cache.shape
+            page_bytes = int(kv_cache.stride(0))
+            fp4_bytes = head_dim // 2 + head_dim // MXFP4_BLOCK_SIZE
+            kv_cache_decode = torch.as_strided(
+                kv_cache,
+                size=(num_blocks, block_size, 1, fp4_bytes),
+                stride=(page_bytes, fp4_bytes, fp4_bytes, 1),
+            )
+        else:
+            # kv_cache size requirement [num_block, block_size, n_head, head_dim],
+            # we only have [num_block, block_size, head_dim],
+            kv_cache_decode = kv_cache.unsqueeze(-2)
+        decode_lens = decode_metadata.decode_lens
+        if decode_metadata.requires_padding:
+            # pad in edge case where we have short chunked prefill length <
+            # decode_threshold since we unstrictly split
+            # prefill and decode by decode_threshold
+            # (currently set to 1 + speculative tokens)
+            if use_fp4_cache:
+                padded_q_decode_tokens = pack_seq_triton(
+                    q_values[:num_decode_tokens],
+                    decode_lens,
+                    pad_value=0,
+                )
+                assert q_scale is not None
+                q_scale_bytes = q_scale[:num_decode_tokens].contiguous()
+                q_scale_bytes = q_scale_bytes.view(torch.uint8).reshape(
+                    num_decode_tokens, -1
+                )
+                padded_q_scale = pack_seq_triton(
+                    q_scale_bytes,
+                    decode_lens,
+                    pad_value=0,
+                )
+                padded_q_scale = padded_q_scale.view(torch.int32).reshape(
+                    padded_q_scale.shape[0],
+                    padded_q_scale.shape[1],
+                    -1,
+                )
+            else:
+                padded_q_decode_tokens = pack_seq_triton(
+                    q_values[:num_decode_tokens], decode_lens
+                )
+                padded_q_scale = None
+        else:
+            padded_q_decode_tokens = q_values[:num_decode_tokens].reshape(
+                decode_lens.shape[0], -1, *q_values.shape[1:]
+            )
+            if use_fp4_cache:
+                assert q_scale is not None
+                padded_q_scale = q_scale[:num_decode_tokens].reshape(
+                    decode_lens.shape[0], -1, *q_scale.shape[1:]
+                )
+            else:
+                padded_q_scale = None
+        # TODO: move and optimize below logic with triton kernels
+        batch_size = padded_q_decode_tokens.shape[0]
+        next_n = padded_q_decode_tokens.shape[1]
+        assert batch_size == decode_metadata.seq_lens.shape[0]
+        num_padded_tokens = batch_size * next_n
+
+        topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
+        if use_fp4_cache:
+            if decode_metadata.max_seq_len <= topk_tokens:
+                _fill_decode_topk_indices(
+                    decode_metadata.seq_lens,
+                    topk_tokens,
+                    next_n,
+                    num_padded_tokens,
+                    out=topk_indices,
+                )
+            else:
+                active_paged_width = (
+                    decode_metadata.block_table.shape[1] * kv_cache_decode.shape[1]
+                )
+                logits_width = min(
+                    max_model_len,
+                    max(topk_tokens, active_paged_width),
+                )
+                logits = fp8_fp4_paged_mqa_logits(
+                    (padded_q_decode_tokens.view(torch.int8), padded_q_scale),
+                    kv_cache_decode,
+                    weights[:num_padded_tokens],
+                    decode_metadata.seq_lens,
+                    decode_metadata.block_table,
+                    decode_metadata.schedule_metadata,
+                    max_model_len=logits_width,
+                    clean_logits=False,
+                )
+                torch.ops._C.top_k_per_row_decode(
+                    logits,
+                    next_n,
+                    decode_metadata.seq_lens,
+                    topk_indices,
+                    logits.shape[0],
+                    logits.stride(0),
+                    logits.stride(1),
+                    topk_tokens,
+                )
+        else:
+            logits = rocm_fp8_paged_mqa_logits(
+                padded_q_decode_tokens,
+                kv_cache_decode,
+                weights[:num_padded_tokens],
+                decode_metadata.seq_lens,
+                decode_metadata.block_table,
+                decode_metadata.schedule_metadata,
+                max_model_len=max_model_len,
+            )
+            torch.ops._C.top_k_per_row_decode(
+                logits,
+                next_n,
+                decode_metadata.seq_lens,
+                topk_indices,
+                logits.shape[0],
+                logits.stride(0),
+                logits.stride(1),
+                topk_tokens,
+            )
+
+        if decode_metadata.requires_padding:
+            # if padded, we need to unpack
+            # the topk indices removing padded tokens
+            topk_indices = unpack_seq_triton(
+                topk_indices.reshape(batch_size, -1, topk_indices.shape[-1]),
+                decode_lens,
+            )
+            topk_indices_buffer[:num_decode_tokens, : topk_indices.shape[-1]] = (
+                topk_indices
+            )
+
     return topk_indices_buffer
 
 
@@ -609,185 +1132,23 @@ def rocm_aiter_sparse_attn_indexer(
     topk_indices_buffer: torch.Tensor | None,
     skip_k_cache_insert: bool = False,
 ) -> torch.Tensor:
-    # careful! this will be None in dummy run
-    attn_metadata = get_forward_context().attn_metadata
-    fp8_dtype = current_platform.fp8_dtype()
-    from vllm import _custom_ops as ops
-    from vllm.utils.torch_utils import _resolve_layer_name
-
-    k_cache_prefix = _resolve_layer_name(k_cache_prefix)
-    # assert isinstance(attn_metadata, dict)
-    if not isinstance(attn_metadata, dict):
-        return rocm_aiter_sparse_attn_indexer_fake(
-            hidden_states,
-            k_cache_prefix,
-            kv_cache,
-            q_fp8,
-            k,
-            weights,
-            quant_block_size,
-            scale_fmt,
-            topk_tokens,
-            head_dim,
-            max_model_len,
-            total_seq_lens,
-            topk_indices_buffer,
-            skip_k_cache_insert,
-        )
-    layer_attn_metadata = attn_metadata[k_cache_prefix]
-    assert isinstance(layer_attn_metadata, DeepseekV32IndexerMetadata)
-    assert topk_indices_buffer is not None
-    assert scale_fmt is not None
-    slot_mapping = layer_attn_metadata.slot_mapping
-    has_decode = layer_attn_metadata.num_decodes > 0
-    has_prefill = layer_attn_metadata.num_prefills > 0
-    num_decode_tokens = layer_attn_metadata.num_decode_tokens
-    device = hidden_states.device if k is None else k.device
-
-    # during speculative decoding, k may be padded to the CUDA graph batch
-    # size while slot_mapping only covers actual tokens.
-    num_tokens = slot_mapping.shape[0]
-    if k is not None:
-        k = k[:num_tokens]
-    elif not skip_k_cache_insert:
-        raise ValueError("k must be provided when skip_k_cache_insert is False")
-
-    if not skip_k_cache_insert:
-        if _ON_GFX942:
-            ops.indexer_k_quant_and_cache(
-                k,
-                kv_cache,
-                slot_mapping,
-                quant_block_size,
-                scale_fmt,
-            )
-        else:
-            indexer_k_quant_and_cache_triton(
-                k,
-                kv_cache,
-                slot_mapping,
-                quant_block_size,
-                scale_fmt,
-            )
-
-    topk_indices_buffer[: hidden_states.shape[0]] = -1
-    if has_prefill:
-        prefill_metadata = layer_attn_metadata.prefill
-        assert prefill_metadata is not None
-        for chunk in prefill_metadata.chunks:
-            k_fp8 = torch.empty(
-                [chunk.total_seq_lens, head_dim],
-                device=device,
-                dtype=fp8_dtype,
-            )
-            k_scale = torch.empty(
-                [chunk.total_seq_lens, 4],
-                device=device,
-                dtype=torch.uint8,
-            )
-            if _ON_GFX942:
-                ops.cp_gather_indexer_k_quant_cache(
-                    kv_cache,
-                    k_fp8,
-                    k_scale,
-                    chunk.block_table,
-                    chunk.cu_seq_lens,
-                )
-            else:
-                cp_gather_indexer_k_quant_cache_triton(
-                    kv_cache,
-                    k_fp8,
-                    k_scale,
-                    chunk.block_table,
-                    chunk.cu_seq_lens,
-                    token_to_seq=chunk.token_to_seq,
-                )
-
-            logits = rocm_fp8_mqa_logits(
-                q_fp8[chunk.token_start : chunk.token_end],
-                (k_fp8, k_scale.view(torch.float32)),
-                weights[chunk.token_start : chunk.token_end],
-                chunk.cu_seqlen_ks,
-                chunk.cu_seqlen_ke,
-            )
-            topk_indices = topk_indices_buffer[
-                chunk.token_start : chunk.token_end, :topk_tokens
-            ]
-
-            num_rows = logits.shape[0]
-
-            torch.ops._C.top_k_per_row_prefill(
-                logits,
-                chunk.cu_seqlen_ks,
-                chunk.cu_seqlen_ke,
-                topk_indices,
-                num_rows,
-                logits.stride(0),
-                logits.stride(1),
-                topk_tokens,
-            )
-
-    if has_decode:
-        decode_metadata = layer_attn_metadata.decode
-        assert decode_metadata is not None
-        # kv_cache size requirement [num_block, block_size, n_head, head_dim],
-        # we only have [num_block, block_size, head_dim],
-        kv_cache = kv_cache.unsqueeze(-2)
-        decode_lens = decode_metadata.decode_lens
-        if decode_metadata.requires_padding:
-            # pad in edge case where we have short chunked prefill length <
-            # decode_threshold since we unstrictly split
-            # prefill and decode by decode_threshold
-            # (currently set to 1 + speculative tokens)
-            padded_q_fp8_decode_tokens = pack_seq_triton(
-                q_fp8[:num_decode_tokens], decode_lens
-            )
-        else:
-            padded_q_fp8_decode_tokens = q_fp8[:num_decode_tokens].reshape(
-                decode_lens.shape[0], -1, *q_fp8.shape[1:]
-            )
-        # TODO: move and optimize below logic with triton kernels
-        batch_size = padded_q_fp8_decode_tokens.shape[0]
-        next_n = padded_q_fp8_decode_tokens.shape[1]
-        assert batch_size == decode_metadata.seq_lens.shape[0]
-        num_padded_tokens = batch_size * next_n
-
-        logits = rocm_fp8_paged_mqa_logits(
-            padded_q_fp8_decode_tokens,
-            kv_cache,
-            weights[:num_padded_tokens],
-            decode_metadata.seq_lens,
-            decode_metadata.block_table,
-            decode_metadata.schedule_metadata,
-            max_model_len=max_model_len,
-        )
-
-        topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
-        num_rows = logits.shape[0]
-
-        torch.ops._C.top_k_per_row_decode(
-            logits,
-            next_n,
-            decode_metadata.seq_lens,
-            topk_indices,
-            num_rows,
-            logits.stride(0),
-            logits.stride(1),
-            topk_tokens,
-        )
-
-        if decode_metadata.requires_padding:
-            # if padded, we need to unpack
-            # the topk indices removing padded tokens
-            topk_indices = unpack_seq_triton(
-                topk_indices.reshape(batch_size, next_n, topk_indices.shape[-1]),
-                decode_lens,
-            )
-            topk_indices_buffer[:num_decode_tokens, : topk_indices.shape[-1]] = (
-                topk_indices
-            )
-
-    return topk_indices_buffer
+    return rocm_aiter_sparse_attn_indexer_native(
+        hidden_states,
+        k_cache_prefix,
+        kv_cache,
+        q_fp8,
+        k,
+        weights,
+        quant_block_size,
+        scale_fmt,
+        topk_tokens,
+        head_dim,
+        max_model_len,
+        total_seq_lens,
+        topk_indices_buffer,
+        skip_k_cache_insert=skip_k_cache_insert,
+        use_fp4_cache=False,
+    )
 
 
 def _decode_e8m0_scales(scale: torch.Tensor) -> torch.Tensor:
@@ -1350,6 +1711,7 @@ def _rocm_sparse_attn_prefill_ragged_triton(
     attn_sink: torch.Tensor | None,
     nope_head_dim: int,
     rope_head_dim: int,
+    output: torch.Tensor | None = None,
 ) -> torch.Tensor:
     assert q.ndim == 3, f"expected q=[sq,h,d], got {q.shape}"
     assert kv.ndim == 2, f"expected kv=[skv,d], got {kv.shape}"
@@ -1379,7 +1741,17 @@ def _rocm_sparse_attn_prefill_ragged_triton(
     block_h = 16
     block_d = triton.next_power_of_2(head_dim)
     block_k = 16 if head_dim >= 256 else 32
-    out = torch.empty_like(q, dtype=torch.bfloat16)
+    if output is None:
+        out = torch.empty_like(q, dtype=torch.bfloat16)
+    else:
+        assert output.shape == q.shape, (
+            f"expected output shape {q.shape}, got {output.shape}"
+        )
+        assert output.dtype == torch.bfloat16, (
+            "direct ROCm sparse attention output currently expects bfloat16, "
+            f"got {output.dtype}"
+        )
+        out = output
     _sparse_attn_prefill_ragged_kernel[(num_queries, triton.cdiv(num_heads, block_h))](
         q,
         kv,
@@ -1417,6 +1789,7 @@ def _rocm_sparse_attn_prefill_triton(
     nope_head_dim: int,
     rope_head_dim: int,
     topk_length: torch.Tensor | None = None,
+    output: torch.Tensor | None = None,
 ) -> torch.Tensor:
     ragged_indices, ragged_indptr = build_ragged_indices_from_dense(
         indices,
@@ -1434,6 +1807,7 @@ def _rocm_sparse_attn_prefill_triton(
         attn_sink=attn_sink,
         nope_head_dim=nope_head_dim,
         rope_head_dim=rope_head_dim,
+        output=output,
     )
 
 
@@ -1449,6 +1823,7 @@ def _rocm_sparse_attn_decode_ragged_triton(
     extra_cache: torch.Tensor | None = None,
     extra_indices: torch.Tensor | None = None,
     extra_indptr: torch.Tensor | None = None,
+    output: torch.Tensor | None = None,
 ) -> torch.Tensor:
     assert q.ndim == 3, f"expected q=[b,h,d], got {q.shape}"
     assert main_cache.ndim == 3, (
@@ -1509,9 +1884,22 @@ def _rocm_sparse_attn_decode_ragged_triton(
         extra_indices = torch.empty(0, device=q.device, dtype=torch.int32)
         extra_indptr = torch.zeros(num_queries + 1, device=q.device, dtype=torch.int32)
 
+    assert extra_indices is not None
+    assert extra_indptr is not None
+
     block_h = 16
-    block_k = 16 if head_dim >= 256 else 32
-    out = torch.empty_like(q, dtype=torch.bfloat16)
+    block_k = 32
+    if output is None:
+        out = torch.empty_like(q, dtype=torch.bfloat16)
+    else:
+        assert output.shape == q.shape, (
+            f"expected output shape {q.shape}, got {output.shape}"
+        )
+        assert output.dtype == torch.bfloat16, (
+            "direct ROCm sparse attention output currently expects bfloat16, "
+            f"got {output.dtype}"
+        )
+        out = output
     _sparse_attn_decode_ragged_kernel[(num_queries, triton.cdiv(num_heads, block_h))](
         q,
         main_cache,
@@ -1542,7 +1930,7 @@ def _rocm_sparse_attn_decode_ragged_triton(
         IS_FNUZ=current_platform.is_fp8_fnuz(),
         BLOCK_H=block_h,
         BLOCK_K=block_k,
-        num_warps=8,
+        num_warps=4,
     )
     return out
 
@@ -1563,6 +1951,7 @@ def _rocm_sparse_attn_decode_triton(
     main_ragged_indptr: torch.Tensor | None = None,
     extra_ragged_indices: torch.Tensor | None = None,
     extra_ragged_indptr: torch.Tensor | None = None,
+    output: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if main_ragged_indices is None or main_ragged_indptr is None:
         main_ragged_indices, main_ragged_indptr = build_ragged_indices_from_dense(
@@ -1598,6 +1987,7 @@ def _rocm_sparse_attn_decode_triton(
         extra_cache=extra_cache,
         extra_indices=extra_ragged_indices,
         extra_indptr=extra_ragged_indptr,
+        output=output,
     )
 
 
@@ -1625,6 +2015,7 @@ def rocm_sparse_attn_prefill(
         "rocm_sparse_attn_prefill",
     )
     if ragged_indices is not None and ragged_indptr is not None:
+        direct_output = output if output.dtype == torch.bfloat16 else None
         output_chunk = _rocm_sparse_attn_prefill_ragged_triton(
             q=q,
             kv=kv.squeeze(1),
@@ -1634,9 +2025,11 @@ def rocm_sparse_attn_prefill(
             attn_sink=None if attn_sink is None else attn_sink[: q.shape[1]],
             nope_head_dim=nope_head_dim,
             rope_head_dim=rope_head_dim,
+            output=direct_output,
         )
     else:
         indices_2d = indices.reshape(indices.shape[0], -1)
+        direct_output = output if output.dtype == torch.bfloat16 else None
         output_chunk = _rocm_sparse_attn_prefill_triton(
             q=q,
             kv=kv.squeeze(1),
@@ -1646,8 +2039,10 @@ def rocm_sparse_attn_prefill(
             nope_head_dim=nope_head_dim,
             rope_head_dim=rope_head_dim,
             topk_length=topk_length,
+            output=direct_output,
         )
-    output.copy_(output_chunk.to(output.dtype))
+    if output_chunk is not output:
+        output.copy_(output_chunk.to(output.dtype))
 
 
 def rocm_sparse_attn_decode(
@@ -1698,6 +2093,7 @@ def rocm_sparse_attn_decode(
         if topk_indices is not None:
             extra_indices = topk_indices.reshape(topk_indices.shape[0], -1)
 
+    direct_output = output if output.dtype == torch.bfloat16 else None
     attn_out = _rocm_sparse_attn_decode_triton(
         q=q,
         main_cache=swa_k_cache,
@@ -1714,5 +2110,7 @@ def rocm_sparse_attn_decode(
         main_ragged_indptr=swa_ragged_indptr,
         extra_ragged_indices=topk_ragged_indices,
         extra_ragged_indptr=topk_ragged_indptr,
+        output=direct_output,
     )
-    output.copy_(attn_out.to(output.dtype))
+    if attn_out is not output:
+        output.copy_(attn_out.to(output.dtype))

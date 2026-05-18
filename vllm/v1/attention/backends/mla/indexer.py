@@ -177,6 +177,7 @@ class DeepseekV32IndexerPrefillChunkMetadata:
     token_end: int
     num_reqs: int
     skip_kv_gather: bool = False
+    max_valid_len: int = 0
 
 
 @dataclass
@@ -195,6 +196,7 @@ class DeepSeekV32IndexerDecodeMetadata:
     decode_lens: torch.Tensor
     requires_padding: bool
     schedule_metadata: torch.Tensor
+    max_seq_len: int = 0
 
 
 @dataclass
@@ -256,25 +258,32 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             self.vllm_config.attention_config.use_fp4_indexer_cache
         )
 
-        assert (
-            current_platform.is_device_capability_family(100)
-            or not self.use_fp4_indexer_cache
-        ), (
+        supports_fp4_indexer_cache = current_platform.is_device_capability_family(
+            100
+        ) or (current_platform.is_rocm() and current_platform.supports_mx())
+        assert supports_fp4_indexer_cache or not self.use_fp4_indexer_cache, (
             "use_fp4_indexer_cache requires Blackwell datacenter GPUs "
-            "(sm_10x, e.g. B200/GB200); sm_120 (consumer Blackwell) and "
-            "earlier architectures are not supported."
+            "(sm_10x, e.g. B200/GB200) or ROCm GPUs with MX support "
+            "(gfx95x, e.g. MI355X); sm_120, earlier CUDA architectures, "
+            "and non-MX ROCm architectures are not supported."
         )
 
         next_n = self.num_speculative_tokens + 1
         self.reorder_batch_threshold += self.num_speculative_tokens
+        native_paged_mqa_logits = current_platform.is_device_capability_family(
+            100
+        ) or (
+            current_platform.is_rocm()
+            and current_platform.supports_mx()
+            and self.use_fp4_indexer_cache
+        )
         # NOTE(zyongye) fp4 indexer cache only natively supports next_n in
         # natively_supported_next_n_fp4; for other next_n values we fall back
-        # to the flattening path. Outside the SM100 datacenter family the FP8
+        # to the flattening path. Outside native FP4 indexer platforms the FP8
         # paged MQA logits kernel has the same [1, 2] constraint (deepgemm
         # smxx_fp8_fp4_paged_mqa_logits.hpp:233), so flatten there too.
         self.use_flattening = (
-            self.use_fp4_indexer_cache
-            or not current_platform.is_device_capability_family(100)
+            self.use_fp4_indexer_cache or not native_paged_mqa_logits
         ) and next_n not in self.natively_supported_next_n_fp4
 
         sm_count = num_compute_units(self.device.index)
@@ -564,6 +573,13 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
             seq_lens = common_attn_metadata.seq_lens[:num_decodes]
             block_table = common_attn_metadata.block_table_tensor[:num_decodes, ...]
+            seq_lens_cpu_upper_bound = common_attn_metadata.seq_lens_cpu_upper_bound
+            if seq_lens_cpu_upper_bound is not None:
+                max_decode_seq_len = int(
+                    seq_lens_cpu_upper_bound[:num_decodes].max().item()
+                )
+            else:
+                max_decode_seq_len = common_attn_metadata.max_seq_len
 
             max_decode_len = int(decode_lens_cpu.max().item())
             next_n = 1 + self.num_speculative_tokens
@@ -601,6 +617,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     )
                     self.expanded_seq_lens_buffer[num_decodes:num_decode_tokens] = 0
                     seq_lens = self.expanded_seq_lens_buffer[:num_decode_tokens]
+                max_decode_seq_len //= self.compress_ratio
 
             # Non-MTP: deep_gemm paged MQA logits requires 2D context_lens
             # (csrc/apis/attention.hpp). Unsqueeze to (B, 1) so downstream
@@ -622,6 +639,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 decode_lens=decode_lens,
                 requires_padding=requires_padding,
                 schedule_metadata=self.scheduler_metadata_buffer,
+                max_seq_len=max_decode_seq_len,
             )
 
         attn_metadata = DeepseekV32IndexerMetadata(
@@ -715,6 +733,7 @@ def build_prefill_chunk_metadata(
         token_end=token_end,
         num_reqs=num_reqs,
         skip_kv_gather=skip_kv_gather,
+        max_valid_len=int(compressed_seq_lens_cpu[start_idx:end_idx].max().item()),
     )
 
 
