@@ -7,7 +7,9 @@ import torch
 from tests.v1.attention.test_attention_backends import BATCH_SPECS
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm.v1.attention.backends.utils import (
+    _split_decode_prefill_boundary,
     split_decodes_and_prefills,
+    split_decodes_prefills_and_extends,
 )
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlice,
@@ -294,6 +296,85 @@ def test_split_decodes_and_prefills_uniform_padded_batch_all_same():
     assert num_prefills == 0
     assert num_decode_tokens == padded_num_tokens
     assert num_prefill_tokens == 0
+
+
+@pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
+def test_split_decode_prefill_boundary_vectorized_dtype(dtype: torch.dtype):
+    query_lens = [2, 1, 3, 4, 5, 6]
+    query_start_loc = torch.zeros(len(query_lens) + 1, dtype=dtype)
+    query_start_loc[1:] = torch.tensor(query_lens, dtype=dtype).cumsum(0)
+
+    assert _split_decode_prefill_boundary(
+        query_start_loc,
+        num_reqs=len(query_lens),
+        num_tokens=sum(query_lens),
+        max_query_len=max(query_lens),
+        decode_threshold=4,
+    ) == (4, 2, 10, 11)
+
+
+def test_split_decode_prefill_boundary_preserves_padded_uniform_tokens():
+    query_lens = [2, 2, 2, 0]
+    query_start_loc = torch.zeros(len(query_lens) + 1, dtype=torch.int32)
+    query_start_loc[1:] = torch.tensor(query_lens, dtype=torch.int32).cumsum(0)
+
+    assert _split_decode_prefill_boundary(
+        query_start_loc,
+        num_reqs=len(query_lens),
+        num_tokens=8,
+        max_query_len=max(query_lens),
+        decode_threshold=3,
+        require_uniform=True,
+    ) == (4, 0, 8, 0)
+
+
+def test_split_decode_prefill_boundary_uniform_short_extends_stay_decodes():
+    query_lens = [2, 2, 0]
+    query_start_loc = torch.zeros(len(query_lens) + 1, dtype=torch.int32)
+    query_start_loc[1:] = torch.tensor(query_lens, dtype=torch.int32).cumsum(0)
+
+    assert _split_decode_prefill_boundary(
+        query_start_loc,
+        num_reqs=len(query_lens),
+        num_tokens=6,
+        max_query_len=max(query_lens),
+        decode_threshold=3,
+        require_uniform=True,
+        treat_short_extends_as_decodes=False,
+        is_prefilling=torch.tensor([True, True, False]),
+    ) == (3, 0, 6, 0)
+
+
+def test_split_decodes_and_prefills_short_extends_as_prefills():
+    query_lens = [1, 1, 5]
+    seq_lens = [10, 11, 5]
+    common_metadata = create_common_attn_metadata(
+        BatchSpec(seq_lens=seq_lens, query_lens=query_lens),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    common_metadata.is_prefilling = torch.tensor([False, True, True])
+
+    assert split_decodes_and_prefills(
+        common_metadata,
+        decode_threshold=4,
+        treat_short_extends_as_decodes=False,
+    ) == (1, 2, 1, 6)
+
+
+def test_split_decodes_prefills_and_extends_mixed_batch():
+    query_lens = [1, 2, 7, 8, 9]
+    seq_lens = [10, 11, 20, 21, 9]
+    common_metadata = create_common_attn_metadata(
+        BatchSpec(seq_lens=seq_lens, query_lens=query_lens),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+
+    assert split_decodes_prefills_and_extends(
+        common_metadata,
+        decode_threshold=4,
+    ) == (2, 2, 1, 3, 15, 9)
 
 
 @pytest.mark.parametrize(
