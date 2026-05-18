@@ -99,6 +99,7 @@ class PromptLogprobsWorker:
                 continue
 
             req_is_prompt_chunked = is_prompt_chunked[i]
+            req_num_prompt_logprobs = int(num_prompt_logprobs[i])
             start_idx = query_start_loc_np[i]
             end_idx = query_start_loc_np[i + 1]
             assert start_idx < end_idx, (
@@ -107,13 +108,18 @@ class PromptLogprobsWorker:
             if not req_is_prompt_chunked:
                 end_idx -= 1
 
+            width = (
+                prompt_logprobs.shape[1]
+                if req_num_prompt_logprobs == -1
+                else req_num_prompt_logprobs + 1
+            )
             # no logprobs if start_idx >= end_idx
             logprobs = (
                 None
                 if start_idx >= end_idx
                 else LogprobsTensors(
-                    logprob_token_ids=prompt_token_ids[start_idx:end_idx],
-                    logprobs=prompt_logprobs[start_idx:end_idx],
+                    logprob_token_ids=prompt_token_ids[start_idx:end_idx, :width],
+                    logprobs=prompt_logprobs[start_idx:end_idx, :width],
                     selected_token_ranks=prompt_ranks[start_idx:end_idx],
                 )
             )
