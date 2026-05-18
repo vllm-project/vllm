@@ -629,10 +629,11 @@ class TritonAttentionImpl(AttentionImpl):
         # softmax_scale and v_scale into output_scale (FlashInfer strategy).
         #
         # NOTE: softmax_scale is a host-side scalar baked into the kernel
-        # launch. With CUDA Graphs + dynamic quantization, the captured
-        # graph will use the scale from capture time.  This matches
-        # FlashInfer's existing approach and is acceptable because scales
-        # stabilize during warmup before graph capture.
+        # launch.  For static quantization (scales loaded from disk), this
+        # is perfectly safe with CUDA Graphs since the value never changes.
+        # For dynamic calibration (calculate_kv_scales=True), scales
+        # stabilize during warmup before graph capture, matching
+        # FlashInfer's existing approach (bmm1_scale/bmm2_scale).
         is_quantized_per_tensor = (
             is_quantized_kv_cache(self.kv_cache_dtype)
             and not self._is_per_token_head_quant
