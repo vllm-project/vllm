@@ -1221,12 +1221,12 @@ class RandomMultiModalDataset(RandomDataset):
         vocab_size = tokenizer.vocab_size
         if is_mistral_tokenizer(tokenizer):
             prohibited_tokens = tokenizer.all_special_ids
-        # Can't use tokenizer.all_special_ids since
-        # it returns ONLY ids from special_tokens_map.json
-        # We want to exclude placeholder tokens and all
-        # tokens that indicate start/end of image as it
-        # may break prompt replacement logic.
         else:
+            # Can't use tokenizer.all_special_ids since
+            # it returns ONLY ids from special_tokens_map.json
+            # We want to exclude placeholder tokens and all
+            # tokens that indicate start/end of image as it
+            # may break prompt replacement logic.
             prohibited_tokens = list(
                 tok_id
                 for tok_id, token in tokenizer.added_tokens_decoder.items()
