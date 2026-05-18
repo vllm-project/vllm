@@ -572,6 +572,15 @@ class SimpleCPUOffloadScheduler:
             # Cap to blocks with confirmed KV data.
             aligned_tokens = confirmed_tokens // self.block_size * self.block_size
 
+            # Eagerly track ``in_flight`` during the scan to dedup both within a
+            # request (SWA reuses the same physical block at multiple logical
+            # positions as the window slides) and across requests in the same
+            # step (prefix sharing produces the same ``gpu_block_id`` in two
+            # requests' scan ranges). Without eager dedup, the same
+            # ``gpu_block_id`` could appear multiple times in
+            # ``merged_gpu_block_ids``, leading to over-incremented ``ref_cnt``
+            # and corruption of the ``BlockPool`` free list (see #42085, #42571).
+
             for g in range(num_groups):
                 # FIXME (yifan): handle CPU cache eviction, where
                 # num_stored_blocks can be stale and omit evicted blocks in
@@ -586,6 +595,11 @@ class SimpleCPUOffloadScheduler:
                 for gpu_block_id in scannable:
                     gpu_block = gpu_block_pool.blocks[gpu_block_id]
                     if gpu_block.is_null:
+                        advanced_per_group[g] += 1
+                        continue
+
+                    # Skip blocks already scheduled in this step.
+                    if gpu_block_id in in_flight:
                         advanced_per_group[g] += 1
                         continue
 
@@ -612,6 +626,7 @@ class SimpleCPUOffloadScheduler:
                         break
                     num_free -= 1
 
+                    in_flight.add(gpu_block_id)
                     gpu_block_ids.append(gpu_block_id)
                     block_hashes_to_store.append(bhash_with_group)
                     advanced_per_group[g] += 1

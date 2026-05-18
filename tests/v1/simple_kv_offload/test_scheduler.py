@@ -641,6 +641,54 @@ def test_eager_in_flight_store_dedup_across_steps() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Test 2bb: Eager intra-request dedup (SWA physical-block reuse pattern)
+# ---------------------------------------------------------------------------
+def test_eager_intra_request_dedup_swa_reuse() -> None:
+    """Eager: a single request whose per-group block table repeats the same
+    physical ``block_id`` at multiple logical positions (the SWA reuse
+    pattern) must emit each ``gpu_block_id`` at most once in the store
+    event.
+
+    Without intra-request dedup the duplicate ids flow through
+    ``gpu_pool.touch`` (over-incrementing ``ref_cnt``) and then through
+    ``free_blocks`` at completion, where ``append_n`` double-links the same
+    ``KVCacheBlock`` into the free list, corrupting the doubly linked list
+    and eventually crashing the engine via the ``popleft_n`` assertion.
+    See #42085 (the crash) and #42571 (same defect class).
+    """
+    fix = make_scheduler(num_cpu_blocks=16, num_gpu_blocks=16, lazy=False)
+    sched = fix.scheduler
+
+    num_distinct = 4
+    req = make_request(num_blocks=num_distinct)
+    kv_blocks = _alloc_and_register(fix, req, num_distinct)
+    sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
+    a, b, c, d = kv_blocks.get_block_ids()[0]
+
+    # SWA reuse: 6 logical positions, 4 distinct physical blocks. ``a`` and
+    # ``b`` are reused at later positions (window slide). The scheduler
+    # extends ``state.block_ids[0]`` with this list verbatim, so the
+    # downstream scan sees the duplicates.
+    swa_block_table = ([a, b, a, c, b, d],)
+    req.num_computed_tokens = len(swa_block_table[0]) * BLOCK_SIZE
+    sched_out = make_scheduler_output(
+        {req.request_id: len(swa_block_table[0]) * BLOCK_SIZE},
+        new_reqs={req.request_id: swa_block_table},
+    )
+
+    meta = sched.build_connector_meta(sched_out)
+
+    assert meta.store_event >= 0
+    assert len(meta.store_gpu_blocks) == len(set(meta.store_gpu_blocks)), (
+        f"Duplicate gpu_block_ids leaked into store event: "
+        f"{meta.store_gpu_blocks}"
+    )
+    assert set(meta.store_gpu_blocks) == {a, b, c, d}
+    # One CPU block allocated per distinct GPU block — no wasted CPU slots.
+    assert len(meta.store_cpu_blocks) == len(meta.store_gpu_blocks)
+
+
+# ---------------------------------------------------------------------------
 # Test 2c: Lazy duplicate store is skipped
 # ---------------------------------------------------------------------------
 def test_lazy_duplicate_store_skipped() -> None:
