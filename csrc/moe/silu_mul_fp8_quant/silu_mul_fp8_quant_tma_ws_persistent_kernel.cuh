@@ -77,6 +77,10 @@ __global__ void __launch_bounds__((N_COMPUTE + 1) * 32)
     return smem_raw + MBAR_REGION + stage * STAGE_BYTES;
   };
 
+  constexpr int SCALE_STRIDE = BATCH_SIZE * N_COMPUTE * 2;
+  float* smem_scales = reinterpret_cast<float*>(smem_raw + MBAR_REGION +
+                                                NUM_STAGES * STAGE_BYTES);
+
   int32_t* my_counter = &work_counter[blockIdx.x];
 
   if (isProducer) {
@@ -102,6 +106,21 @@ __global__ void __launch_bounds__((N_COMPUTE + 1) * 32)
       int actual_load = min(BATCH_SIZE, totalN - batchStart);
       batch_token_start[fillStage] = batchStart;
 
+      int sOff = fillStage * SCALE_STRIDE;
+      for (int t = 0; t < actual_load; t++) {
+        int tok = batchStart + t;
+        for (int w = 0; w < N_COMPUTE; w++) {
+          int sb = static_cast<int>(blockIdx.x) * N_COMPUTE + w;
+          if (sb < G) {
+            cp_async_f32(&smem_scales[sOff + t * N_COMPUTE * 2 + w * 2],
+                         &input_scales[tok + scale_stride * sb]);
+            cp_async_f32(&smem_scales[sOff + t * N_COMPUTE * 2 + w * 2 + 1],
+                         &input_scales[tok + scale_stride * (sb + G)]);
+          }
+        }
+      }
+      cp_async_commit();
+
       char* dst = stage_ptr(fillStage);
       for (int t = 0; t < actual_load; t++) {
         tma_load_3d(dst + t * TOKEN_BYTES, tensorMap, 0, gateDim1,
@@ -110,6 +129,8 @@ __global__ void __launch_bounds__((N_COMPUTE + 1) * 32)
                     batchStart + t, &full_mbar[fillStage]);
       }
 
+      cp_async_wait_all();
+      __threadfence_block();
       uint32_t load_bytes =
           static_cast<uint32_t>(actual_load * 2 * validSliceBytes);
       mbarrier_arrive_expect_tx(&full_mbar[fillStage], load_bytes);
@@ -138,7 +159,6 @@ __global__ void __launch_bounds__((N_COMPUTE + 1) * 32)
     int const elemBase =
         valid ? (scaleBlock * SCALE_BLOCK_SIZE + laneId * ELTS_PER_THREAD) : 0;
     int const col = laneId * 4;
-    int const sw_col = col ^ ((consumerWarpId & 7) << 4);
 
     int consumeStage = 0;
     int phase_full[NUM_STAGES] = {};
@@ -164,16 +184,19 @@ __global__ void __launch_bounds__((N_COMPUTE + 1) * 32)
 #pragma unroll
           for (int k = 0; k < 4; k++) {
             int off = (t + k) * TOKEN_BYTES + consumerWarpId * 128;
-            px1[k] = *reinterpret_cast<uint32_t const*>(sp + off + sw_col);
-            px2[k] = *reinterpret_cast<uint32_t const*>(sp + off + NC_BYTES +
-                                                        sw_col);
+            px1[k] = *reinterpret_cast<uint32_t const*>(sp + off + col);
+            px2[k] =
+                *reinterpret_cast<uint32_t const*>(sp + off + NC_BYTES + col);
           }
 
           float sc1[4], sc2[4];
+          int sOff4 = consumeStage * SCALE_STRIDE;
 #pragma unroll
           for (int k = 0; k < 4; k++) {
-            sc1[k] = input_scales[tok[k] + scale_stride * scaleBlock];
-            sc2[k] = input_scales[tok[k] + scale_stride * (scaleBlock + G)];
+            sc1[k] = smem_scales[sOff4 + (t + k) * N_COMPUTE * 2 +
+                                 consumerWarpId * 2];
+            sc2[k] = smem_scales[sOff4 + (t + k) * N_COMPUTE * 2 +
+                                 consumerWarpId * 2 + 1];
           }
 
           float r[4][4];
@@ -230,14 +253,12 @@ __global__ void __launch_bounds__((N_COMPUTE + 1) * 32)
           int offA = t * TOKEN_BYTES + consumerWarpId * 128;
           int offB = (t + 1) * TOKEN_BYTES + consumerWarpId * 128;
 
-          uint32_t px1A =
-              *reinterpret_cast<uint32_t const*>(sp + offA + sw_col);
+          uint32_t px1A = *reinterpret_cast<uint32_t const*>(sp + offA + col);
           uint32_t px2A =
-              *reinterpret_cast<uint32_t const*>(sp + offA + NC_BYTES + sw_col);
-          uint32_t px1B =
-              *reinterpret_cast<uint32_t const*>(sp + offB + sw_col);
+              *reinterpret_cast<uint32_t const*>(sp + offA + NC_BYTES + col);
+          uint32_t px1B = *reinterpret_cast<uint32_t const*>(sp + offB + col);
           uint32_t px2B =
-              *reinterpret_cast<uint32_t const*>(sp + offB + NC_BYTES + sw_col);
+              *reinterpret_cast<uint32_t const*>(sp + offB + NC_BYTES + col);
 
           __nv_fp8_e4m3 x1A[4], x2A[4], x1B[4], x2B[4];
           memcpy(x1A, &px1A, 4);
@@ -245,10 +266,15 @@ __global__ void __launch_bounds__((N_COMPUTE + 1) * 32)
           memcpy(x1B, &px1B, 4);
           memcpy(x2B, &px2B, 4);
 
-          float sc1A = input_scales[tokenA + scale_stride * scaleBlock];
-          float sc2A = input_scales[tokenA + scale_stride * (scaleBlock + G)];
-          float sc1B = input_scales[tokenB + scale_stride * scaleBlock];
-          float sc2B = input_scales[tokenB + scale_stride * (scaleBlock + G)];
+          int sOff2 = consumeStage * SCALE_STRIDE;
+          float sc1A =
+              smem_scales[sOff2 + t * N_COMPUTE * 2 + consumerWarpId * 2];
+          float sc2A =
+              smem_scales[sOff2 + t * N_COMPUTE * 2 + consumerWarpId * 2 + 1];
+          float sc1B =
+              smem_scales[sOff2 + (t + 1) * N_COMPUTE * 2 + consumerWarpId * 2];
+          float sc2B = smem_scales[sOff2 + (t + 1) * N_COMPUTE * 2 +
+                                   consumerWarpId * 2 + 1];
 
           float rA[4], rB[4];
           float mA = 0.0f, mB = 0.0f;
@@ -304,16 +330,19 @@ __global__ void __launch_bounds__((N_COMPUTE + 1) * 32)
           int off = t * TOKEN_BYTES + consumerWarpId * 128;
 
           uint32_t packed_x1 =
-              *reinterpret_cast<uint32_t const*>(sp + off + sw_col);
+              *reinterpret_cast<uint32_t const*>(sp + off + col);
           uint32_t packed_x2 =
-              *reinterpret_cast<uint32_t const*>(sp + off + NC_BYTES + sw_col);
+              *reinterpret_cast<uint32_t const*>(sp + off + NC_BYTES + col);
 
           __nv_fp8_e4m3 x1_vals[4], x2_vals[4];
           memcpy(x1_vals, &packed_x1, 4);
           memcpy(x2_vals, &packed_x2, 4);
 
-          float sc1 = input_scales[token + scale_stride * scaleBlock];
-          float sc2 = input_scales[token + scale_stride * (scaleBlock + G)];
+          int sOff1 = consumeStage * SCALE_STRIDE;
+          float sc1 =
+              smem_scales[sOff1 + t * N_COMPUTE * 2 + consumerWarpId * 2];
+          float sc2 =
+              smem_scales[sOff1 + t * N_COMPUTE * 2 + consumerWarpId * 2 + 1];
 
           float results[4];
           float localMax = 0.0f;

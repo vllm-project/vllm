@@ -39,7 +39,9 @@ void launch_tma_ws_fp8_persistent_dispatch(void* input, void* input_scales,
       ((2 * FP8_PERSISTENT_STAGES * 8 + sizeof(int32_t)) + 127) & ~127;
   constexpr int TOKEN_BYTES = 2 * N_COMPUTE * 128;
   constexpr int STAGE_DATA = BATCH_SIZE * TOKEN_BYTES;
-  int smem = MBAR_REGION + FP8_PERSISTENT_STAGES * STAGE_DATA;
+  constexpr int SCALE_SMEM =
+      FP8_PERSISTENT_STAGES * BATCH_SIZE * N_COMPUTE * 2 * sizeof(float);
+  int smem = MBAR_REGION + FP8_PERSISTENT_STAGES * STAGE_DATA + SCALE_SMEM;
   constexpr int blockThreads = (N_COMPUTE + 1) * 32;
 
   auto kernel_fn = tma_v5::silu_mul_fp8_quant_tma_ws_persistent_kernel<
@@ -76,7 +78,7 @@ void launch_tma_ws_fp8_persistent_dispatch(void* input, void* input_scales,
   cuTensorMapEncodeTiled(
       &tensorMap, CU_TENSOR_MAP_DATA_TYPE_UINT8, 3, input, globalDim,
       globalStrides, boxDim, elementStrides, CU_TENSOR_MAP_INTERLEAVE_NONE,
-      CU_TENSOR_MAP_SWIZZLE_128B, CU_TENSOR_MAP_L2_PROMOTION_NONE,
+      CU_TENSOR_MAP_SWIZZLE_NONE, CU_TENSOR_MAP_L2_PROMOTION_NONE,
       CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
 
   dim3 grid(gridX, gridY);
