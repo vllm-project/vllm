@@ -11,7 +11,10 @@ from vllm.model_executor.layers.sparse_attn_indexer import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
-from vllm.v1.attention.ops.deepseek_v4_ops import sm12x_deep_gemm_fallbacks
+from vllm.v1.attention.ops.deepseek_v4_ops import (
+    sm12x_deep_gemm_fallbacks,
+    sm12x_mqa,
+)
 
 
 def _make_indexer_kv_cache(
@@ -92,6 +95,67 @@ def test_decode_topk_logits_width_keeps_topk_kernel_width():
     assert _decode_topk_logits_width(262144, 128, 512) == 512
     assert _decode_topk_logits_width(300, 128, 512) == 300
     assert _decode_topk_logits_width(0, 128, 512) == 0
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(120), reason="SM120 only"
+)
+def test_sm120_mqa_direct_topk_uses_triton_logits_when_logits_fit(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    torch.manual_seed(11)
+    num_q, num_heads, head_dim = 8, 4, 64
+    seq_len_kv, topk_tokens = 17, 5
+    monkeypatch.setattr(
+        sm12x_deep_gemm_fallbacks,
+        "_SM120_MQA_TRITON_TOPK_MAX_LOGITS_BYTES",
+        num_q * seq_len_kv * torch.float32.itemsize,
+    )
+
+    q = torch.randn(num_q, num_heads, head_dim, device="cuda", dtype=torch.bfloat16)
+    q_fp8 = q.to(torch.float8_e4m3fn).contiguous()
+    kv = torch.randn(seq_len_kv, head_dim, device="cuda", dtype=torch.bfloat16)
+    kv_scale = kv.abs().float().amax(dim=-1).clamp(1e-4) / 448.0
+    kv_fp8 = (kv * kv_scale.reciprocal()[:, None]).to(torch.float8_e4m3fn)
+    weights = torch.randn(num_q, num_heads, device="cuda", dtype=torch.float32)
+    cu_seqlen_ks = torch.arange(num_q, device="cuda", dtype=torch.int32) % 3
+    cu_seqlen_ke = torch.full(
+        (num_q,), seq_len_kv, device="cuda", dtype=torch.int32
+    )
+    out = torch.empty(num_q, topk_tokens, device="cuda", dtype=torch.int32)
+
+    original_triton = sm12x_mqa.fp8_mqa_logits_triton
+    calls = 0
+
+    def wrapped_triton(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_triton(*args, **kwargs)
+
+    monkeypatch.setattr(sm12x_mqa, "fp8_mqa_logits_triton", wrapped_triton)
+
+    assert deep_gemm_utils.fp8_fp4_mqa_topk_indices(
+        (q_fp8, None),
+        (kv_fp8, kv_scale),
+        weights,
+        cu_seqlen_ks,
+        cu_seqlen_ke,
+        out,
+    )
+    assert calls == 1
+
+    reference_logits = sm12x_deep_gemm_fallbacks._fp8_mqa_logits_torch(
+        (q_fp8, None),
+        (kv_fp8, kv_scale),
+        weights,
+        cu_seqlen_ks,
+        cu_seqlen_ke,
+        clean_logits=True,
+    )
+    expected = torch.topk(reference_logits, topk_tokens, dim=1).indices.to(
+        torch.int32
+    )
+    torch.testing.assert_close(out, expected, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(
