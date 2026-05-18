@@ -5896,8 +5896,9 @@ class GPUModelRunner(
             # KV-cache memory profiling, and the memory footprint is
             # independent of top_k. A near-vocab_size value (vocab_size - 1)
             # triggers an SM120 top-k masking kernel hang on RTX 5090 in both
-            # the Triton and FlashInfer paths; see issue #42987.
-            top_k=dummy_tensors(50),
+            # the Triton and FlashInfer paths; see issue #42987. Capped at
+            # vocab_size - 1 so top_k never exceeds vocab for tiny-vocab models.
+            top_k=dummy_tensors(min(50, logits.size(1) - 1)),
             generators={},
             max_num_logprobs=None,
             logprob_token_ids=None,
