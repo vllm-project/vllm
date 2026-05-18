@@ -884,7 +884,7 @@ class InputBatch:
             not self.no_penalties
             or bool(self.bad_words_token_ids)
             or self.logitsprocs_need_output_token_ids
-            or not thinking_budget_tracks_reqs
+            or thinking_budget_tracks_reqs
         )
         output_token_ids = (
             cast(list[list[int]], self.req_output_token_ids)

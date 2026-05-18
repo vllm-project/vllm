@@ -3,10 +3,13 @@
 
 
 import asyncio
+import io
 import time
 from collections.abc import AsyncGenerator
 from collections.abc import Sequence as GenericSequence
 
+import numpy as np
+import pybase64 as base64
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
@@ -255,11 +258,24 @@ class ServingTokens(OpenAIServing):
             else:
                 logprobs = None
 
+            # Encode routed_experts for transport. JSON can't carry raw
+            # bytes, so we write the ndarray as a ``.npy`` byte stream
+            # and base64-encode it. ``pybase64`` is ~3x faster than the
+            # stdlib ``base64`` on large payloads thanks to SIMD.
+            # This is the only base64 hop in the pipeline -- the
+            # engine<->API-server link is binary msgpack + zmq.
+            routed_experts_b64 = None
+            if output.routed_experts is not None:
+                buf = io.BytesIO()
+                np.save(buf, output.routed_experts)
+                routed_experts_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+
             choice_data = GenerateResponseChoice(
                 index=output.index,
                 logprobs=logprobs,
                 finish_reason=output.finish_reason if output.finish_reason else "stop",
                 token_ids=as_list(output.token_ids),
+                routed_experts=routed_experts_b64,
             )
 
             choices.append(choice_data)
