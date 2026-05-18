@@ -72,7 +72,7 @@ class Glm4MoeModelToolParser(ToolParser):
 
         self.func_call_regex = re.compile(r"<tool_call>.*?</tool_call>", re.DOTALL)
         self.func_detail_regex = re.compile(
-            r"<tool_call>([^\n]*)\n(.*)</tool_call>", re.DOTALL
+            r"<tool_call>([^\n]*)\n?(.*)</tool_call>", re.DOTALL
         )
         self.func_arg_regex = re.compile(
             r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>", re.DOTALL
@@ -136,12 +136,20 @@ class Glm4MoeModelToolParser(ToolParser):
                 continue
             if tool.function.parameters is None:
                 return False
-            arg_type = (
-                tool.function.parameters.get("properties", {})
-                .get(arg_name, {})
-                .get("type", None)
-            )
-            return arg_type == "string"
+            prop = tool.function.parameters.get("properties", {}).get(arg_name, {})
+            # Direct type check
+            arg_type = prop.get("type", None)
+            if arg_type == "string":
+                return True
+            # Handle anyOf/oneOf (Pydantic Optional[str])
+            for key in ("anyOf", "oneOf"):
+                variants = prop.get(key, [])
+                if isinstance(variants, list):
+                    types = [v.get("type") for v in variants if isinstance(v, dict)]
+                    if "string" in types:
+                        return True
+            # Handle type as list: ["string", "null"]
+            return isinstance(arg_type, list) and "string" in arg_type
         logger.debug("No tool named '%s'.", tool_name)
         return False
 
@@ -177,6 +185,11 @@ class Glm4MoeModelToolParser(ToolParser):
                 # The tool_parser handles extraction from XML output.
                 if request.tool_choice != "none":
                     request.skip_special_tokens = False
+                # Override tool_choice to "auto" so the serving layer routes
+                # through extract_tool_calls() instead of bypassing the tool
+                # parser and passing raw model output as arguments.  GLM
+                # outputs XML tool calls that need parsing, not raw JSON.
+                request.tool_choice = "auto"
                 return request
         request = super().adjust_request(request)
         if request.tools and request.tool_choice != "none":
@@ -210,10 +223,9 @@ class Glm4MoeModelToolParser(ToolParser):
                 arg_dct: dict[str, Any] = {}
                 for key, value in pairs:
                     arg_key = key.strip()
-                    if self._is_string_type(tc_name, arg_key, self.tools):
-                        arg_val = value
-                    else:
-                        arg_val = self._deserialize(value.strip())
+                    arg_val = value.strip()
+                    if not self._is_string_type(tc_name, arg_key, self.tools):
+                        arg_val = self._deserialize(arg_val)
                     logger.debug("arg_key = %s, arg_val = %s", arg_key, arg_val)
                     arg_dct[arg_key] = arg_val
                 tool_calls.append(
@@ -329,6 +341,24 @@ class Glm4MoeModelToolParser(ToolParser):
         name = inner_text[:cut].strip()
         return name if name else None
 
+    @staticmethod
+    def _format_nonstring_value(raw: str) -> str:
+        """Format a non-string value, preserving raw JSON when valid.
+
+        If *raw* parses as valid JSON, return it as-is (preserving the
+        model's original formatting).  Otherwise fall back to
+        ``_deserialize`` + ``json.dumps`` to produce valid JSON.
+        """
+        try:
+            json.loads(raw)
+            return raw
+        except (json.JSONDecodeError, ValueError):
+            pass
+        try:
+            return json.dumps(ast.literal_eval(raw), ensure_ascii=False)
+        except (ValueError, SyntaxError):
+            return json.dumps(raw, ensure_ascii=False)
+
     def _build_args_json_so_far(
         self,
         tool_name: str,
@@ -357,9 +387,7 @@ class Glm4MoeModelToolParser(ToolParser):
                 # and must match the partial-value path for diffing.
                 val_json = json.dumps(value, ensure_ascii=False)
             else:
-                val_json = json.dumps(
-                    self._deserialize(value.strip()), ensure_ascii=False
-                )
+                val_json = self._format_nonstring_value(value.strip())
             parts.append(f"{key_json}: {val_json}")
 
         # Check for a partial (incomplete) arg value
@@ -395,10 +423,7 @@ class Glm4MoeModelToolParser(ToolParser):
                     if self._is_string_type(tool_name, partial_key, self.tools):
                         val_json = json.dumps(partial_content, ensure_ascii=False)
                     else:
-                        val_json = json.dumps(
-                            self._deserialize(partial_content.strip()),
-                            ensure_ascii=False,
-                        )
+                        val_json = self._format_nonstring_value(partial_content.strip())
                     parts.append(f"{key_json}: {val_json}")
                 elif self._is_string_type(tool_name, partial_key, self.tools):
                     escaped = self._json_escape_string_content(partial_content)
@@ -422,7 +447,21 @@ class Glm4MoeModelToolParser(ToolParser):
             self.streamed_args_for_tool[index]
         ):
             return None
-        diff = args_so_far[len(self.streamed_args_for_tool[index]) :]
+
+        streamed = self.streamed_args_for_tool[index]
+        # Safety net: if the new render doesn't extend what was previously
+        # streamed (e.g. model emitted Python-literal True instead of JSON
+        # true), skip the delta to avoid emitting corrupt JSON.
+        if streamed and not args_so_far.startswith(streamed):
+            logger.warning(
+                "args_so_far does not extend previously streamed content; "
+                "skipping delta to avoid corruption. streamed=%r, new=%r",
+                streamed,
+                args_so_far,
+            )
+            return None
+
+        diff = args_so_far[len(streamed) :]
         self.streamed_args_for_tool[index] = args_so_far
         self.prev_tool_call_arr[index]["arguments"] = args_so_far
         return diff
