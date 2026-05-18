@@ -133,6 +133,7 @@ def run_vllm_chat(
     engine_args: EngineArgs,
     do_profile: bool,
     disable_detokenize: bool = False,
+    prequeue_chat_requests: bool = False,
 ) -> tuple[float, list[RequestOutput]]:
     """
     Run vLLM chat benchmark. This function is recommended ONLY for benchmarking
@@ -166,12 +167,25 @@ def run_vllm_chat(
                 detokenize=not disable_detokenize,
             )
         )
+    if prequeue_chat_requests:
+        llm.sleep(level=0, mode="abort")
+
     start = time.perf_counter()
     if do_profile:
         llm.start_profile()
-    outputs = llm.chat(prompts, sampling_params, use_tqdm=True)
+
+    if prequeue_chat_requests:
+        try:
+            llm.enqueue_chat(prompts, sampling_params, use_tqdm=True)
+        finally:
+            llm.wake_up(tags=["scheduling"])
+        outputs = llm.wait_for_completion(output_type=RequestOutput, use_tqdm=True)
+    else:
+        outputs = llm.chat(prompts, sampling_params, use_tqdm=True)
+
     if do_profile:
         llm.stop_profile()
+
     end = time.perf_counter()
     return end - start, outputs
 
@@ -543,6 +557,8 @@ def validate_args(args):
     valid_backends = {"vllm", "hf", "mii", "vllm-chat"}
     if args.backend not in valid_backends:
         raise ValueError(f"Unsupported backend: {args.backend}")
+    if args.prequeue_chat_requests and args.backend != "vllm-chat":
+        raise ValueError("--prequeue-chat-requests requires --backend vllm-chat")
 
     # === Dataset Configuration ===
     if (
@@ -790,6 +806,18 @@ def add_cli_args(parser: argparse.ArgumentParser):
         help="Use vLLM async engine rather than LLM class.",
     )
     parser.add_argument(
+        "--prequeue-chat-requests",
+        action="store_true",
+        default=False,
+        help=(
+            "For the vllm-chat backend, enqueue all chat requests before "
+            "allowing the scheduler to process them. This can improve "
+            "benchmark reproducibility by removing overlap between chat "
+            "request rendering and engine scheduling, but may reduce measured "
+            "throughput."
+        ),
+    )
+    parser.add_argument(
         "--disable-detokenize",
         action="store_true",
         help=(
@@ -965,6 +993,7 @@ def main(args: argparse.Namespace):
             EngineArgs.from_cli_args(args),
             disable_detokenize=args.disable_detokenize,
             do_profile=args.profile,
+            prequeue_chat_requests=args.prequeue_chat_requests,
         )
     else:
         raise ValueError(f"Unknown backend: {args.backend}")
