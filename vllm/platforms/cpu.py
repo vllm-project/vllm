@@ -139,12 +139,27 @@ class CpuPlatform(Platform):
         # supported as it is not possible to set the OMP environment correctly
         if parallel_config.distributed_executor_backend == "uni":
             parallel_config.distributed_executor_backend = "mp"
+
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.cpu_worker.CPUWorker"
         # Disable DBO
         if parallel_config.enable_dbo:
             logger.warning("Dual-Batch Overlap is not supported on CPU, disabled.")
             parallel_config.enable_dbo = False
+
+        if torch.cpu._is_amx_tile_supported() and (
+            model_config is not None
+            and model_config.get_num_layers_by_block_type(
+                parallel_config, "linear_attention"
+            )
+            > 0
+        ):
+            cache_config.enable_prefix_caching = False
+            scheduler_config.enable_chunked_prefill = False
+            logger.warning(
+                "Disabled unsupported prefix caching and chunked prefill "
+                "for linear attention on AMX CPU platforms."
+            )
 
         # Note: workaround for v1 gpu_model_runner
         from vllm.config import CompilationMode
@@ -210,6 +225,10 @@ class CpuPlatform(Platform):
 
         # Avoid inductor generates num_thread() and breaks the thread binding
         os.environ["TORCHINDUCTOR_CPP_DYNAMIC_THREADS"] = "1"
+
+        # For efficient conv state memory access
+        if torch.cpu._is_amx_tile_supported():
+            os.environ["VLLM_SSM_CONV_STATE_LAYOUT"] = "SD"
 
         ld_preload_str = os.getenv("LD_PRELOAD", "")
         cpu_architecture = Platform.get_cpu_architecture()
