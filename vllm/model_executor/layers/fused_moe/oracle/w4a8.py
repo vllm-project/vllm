@@ -18,6 +18,8 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kFp8DynamicTokenSym,
+    kInt4Static,
 )
 
 if TYPE_CHECKING:
@@ -47,8 +49,8 @@ def backend_to_kernel_cls(
 
 def select_w4a8_moe_backend(
     config: FusedMoEConfig,
-    weight_key: QuantKey | None = None,
-    activation_key: QuantKey | None = None,
+    weight_key: QuantKey | None = kInt4Static,
+    activation_key: QuantKey | None = kFp8DynamicTokenSym,
 ) -> tuple[W4A8MoeBackend, type["CutlassExpertsW4A8Fp8"]]:
     backend = W4A8MoeBackend.CUTLASS
 
@@ -79,54 +81,67 @@ def select_w4a8_moe_backend(
 
 
 def convert_to_w4a8_moe_kernel_format(
-    layer: torch.nn.Module,
     quant_fp8: Callable[..., Any],
-) -> tuple[torch.Tensor, torch.Tensor]:
+    w13_weight_packed: torch.Tensor,
+    w2_weight_packed: torch.Tensor,
+    w13_weight_scale: torch.Tensor,
+    w2_weight_scale: torch.Tensor,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
     from vllm import _custom_ops as ops
     from vllm.model_executor.layers.quantization.utils.quant_utils import (
         convert_bf16_scales_to_fp8,
         convert_packed_uint4b8_to_signed_int4_inplace,
     )
-    from vllm.model_executor.utils import replace_parameter
 
-    convert_packed_uint4b8_to_signed_int4_inplace(layer.w13_weight_packed)
+    convert_packed_uint4b8_to_signed_int4_inplace(w13_weight_packed)
     # Mirror the sync in CutlassW4A8LinearKernel; required for TP>1 correctness.
     torch.accelerator.synchronize()
     w13_weight_shuffled, b_strides1 = ops.cutlass_encode_and_reorder_int4b_grouped(
-        layer.w13_weight_packed
+        w13_weight_packed
     )
-    replace_parameter(layer, "w13_weight_packed", w13_weight_shuffled)
 
-    convert_packed_uint4b8_to_signed_int4_inplace(layer.w2_weight_packed)
+    convert_packed_uint4b8_to_signed_int4_inplace(w2_weight_packed)
     # Mirror the sync in CutlassW4A8LinearKernel; required for TP>1 correctness.
     torch.accelerator.synchronize()
     w2_weight_shuffled, b_strides2 = ops.cutlass_encode_and_reorder_int4b_grouped(
-        layer.w2_weight_packed
+        w2_weight_packed
     )
-    replace_parameter(layer, "w2_weight_packed", w2_weight_shuffled)
 
     w13_weight_scale, w13_weight_chan_scale = convert_bf16_scales_to_fp8(
-        quant_fp8, layer.w13_weight_scale
+        quant_fp8, w13_weight_scale
     )
     w2_weight_scale, w2_weight_chan_scale = convert_bf16_scales_to_fp8(
-        quant_fp8, layer.w2_weight_scale
+        quant_fp8, w2_weight_scale
     )
-
-    replace_parameter(layer, "w13_weight_chan_scale", w13_weight_chan_scale)
-    replace_parameter(layer, "w2_weight_chan_scale", w2_weight_chan_scale)
 
     # Scales are stored as (E, N, K // 128), but the kernel expects
     # (E, K // 128, N) in row-major format.
     w13_weight_scale_packed = ops.cutlass_pack_scale_fp8(
         w13_weight_scale.permute(0, 2, 1).contiguous()
     )
-    replace_parameter(layer, "w13_weight_scale", w13_weight_scale_packed)
     w2_weight_scale_packed = ops.cutlass_pack_scale_fp8(
         w2_weight_scale.permute(0, 2, 1).contiguous()
     )
-    replace_parameter(layer, "w2_weight_scale", w2_weight_scale_packed)
 
-    return b_strides1, b_strides2
+    return (
+        w13_weight_shuffled,
+        w2_weight_shuffled,
+        w13_weight_scale_packed,
+        w2_weight_scale_packed,
+        w13_weight_chan_scale,
+        w2_weight_chan_scale,
+        b_strides1,
+        b_strides2,
+    )
 
 
 def make_w4a8_moe_quant_config(

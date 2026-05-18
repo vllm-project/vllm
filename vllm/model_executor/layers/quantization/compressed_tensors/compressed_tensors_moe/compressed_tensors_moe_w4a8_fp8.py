@@ -25,7 +25,7 @@ from vllm.model_executor.layers.fused_moe.oracle.w4a8 import (
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa E501
     CompressedTensorsMoEMethod,
 )
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 
 
 class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
@@ -53,15 +53,11 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
         from vllm.model_executor.layers.quantization.utils.quant_utils import (
             GroupShape,
-            kFp8DynamicTokenSym,
-            kInt4Static,
         )
 
         self.quant_fp8 = QuantFP8(static=False, group_shape=GroupShape.PER_TOKEN)
         self.w4a8_backend, self.experts_cls = select_w4a8_moe_backend(
             config=self.moe,
-            weight_key=kInt4Static,
-            activation_key=kFp8DynamicTokenSym,
         )
 
     def create_weights(
@@ -175,10 +171,29 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         layer.w2_input_scale = None
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
-        b_strides1, b_strides2 = convert_to_w4a8_moe_kernel_format(
-            layer=layer,
+        (
+            w13_weight_packed,
+            w2_weight_packed,
+            w13_weight_scale,
+            w2_weight_scale,
+            w13_weight_chan_scale,
+            w2_weight_chan_scale,
+            b_strides1,
+            b_strides2,
+        ) = convert_to_w4a8_moe_kernel_format(
             quant_fp8=self.quant_fp8,
+            w13_weight_packed=layer.w13_weight_packed,
+            w2_weight_packed=layer.w2_weight_packed,
+            w13_weight_scale=layer.w13_weight_scale,
+            w2_weight_scale=layer.w2_weight_scale,
         )
+
+        replace_parameter(layer, "w13_weight_packed", w13_weight_packed)
+        replace_parameter(layer, "w2_weight_packed", w2_weight_packed)
+        replace_parameter(layer, "w13_weight_scale", w13_weight_scale)
+        replace_parameter(layer, "w2_weight_scale", w2_weight_scale)
+        replace_parameter(layer, "w13_weight_chan_scale", w13_weight_chan_scale)
+        replace_parameter(layer, "w2_weight_chan_scale", w2_weight_chan_scale)
 
         self.b_strides1 = b_strides1
         self.b_strides2 = b_strides2

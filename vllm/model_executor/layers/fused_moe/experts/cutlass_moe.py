@@ -1306,11 +1306,7 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        SUPPORTED_W_A = [
-            (None, None),
-            (kInt4Static, kFp8DynamicTokenSym),
-        ]
-        return (weight_key, activation_key) in SUPPORTED_W_A
+        return (weight_key, activation_key) == (kInt4Static, kFp8DynamicTokenSym)
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
