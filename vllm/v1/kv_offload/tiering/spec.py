@@ -25,7 +25,7 @@ Example configuration:
     "secondary_tiers": [
         {
             "type": "example",
-            "capacity": 1000
+            "custom_param": 67
         }
     ]
 }

@@ -71,6 +71,7 @@ class TestExampleSecondaryTier:
             vllm_config=_MOCK_VLLM_CONFIG,
             primary_kv_view=mock_view,
             tier_type="example",
+            custom_param=67,
         )
 
         # Initially empty

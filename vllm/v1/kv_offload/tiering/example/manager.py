@@ -9,6 +9,7 @@ reference for writing new tiers and is useful for testing the
 TieringOffloadingManager without requiring actual storage or network backends.
 """
 
+import logging
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
@@ -18,6 +19,8 @@ from vllm.v1.kv_offload.tiering.base import (
     JobResult,
     SecondaryTierManager,
 )
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -37,13 +40,13 @@ class ExampleSecondaryTier(SecondaryTierManager):
         vllm_config: "VllmConfig",
         primary_kv_view: memoryview,
         tier_type: str,
-        capacity: int | None = None,
+        custom_param: int = 0,
     ):
         """
         Initialize the example secondary tier.
 
         Args:
-            capacity: Maximum number of blocks to store. None means unlimited.
+            custom_param: Dummy parameter demonstrating custom args.
         """
         super().__init__(
             vllm_config=vllm_config,
@@ -51,7 +54,9 @@ class ExampleSecondaryTier(SecondaryTierManager):
             tier_type=tier_type,
         )
 
-        self.capacity = capacity
+        logger.info(
+            "ExampleSecondaryTier initialized with custom_param=%d", custom_param
+        )
 
         # key -> True (only care about presence)
         self.blocks: dict[OffloadKey, bool] = {}
@@ -86,12 +91,6 @@ class ExampleSecondaryTier(SecondaryTierManager):
         assert len(keys) == len(block_ids), (
             f"Length mismatch: {len(keys)} keys but {len(block_ids)} block_ids"
         )
-
-        if self.capacity is not None and len(self.blocks) + len(keys) > self.capacity:
-            self.completed_jobs.append(
-                JobResult(job_id=job_metadata.job_id, success=False)
-            )
-            return
 
         for key in keys:
             self.blocks[key] = True
