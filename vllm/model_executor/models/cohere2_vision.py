@@ -358,6 +358,10 @@ class Cohere2VisionForConditionalGeneration(
                 architectures=config.text_config.architectures,
             )
 
+        self.make_empty_intermediate_tensors = (
+            self.language_model.make_empty_intermediate_tensors
+        )
+
     @property
     def dtype(self):
         return next(self.parameters()).dtype
