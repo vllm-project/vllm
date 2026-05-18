@@ -402,10 +402,7 @@ class EngineCore:
         # dummy passes -- the engine entered collectives but did no real work.
         # Skip the log here so the dummy_batch path in DP mode can emit the
         # "(dummy)" line without double-logging the iteration index.
-        if (
-            scheduler_output is not None
-            and scheduler_output.total_num_scheduled_tokens == 0
-        ):
+        if scheduler_output and scheduler_output.total_num_scheduled_tokens == 0:
             yield
             return
         self._iteration_index = getattr(self, "_iteration_index", 0)
