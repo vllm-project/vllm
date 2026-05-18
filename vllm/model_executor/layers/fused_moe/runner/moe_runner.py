@@ -265,6 +265,11 @@ class MoERunner(MoERunnerInterface):
 
         self._forward_entry = self._select_forward()
 
+        # When True, skip the allreduce in _maybe_reduce_final_output
+        # and let the model fuse it with the next layer's input layernorm.
+        # This flag is set by the model (e.g. MiniMaxM2Model) during init.
+        self.defer_allreduce: bool = False
+
     def _select_forward(self) -> Callable:
         if current_platform.is_tpu() or current_platform.is_cpu():
             # TODO: Once the OOM issue for the TPU backend is resolved, we
@@ -411,10 +416,15 @@ class MoERunner(MoERunnerInterface):
             # Defer the allreduce when requested by the model (e.g.
             # MiniMax-M2 decode with fuse_moe_allreduce). The model fuses
             # it with the next input_layernorm via trtllm_allreduce_fusion.
-            # Uses self.moe_config.defer_allreduce (a dataclass field set
-            # during init) so Dynamo traces it as a proper constant.
+            #
+            # NOTE: self.defer_allreduce is traced as a Dynamo constant.
+            # When True the AR branch is dead-code-eliminated from the
+            # compiled graph.  If a stale cache captured with defer=False
+            # is loaded, the AR remains.  Always clear the compile cache
+            # after changing the defer flag or toggling fuse_moe_allreduce:
+            #   rm -rf /root/.cache/vllm/torch_compile_cache/*
             if not (
-                self.moe_config.defer_allreduce
+                self.defer_allreduce
                 and self.moe_config.ep_size <= 1
                 and states.shape[0] <= 128
             ):

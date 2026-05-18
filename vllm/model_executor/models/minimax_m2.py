@@ -393,13 +393,13 @@ class MiniMaxM2Model(nn.Module, EagleModelMixin):
             for layer in islice(self.layers, self.start_layer, self.end_layer):
                 runner = layer.block_sparse_moe.experts.runner
                 if runner.moe_config.ep_size <= 1:
-                    runner.moe_config.defer_allreduce = True
+                    runner.defer_allreduce = True
                     layer._defer_ar = True
             # Disable fusion when EP is active — the runner keeps its
             # own AR because deferral isn't safe across EP all-to-all.
             self._fuse_moe_allreduce = self.layers[
                 self.start_layer
-            ].block_sparse_moe.experts.runner.moe_config.defer_allreduce
+            ].block_sparse_moe.experts.runner.defer_allreduce
             logger.info_once(
                 "MoE deferred AR: fuse_moe_allreduce=%s, tp_size=%s, ep_size=%s, "
                 "num_layers=%s, hidden_size=%s",
