@@ -570,6 +570,12 @@ def stateless_init_torch_distributed_process_group(
     init_method = get_tcp_uri(host, port)
     backend = Backend(backend)  # it is basically string
     timeout = _get_default_timeout(backend)
+    if backend == "gloo":
+        from vllm.config import get_current_vllm_config_or_none
+
+        _cfg = get_current_vllm_config_or_none()
+        if _cfg is not None and _cfg.parallel_config.gloo_timeout_seconds is not None:
+            timeout = timedelta(seconds=_cfg.parallel_config.gloo_timeout_seconds)
 
     if listen_socket is not None:
         store = create_tcp_store(
