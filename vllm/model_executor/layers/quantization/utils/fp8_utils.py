@@ -573,7 +573,7 @@ def per_token_group_quant_fp8(
         shape = x.shape[:-1] + (x.shape[-1] // group_size,)
         x_s = torch.empty(shape, device=x.device, dtype=torch.float32)
 
-    # prefer CUDA kernel if available
+    # prefer CUDA/XPU kernel if available
     # TODO(bnell): this causes some fp8 moe test to fail.
     if current_platform.is_cuda() and x.is_contiguous():
         torch.ops._C.per_token_group_fp8_quant(
@@ -587,6 +587,12 @@ def per_token_group_quant_fp8(
             use_ue8m0,
             column_major_scales,
             tma_aligned_scales,
+        )
+        return x_q, x_s
+
+    if current_platform.is_xpu() and x.is_contiguous():
+        torch.ops._C.per_token_group_fp8_quant(
+            x, x_q, x_s, group_size, eps, fp8_min, fp8_max, use_ue8m0
         )
         return x_q, x_s
 
@@ -861,7 +867,7 @@ def w8a8_triton_block_scaled_mm(
     # Triton cannot currently bind E8M0 scale tensors directly. On ROCm,
     # DeepSeek-V4 checkpoints store block scales in exponent-only E8M0 format,
     # so decode them to fp32 before launching the kernel.
-    if current_platform.is_rocm():
+    if current_platform.is_rocm() or current_platform.is_xpu():
         if As.dtype == torch.float8_e8m0fnu:
             As = _upcast_e8m0_to_fp32(As).contiguous()
         if Bs.dtype == torch.float8_e8m0fnu:
