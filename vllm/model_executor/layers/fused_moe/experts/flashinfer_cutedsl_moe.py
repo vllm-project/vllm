@@ -149,24 +149,21 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
         # The functional API expects x_sf with trailing dim: (M, K//16, 1).
         x_sf = a1q_scale.unsqueeze(-1)
 
-        from vllm.utils.flashinfer import _is_fi_autotuning, autotune
-
-        with autotune(_is_fi_autotuning):
-            flashinfer_cute_dsl_fused_moe_nvfp4(
-                x=hidden_states,
-                x_sf=x_sf,
-                token_selected_experts=topk_ids.to(torch.int32),
-                token_final_scales=topk_weights.float(),
-                w1_weight=w1,
-                w1_weight_sf=self.w1_scale,
-                w1_alpha=self.g1_alphas,
-                fc2_input_scale=self.a2_gscale,
-                w2_weight=w2,
-                w2_weight_sf=self.w2_scale,
-                w2_alpha=self.g2_alphas,
-                num_experts=self.global_num_experts,
-                top_k=self.topk,
-                num_local_experts=self.local_num_experts,
-                local_expert_offset=self.local_expert_offset,
-                moe_output=output,
-            )
+        flashinfer_cute_dsl_fused_moe_nvfp4(
+            x=hidden_states,
+            x_sf=x_sf,
+            token_selected_experts=topk_ids.to(torch.int32),
+            token_final_scales=topk_weights.float(),
+            w1_weight=w1,
+            w1_weight_sf=self.w1_scale,
+            w1_alpha=self.g1_alphas,
+            fc2_input_scale=self.a2_gscale,
+            w2_weight=w2,
+            w2_weight_sf=self.w2_scale,
+            w2_alpha=self.g2_alphas,
+            num_experts=self.global_num_experts,
+            top_k=self.topk,
+            num_local_experts=self.local_num_experts,
+            local_expert_offset=self.local_expert_offset,
+            moe_output=output,
+        )

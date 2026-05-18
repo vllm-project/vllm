@@ -402,10 +402,10 @@ def batched_fused_marlin_moe(
     global_num_experts: int = -1,
     activation: MoEActivation = MoEActivation.SILU,
     expert_map: torch.Tensor | None = None,
-    global_scale1: torch.Tensor | None = None,
-    global_scale2: torch.Tensor | None = None,
     input_global_scale1: torch.Tensor | None = None,
     input_global_scale2: torch.Tensor | None = None,
+    global_scale1: torch.Tensor | None = None,
+    global_scale2: torch.Tensor | None = None,
     g_idx1: torch.Tensor | None = None,
     g_idx2: torch.Tensor | None = None,
     sort_indices1: torch.Tensor | None = None,
@@ -417,6 +417,7 @@ def batched_fused_marlin_moe(
     intermediate_cache2: torch.Tensor | None = None,
     is_k_full: bool = True,
     output: torch.Tensor | None = None,
+    input_dtype: torch.dtype | None = None,
     inplace: bool = False,
     clamp_limit: float | None = None,
 ) -> torch.Tensor:
@@ -492,7 +493,15 @@ def batched_fused_marlin_moe(
     topk = 1
 
     # TODO(varun) : Choose a decent block size like in fused_marlin_moe
+    # Tune block_size_m based on expert capacity to reduce padding overhead.
     block_size_m = 64
+    for b_m in [8, 16, 32, 48, 64]:
+        if BATCH_TOKENS_MAX / b_m < 0.9:
+            block_size_m = b_m
+            break
+
+    if input_dtype is not None and input_dtype.itemsize == 1:
+        block_size_m = max(block_size_m, 16)
 
     sorted_token_ids, expert_ids, num_tokens_post_padded = batched_moe_align_block_size(
         max_tokens_per_batch=BATCH_TOKENS_MAX,
@@ -528,10 +537,10 @@ def batched_fused_marlin_moe(
         sorted_token_ids=sorted_token_ids,
         expert_ids=expert_ids,
         num_tokens_post_padded=num_tokens_post_padded,
-        global_scale1=global_scale1,
-        global_scale2=global_scale2,
         input_global_scale1=input_global_scale1,
         input_global_scale2=input_global_scale2,
+        global_scale1=global_scale1,
+        global_scale2=global_scale2,
         g_idx1=g_idx1,
         g_idx2=g_idx2,
         sort_indices1=sort_indices1,
@@ -542,6 +551,7 @@ def batched_fused_marlin_moe(
         intermediate_cache13=intermediate_cache13,
         intermediate_cache2=intermediate_cache2,
         output=output.view(-1, K) if output is not None else output,
+        input_dtype=input_dtype,
         is_k_full=is_k_full,
         clamp_limit=clamp_limit,
     )
@@ -562,8 +572,6 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
         w2_g_idx: torch.Tensor | None = None,
         w13_g_idx_sort_indices: torch.Tensor | None = None,
         w2_g_idx_sort_indices: torch.Tensor | None = None,
-        input_global_scale1: torch.Tensor | None = None,
-        input_global_scale2: torch.Tensor | None = None,
         is_k_full: bool = True,
     ):
         # TODO (varun) : Enable activation quantization
@@ -581,8 +589,6 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
         self.is_k_full = is_k_full
         self.input_dtype = get_marlin_input_dtype()
         self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
-        self.input_global_scale1 = input_global_scale1
-        self.input_global_scale2 = input_global_scale2
 
         super().__init__(
             moe_config=moe_config,
@@ -646,6 +652,8 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
     @property
     def quant_type_id(self) -> int:
         if self.quant_config.use_int4_w4a16:
+            if self.w1_zp is not None or self.w2_zp is not None:
+                return scalar_types.uint4.id
             return scalar_types.uint4b8.id
         elif self.quant_config.use_int8_w8a16:
             return scalar_types.uint8b128.id
@@ -765,10 +773,12 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
                 w2_scale=self.w2_scale,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                input_global_scale1=self.input_global_scale1,
-                input_global_scale2=self.input_global_scale2,
                 global_scale1=self.g1_alphas,
                 global_scale2=self.g2_alphas,
+                input_global_scale1=self.a1_gscale,
+                input_global_scale2=self.a2_gscale,
+                w1_zeros=self.w1_zp,
+                w2_zeros=self.w2_zp,
                 quant_type_id=self.quant_type_id,
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 global_num_experts=global_num_experts,
@@ -866,10 +876,12 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
             w2_scale=self.w2_scale,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            input_global_scale1=self.input_global_scale1,
-            input_global_scale2=self.input_global_scale2,
             global_scale1=self.g1_alphas,
             global_scale2=self.g2_alphas,
+            input_global_scale1=self.a1_gscale,
+            input_global_scale2=self.a2_gscale,
+            w1_zeros=self.w1_zp,
+            w2_zeros=self.w2_zp,
             quant_type_id=self.quant_type_id,
             apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
@@ -906,8 +918,6 @@ class BatchedMarlinExperts(MarlinExpertsBase):
         w2_g_idx: torch.Tensor | None = None,
         w13_g_idx_sort_indices: torch.Tensor | None = None,
         w2_g_idx_sort_indices: torch.Tensor | None = None,
-        input_global_scale1: torch.Tensor | None = None,
-        input_global_scale2: torch.Tensor | None = None,
         is_k_full: bool = True,
     ):
         super().__init__(
@@ -919,8 +929,6 @@ class BatchedMarlinExperts(MarlinExpertsBase):
             w2_g_idx=w2_g_idx,
             w13_g_idx_sort_indices=w13_g_idx_sort_indices,
             w2_g_idx_sort_indices=w2_g_idx_sort_indices,
-            input_global_scale1=input_global_scale1,
-            input_global_scale2=input_global_scale2,
             is_k_full=is_k_full,
         )
 
@@ -988,6 +996,8 @@ class BatchedMarlinExperts(MarlinExpertsBase):
             global_num_experts=global_num_experts,
             activation=activation,
             expert_map=expert_map,
+            input_global_scale1=self.a1_gscale,
+            input_global_scale2=self.a2_gscale,
             output=output,
             intermediate_cache13=workspace13,
             intermediate_cache2=workspace2,
@@ -995,6 +1005,9 @@ class BatchedMarlinExperts(MarlinExpertsBase):
             g_idx2=self.w2_g_idx,
             sort_indices1=self.w13_g_idx_sort_indices,
             sort_indices2=self.w2_g_idx_sort_indices,
+            w1_zeros=self.w1_zp,
+            w2_zeros=self.w2_zp,
+            input_dtype=self.input_dtype,
             is_k_full=self.is_k_full,
             clamp_limit=self.gemm1_clamp_limit,
         )

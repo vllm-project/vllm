@@ -334,6 +334,8 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             w2_g_idx_processed,
             w13_g_idx_sort_indices,
             w2_g_idx_sort_indices,
+            _,  # w13_qzeros
+            _,  # w2_qzeros
             w13_input_global_scale,
             w2_input_global_scale,
             _,  # w13_bias
@@ -396,8 +398,6 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
                 "w2_g_idx": layer.w2_weight_g_idx,
                 "w13_g_idx_sort_indices": layer.w13_g_idx_sort_indices,
                 "w2_g_idx_sort_indices": layer.w2_g_idx_sort_indices,
-                "input_global_scale1": getattr(layer, "w13_input_global_scale", None),
-                "input_global_scale2": getattr(layer, "w2_input_global_scale", None),
                 "is_k_full": self.is_k_full,
             }
 
