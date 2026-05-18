@@ -235,7 +235,12 @@ class DeepSeekV4MultiTokenPredictor(nn.Module):
         hidden_states = hidden_states.view(
             -1, mtp_layer.hc_mult, mtp_layer.config.hidden_size
         )
-        hidden_states = self.hc_head_op(
+        # ``hc_head_op`` is installed on the inner ``DeepSeekV4MultiTokenPredictorLayer``
+        # (see ``__init__`` above), not on this parent module, so accessing
+        # ``self.hc_head_op`` would raise ``AttributeError``. Use the
+        # ``mtp_layer`` we selected — it also owns the matching
+        # ``hc_head_{fn,scale,base}`` and ``hc_eps`` we pass in.
+        hidden_states = mtp_layer.hc_head_op(
             hidden_states,
             mtp_layer.hc_head_fn,
             mtp_layer.hc_head_scale,
