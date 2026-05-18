@@ -619,7 +619,7 @@ class GPUModelRunner(
             vocab_size=self.model_config.get_vocab_size(),
             block_sizes=[placeholder_block_size],
             kernel_block_sizes=[placeholder_block_size],
-            is_spec_decode=bool(self.vllm_config.speculative_config),
+            num_spec_tokens=self.num_spec_tokens,  # cohere
             logitsprocs=build_logitsprocs(
                 self.vllm_config,
                 self.device,
@@ -635,8 +635,8 @@ class GPUModelRunner(
             or self.vllm_config.reasoning_config is not None,
             is_pooling_model=self.is_pooling_model,
             cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
+            reasoning_config=self.vllm_config.reasoning_config,
         )
-        # cohere end
 
         # Separate cuda stream for overlapping transfer of sampled token ids from
         # GPU to CPU when async scheduling is enabled.
@@ -1359,17 +1359,6 @@ class GPUModelRunner(
         # Allow attention backend to reorder the batch, potentially
         self._may_reorder_batch(scheduler_output)
         # Refresh batch metadata with any pending updates.
-        # cohere start
-        # the updates here are done in order to get the updated spec and outputokens
-        # for the current step to be processed by logitsprocessor, else
-        # the logits processors use a placeholder which are updated in the
-        # sampling step. (moved the updated from sampling to state update).
-        if self.use_async_scheduling:
-            if self._draft_token_req_ids is not None:
-                draft_token_ids_cpu, _ = self._get_draft_token_ids_cpu()
-                self.input_batch.update_async_spec_token_ids(draft_token_ids_cpu)
-            self.input_batch.update_async_output_token_ids()
-        # cohere end
         self.input_batch.refresh_metadata()
 
         # Incrementally update ngram_gpu tensors after batch is stable
@@ -3363,6 +3352,9 @@ class GPUModelRunner(
     ) -> SamplerOutput:
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
+        # Update output token ids with tokens sampled in last step
+        # if async scheduling and required by current sampling params.
+        self.input_batch.update_async_output_token_ids()
         if spec_decode_metadata is None:
             return self.sampler(
                 logits=logits,
@@ -6567,10 +6559,11 @@ class GPUModelRunner(
                 block_sizes=block_sizes,
                 kernel_block_sizes=kernel_block_sizes,
                 max_num_blocks_per_req=max_num_blocks,
-                is_spec_decode=bool(self.vllm_config.speculative_config),
+                num_spec_tokens=self.num_spec_tokens,  # cohere
                 logitsprocs=self.input_batch.logitsprocs,
                 logitsprocs_need_output_token_ids=self.input_batch.logitsprocs_need_output_token_ids,
                 is_pooling_model=self.is_pooling_model,
+                reasoning_config=self.vllm_config.reasoning_config,
             )
 
         assert self._init_block_sizes == block_sizes, (

@@ -181,7 +181,7 @@ class Sampler(nn.Module):
         # Apply logits processors that only apply to random sampling
         # (argmax invariant)
         for processor in sampling_metadata.logitsprocs.argmax_invariant:
-            logits = processor.apply(logits, predict_bonus_token=False)  # cohere
+            logits = processor.apply(logits)
 
         # Apply top_k and/or top_p.
         random_sampled, processed_logprobs = self.topk_topp_sampler(
@@ -273,9 +273,14 @@ class Sampler(nn.Module):
         any_penalties_or_bad_words = (
             bool(bad_words_token_ids) or not sampling_metadata.no_penalties
         )
-
+        # cohere start
+        holder = sampling_metadata.thinking_budget_state_holder
+        needs_thinking_combine = holder is not None and holder.has_tracked_requests()
+        # cohere end
         output_token_ids = sampling_metadata.output_token_ids
-        if predict_bonus_token and any_penalties_or_bad_words:
+        if predict_bonus_token and (
+            any_penalties_or_bad_words or needs_thinking_combine
+        ):
             # Combine base outputs with spec tokens when speculative decoding
             # is enabled.
             output_token_ids = self._combine_outputs_with_spec_tokens(
@@ -293,12 +298,23 @@ class Sampler(nn.Module):
 
         # Apply logits processors which can impact greedy sampling.
         for processor in sampling_metadata.logitsprocs.non_argmax_invariant:
-            # add predict_bonus_token: bonus and target token logitsprocessors
-            # are processed independently in rejection sampling (cohere)
-            logits = processor.apply(logits, predict_bonus_token=predict_bonus_token)
+            logits = processor.apply(logits)
 
         # Apply penalties (e.g., freq_penalties).
         logits = self.apply_penalties(logits, sampling_metadata, output_token_ids)
+        # cohere start
+        if holder is not None and holder.has_tracked_requests():
+            holder.update_state(
+                output_token_ids,
+                sampling_metadata.spec_token_ids,
+                repeat_indices=None,
+            )
+            logits = holder.apply_to_logits(
+                logits,
+                predict_bonus_token,
+                sampling_metadata.spec_token_ids,
+            )
+        # cohere end
         return logits
 
     @staticmethod

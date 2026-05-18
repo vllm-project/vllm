@@ -18,7 +18,6 @@ from vllm.v1.sample.logits_processor.builtin import (
     LogitBiasLogitsProcessor,
     MinPLogitsProcessor,
     MinTokensLogitsProcessor,
-    ThinkingTokenBudgetLogitsProcessor,
     process_dict_updates,
 )
 from vllm.v1.sample.logits_processor.interface import (
@@ -51,7 +50,6 @@ BUILTIN_LOGITS_PROCESSORS: list[type[LogitsProcessor]] = [
     MinTokensLogitsProcessor,
     LogitBiasLogitsProcessor,
     MinPLogitsProcessor,
-    ThinkingTokenBudgetLogitsProcessor,
 ]
 
 
@@ -206,15 +204,8 @@ def build_logitsprocs(
         logger.warning(
             "min_p and logit_bias parameters won't work with speculative decoding."
         )
-        # Exception: Allow ThinkingTokenBudgetLogitsProcessor with speculative decoding
-        thinking_budget_processors = [
-            ctor(vllm_config, device, is_pin_memory)
-            for ctor in BUILTIN_LOGITS_PROCESSORS
-            if ctor is ThinkingTokenBudgetLogitsProcessor
-        ]
         return LogitsProcessors(
             [MinTokensLogitsProcessor(vllm_config, device, is_pin_memory)]
-            + thinking_budget_processors
         )
     custom_logitsprocs_classes = _load_custom_logitsprocs(custom_logitsprocs)
     return LogitsProcessors(
@@ -332,7 +323,6 @@ class AdapterLogitsProcessor(LogitsProcessor):
     def update_state(
         self,
         batch_update: BatchUpdate | None,
-        spec_token_ids: Sequence[Sequence[int]] | None = None,  # cohere
     ) -> None:
         process_dict_updates(
             self.req_info,
@@ -343,7 +333,6 @@ class AdapterLogitsProcessor(LogitsProcessor):
     def apply(
         self,
         logits: torch.Tensor,
-        predict_bonus_token: bool = False,  # cohere
     ) -> torch.Tensor:
         if self.req_info:
             # Apply per-request logits processors to corresponding rows of
@@ -370,5 +359,4 @@ __all__ = [
     "STR_POOLING_REJECTS_LOGITSPROCS",
     "LOGITSPROCS_GROUP",
     "AdapterLogitsProcessor",
-    "ThinkingTokenBudgetLogitsProcessor",
 ]

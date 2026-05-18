@@ -198,39 +198,43 @@ class LogitsprocsTestFakes(NamedTuple):
 
 def fake_update_logitsprocs_state(
     test_fakes: LogitsprocsTestFakes,
-    batch_update: BatchUpdate,
-    spec_token_ids: list[list[int]] | None = None,  # cohere
+    batch_update: BatchUpdate | None,
 ) -> None:
     """Imitate logits processors persistent batch state update
     in engine core"""
     for logitproc in test_fakes.get_logitsprocs():
-        logitproc.update_state(batch_update, spec_token_ids)  # cohere
+        logitproc.update_state(batch_update)
+    holder = test_fakes.sampling_metadata.thinking_budget_state_holder
+    if holder is not None:
+        holder.sync_batch(batch_update)
 
 
 def fake_apply_logitsprocs(
     test_fakes: LogitsprocsTestFakes,
     slice_indices: list[int],
-    predict_bonus_token: bool = False,  # cohere
+    slot_output_token_ids: list[list[int]] | None = None,
 ) -> torch.Tensor:
-    """Imitate application of logits processors in engine core"""
-    total_spec_rows = 0  # cohere
-    for processor in test_fakes.get_logitsprocs():
-        # cohere start
-        if getattr(processor, "in_spec_mode", False) and not predict_bonus_token:
-            spec_ids = getattr(processor, "spec_token_ids", [])
-            total_spec_rows = sum(len(s) for s in spec_ids)
-            break
+    """Imitate application of logits processors in engine core.
 
-    if total_spec_rows > 0:
-        logits = test_fakes.logits[:total_spec_rows].clone()
-    else:
-        logits = test_fakes.logits[
-            torch.tensor(slice_indices, dtype=torch.long)
-        ].clone()
-
+    When ``thinking_budget_state_holder`` has tracked requests, this mirrors
+    :meth:`Sampler.apply_logits_processors` by refreshing per-slot
+    ``output_token_ids`` (if ``slot_output_token_ids`` is provided), then
+    ``update_state`` + ``apply_to_logits`` on the holder after built-in logits
+    processors.
+    """
+    logits = test_fakes.logits[torch.tensor(slice_indices, dtype=torch.long)].clone()
     for processor in test_fakes.get_logitsprocs():
-        logits = processor.apply(logits, predict_bonus_token)
-    # cohere end
+        logits = processor.apply(logits)
+
+    md = test_fakes.sampling_metadata
+    holder = md.thinking_budget_state_holder
+    if holder is not None and holder.has_tracked_requests():
+        if slot_output_token_ids is not None:
+            for i, toks in enumerate(slot_output_token_ids):
+                if i < len(md.output_token_ids):
+                    md.output_token_ids[i] = list(toks)
+        holder.update_state(md.output_token_ids, md.spec_token_ids, None)
+        logits = holder.apply_to_logits(logits, False, md.spec_token_ids)
     return logits
 
 

@@ -73,7 +73,7 @@ class LogitsProcessor(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def apply(self, logits: torch.Tensor, predict_bonus_token: bool) -> torch.Tensor:
+    def apply(self, logits: torch.Tensor) -> torch.Tensor:
         """Apply LogitsProcessor to batch logits tensor. (cohere)
 
         The updated tensor must be returned but may be
@@ -95,7 +95,6 @@ class LogitsProcessor(ABC):
     def update_state(
         self,
         batch_update: "BatchUpdate | None",
-        spec_token_ids: Sequence[Sequence[int]] | None,  # cohere
     ) -> None:
         """Called when there are new output tokens, prior
         to each forward pass.

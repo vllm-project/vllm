@@ -18,12 +18,7 @@ from tests.v1.sample.utils import (
     fake_apply_logitsprocs,
     fake_update_logitsprocs_state,
 )
-
-# cohere start
-from vllm.config import SchedulerConfig, VllmConfig
-from vllm.config.reasoning import ReasoningConfig
-
-# cohere end
+from vllm.config import VllmConfig
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils.platform_utils import is_pin_memory_available
@@ -35,37 +30,35 @@ from vllm.v1.sample.logits_processor import (
     MinPLogitsProcessor,
     MinTokensLogitsProcessor,
     MoveDirectionality,
-    ThinkingTokenBudgetLogitsProcessor,  # cohere
     build_logitsprocs,
 )
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.sample.thinking_budget_state import (
+    ThinkingBudgetStateHolder,
+    maybe_create_thinking_budget_state_holder,
+)
 
 PIN_MEMORY_AVAILABLE = is_pin_memory_available()
 MAX_NUM_REQS = 256
 VOCAB_SIZE = 1024
 NUM_OUTPUT_TOKENS = 20
-CUDA_DEVICES = [
-    f"{current_platform.device_type}:{i}"
+DEVICE_TYPE = current_platform.device_type
+DEVICES = [
+    f"{DEVICE_TYPE}:{i}"
     for i in range(1 if current_platform.device_count() == 1 else 2)
 ]
 MAX_NUM_PROMPT_TOKENS = 64
 MIN_TOKENS_LEN_THRESHOLD = 5
 REQS_PER_LOGITPROC = 50
 STR_NO_LOGITPROC = "none"
+# Thinking budget uses ``ThinkingBudgetStateHolder`` (not a logits processor).
+STR_THINKING_BUDGET = "thinking_budget"
 
-# cohere start
-# ThinkingTokenBudgetLogitsProcessor testing constants
+# Thinking token budget testing constants
 THINKING_TOKEN_BUDGET = 5
 THINK_START_TOKEN_ID = 999
 THINK_END_TOKEN_ID = 998
-NUM_SPEC_TOKENS = 3  # Number of speculative tokens per request
 
-# For standalone thinking budget edge-case tests (ReasoningConfig.is_thinking_enabled)
-THINK_BUDGET_START_IDS = [1]
-THINK_BUDGET_END_IDS = [2, 3]
-MAX_NUM_REQS_THINK_BUDGET = 16
-
-# cohere end
 # LogitsProcessor subclass or "none"
 LogitprocType: TypeAlias = type[LogitsProcessor] | str
 
@@ -86,26 +79,17 @@ class LogitsProcsRequestParams:
         self.workload_index = workload_index
         self.logitproc_type = logitproc_type
         # Number of output tokens is randomly 0 or twice the min-tokens
-        # cohere start
         # threshold which will be used in testing.
         # Generate diverse random tokens for all processors (more realistic)
         num_tokens = MIN_TOKENS_LEN_THRESHOLD * random.randint(0, 2)
         if num_tokens > 0:
             # Use diverse random tokens
             self.out_tokens = [random.randint(1, 950) for _ in range(num_tokens)]
-            # Set first token for ThinkingTokenBudget testing
-            is_thinking_processor = (
-                logitproc_type is ThinkingTokenBudgetLogitsProcessor
-                or (
-                    hasattr(logitproc_type, "__name__")
-                    and logitproc_type.__name__ == "ThinkingTokenBudgetLogitsProcessor"
-                )
-            )
-            if is_thinking_processor:
+            # Think-start seed for ``STR_THINKING_BUDGET`` rows.
+            if logitproc_type == STR_THINKING_BUDGET:
                 self.out_tokens[0] = THINK_START_TOKEN_ID
         else:
             self.out_tokens = []
-        # cohere end
         self.prompt_tokens = []
         self.params = _sampling_params_from_logitproc(logitproc_type)
 
@@ -115,38 +99,23 @@ class LogitsProcsRequestParams:
         return f"MyClass({summ})"
 
 
-# cohere start
 class MockReasoningConfig:
-    """Mock reasoning config for testing ThinkingTokenBudgetLogitsProcessor."""
+    """Minimal reasoning config for ``ThinkingBudgetStateHolder`` tests."""
 
     reasoning_start_token_ids = [THINK_START_TOKEN_ID]
     reasoning_end_token_ids = [THINK_END_TOKEN_ID]
+    enabled = True
 
 
-class MockSpeculativeConfig:
-    """Mock speculative config for testing with spec decoding."""
-
-    num_speculative_tokens = NUM_SPEC_TOKENS
-
-    def uses_draft_model(self) -> bool:
-        return True
-
-
-# cohere end
 def _generate_fake_sampling_metadata(
     num_output_tokens: int,
     batch_size: int,
     vocab_size: int,
     device: torch.device,
-    enable_spec_decode: bool = False,  # cohere
 ) -> SamplingMetadata:
     """Generate fake sampling metadata with fake logitsprocs"""
     output_token_ids: list[list[int]] = []
     prompt_token_ids: list[list[int]] = []
-    # cohere start
-    spec_token_ids: list[list[int]] = []
-
-    # cohere end
     for _ in range(batch_size):
         output_token_ids.append(
             np.random.randint(0, vocab_size, size=num_output_tokens).tolist()
@@ -156,39 +125,28 @@ def _generate_fake_sampling_metadata(
                 0, vocab_size, size=np.random.randint(1, MAX_NUM_PROMPT_TOKENS)
             ).tolist()
         )
-        # cohere start
-        # Add spec tokens if speculative decoding is enabled
-        if enable_spec_decode:
-            spec_token_ids.append(
-                np.random.randint(0, vocab_size, size=NUM_SPEC_TOKENS).tolist()
-            )
-        else:
-            spec_token_ids.append([])
 
     vllm_config = VllmConfig()
     vllm_config.reasoning_config = MockReasoningConfig()
 
-    if enable_spec_decode:
-        vllm_config.speculative_config = MockSpeculativeConfig()
-
-    # For speculative decoding tests, we need to manually create the processors
-    # since build_logitsprocs disables all processors when speculative_config is present
-    if enable_spec_decode:
-        from vllm.v1.sample.logits_processor import LogitsProcessors
-
-        # Create ThinkingTokenBudgetLogitsProcessor manually
-        thinking_processor = ThinkingTokenBudgetLogitsProcessor(
-            vllm_config, device, PIN_MEMORY_AVAILABLE
-        )
-        logitsprocs = LogitsProcessors([thinking_processor])
-    else:
-        logitsprocs = build_logitsprocs(
-            vllm_config=vllm_config,
-            device=device,
-            is_pin_memory=PIN_MEMORY_AVAILABLE,
-            is_pooling_model=False,
-        )
-    # cohere end
+    logitsprocs = build_logitsprocs(
+        vllm_config=vllm_config,
+        device=device,
+        is_pin_memory=PIN_MEMORY_AVAILABLE,
+        is_pooling_model=False,
+    )
+    num_spec = (
+        vllm_config.speculative_config.num_speculative_tokens
+        if vllm_config.speculative_config
+        else 0
+    )
+    thinking_holder = maybe_create_thinking_budget_state_holder(
+        vllm_config.reasoning_config,
+        vllm_config.scheduler_config.max_num_seqs,
+        num_spec,
+        device,
+        PIN_MEMORY_AVAILABLE,
+    )
     fake_sampling_metadata = SamplingMetadata(
         temperature=torch.full((batch_size,), 0.0),
         all_greedy=True,
@@ -208,41 +166,20 @@ def _generate_fake_sampling_metadata(
         allowed_token_ids_mask=None,
         bad_words_token_ids={},
         logitsprocs=logitsprocs,
-        spec_token_ids=spec_token_ids,  # cohere
+        thinking_budget_state_holder=thinking_holder,
     )
     return fake_sampling_metadata
 
 
-# cohere start
-def _generate_test_fakes(
-    batch_size: int, device: str, enable_spec_decode: bool = False
-) -> LogitsprocsTestFakes:
-    # cohere end
+def _generate_test_fakes(batch_size: int, device: str) -> LogitsprocsTestFakes:
     """Generate fake logits and sampling metadata"""
-    # cohere start
-    # Calculate the total logits size for speculative decoding
-    if enable_spec_decode:
-        # In speculative decoding, logits size = batch_size +
-        # total_spec_tokens_across_all_requests
-        total_spec_tokens = batch_size * NUM_SPEC_TOKENS
-        logits_size = batch_size + total_spec_tokens
-    else:
-        logits_size = batch_size
-
-    fake_logits = create_fake_logits(logits_size, VOCAB_SIZE)
-    # Create one dominant token per logit position, to support min-p test
-    for i in range(logits_size):
-        # cohere end
+    fake_logits = create_fake_logits(batch_size, VOCAB_SIZE)
+    # Create one dominant token per batch, to support min-p test
+    for i in range(batch_size):
         fake_logits[i, 0] = 10.0  # High logit for first token
         fake_logits[i, 1:] = 1e-2  # Others remain low
     sampling_metadata = _generate_fake_sampling_metadata(
-        # cohere start
-        NUM_OUTPUT_TOKENS,
-        batch_size,
-        VOCAB_SIZE,
-        torch.device(device),
-        enable_spec_decode,
-        # cohere end
+        NUM_OUTPUT_TOKENS, batch_size, VOCAB_SIZE, torch.device(device)
     )
     return LogitsprocsTestFakes(
         logits=fake_logits,
@@ -261,7 +198,7 @@ def _sampling_params_from_logitproc(logitproc_type: LogitprocType) -> SamplingPa
 
 def _generate_mixed_logitsprocs_batch_params(
     reqs_per_logitproc: int,
-    logitsprocs_types: list[str],
+    logitsprocs_types: list[LogitprocType],
 ) -> list[LogitsProcsRequestParams]:
     """Define key params for a batch of requests with a different
     logitproc enabled per request.
@@ -294,27 +231,6 @@ def _generate_mixed_logitsprocs_batch_params(
     ]
 
 
-# cohere start
-def _generate_mixed_logitsprocs_batch_params_spec_decode(
-    reqs_per_logitproc: int,
-    logitsprocs_types: list[str],
-) -> list[LogitsProcsRequestParams]:
-    """Generate batch params for speculative decoding tests"""
-    batch_size = len(logitsprocs_types) * reqs_per_logitproc
-    # Generate multiple repeats of key params for each logitproc;
-    # apply random inverse permutation to the iteration
-    # over logitsprocs, such that logitsprocs are shuffled.
-    batch_perm = random.sample(range(batch_size), k=batch_size)
-    return [
-        LogitsProcsRequestParams(
-            workload_index=idx,
-            logitproc_type=logitsprocs_types[pdx // reqs_per_logitproc],
-        )
-        for idx, pdx in enumerate(batch_perm)
-    ]
-
-
-# cohere end
 def _raise_error_invalid(
     msg_suffix: str,
     batch_index: int,
@@ -532,7 +448,6 @@ def _min_tokens_validate(
                 )
 
 
-# cohere start
 def _thinking_budget_params(kwargs: dict) -> None:
     """Set SamplingParams kwargs for thinking token budget tests"""
     kwargs["thinking_token_budget"] = THINKING_TOKEN_BUDGET
@@ -546,23 +461,21 @@ def _thinking_budget_validate(
     request_params: LogitsProcsRequestParams,
     step_idx: int,
 ) -> None:
-    """Validate thinking token budget processor behavior (non-speculative)"""
-    # Get the ThinkingTokenBudgetLogitsProcessor instance
-    tb_processor: ThinkingTokenBudgetLogitsProcessor = next(
-        test_fakes.get_logitsprocs_by_cls(ThinkingTokenBudgetLogitsProcessor)
-    )
+    """Validate ``ThinkingBudgetStateHolder`` thinking-budget behavior.
 
-    # Get current request state
-    state = tb_processor._state.get(batch_index)
+    State is keyed by **batch slot** (same index space as logits rows), matching
+    ``sync_batch`` / sampler integration (see PR #34668 discussion).
+    """
+    holder = test_fakes.sampling_metadata.thinking_budget_state_holder
+    assert holder is not None
+    state = holder._state.get(batch_index)
     params = request_params.params
 
-    # Validate thinking token budget configuration
     if hasattr(params, "thinking_token_budget") and params.thinking_token_budget:
-        # State should exist for requests with thinking_token_budget
         if state is None:
             _raise_error_invalid(
                 msg_suffix=(
-                    f"Expected state for batch {batch_index} "
+                    f"Expected holder state for batch slot {batch_index} "
                     f"with thinking_token_budget={params.thinking_token_budget}"
                 ),
                 batch_index=batch_index,
@@ -570,10 +483,8 @@ def _thinking_budget_validate(
                 step_idx=step_idx,
             )
 
-        # Validate budget matches what was set
         expected_budget = params.thinking_token_budget
         actual_budget = state["thinking_token_budget"]
-
         if actual_budget != expected_budget:
             _raise_error_invalid(
                 msg_suffix=(
@@ -584,13 +495,9 @@ def _thinking_budget_validate(
                 step_idx=step_idx,
             )
 
-        # Check if we're in thinking mode and validate token counting
         output_tokens = request_params.out_tokens
-
-        # Find if thinking has started in output tokens
+        start_tokens = holder.think_start_token_ids
         thinking_started = False
-        start_tokens = tb_processor.reasoning_start_token_ids
-
         if len(start_tokens) > 0:
             for i in range(len(output_tokens) - len(start_tokens) + 1):
                 if output_tokens[i : i + len(start_tokens)] == start_tokens:
@@ -598,235 +505,43 @@ def _thinking_budget_validate(
                     break
 
         if thinking_started:
-            # If budget is exceeded, validate end token forcing
             think_count = state["think_count"]
             budget = state["thinking_token_budget"]
+            if think_count >= budget and not state["in_end"]:
+                _raise_error_invalid(
+                    msg_suffix=(
+                        f"Budget exceeded ({think_count} >= {budget}) but "
+                        "in_end is false"
+                    ),
+                    batch_index=batch_index,
+                    request_params=request_params,
+                    step_idx=step_idx,
+                )
 
-            if think_count >= budget:
-                if not state["in_end"]:
+            end_tokens = holder.think_end_token_ids
+            if (
+                think_count >= budget
+                and state["in_end"]
+                and len(end_tokens) > 0
+                and holder.has_tracked_requests()
+            ):
+                expected_end_token_id = end_tokens[
+                    min(state["end_count"], len(end_tokens) - 1)
+                ]
+                # Holder bumps forced vocab positions to 1e9 (does not -inf others).
+                forced_logit = float(logits_new[batch_index, expected_end_token_id])
+                if forced_logit < 1.0e8:
                     _raise_error_invalid(
                         msg_suffix=(
-                            f"Budget exceeded ({think_count} >= "
-                            f"{budget}) but not "
-                            "forcing end tokens"
+                            f"Expected forced end token {expected_end_token_id} "
+                            f"with large logit, got {forced_logit}"
                         ),
                         batch_index=batch_index,
                         request_params=request_params,
                         step_idx=step_idx,
                     )
 
-                # Validate that only end tokens are allowed
-                end_tokens = tb_processor.reasoning_end_token_ids
-                if len(end_tokens) > 0:
-                    expected_end_token_id = end_tokens[
-                        min(
-                            state["end_count"],
-                            len(end_tokens) - 1,
-                        )
-                    ]
 
-                    # Check logits masking for non-speculative case
-                    batch_logits = logits_new[batch_index]
-                    for token_id in range(len(batch_logits)):
-                        logit_value = batch_logits[token_id]
-
-                        if token_id == expected_end_token_id and logit_value < 1e8:
-                            # End token should have high logit value (forced), ~1e9
-                            _raise_error_invalid(
-                                msg_suffix=(
-                                    f"End token {token_id} should have high "
-                                    f"logit (~1e9) but got {logit_value}"
-                                ),
-                                batch_index=batch_index,
-                                request_params=request_params,
-                                step_idx=step_idx,
-                            )
-
-
-def _thinking_budget_validate_spec_decode(
-    test_fakes: LogitsprocsTestFakes,
-    persistent_batch: list[LogitsProcsRequestParams],
-    logits_new: torch.Tensor,
-    batch_index: int,
-    request_params: LogitsProcsRequestParams,
-    step_idx: int,
-) -> None:
-    """Validate thinking token budget processor with speculative decoding"""
-    # Get the ThinkingTokenBudgetLogitsProcessor instance
-    try:
-        tb_processor: ThinkingTokenBudgetLogitsProcessor = next(
-            test_fakes.get_logitsprocs_by_cls(ThinkingTokenBudgetLogitsProcessor)
-        )
-    except StopIteration:
-        # If ThinkingTokenBudgetLogitsProcessor is not found, it wasn't created.
-        # This can happen when speculative decoding configuration disables
-        # certain processors. In this case, skip validation for this processor.
-        return
-
-    # Get current request state
-    state = tb_processor._state.get(batch_index)
-    params = request_params.params
-
-    # Validate thinking token budget configuration
-    if hasattr(params, "thinking_token_budget") and params.thinking_token_budget:
-        # State should exist for requests with thinking_token_budget
-        if state is None:
-            _raise_error_invalid(
-                msg_suffix=(
-                    f"Expected state for batch {batch_index} "
-                    f"with thinking_token_budget={params.thinking_token_budget} "
-                    f"in speculative decoding mode"
-                ),
-                batch_index=batch_index,
-                request_params=request_params,
-                step_idx=step_idx,
-            )
-
-        # Validate budget matches what was set
-        expected_budget = params.thinking_token_budget
-        actual_budget = state["thinking_token_budget"]
-
-        if actual_budget != expected_budget:
-            _raise_error_invalid(
-                msg_suffix=(
-                    f"Budget mismatch in spec decode: expected {expected_budget}, "
-                    f"got {actual_budget}"
-                ),
-                batch_index=batch_index,
-                request_params=request_params,
-                step_idx=step_idx,
-            )
-
-        # Validate spec_token_ids are properly stored
-        spec_token_ids = state.get("spec_token_ids", [])
-        expected_spec_tokens = test_fakes.sampling_metadata.spec_token_ids[batch_index]
-
-        if len(spec_token_ids) != len(expected_spec_tokens):
-            _raise_error_invalid(
-                msg_suffix=(
-                    f"Spec token count mismatch: expected {len(expected_spec_tokens)} "
-                    f"spec tokens, got {len(spec_token_ids)}"
-                ),
-                batch_index=batch_index,
-                request_params=request_params,
-                step_idx=step_idx,
-            )
-
-        # Check if we're in thinking mode and validate token counting with spec tokens
-        output_tokens = request_params.out_tokens
-
-        # Find if thinking has started in output tokens
-        thinking_started = False
-        start_tokens = tb_processor.reasoning_start_token_ids
-
-        if len(start_tokens) > 0:
-            for i in range(len(output_tokens) - len(start_tokens) + 1):
-                if output_tokens[i : i + len(start_tokens)] == start_tokens:
-                    thinking_started = True
-                    break
-
-        if thinking_started:
-            # If budget is exceeded (including spec tokens), validate end token forcing
-            think_count = state["think_count"]
-            spec_count = len(spec_token_ids)
-            total_think_tokens = think_count + spec_count
-            budget = state["thinking_token_budget"]
-
-            if total_think_tokens >= budget:
-                if not state["in_end"]:
-                    _raise_error_invalid(
-                        msg_suffix=(
-                            f"Budget exceeded with spec decode "
-                            f"(think:{think_count} + spec:{spec_count} = "
-                            f"{total_think_tokens} >= {budget}) but not "
-                            "forcing end tokens"
-                        ),
-                        batch_index=batch_index,
-                        request_params=request_params,
-                        step_idx=step_idx,
-                    )
-
-                # Validate force_index calculation with spec tokens
-                remaining_budget = budget - think_count
-                if 0 < remaining_budget < spec_count:
-                    expected_force_index = list(range(remaining_budget, spec_count))
-                elif remaining_budget <= 0 and spec_count > 0:
-                    expected_force_index = list(range(spec_count))
-                elif remaining_budget <= 0:
-                    expected_force_index = [0]
-                else:
-                    expected_force_index = [spec_count]
-                actual_force_index = state.get("force_index", [])
-
-                if actual_force_index != expected_force_index:
-                    _raise_error_invalid(
-                        msg_suffix=(
-                            f"Force index mismatch in spec decode: "
-                            f"expected {expected_force_index}, got {actual_force_index}"
-                            f" (think_count={think_count}, spec_count={spec_count}, "
-                            f"budget={budget})"
-                        ),
-                        batch_index=batch_index,
-                        request_params=request_params,
-                        step_idx=step_idx,
-                    )
-
-                # Validate that the correct position in logits is being forced
-                # Use the processor's own cu_num_tokens for consistency
-                cumulative_offset = tb_processor.cu_num_tokens.get(batch_index, 0)
-
-                end_tokens = tb_processor.reasoning_end_token_ids
-                end_count = state.get("end_count", 0)
-
-                for fi in actual_force_index:
-                    if end_count >= len(end_tokens):
-                        break
-
-                    expected_mask_position = cumulative_offset + fi
-
-                    if (
-                        hasattr(tb_processor, "mask")
-                        and len(tb_processor.mask) > expected_mask_position
-                    ):
-                        mask_value = tb_processor.mask[expected_mask_position]
-                        if not mask_value:
-                            _raise_error_invalid(
-                                msg_suffix=(
-                                    f"Expected mask to be True at position "
-                                    f"{expected_mask_position} "
-                                    f"(cumulative_offset:{cumulative_offset}"
-                                    f" + force_index:{fi}) but got "
-                                    f"{mask_value}"
-                                ),
-                                batch_index=batch_index,
-                                request_params=request_params,
-                                step_idx=step_idx,
-                            )
-
-                    expected_end_token_id = end_tokens[end_count]
-
-                    if expected_mask_position < logits_new.shape[0]:
-                        forced_token_logit = logits_new[
-                            expected_mask_position, expected_end_token_id
-                        ]
-
-                        if forced_token_logit < 1e8:
-                            _raise_error_invalid(
-                                msg_suffix=(
-                                    f"End token {expected_end_token_id}"
-                                    f" at position "
-                                    f"{expected_mask_position} should "
-                                    f"have high logit (~1e9) but got "
-                                    f"{forced_token_logit}"
-                                ),
-                                batch_index=batch_index,
-                                request_params=request_params,
-                                step_idx=step_idx,
-                            )
-                    end_count += 1
-
-
-# cohere end
 def _none_validate(
     test_fakes: LogitsprocsTestFakes,
     persistent_batch: list[LogitsProcsRequestParams],
@@ -873,44 +588,27 @@ logitsprocs_test_mapping = {
     MinTokensLogitsProcessor: LogitsprocTestHelpers(
         gen_request_fxn=_min_tokens_params, eval_fxn=_min_tokens_validate
     ),
-    # cohere start
-    ThinkingTokenBudgetLogitsProcessor: LogitsprocTestHelpers(
+    STR_THINKING_BUDGET: LogitsprocTestHelpers(
         gen_request_fxn=_thinking_budget_params, eval_fxn=_thinking_budget_validate
     ),
-}
-
-# Separate mapping for speculative decoding tests
-logitsprocs_spec_decode_test_mapping = {
-    ThinkingTokenBudgetLogitsProcessor: LogitsprocTestHelpers(
-        gen_request_fxn=_thinking_budget_params,
-        eval_fxn=_thinking_budget_validate_spec_decode,
-    ),
-    # cohere end
 }
 
 
 def _get_test_cases() -> list[list[str]]:
     """Each test case is a set of logitsprocs"""
     logitsprocs_types = list(logitsprocs_test_mapping.keys())
-    # cohere start
 
-    # Isolate ThinkingTokenBudgetLogitsProcessor from all other processors
-    # to avoid unexpected modification of logits interference
-    thinking_processor = ThinkingTokenBudgetLogitsProcessor
+    # Isolate thinking-budget handling from other processors to avoid cross-talk.
+    thinking_id: LogitprocType = STR_THINKING_BUDGET
     other_processors = [
-        p
-        for p in logitsprocs_types
-        if p != STR_NO_LOGITPROC and p != thinking_processor
+        p for p in logitsprocs_types if p != STR_NO_LOGITPROC and p != thinking_id
     ]
 
-    # cohere end
     return (
         [[STR_NO_LOGITPROC]]
-        # cohere start
         + [[logitproc_type, STR_NO_LOGITPROC] for logitproc_type in other_processors]
         + [other_processors]
-        + [[thinking_processor]]
-        # cohere end
+        + [[thinking_id]]
     )
 
 
@@ -945,9 +643,7 @@ def _generate_fake_step_update(
     # 50% of steps: remove no requests
     # Other 50%: remove a limited number of reqs (less than the number
     # persistent batch reqs remaining, less than an arbitrary max)
-    # cohere start
-
-    # cohere end
+    # If persistent batch is empty: 100% of steps have 0 removals until
     # more requests are added. Assume that removed requests are always
     # drawn from the current batch, before new adds
     num_step_remove = (
@@ -1087,50 +783,23 @@ def _assert_valid(
         )
 
 
-# cohere start
-def _assert_valid_spec_decode(
-    batch_size: int,
-    persistent_batch: list[LogitsProcsRequestParams],
-    test_fakes: LogitsprocsTestFakes,
-    slice_idxs: list[int],
-    logits_w_lp: torch.Tensor,
-    step_idx: int,
-) -> None:
-    """Validation for speculative decoding tests"""
-    if not slice_idxs:
-        # Trivial case of empty persistent batch
-        assert len(persistent_batch) == 0
-        if logits_w_lp.shape[0] != 0:
-            raise ValueError(
-                "Fake persistent batch is empty but logitsprocs "
-                f"output batch has shape {logits_w_lp.shape}"
-            )
-        return
-
-    # Validate logits for each fake request using speculative decoding validation
-    for batch_index in range(batch_size):
-        request_params = persistent_batch[batch_index]
-        # Use speculative decoding validation function
-        fxn = logitsprocs_spec_decode_test_mapping[
-            request_params.logitproc_type
-        ].eval_fxn
-        fxn(
-            test_fakes=test_fakes,
-            persistent_batch=persistent_batch,
-            logits_new=logits_w_lp,
-            batch_index=batch_index,
-            request_params=request_params,
-            step_idx=step_idx,
-        )
+def _slot_outputs_for_metadata(
+    persistent_batch: list[LogitsProcsRequestParams], pad_len: int
+) -> list[list[int]]:
+    """Per-batch-slot output token ids aligned with ``SamplingMetadata`` rows."""
+    rows: list[list[int]] = [[] for _ in range(pad_len)]
+    for i, req in enumerate(persistent_batch):
+        if i < pad_len:
+            rows[i] = list(req.out_tokens)
+    return rows
 
 
-# cohere end
 @create_new_process_for_each_test()
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("reqs_per_logitproc", [REQS_PER_LOGITPROC])
 @pytest.mark.parametrize("logitsprocs_under_test", _get_test_cases())
 def test_logitsprocs(
-    device: str, reqs_per_logitproc: int, logitsprocs_under_test: list[str]
+    device: str, reqs_per_logitproc: int, logitsprocs_under_test: list[LogitprocType]
 ):
     random.seed(40)
     torch.set_default_device(device)
@@ -1176,19 +845,12 @@ def test_logitsprocs(
         batch_size = len(persistent_batch)
 
         # Apply fake batch update to logitsprocs
-        # cohere start
-        spec_token_ids = [
-            test_fakes.sampling_metadata.spec_token_ids[req.workload_index]
-            for req in persistent_batch
-        ]
-        fake_update_logitsprocs_state(
-            test_fakes, batch_update, spec_token_ids=spec_token_ids
-        )
-        # cohere end
+        fake_update_logitsprocs_state(test_fakes, batch_update)
 
-        # Emulate application of logits processors in engine
+        # Emulate application of logits processors + thinking holder (sampler order).
         slice_idxs = [req.workload_index for req in persistent_batch]
-        logits_w_lp = fake_apply_logitsprocs(test_fakes, slice_idxs).cpu()
+        slot_rows = _slot_outputs_for_metadata(persistent_batch, workload_size)
+        logits_w_lp = fake_apply_logitsprocs(test_fakes, slice_idxs, slot_rows).cpu()
 
         _assert_valid(
             batch_size=batch_size,
@@ -1202,477 +864,333 @@ def test_logitsprocs(
         step_idx += 1
 
 
-# cohere start
+class MockReasoningNoEndTokens:
+    """Reasoning config with no end token ids (disables enforcement in holder)."""
+
+    reasoning_start_token_ids = [THINK_START_TOKEN_ID]
+    reasoning_end_token_ids: list[int] = []
 
 
-@create_new_process_for_each_test()
-@pytest.mark.parametrize("device", CUDA_DEVICES)
-@pytest.mark.parametrize("reqs_per_logitproc", [REQS_PER_LOGITPROC])
-def test_thinking_budget_logitsproc_spec_decode(device: str, reqs_per_logitproc: int):
-    """Test ThinkingTokenBudgetLogitsProcessor with speculative decoding"""
-    random.seed(42)  # Different seed to avoid conflicts
-    torch.set_default_device(device)
-
-    # Only test ThinkingTokenBudgetLogitsProcessor with speculative decoding
-    logitsprocs_under_test = [ThinkingTokenBudgetLogitsProcessor]
-
-    # Define a shuffled batch of requests using thinking token budget processor
-    workload_params = _generate_mixed_logitsprocs_batch_params_spec_decode(
-        reqs_per_logitproc=reqs_per_logitproc, logitsprocs_types=logitsprocs_under_test
+def test_maybe_create_thinking_budget_holder_without_reasoning():
+    cfg = VllmConfig()
+    assert cfg.reasoning_config is None
+    assert (
+        maybe_create_thinking_budget_state_holder(
+            None,
+            cfg.scheduler_config.max_num_seqs,
+            0,
+            torch.device("cpu"),
+            False,
+        )
+        is None
     )
-    workload_size = len(workload_params)
 
-    # Create fake test data structures for testing with speculative decoding enabled
-    test_fakes = _generate_test_fakes(workload_size, device, enable_spec_decode=True)
 
-    wdx = 0  # Next request index in workload to add
-    persistent_batch: list[
-        LogitsProcsRequestParams
-    ] = []  # Persistent batch state, as list of workload indices
-
-    # Generate fake removed request indices from current persistent
-    # batch before adds
-    batch_update_builder = BatchUpdateBuilder()
-
-    # Break when entire workload has been added previously and persistent
-    # batch is empty
-    workload_reqs_remaining = workload_size
-    batch_size = 0
-    step_idx = 0
-    while True:
-        if not (workload_reqs_remaining or batch_size):
-            break
-
-        (
-            batch_update,
-            wdx,
-            workload_reqs_remaining,
-        ) = _generate_fake_step_update(
-            persistent_batch=persistent_batch,
-            workload_params=workload_params,
-            wdx=wdx,
-            batch_update_builder=batch_update_builder,
+def test_thinking_budget_holder_has_tracked_after_sync_add():
+    vc = VllmConfig()
+    vc.reasoning_config = MockReasoningConfig()
+    h = ThinkingBudgetStateHolder(
+        vc.reasoning_config,
+        vc.scheduler_config.max_num_seqs,
+        0,
+        torch.device("cpu"),
+        False,
+    )
+    assert not h.has_tracked_requests()
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=1,
+            removed=(),
+            added=[
+                (
+                    0,
+                    SamplingParams(thinking_token_budget=3),
+                    None,
+                    [THINK_START_TOKEN_ID],
+                )
+            ],
+            moved=(),
         )
-        batch_size = len(persistent_batch)
+    )
+    assert h.has_tracked_requests()
+    assert h._state[0]["thinking_token_budget"] == 3
 
-        # Apply fake batch update to logitsprocs with spec_token_ids
-        spec_token_ids = [
-            test_fakes.sampling_metadata.spec_token_ids[req.workload_index]
-            for req in persistent_batch
-        ]
 
-        # Update state for each logits processor individually to pass spec_token_ids
-        for logitproc in test_fakes.get_logitsprocs():
-            if isinstance(logitproc, ThinkingTokenBudgetLogitsProcessor):
-                logitproc.update_state(batch_update, spec_token_ids)
-            else:
-                logitproc.update_state(batch_update)
-
-        # Emulate application of logits processors in engine
-        slice_idxs = [req.workload_index for req in persistent_batch]
-        logits_w_lp = fake_apply_logitsprocs(test_fakes, slice_idxs).cpu()
-
-        _assert_valid_spec_decode(
-            batch_size=batch_size,
-            persistent_batch=persistent_batch,
-            test_fakes=test_fakes,
-            slice_idxs=slice_idxs,
-            logits_w_lp=logits_w_lp,
-            step_idx=step_idx,
+def test_thinking_budget_holder_sync_remove_clears_state():
+    vc = VllmConfig()
+    vc.reasoning_config = MockReasoningConfig()
+    h = ThinkingBudgetStateHolder(
+        vc.reasoning_config,
+        vc.scheduler_config.max_num_seqs,
+        0,
+        torch.device("cpu"),
+        False,
+    )
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=1,
+            removed=(),
+            added=[
+                (
+                    0,
+                    SamplingParams(thinking_token_budget=3),
+                    None,
+                    [],
+                )
+            ],
+            moved=(),
         )
+    )
+    assert h.has_tracked_requests()
+    h.sync_batch(BatchUpdate(batch_size=0, removed=(0,), added=(), moved=()))
+    assert not h.has_tracked_requests()
 
-        step_idx += 1
+
+def test_thinking_budget_holder_sync_add_without_budget_drops_row():
+    vc = VllmConfig()
+    vc.reasoning_config = MockReasoningConfig()
+    h = ThinkingBudgetStateHolder(
+        vc.reasoning_config,
+        vc.scheduler_config.max_num_seqs,
+        0,
+        torch.device("cpu"),
+        False,
+    )
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=1,
+            removed=(),
+            added=[(0, SamplingParams(), None, [])],
+            moved=(),
+        )
+    )
+    assert not h.has_tracked_requests()
 
 
-@create_new_process_for_each_test()
-@pytest.mark.parametrize("device", CUDA_DEVICES)
-def test_thinking_budget_custom_spec_decode(device: str):
-    """Test ThinkingTokenBudgetLogitsProcessor with custom speculative decoding inputs
+def test_thinking_budget_holder_swap_exchanges_state():
+    vc = VllmConfig()
+    vc.reasoning_config = MockReasoningConfig()
+    h = ThinkingBudgetStateHolder(
+        vc.reasoning_config,
+        vc.scheduler_config.max_num_seqs,
+        0,
+        torch.device("cpu"),
+        False,
+    )
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=2,
+            removed=(),
+            added=[
+                (
+                    0,
+                    SamplingParams(thinking_token_budget=3),
+                    None,
+                    [],
+                ),
+                (
+                    1,
+                    SamplingParams(thinking_token_budget=7),
+                    None,
+                    [],
+                ),
+            ],
+            moved=(),
+        )
+    )
+    b0, b1 = h._state[0]["thinking_token_budget"], h._state[1]["thinking_token_budget"]
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=2,
+            removed=(),
+            added=(),
+            moved=[(0, 1, MoveDirectionality.SWAP)],
+        )
+    )
+    assert h._state[0]["thinking_token_budget"] == b1
+    assert h._state[1]["thinking_token_budget"] == b0
 
-    This test allows you to define custom speculative tokens and output tokens
-    to test specific scenarios with the thinking token budget processor.
-    Uses the same rigorous validation logic as
-    test_thinking_budget_logitsproc_spec_decode.
 
-    To customize your test:
-    1. Modify custom_spec_tokens - the speculative tokens for each request
-    2. Modify custom_output_tokens - the output tokens for each request
-    3. The test will automatically validate all logic with comprehensive assertions
+def test_thinking_budget_holder_unidirectional_move():
+    vc = VllmConfig()
+    vc.reasoning_config = MockReasoningConfig()
+    h = ThinkingBudgetStateHolder(
+        vc.reasoning_config,
+        vc.scheduler_config.max_num_seqs,
+        0,
+        torch.device("cpu"),
+        False,
+    )
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=2,
+            removed=(),
+            added=[
+                (
+                    1,
+                    SamplingParams(thinking_token_budget=4),
+                    None,
+                    [],
+                ),
+            ],
+            moved=(),
+        )
+    )
+    assert 1 in h._state and 0 not in h._state
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=2,
+            removed=(),
+            added=(),
+            moved=[(1, 0, MoveDirectionality.UNIDIRECTIONAL)],
+        )
+    )
+    assert 0 in h._state and 1 not in h._state
+    assert h._state[0]["thinking_token_budget"] == 4
+
+
+def test_thinking_budget_holder_update_state_repeat_indices_last_row_wins():
+    vc = VllmConfig()
+    vc.reasoning_config = MockReasoningConfig()
+    h = ThinkingBudgetStateHolder(
+        vc.reasoning_config,
+        vc.scheduler_config.max_num_seqs,
+        0,
+        torch.device("cpu"),
+        False,
+    )
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=1,
+            removed=(),
+            added=[
+                (
+                    0,
+                    SamplingParams(thinking_token_budget=5),
+                    None,
+                    [THINK_START_TOKEN_ID],
+                )
+            ],
+            moved=(),
+        )
+    )
+    out_lists = [[THINK_START_TOKEN_ID], [THINK_START_TOKEN_ID, 10, 11, 12, 13, 14]]
+    h.update_state(
+        out_lists,
+        None,
+        torch.tensor([0, 0], dtype=torch.long),
+    )
+    assert h._state[0]["output_tok_ids"] == out_lists[1]
+
+
+def test_thinking_budget_holder_spec_mode_tensor_layout():
+    h = ThinkingBudgetStateHolder(
+        MockReasoningConfig(),
+        8,
+        2,
+        torch.device("cpu"),
+        False,
+    )
+    assert h.in_spec_mode
+    assert h.mask.shape[0] == 8 * (2 + 1)
+
+
+def test_thinking_budget_holder_empty_end_tokens_disables_row():
+    vc = VllmConfig()
+    vc.reasoning_config = MockReasoningNoEndTokens()
+    h = ThinkingBudgetStateHolder(
+        vc.reasoning_config,
+        vc.scheduler_config.max_num_seqs,
+        0,
+        torch.device("cpu"),
+        False,
+    )
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=1,
+            removed=(),
+            added=[
+                (
+                    0,
+                    SamplingParams(thinking_token_budget=5),
+                    None,
+                    [THINK_START_TOKEN_ID],
+                )
+            ],
+            moved=(),
+        )
+    )
+    h.update_state([[THINK_START_TOKEN_ID, 1]], None, None)
+    assert h._state[0]["thinking_token_budget"] == -1
+
+
+def test_thinking_budget_enforced_without_penalties():
+    """Regression test for gpu_input_batch.py bug.
+
+    When thinking_budget_tracks_reqs=True and no penalties/bad_words are set,
+    the old code computed needs_output_token_ids=False (inverted condition:
+    ``or not thinking_budget_tracks_reqs``), causing update_state to receive
+    an empty list and skip _update_think_state for every request.
+
+    Fix: changed ``or not thinking_budget_tracks_reqs`` to
+    ``or thinking_budget_tracks_reqs`` so that output_token_ids is populated
+    whenever the thinking budget state holder has tracked requests.
+
+    This test verifies that update_state correctly calls _update_think_state
+    (setting in_end=True) when given the real output_token_ids, and that
+    passing an empty list (the pre-fix behavior) prevents budget enforcement.
     """
-    random.seed(123)  # Fixed seed for reproducible tests
-    torch.set_default_device(device)
+    vc = VllmConfig()
+    vc.reasoning_config = MockReasoningConfig()
+    budget = 3  # allow 3 thinking tokens
 
-    # CUSTOMIZE THESE VALUES FOR YOUR TEST CASES:
-    batch_size = 3
-
-    # Custom speculative tokens for each request
-    custom_spec_tokens = [
-        [300, 100, 400],  # Request 0: thinking tokens in spec
-        [200, 201, 202],  # Request 1: random tokens
-        [500, 800, 300],  # Request 2: multiple end tokens
-    ]
-
-    # Custom output tokens for each request
-    custom_output_tokens = [
-        [
-            THINK_START_TOKEN_ID,
-            50,
-            51,
-            52,
-            53,
-        ],  # Request 0: 8 thinking tokens (exceeds budget)
-        [
-            THINK_START_TOKEN_ID,
-            60,
-            61,
-            62,
-        ],  # Request 1: 3 thinking tokens (within budget)
-        [THINK_START_TOKEN_ID, 70, 71, 72, 73, 74],  # Request 2
-    ]
-
-    # Calculate logits size for spec decode
-    total_spec_tokens = sum(len(spec_tokens) for spec_tokens in custom_spec_tokens)
-    logits_size = batch_size + total_spec_tokens
-
-    # Create fake logits
-    fake_logits = create_fake_logits(logits_size, VOCAB_SIZE)
-    for i in range(logits_size):
-        fake_logits[i, 0] = 10.0
-        fake_logits[i, 1:] = 1e-2
-
-    # Create VllmConfig for spec decode
-    vllm_config = VllmConfig()
-    vllm_config.reasoning_config = MockReasoningConfig()
-    vllm_config.speculative_config = MockSpeculativeConfig()
-
-    # Create processor manually
-    from vllm.v1.sample.logits_processor import LogitsProcessors
-
-    thinking_processor = ThinkingTokenBudgetLogitsProcessor(
-        vllm_config, torch.device(device), PIN_MEMORY_AVAILABLE
+    h = ThinkingBudgetStateHolder(
+        vc.reasoning_config,
+        vc.scheduler_config.max_num_seqs,
+        0,
+        torch.device("cpu"),
+        False,
     )
-    logitsprocs = LogitsProcessors([thinking_processor])
-
-    # Create sampling metadata
-    prompt_token_ids = [
-        np.random.randint(1, VOCAB_SIZE, size=10).tolist() for _ in range(batch_size)
-    ]
-    fake_sampling_metadata = SamplingMetadata(
-        temperature=torch.full((batch_size,), 0.0),
-        all_greedy=True,
-        all_random=False,
-        top_p=None,
-        top_k=None,
-        generators={},
-        max_num_logprobs=5,
-        prompt_token_ids=create_prompt_tokens_tensor(
-            prompt_token_ids, VOCAB_SIZE, torch.device(device)
-        ),
-        output_token_ids=custom_output_tokens,
-        frequency_penalties=create_penalty_tensor(
-            batch_size, 0.0, torch.device(device)
-        ),
-        presence_penalties=create_penalty_tensor(batch_size, 0.0, torch.device(device)),
-        repetition_penalties=create_penalty_tensor(
-            batch_size, 1.0, torch.device(device)
-        ),
-        no_penalties=True,
-        allowed_token_ids_mask=None,
-        bad_words_token_ids={},
-        logitsprocs=logitsprocs,
-        spec_token_ids=custom_spec_tokens,
-    )
-
-    test_fakes = LogitsprocsTestFakes(
-        logits=fake_logits, sampling_metadata=fake_sampling_metadata
-    )
-
-    # Create request params with custom tokens
-    workload_params = []
-    for i in range(batch_size):
-        params = LogitsProcsRequestParams(
-            workload_index=i,
-            logitproc_type=ThinkingTokenBudgetLogitsProcessor,
+    output_token_ids: list[int] = []
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=1,
+            removed=(),
+            added=[
+                (
+                    0,
+                    SamplingParams(thinking_token_budget=budget),
+                    None,
+                    output_token_ids,
+                )
+            ],
+            moved=(),
         )
-        params.out_tokens = custom_output_tokens[i]
-        workload_params.append(params)
+    )
+    assert h.has_tracked_requests()
 
-    # Build batch update
-    batch_update_builder = BatchUpdateBuilder()
-    for i, req_params in enumerate(workload_params):
-        batch_update_builder.added.append(
-            (
-                i,
-                req_params.params,
-                req_params.prompt_tokens,
-                req_params.out_tokens,
-            )
-        )
-    batch_update = batch_update_builder.get_and_reset(batch_size)
-
-    # Update processor state with custom spec tokens
-    for logitproc in test_fakes.get_logitsprocs():
-        if isinstance(logitproc, ThinkingTokenBudgetLogitsProcessor):
-            logitproc.update_state(batch_update, custom_spec_tokens)
-
-    # Apply processors and get results
-    logits_w_lp = fake_apply_logitsprocs(test_fakes, list(range(batch_size))).cpu()
-
-    # COMPREHENSIVE VALIDATION using the same rigorous logic as
-    # test_thinking_budget_logitsproc_spec_decode
-    print("Custom Speculative Decoding Test Results:")
-
-    # Apply the same validation used in the main test
-    for batch_index, req_params in enumerate(workload_params):
-        # Use the same validation function as the main test
-        _thinking_budget_validate_spec_decode(
-            test_fakes=test_fakes,
-            persistent_batch=workload_params,
-            logits_new=logits_w_lp,
-            batch_index=batch_index,
-            request_params=req_params,
-            step_idx=0,  # Single step test
-        )
-
-    print("✅ Custom speculative decoding test completed with full validation!")
-
-
-def _make_thinking_budget_reasoning_config(
-    think_start: list[int] | None = THINK_BUDGET_START_IDS,
-    think_end: list[int] | None = THINK_BUDGET_END_IDS,
-) -> ReasoningConfig:
-    cfg = ReasoningConfig()
-    cfg._reasoning_start_token_ids = think_start or []
-    cfg._reasoning_end_token_ids = think_end or []
-    return cfg
-
-
-def _make_thinking_budget_vllm_config(
-    reasoning_config: ReasoningConfig | None = None,
-    max_num_seqs: int = MAX_NUM_REQS_THINK_BUDGET,
-    num_spec_tokens: int = 0,
-) -> VllmConfig:
-    scheduler_config = SchedulerConfig.default_factory(max_num_seqs=max_num_seqs)
-    speculative_config = None
-    if num_spec_tokens > 0:
-        from unittest.mock import MagicMock
-
-        speculative_config = MagicMock()
-        speculative_config.num_speculative_tokens = num_spec_tokens
-    return VllmConfig(
-        scheduler_config=scheduler_config,
-        reasoning_config=reasoning_config,
-        speculative_config=speculative_config,
+    # Simulate the buggy behavior: update_state receives empty list.
+    # _update_think_state is skipped → in_end stays False → no budget enforcement.
+    h.update_state([], None, None)
+    assert not h._state[0].get("in_end", False), (
+        "With empty output_token_ids, in_end should stay False (budget not yet tracked)"
     )
 
-
-def _make_thinking_budget_processor(
-    reasoning_config: ReasoningConfig | None = None,
-    max_num_seqs: int = MAX_NUM_REQS_THINK_BUDGET,
-    num_spec_tokens: int = 0,
-    device: str = "cuda:0",
-) -> ThinkingTokenBudgetLogitsProcessor:
-    config = _make_thinking_budget_vllm_config(
-        reasoning_config=reasoning_config,
-        max_num_seqs=max_num_seqs,
-        num_spec_tokens=num_spec_tokens,
-    )
-    return ThinkingTokenBudgetLogitsProcessor(
-        config,
-        device=torch.device(device),
-        is_pin_memory=PIN_MEMORY_AVAILABLE,
+    # Simulate the correct behavior: output_token_ids is the live list.
+    # Step 1: think-start token appears.
+    output_token_ids.append(THINK_START_TOKEN_ID)
+    h.update_state([output_token_ids], None, None)
+    assert not h._state[0].get("in_end", False), (
+        "Still within budget after 0 think tokens"
     )
 
+    # Steps 2–4: 3 thinking tokens (hits the budget exactly).
+    for tok in [1, 2, 3]:
+        output_token_ids.append(tok)
+        h.update_state([output_token_ids], None, None)
 
-def _thinking_budget_batch_update(
-    batch_size: int,
-    added: list[tuple[int, SamplingParams, list[int] | None, list[int]]] | None = None,
-    removed: list | None = None,
-    moved: list | None = None,
-) -> BatchUpdate | None:
-    if not any((added, removed, moved)):
-        return None
-    return BatchUpdate(
-        batch_size=batch_size,
-        removed=removed or [],
-        added=added or [],
-        moved=moved or [],
+    # After exactly `budget` thinking tokens the holder should force end token.
+    assert h._state[0].get("in_end", False), (
+        "Budget exceeded: in_end should be True so that apply_to_logits "
+        "forces the end token"
     )
-
-
-# ---- Edge case tests for ThinkingTokenBudgetLogitsProcessor ----
-# (builtin.py alignment)
-
-
-@create_new_process_for_each_test()
-@pytest.mark.parametrize("device", CUDA_DEVICES)
-def test_thinking_budget_edge_case_budget_zero_prompt_starts_in_think(
-    device: str,
-):
-    """Edge case: budget=0 and prompt already in think (last_start > last_end)
-    -> in_end=True."""
-    proc = _make_thinking_budget_processor(
-        reasoning_config=_make_thinking_budget_reasoning_config(),
-        device=device,
-    )
-    prompt = [0, 0] + THINK_BUDGET_END_IDS + [0, 0] + THINK_BUDGET_START_IDS + [10, 11]
-    params = SamplingParams(thinking_token_budget=0)
-    added: list[tuple[int, SamplingParams, list[int] | None, list[int]]] = [
-        (0, params, prompt, [])
-    ]
-    batch = _thinking_budget_batch_update(1, added=added)
-    proc.update_state(batch, [[]])
-    state = proc._state[0]
-    assert state["in_think"] is True
-    assert state["in_end"] is True
-    assert state["check_count_down"] <= 0
-    logits = torch.randn(1, VOCAB_SIZE, device=torch.device(device))
-    out = proc.apply(logits.clone(), predict_bonus_token=False)
-    assert out.shape == (1, VOCAB_SIZE)
-
-
-@create_new_process_for_each_test()
-@pytest.mark.parametrize("device", CUDA_DEVICES)
-def test_thinking_budget_edge_case_single_token_think_end(device: str):
-    """Edge case: single-token think_end must not crash."""
-    from vllm.config.reasoning import ReasoningConfig
-
-    single_end = ReasoningConfig()
-    single_end._reasoning_start_token_ids = THINK_BUDGET_START_IDS
-    single_end._reasoning_end_token_ids = [42]
-    config = _make_thinking_budget_vllm_config(reasoning_config=single_end)
-    proc = ThinkingTokenBudgetLogitsProcessor(
-        config,
-        device=torch.device(device),
-        is_pin_memory=PIN_MEMORY_AVAILABLE,
-    )
-    params = SamplingParams(thinking_token_budget=5)
-    added: list[tuple[int, SamplingParams, list[int] | None, list[int]]] = [
-        (0, params, [], [])
-    ]
-    batch = _thinking_budget_batch_update(1, added=added)
-    proc.update_state(batch, [[]])
-    logits = torch.randn(1, VOCAB_SIZE, device=torch.device(device))
-    out = proc.apply(logits.clone(), predict_bonus_token=False)
-    assert out.shape == (1, VOCAB_SIZE)
-
-
-@create_new_process_for_each_test()
-@pytest.mark.parametrize("device", CUDA_DEVICES)
-def test_thinking_budget_edge_case_state_keys_present_after_init(device: str):
-    """Edge case: state has all keys expected by _update_think_state and apply."""
-    proc = _make_thinking_budget_processor(
-        reasoning_config=_make_thinking_budget_reasoning_config(),
-        device=device,
-    )
-    params = SamplingParams(thinking_token_budget=10)
-    added: list[tuple[int, SamplingParams, list[int] | None, list[int]]] = [
-        (0, params, None, [])
-    ]
-    batch = _thinking_budget_batch_update(1, added=added)
-    proc.update_state(batch, [[]])
-    state = proc._state[0]
-    required_keys = {
-        "in_think",
-        "in_end",
-        "check_count_down",
-        "think_count",
-        "end_count",
-        "thinking_token_budget",
-        "output_tok_ids",
-        "prev_output_length",
-        "spec_token_ids",
-        "force_index",
-        "start_thinking",
-        "end_thinking",
-        "in_spec_mode",
-        "bonus_token_forced",
-        "continue_thinking",
-        "prompt_tok_ids",
-    }
-    for key in required_keys:
-        assert key in state, f"Missing state key: {key}"
-
-
-@create_new_process_for_each_test()
-@pytest.mark.parametrize("device", CUDA_DEVICES)
-def test_thinking_budget_edge_case_budget_none_early_return(device: str):
-    """Edge case: budget=None skips countdown in _update_think_state (no crash)."""
-    proc = _make_thinking_budget_processor(
-        reasoning_config=_make_thinking_budget_reasoning_config(),
-        device=device,
-    )
-    params = SamplingParams(thinking_token_budget=5)
-    added: list[tuple[int, SamplingParams, list[int] | None, list[int]]] = [
-        (0, params, THINK_BUDGET_START_IDS + [1, 2, 3], [])
-    ]
-    batch = _thinking_budget_batch_update(1, added=added)
-    proc.update_state(batch, [[]])
-    proc._state[0]["thinking_token_budget"] = -1
-    proc._state[0]["output_tok_ids"] = THINK_BUDGET_START_IDS + [4, 5, 6]
-    proc.update_state(None, [[]])
-    logits = torch.randn(1, VOCAB_SIZE, device=torch.device(device))
-    out = proc.apply(logits.clone(), predict_bonus_token=False)
-    assert out.shape == (1, VOCAB_SIZE)
-
-
-@create_new_process_for_each_test()
-@pytest.mark.parametrize("device", CUDA_DEVICES)
-def test_thinking_budget_edge_case_empty_output_tok_ids(device: str):
-    """Edge case: output_tok_ids empty -> _update_think_state early
-    return (no crash)."""
-    proc = _make_thinking_budget_processor(
-        reasoning_config=_make_thinking_budget_reasoning_config(),
-        device=device,
-    )
-    params = SamplingParams(thinking_token_budget=5)
-    added: list[tuple[int, SamplingParams, list[int] | None, list[int]]] = [
-        (0, params, [], [])
-    ]
-    batch = _thinking_budget_batch_update(1, added=added)
-    proc.update_state(batch, [[]])
-    assert proc._state[0]["output_tok_ids"] == []
-    proc.update_state(None, [[]])
-    logits = torch.randn(1, VOCAB_SIZE, device=torch.device(device))
-    out = proc.apply(logits.clone(), predict_bonus_token=False)
-    assert out.shape == (1, VOCAB_SIZE)
-
-
-@create_new_process_for_each_test()
-@pytest.mark.parametrize("device", CUDA_DEVICES)
-def test_thinking_budget_edge_case_apply_zero_batch_size(device: str):
-    """Edge case: apply with logits (0, vocab_size) when _state empty
-    must not crash."""
-    proc = _make_thinking_budget_processor(
-        reasoning_config=_make_thinking_budget_reasoning_config(),
-        device=device,
-    )
-    logits = torch.randn(0, VOCAB_SIZE, device=torch.device(device))
-    out = proc.apply(logits.clone(), predict_bonus_token=False)
-    assert out.shape == (0, VOCAB_SIZE)
-
-
-@create_new_process_for_each_test()
-@pytest.mark.parametrize("device", CUDA_DEVICES)
-def test_thinking_budget_edge_case_continue_thinking_from_prompt(device: str):
-    """Edge case: prompt ends in think -> continue_thinking=True,
-    check_count_down reduced."""
-    proc = _make_thinking_budget_processor(
-        reasoning_config=_make_thinking_budget_reasoning_config(),
-        device=device,
-    )
-    prompt = THINK_BUDGET_START_IDS + [10, 11, 12]
-    params = SamplingParams(thinking_token_budget=10)
-    added: list[tuple[int, SamplingParams, list[int] | None, list[int]]] = [
-        (0, params, prompt, [])
-    ]
-    batch = _thinking_budget_batch_update(1, added=added)
-    proc.update_state(batch, [[]])
-    state = proc._state[0]
-    assert state["continue_thinking"] is True
-    assert state["in_think"] is True
-    assert state["think_count"] == 3
-    assert state["check_count_down"] == 7
-
-
-# cohere end
