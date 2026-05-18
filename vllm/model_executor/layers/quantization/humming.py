@@ -434,12 +434,12 @@ class HummingLinearMethod(LinearMethodBase):
                         input_scale_group_size=input_scale_group_size,
                         shape_k=shape_k,
                     )
-                    assert hadamard_block_size >= 4, str(shape_k)
-                    loaded_weight = humming.ops.hadamard_transform(
-                        inputs=loaded_weight.cuda(),
-                        block_size=hadamard_block_size,
-                    )
-                    layer.hadamard_block_size = hadamard_block_size
+                    if hadamard_block_size >= 4:
+                        loaded_weight = humming.ops.hadamard_transform(
+                            inputs=loaded_weight.cuda(),
+                            block_size=hadamard_block_size,
+                        )
+                        layer.hadamard_block_size = hadamard_block_size
 
                 tensor_list = quantize_weight(
                     weight=loaded_weight,
