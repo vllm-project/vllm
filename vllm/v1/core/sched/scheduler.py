@@ -370,32 +370,27 @@ class Scheduler(SchedulerInterface):
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
 
-            if request.num_output_placeholders > 0:
-                if (
-                    # This is (num_computed_tokens + 1) - (num_output_placeholders - 1).
-                    # Since output placeholders are also included in the computed tokens
-                    # count, we subtract (num_output_placeholders - 1) to remove any
-                    # draft tokens, so that we can be sure no further steps are needed
-                    # even if they are all rejected.
-                    request.num_computed_tokens + 2 - request.num_output_placeholders
-                    >= request.num_prompt_tokens + request.max_tokens
-                ):
-                    # Async scheduling: Avoid scheduling an extra step when we are sure
-                    # that the previous step has reached request.max_tokens. We don't
-                    # schedule partial draft tokens since this prevents uniform decode
-                    # optimizations.
-                    req_index += 1
-                    continue
+            if (
+                request.num_output_placeholders > 0
+                # This is (num_computed_tokens + 1) - (num_output_placeholders - 1).
+                # Since output placeholders are also included in the computed tokens
+                # count, we subtract (num_output_placeholders - 1) to remove any draft
+                # tokens, so that we can be sure no further steps are needed even if
+                # they are all rejected.
+                and request.num_computed_tokens + 2 - request.num_output_placeholders
+                >= request.num_prompt_tokens + request.max_tokens
+            ):
+                # Async scheduling: Avoid scheduling an extra step when we are sure that
+                # the previous step has reached request.max_tokens. We don't schedule
+                # partial draft tokens since this prevents uniform decode optimizations.
+                req_index += 1
+                continue
 
-                if (
-                    self.use_pp
-                    and self.use_v2_model_runner
-                    and self.current_step < request.next_decode_eligible_step
-                ):
-                    # V2+PP+async: enforce `pp_size` steps between same-req decodes
-                    # to match worker-side sampled-tokens broadcast slot ring cadence.
-                    req_index += 1
-                    continue
+            if self.use_pp and self.current_step < request.next_decode_eligible_step:
+                # V2+PP+async: enforce `pp_size` steps between same-req decodes
+                # to match worker-side sampled-tokens broadcast slot ring cadence.
+                req_index += 1
+                continue
 
             num_new_tokens = (
                 request.num_tokens_with_spec

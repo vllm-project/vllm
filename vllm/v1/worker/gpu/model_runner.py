@@ -208,7 +208,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if self.use_pp:
             self.pp_handler = PPHandler(
-                num_speculative_steps=self.num_speculative_steps, device=self.device
+                max_num_reqs=self.max_num_reqs,
+                num_speculative_steps=self.num_speculative_steps,
+                device=self.device,
             )
 
         self.sampler: Sampler | None = None
@@ -661,8 +663,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return cuda_graph_size
 
     def _remove_request(self, req_id: str) -> bool:
-        if not self.req_states.remove_request(req_id):
+        req_idx = self.req_states.remove_request(req_id)
+        if req_idx is None:
             return False
+        if self.pp_handler is not None:
+            self.pp_handler.on_slot_freed(req_idx)
         if self.encoder_cache is not None:
             self.encoder_cache.remove_request(req_id)
         if self.prompt_logprobs_worker is not None:
@@ -687,7 +692,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # For non-last PP ranks, update decode requests with sampler output from
         # the prior step in which they were scheduled (pp_size steps ago).
         if self.pp_handler is not None:
-            outputs = self.pp_handler.get_prev_step_sampled_outputs(self.req_states)
+            outputs = self.pp_handler.get_prev_step_sampled_outputs()
             if outputs is not None:
                 self.postprocess_sampled(**outputs)
 

@@ -57,7 +57,9 @@ class PPHandler:
     inter-stage hidden-state p2p send/recv ops.
     """
 
-    def __init__(self, num_speculative_steps: int, device: torch.device):
+    def __init__(
+        self, max_num_reqs: int, num_speculative_steps: int, device: torch.device
+    ):
         self.is_last_rank = get_pp_group().is_last_rank
         self.last_rank = get_pp_group().last_rank
         self.max_sample_len = num_speculative_steps + 1
@@ -77,14 +79,19 @@ class PPHandler:
         # prematurely, since we schedule pp_size+1 steps concurrently.
         self.last_consumed_slot: PendingRecv | None = None
 
+        # Per-slot generation counter, incremented every time a slot is
+        # freed. Used for invalidating freed req data between PP decodes.
+        self.slot_gen_np = np.zeros(max_num_reqs, dtype=np.int32)
+
         # Dedicated subgroup for the sampled-token broadcast.
         self.broadcast_group = get_pp_group().make_sibling_device_group(
             group_desc="pp_broadcast"
         )
 
-    def get_prev_step_sampled_outputs(
-        self, req_states: RequestState
-    ) -> dict[str, torch.Tensor] | None:
+    def on_slot_freed(self, req_idx: int) -> None:
+        self.slot_gen_np[req_idx] += 1
+
+    def get_prev_step_sampled_outputs(self) -> dict[str, torch.Tensor] | None:
         """Advance to this step's slot and wait for its recv event, then
         filter out entries whose request was freed since `receive`.
         """
@@ -100,10 +107,7 @@ class PPHandler:
 
         # Skip slots whose request has been freed (and possibly reassigned)
         # since this `PendingRecv` was created.
-        assert req_states.slot_gen_np is not None
-        alive_mask = (
-            req_states.slot_gen_np[slot.idx_mapping_np] == slot.gen_at_receive_np
-        )
+        alive_mask = self.slot_gen_np[slot.idx_mapping_np] == slot.gen_at_receive_np
         if alive_mask.all():
             return dict(
                 sampled_tokens=slot.sampled_tokens,
@@ -143,8 +147,7 @@ class PPHandler:
 
         # Snapshot the per-slot generation counter so a later free of any
         # of these slots is detectable at consume time.
-        assert req_states.slot_gen_np is not None
-        gen_at_receive_np = req_states.slot_gen_np[idx_mapping_np]
+        gen_at_receive_np = self.slot_gen_np[idx_mapping_np]
 
         # Allocate receive tensors on the main stream.
         num_reqs = idx_mapping.shape[0]
