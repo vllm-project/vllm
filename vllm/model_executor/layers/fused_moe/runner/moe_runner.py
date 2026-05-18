@@ -267,6 +267,7 @@ class MoERunner(MoERunnerInterface):
 
         # When True, skip the allreduce in _maybe_reduce_final_output
         # and let the model fuse it with the next layer's input layernorm.
+        # This flag is set by the model (e.g. MiniMaxM2Model) during init.
         self.defer_allreduce: bool = False
 
     def _select_forward(self) -> Callable:
@@ -395,6 +396,7 @@ class MoERunner(MoERunnerInterface):
             shared_output = tensor_model_parallel_all_reduce(shared_output)
         return shared_output
 
+    @torch.compiler.disable
     def _maybe_reduce_final_output(
         self,
         states: torch.Tensor,
@@ -406,10 +408,11 @@ class MoERunner(MoERunnerInterface):
         output was individually reduced, the combined sum is all-reduced
         here. Skipped when sequence-parallel is active (SP handles its
         own reduction) or when the early path already reduced both outputs.
+
+        Disabled from torch.compile to make the ``defer_allreduce`` decision
+        outside the compiled graph, so stale compilation caches cannot
+        bake in the wrong branch.
         """
-        # We don't need to reduce the final output if:
-        # - We are not running with TP or DP
-        # - The MK already reduced the fused output itself.
         if (
             not self.moe_config.is_sequence_parallel
             and (self.moe_config.tp_size > 1 or self.moe_config.ep_size > 1)
@@ -418,13 +421,11 @@ class MoERunner(MoERunnerInterface):
             # Defer the allreduce when requested by the model (e.g.
             # MiniMax-M2 decode with fuse_moe_allreduce). The model fuses
             # it with the next input_layernorm via trtllm_allreduce_fusion.
-            # Avoid early-return so torch.compile sees a single exit path.
-            defer = (
+            if not (
                 self.defer_allreduce
                 and self.moe_config.ep_size <= 1
                 and states.shape[0] <= 128
-            )
-            if not defer:
+            ):
                 states = tensor_model_parallel_all_reduce(states)
 
         return states[..., :trunc_size]
