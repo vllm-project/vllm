@@ -5,6 +5,7 @@ steps:
 - label: Basic Models Tests (Initialization)
   key: basic-models-tests-initialization
   timeout_in_minutes: 45
+  device: h200_18gb
   torch_nightly: true
   source_file_dependencies:
   - vllm/

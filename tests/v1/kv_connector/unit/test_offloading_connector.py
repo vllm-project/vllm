@@ -292,3 +292,48 @@ def test_cpu_offloading(
         if subscriber is not None:
             subscriber.close()
         del llm
+
+
+def test_tiering_offloading() -> None:
+    """Tests OffloadingConnector with TieringOffloadingSpec."""
+    extra_config: dict = {
+        "cpu_bytes_to_use": 500 << 20,
+        "block_size": 48,
+        "spec_name": "TieringOffloadingSpec",
+        "secondary_tiers": [{"type": "example"}],
+    }
+    kv_transfer_config = KVTransferConfig(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config=extra_config,
+    )
+
+    port: int
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("0.0.0.0", 0))
+        port = s.getsockname()[1]
+    events_endpoint = f"tcp://*:{port}"
+    kv_events_config = KVEventsConfig(
+        enable_kv_cache_events=True,
+        publisher="zmq",
+        endpoint=events_endpoint,
+        topic="test",
+    )
+
+    llm = LLM(
+        model="meta-llama/Llama-3.2-1B-Instruct",
+        max_model_len=4096,
+        gpu_memory_utilization=0.5,
+        kv_events_config=kv_events_config,
+        kv_transfer_config=kv_transfer_config,
+    )
+    subscriber = MockSubscriber(
+        events_endpoint.replace("*", "127.0.0.1"),
+        topic=kv_events_config.topic,
+    )
+    try:
+        _latency_test(llm, subscriber)
+        _accuracy_test(llm, subscriber)
+    finally:
+        subscriber.close()
+        del llm
