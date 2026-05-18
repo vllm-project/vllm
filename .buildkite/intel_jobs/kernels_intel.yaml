@@ -1,0 +1,21 @@
+group: Kernels Intel
+depends_on: 
+  - image-build-xpu
+steps:
+- label: vLLM IR Tests
+  timeout_in_minutes: 30
+  device: intel_gpu
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/ir
+    - vllm/kernels
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      pytest -v -s kernels/ir'

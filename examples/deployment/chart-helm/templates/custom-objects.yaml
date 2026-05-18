@@ -1,0 +1,6 @@
+{{- if .Values.customObjects }}
+{{- range .Values.customObjects }}
+{{- tpl (. | toYaml) $ }}
+---
+{{- end }}
+{{- end }}

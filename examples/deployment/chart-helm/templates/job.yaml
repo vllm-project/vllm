@@ -1,0 +1,41 @@
+{{- if and .Values.extraInit .Values.extraInit.modelDownload.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: "{{ .Release.Name }}-init-vllm"
+  namespace: {{ .Release.Namespace }}
+spec:
+  ttlSecondsAfterFinished: 100
+  template:
+   metadata:
+     name: init-vllm
+   spec:
+    containers:
+    - name: job-download-model
+      image: {{ .Values.extraInit.modelDownload.image.repository }}:{{ .Values.extraInit.modelDownload.image.tag }}
+      imagePullPolicy: {{ .Values.extraInit.modelDownload.image.pullPolicy }}
+      command: {{ .Values.extraInit.modelDownload.downloadJob.command | toJson }}
+      args:
+      {{- toYaml .Values.extraInit.modelDownload.downloadJob.args | nindent 8 }}
+      env:
+      {{- if .Values.extraInit.modelDownload.downloadJob.env }}
+      {{- toYaml .Values.extraInit.modelDownload.downloadJob.env | nindent 8 }}
+      {{- else }}
+      {{- include "chart.extraInitEnv" . | nindent 8 }}
+      {{- end }}
+      volumeMounts:
+        - name: {{ .Release.Name }}-storage
+          mountPath: /data
+      resources:
+        requests:
+          cpu: 200m
+          memory: 1Gi
+        limits:
+          cpu: 500m
+          memory: 2Gi
+    restartPolicy: OnFailure
+    volumes:
+    - name: {{ .Release.Name }}-storage
+      persistentVolumeClaim:
+        claimName: "{{ .Release.Name }}-storage-claim"
+{{- end }}

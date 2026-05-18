@@ -1,0 +1,20 @@
+{%- if messages | length > 1 -%}
+    {{ raise_exception('Embedding models should only embed one message at a time') }}
+{%- endif -%}
+
+{% set vars = namespace(prefix='', images=[], texts=[]) %}
+{%- for message in messages -%}
+    {%- if message['role'] == 'query' -%}
+        {%- set vars.prefix = 'query: ' %}
+    {%- elif message['role'] == 'document' -%}
+        {%- set vars.prefix = 'passage: ' %}
+    {%- endif -%}
+    {%- for content in message['content'] -%}
+        {%- if content['type'] == 'text' -%}
+            {%- set vars.texts = vars.texts + [content['text']] %}
+        {%- elif content['type'] == 'image' -%}
+            {%- set vars.images = vars.images + ['<image> '] %}
+        {%- endif -%}
+    {%- endfor -%}
+{%- endfor -%}
+{{- bos_token }}{{ vars.prefix }}{{ (vars.images + vars.texts) | join('') }}
