@@ -418,7 +418,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 block_ids = new_block_ids[0]
 
                 meta.add_request(
-                    request_id=self._req_stable_id.get(req_id, req_id),
+                    request_id=request.external_req_id,
                     token_ids=token_ids,
                     block_ids=block_ids,
                     block_size=self._block_size,
