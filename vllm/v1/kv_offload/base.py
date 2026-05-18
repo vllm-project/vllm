@@ -4,10 +4,8 @@
 Core abstractions for KV cache offloading in vLLM v1.
 """
 
-from __future__ import annotations
-
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Collection, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NewType
 
@@ -46,6 +44,7 @@ def get_offload_group_idx(key: OffloadKey) -> int:
 
 @dataclass
 class ReqContext:
+    req_id: str
     kv_transfer_params: dict[str, Any] | None = None
 
 
@@ -128,7 +127,7 @@ class OffloadingManager(ABC):
     @abstractmethod
     def prepare_load(
         self,
-        keys: Sequence[OffloadKey],
+        keys: Collection[OffloadKey],
         req_context: ReqContext,
     ) -> LoadStoreSpec:
         """
@@ -147,29 +146,31 @@ class OffloadingManager(ABC):
         """
         pass
 
-    def touch(self, keys: Sequence[OffloadKey]):
+    def touch(self, keys: Collection[OffloadKey], req_context: ReqContext):
         """
         Mark the given blocks as recently used.
         This could in practice mean moving them to the end of an LRU list.
 
         Args:
             keys: the keys identifying the blocks.
+            req_context: per-request context (e.g. kv_transfer_params).
         """
         return
 
-    def complete_load(self, keys: Iterable[OffloadKey]):
+    def complete_load(self, keys: Collection[OffloadKey], req_context: ReqContext):
         """
         Marks previous blocks that were prepared to load as done loading.
 
         Args:
             keys: the keys identifying the blocks.
+            req_context: per-request context (e.g. kv_transfer_params).
         """
         return
 
     @abstractmethod
     def prepare_store(
         self,
-        keys: Sequence[OffloadKey],
+        keys: Collection[OffloadKey],
         req_context: ReqContext,
     ) -> PrepareStoreOutput | None:
         """
@@ -189,15 +190,21 @@ class OffloadingManager(ABC):
         """
         pass
 
-    def complete_store(self, keys: Iterable[OffloadKey], success: bool = True):
+    def complete_store(
+        self,
+        keys: Collection[OffloadKey],
+        req_context: ReqContext,
+        success: bool = True,
+    ):
         """
         Marks blocks which were previously prepared to be stored, as stored.
         Following this call, the blocks become loadable.
-        If if_success is False, blocks that were not marked as stored will be
+        If success is False, blocks that were not marked as stored will be
         removed.
 
         Args:
             keys: the keys identifying the blocks.
+            req_context: per-request context (e.g. kv_transfer_params).
             success: whether the blocks were stored successfully.
         """
         return
@@ -210,6 +217,10 @@ class OffloadingManager(ABC):
             New OffloadingEvents collected since the last call.
         """
         return ()
+
+    def reset_cache(self) -> None:
+        """Evict all tracked blocks and reset internal state."""
+        return
 
     def shutdown(self) -> None:
         """Shutdown the manager and release any resources."""
@@ -319,7 +330,7 @@ class CanonicalKVCaches:
 class OffloadingSpec(ABC):
     """Spec for an offloading connector"""
 
-    def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig):
+    def __init__(self, vllm_config: "VllmConfig", kv_cache_config: "KVCacheConfig"):
         logger.warning(
             "Initializing OffloadingSpec. This API is experimental and "
             "subject to change in the future as we iterate the design."
@@ -331,12 +342,20 @@ class OffloadingSpec(ABC):
         assert kv_transfer_config is not None
         self.extra_config = kv_transfer_config.kv_connector_extra_config
 
+        parallel_config = vllm_config.parallel_config
+        context_parallel_factor = (
+            parallel_config.decode_context_parallel_size
+            * parallel_config.prefill_context_parallel_size
+        )
+
         # block size used by vLLM for hashing request tokens for the sake
         # of enabling prefix caching
-        self.hash_block_size = vllm_config.cache_config.block_size
+        self.hash_block_size = (
+            vllm_config.cache_config.block_size * context_parallel_factor
+        )
         # gpu block size per group
         self.gpu_block_size: tuple[int, ...] = tuple(
-            kv_cache_group.kv_cache_spec.block_size
+            kv_cache_group.kv_cache_spec.block_size * context_parallel_factor
             for kv_cache_group in kv_cache_config.kv_cache_groups
         )
 
@@ -377,7 +396,7 @@ class OffloadingSpec(ABC):
     @abstractmethod
     def get_handlers(
         self, kv_caches: CanonicalKVCaches
-    ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
+    ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], "OffloadingHandler"]]:
         """
         Get offloading handlers along with their respective src and dst types.
 

@@ -122,9 +122,17 @@ struct FP16Vec16 : public Vec<FP16Vec16> {
   void save(void* ptr) const { _mm256_storeu_si256((__m256i*)ptr, reg); }
 
   void save(void* ptr, const int elem_num) const {
+#ifdef __AVX512BW__
     constexpr uint32_t M = 0xFFFFFFFF;
     __mmask16 mask = _cvtu32_mask16(M >> (32 - elem_num));
     _mm256_mask_storeu_epi16(ptr, mask, reg);
+#else
+    // Fallback for lack of 16-bit masked store
+    int16_t tmp[VEC_ELEM_NUM];
+    _mm256_storeu_si256((__m256i*)tmp, reg);
+    for (int i = 0; i < elem_num; ++i)
+      reinterpret_cast<int16_t*>(ptr)[i] = tmp[i];
+#endif
   }
 };
 
@@ -161,9 +169,17 @@ struct BF16Vec16 : public Vec<BF16Vec16> {
   void save(void* ptr) const { _mm256_storeu_si256((__m256i*)ptr, reg); }
 
   void save(void* ptr, const int elem_num) const {
+#ifdef __AVX512BW__
     constexpr uint32_t M = 0xFFFFFFFF;
     __mmask16 mask = _cvtu32_mask16(M >> (32 - elem_num));
     _mm256_mask_storeu_epi16(ptr, mask, reg);
+#else
+    // Fallback for lack of 16-bit masked store
+    int16_t tmp[VEC_ELEM_NUM];
+    _mm256_storeu_si256((__m256i*)tmp, reg);
+    for (int i = 0; i < elem_num; ++i)
+      reinterpret_cast<int16_t*>(ptr)[i] = tmp[i];
+#endif
   }
 };
 
@@ -247,13 +263,12 @@ struct BF16Vec32 : public Vec<BF16Vec32> {
   explicit BF16Vec32(__m256i low, __m256i high)
       : reg_low(low), reg_high(high) {}
 
+  explicit BF16Vec32()
+      : reg_low(_mm256_setzero_si256()), reg_high(_mm256_setzero_si256()) {}
+
   explicit BF16Vec32(BF16Vec8& vec8_data)
-      : reg_low((__m256i)_mm256_inserti32x4(
-            _mm256_castsi128_si256((__m128i)vec8_data.reg),
-            (__m128i)vec8_data.reg, 1)),
-        reg_high((__m256i)_mm256_inserti32x4(
-            _mm256_castsi128_si256((__m128i)vec8_data.reg),
-            (__m128i)vec8_data.reg, 1)) {}
+      : reg_low(_mm256_broadcastsi128_si256((__m128i)vec8_data.reg)),
+        reg_high(_mm256_broadcastsi128_si256((__m128i)vec8_data.reg)) {}
 
   // E4M3 decode (AVX2 path) — same bit-layout trick as the AVX512 variant
   // above.  Result = true_E4M3 * 2^-8; caller applies scale * 2^8.
@@ -674,6 +689,11 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
                      _mm256_sub_ps(reg_high, b.reg_high));
   }
 
+  FP32Vec16 operator-() const {
+    const __m256 neg = _mm256_set1_ps(-0.0f);
+    return FP32Vec16(_mm256_xor_ps(reg_low, neg), _mm256_xor_ps(reg_high, neg));
+  }
+
   FP32Vec16 operator/(const FP32Vec16& b) const {
     return FP32Vec16(_mm256_div_ps(reg_low, b.reg_low),
                      _mm256_div_ps(reg_high, b.reg_high));
@@ -739,6 +759,85 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
     _mm256_storeu_ps(ptr, reg_low);
     _mm256_storeu_ps(ptr + 8, reg_high);
   }
+
+  void save(float* ptr, const int elem_num) const {
+    // Partial store: cmpgt produces a sign-bit mask (0xFFFFFFFF/0 per lane)
+    // for the first elem_num lanes, applied across the two 8-wide halves.
+    if (elem_num <= 8) {
+      __m256i mask =
+          _mm256_cmpgt_epi32(_mm256_set1_epi32(elem_num),
+                             _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7));
+      _mm256_maskstore_ps(ptr, mask, reg_low);
+    } else {
+      _mm256_storeu_ps(ptr, reg_low);
+      __m256i mask =
+          _mm256_cmpgt_epi32(_mm256_set1_epi32(elem_num - 8),
+                             _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7));
+      _mm256_maskstore_ps(ptr + 8, mask, reg_high);
+    }
+  }
+
+  FP32Vec16 clamp(const FP32Vec16& min, const FP32Vec16& max) const {
+    return FP32Vec16(
+        _mm256_min_ps(max.reg_low, _mm256_max_ps(min.reg_low, reg_low)),
+        _mm256_min_ps(max.reg_high, _mm256_max_ps(min.reg_high, reg_high)));
+  }
+
+  FP32Vec16 abs() const {
+    const __m256 sign_mask = _mm256_set1_ps(-0.0f);
+    return FP32Vec16(_mm256_andnot_ps(sign_mask, reg_low),
+                     _mm256_andnot_ps(sign_mask, reg_high));
+  }
+
+  FP32Vec16 min(const FP32Vec16& b) const {
+    return FP32Vec16(_mm256_min_ps(reg_low, b.reg_low),
+                     _mm256_min_ps(reg_high, b.reg_high));
+  }
+
+  // Partial element-wise min over the first elem_num lanes only (tail path).
+  // Scalar via AliasReg: AVX2 has no masked vminps, so we spill, loop, reload.
+  FP32Vec16 min(const FP32Vec16& b, const int elem_num) const {
+    AliasReg ar_this_low, ar_this_high, ar_b_low, ar_b_high;
+    ar_this_low.reg = reg_low;
+    ar_this_high.reg = reg_high;
+    ar_b_low.reg = b.reg_low;
+    ar_b_high.reg = b.reg_high;
+    for (int i = 0; i < elem_num && i < 8; ++i)
+      ar_this_low.values[i] =
+          std::min(ar_this_low.values[i], ar_b_low.values[i]);
+    for (int i = 0; i < elem_num - 8 && i < 8; ++i)
+      ar_this_high.values[i] =
+          std::min(ar_this_high.values[i], ar_b_high.values[i]);
+    return FP32Vec16(ar_this_low.reg, ar_this_high.reg);
+  }
+
+  // Partial element-wise max over the first elem_num lanes only (tail path).
+  // Scalar via AliasReg: AVX2 has no masked vmaxps, so we spill, loop, reload.
+  FP32Vec16 max(const FP32Vec16& b, const int elem_num) const {
+    AliasReg ar_this_low, ar_this_high, ar_b_low, ar_b_high;
+    ar_this_low.reg = reg_low;
+    ar_this_high.reg = reg_high;
+    ar_b_low.reg = b.reg_low;
+    ar_b_high.reg = b.reg_high;
+    for (int i = 0; i < elem_num && i < 8; ++i)
+      ar_this_low.values[i] =
+          std::max(ar_this_low.values[i], ar_b_low.values[i]);
+    for (int i = 0; i < elem_num - 8 && i < 8; ++i)
+      ar_this_high.values[i] =
+          std::max(ar_this_high.values[i], ar_b_high.values[i]);
+    return FP32Vec16(ar_this_low.reg, ar_this_high.reg);
+  }
+
+  float reduce_min() const {
+    __m256 v = _mm256_min_ps(reg_low, reg_high);
+    __m256 v_shuffled = _mm256_permute_ps(v, 0b00001011);
+    __m256 v_min = _mm256_min_ps(v, v_shuffled);
+    v_shuffled = _mm256_permute_ps(v_min, 0b00000001);
+    v_min = _mm256_min_ps(v_min, v_shuffled);
+    v_shuffled = _mm256_permute2f128_ps(v_min, v_min, 0b00000001);
+    v_min = _mm256_min_ps(v_min, v_shuffled);
+    return _mm256_cvtss_f32(v_min);
+  }
 };
 #endif
 
@@ -790,6 +889,34 @@ struct INT8Vec64 : public Vec<INT8Vec64> {
 
   // non-temporal save
   void nt_save(int8_t* ptr) { _mm512_stream_si512((__m512i*)ptr, reg); }
+};
+#else
+struct INT8Vec16 : public Vec<INT8Vec16> {
+  constexpr static int VEC_ELEM_NUM = 16;
+  union AliasReg {
+    __m128i reg;
+    int8_t values[VEC_ELEM_NUM];
+  };
+
+  __m128i reg;
+
+  explicit INT8Vec16(const FP32Vec16& vec) {
+    __m256i lo_i32 = _mm256_cvtps_epi32(vec.reg_low);
+    __m256i hi_i32 = _mm256_cvtps_epi32(vec.reg_high);
+    __m256i packed16 = _mm256_packs_epi32(lo_i32, hi_i32);
+    packed16 = _mm256_permute4x64_epi64(packed16, 0xD8);
+    __m256i packed8 = _mm256_packs_epi16(packed16, _mm256_setzero_si256());
+    packed8 = _mm256_permute4x64_epi64(packed8, 0xD8);
+    reg = _mm256_castsi256_si128(packed8);
+  }
+
+  void save(int8_t* ptr) const { _mm_storeu_si128((__m128i*)ptr, reg); }
+
+  void save(int8_t* ptr, const int elem_num) const {
+    AliasReg ar;
+    ar.reg = reg;
+    for (int i = 0; i < elem_num; ++i) ptr[i] = ar.values[i];
+  }
 };
 #endif
 

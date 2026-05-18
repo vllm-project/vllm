@@ -345,3 +345,182 @@ def test_triton_unified_attn_fp16_input_fp8_output(
         torch.testing.assert_close(output_fp16, ref_output, atol=atol, rtol=rtol),
         f"{torch.max(torch.abs(output_fp16 - ref_output))}",
     )
+
+
+# USE_TD path covers two head-size regimes:
+# - pow2 (HEAD_SIZE == HEAD_SIZE_PADDED): full TD path including Q/O.
+# - non-pow2 (96, HEAD_SIZE_PADDED=128): gates USE_TD_QO off — Q load
+#   and output store fall back to pointer path, KV tile TD load remains.
+# The non-pow2 case mirrors real models like Phi-3-mini (head_size=96).
+HEAD_SIZES_USE_TD = [128, 256, 96]
+
+
+def _run_use_td_case(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    block_size: int,
+    sliding_window: int | None,
+    soft_cap: float | None,
+    seq_threshold_3D: int,
+    dtype: torch.dtype = torch.bfloat16,
+    num_blocks: int = 2048,
+) -> None:
+    """Shared driver for the USE_TD test cases.
+
+    Runs ``unified_attention(..., use_td=True)`` and compares against the
+    reference paged-attention implementation that the sibling non-TD
+    tests use.
+    """
+    torch.set_default_device(DEVICE_TYPE)
+    set_random_seed(0)
+
+    num_seqs = len(seq_lens)
+    query_lens = [x[0] for x in seq_lens]
+    kv_lens = [x[1] for x in seq_lens]
+    num_query_heads, num_kv_heads = num_heads
+    assert num_query_heads % num_kv_heads == 0
+    max_query_len = max(query_lens)
+    max_kv_len = max(kv_lens)
+    window_size = (sliding_window - 1, 0) if sliding_window is not None else (-1, -1)
+    scale = head_size**-0.5
+
+    query = torch.randn(sum(query_lens), num_query_heads, head_size, dtype=dtype)
+    key_cache = torch.randn(
+        num_blocks, block_size, num_kv_heads, head_size, dtype=dtype
+    )
+    value_cache = torch.randn_like(key_cache)
+    cu_query_lens = torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(
+        dim=0, dtype=torch.int32
+    )
+    kv_lens_tensor = torch.tensor(kv_lens, dtype=torch.int32)
+
+    max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
+    block_tables = torch.randint(
+        0, num_blocks, (num_seqs, max_num_blocks_per_seq), dtype=torch.int32
+    )
+
+    output = torch.empty_like(query)
+
+    num_par_softmax_segments = 16
+    head_size_padded = next_power_of_2(head_size)
+    softmax_segm_output = torch.empty(
+        (seq_threshold_3D, num_query_heads, num_par_softmax_segments, head_size_padded),
+        dtype=torch.float32,
+    )
+    softmax_segm_max = torch.empty(
+        (seq_threshold_3D, num_query_heads, num_par_softmax_segments),
+        dtype=torch.float32,
+    )
+    softmax_segm_expsum = torch.empty(
+        (seq_threshold_3D, num_query_heads, num_par_softmax_segments),
+        dtype=torch.float32,
+    )
+
+    unified_attention(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        out=output,
+        cu_seqlens_q=cu_query_lens,
+        seqused_k=kv_lens_tensor,
+        max_seqlen_q=max_query_len,
+        max_seqlen_k=max_kv_len,
+        softmax_scale=scale,
+        causal=True,
+        window_size=window_size,
+        block_table=block_tables,
+        softcap=soft_cap if soft_cap is not None else 0,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
+        seq_threshold_3D=seq_threshold_3D,
+        num_par_softmax_segments=num_par_softmax_segments,
+        softmax_segm_output=softmax_segm_output,
+        softmax_segm_max=softmax_segm_max,
+        softmax_segm_expsum=softmax_segm_expsum,
+        use_td=True,
+    )
+
+    ref_output = ref_paged_attn(
+        query=query,
+        key_cache=key_cache,
+        value_cache=value_cache,
+        query_lens=query_lens,
+        kv_lens=kv_lens,
+        block_tables=block_tables,
+        scale=scale,
+        sliding_window=sliding_window,
+        soft_cap=soft_cap,
+    )
+    torch.testing.assert_close(output, ref_output, atol=1.5e-2, rtol=1e-2)
+
+
+@pytest.mark.parametrize(
+    "seq_lens", [[(1, 1328), (5, 18), (129, 463)], [(1, 523), (1, 37), (1, 2011)]]
+)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES_USE_TD)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("sliding_window", [None, 128])
+@pytest.mark.parametrize("soft_cap", [None, 50.0])
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
+@pytest.mark.parametrize("seq_threshold_3D", SEQ_THRESHOLD_3D_VALUES)
+@torch.inference_mode()
+def test_triton_unified_attn_use_td(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    sliding_window: int | None,
+    block_size: int,
+    soft_cap: float | None,
+    num_blocks: int,
+    seq_threshold_3D: int,
+) -> None:
+    """Exercise the USE_TD (tensor-descriptor) Q/K/V load/store path.
+
+    Covers both 2D and 3D kernels via ``seq_threshold_3D``. Two routes
+    to the USE_TD_QO=False fallback (pointer path for Q/O with TD still
+    active for KV tile loads):
+
+    - non-pow2 ``num_queries_per_kv`` via ``NUM_HEADS`` entry ``(5, 1)``,
+    - non-pow2 ``head_size`` via ``HEAD_SIZES_USE_TD`` entry ``96``.
+    """
+    _run_use_td_case(
+        seq_lens=seq_lens,
+        num_heads=num_heads,
+        head_size=head_size,
+        block_size=block_size,
+        sliding_window=sliding_window,
+        soft_cap=soft_cap,
+        seq_threshold_3D=seq_threshold_3D,
+        num_blocks=num_blocks,
+    )
+
+
+# Prefill-heavy shape: long query drives the prefill kernel path where
+# ``_get_tile_size`` returns 32, which exceeds block_size=16 and must be
+# clamped by the fix in 'clamp TILE_SIZE to block_size when USE_TD'.
+# Only the prefill launch exercises the clamp, so parameterize only over
+# the (num_heads, seq_threshold_3D=0) combinations needed to cover it.
+@pytest.mark.parametrize("num_heads", [(4, 4), (5, 1)])
+@torch.inference_mode()
+def test_triton_unified_attn_use_td_tile_clamp(
+    num_heads: tuple[int, int],
+) -> None:
+    """Regression guard: ``USE_TD`` needs ``BLOCK_SIZE % TILE_SIZE == 0``.
+
+    With ``block_size=16`` and ``head_size=128`` (non-Gemma3),
+    ``_get_tile_size`` returns 32 for prefill, which violates the
+    ``USE_TD`` constraint unless clamped to ``block_size``.  Without
+    the clamp the triton kernel ``static_assert`` fires at compile time.
+    """
+    _run_use_td_case(
+        seq_lens=[(256, 256), (128, 128)],
+        num_heads=num_heads,
+        head_size=128,
+        block_size=16,
+        sliding_window=None,
+        soft_cap=None,
+        seq_threshold_3D=0,
+    )

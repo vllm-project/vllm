@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from enum import IntEnum
 from typing import TYPE_CHECKING, Literal
 
 import torch
@@ -2449,23 +2450,6 @@ def moe_wna16_gemm(
     )
 
 
-def router_gemm_bf16_fp32(input: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-    """bf16 x bf16 -> fp32 GEMM via cuBLAS. weight shape: (N, K)."""
-    return torch.ops._moe_C.router_gemm_bf16_fp32(input, weight)
-
-
-if hasattr(torch.ops, "_moe_C") and hasattr(torch.ops._moe_C, "router_gemm_bf16_fp32"):
-
-    @register_fake("_moe_C::router_gemm_bf16_fp32")
-    def router_gemm_bf16_fp32_fake(
-        input: torch.Tensor,
-        weight: torch.Tensor,
-    ) -> torch.Tensor:
-        return torch.empty(
-            input.shape[0], weight.shape[0], dtype=torch.float32, device=input.device
-        )
-
-
 def dsv3_router_gemm(
     hidden_states: torch.Tensor,
     router_weight: torch.Tensor,
@@ -2479,6 +2463,36 @@ def dsv3_router_gemm(
     )
     torch.ops._moe_C.dsv3_router_gemm(output, hidden_states, router_weight)
     return output
+
+
+def dsv4_norm_router_gemm(
+    x: torch.Tensor,
+    norm_weight: torch.Tensor,
+    gate_weight: torch.Tensor,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fused RMSNorm + router GEMV for DeepSeek V4.
+
+    Returns ``(normed_x, router_logits)`` where
+        normed_x[m,k]      = x[m,k] * rsqrt(mean(x[m]^2) + eps) * norm_weight[k]
+        router_logits[m,n] = sum_k(normed_x[m,k] * gate_weight[n,k])
+
+    DSV4-specific constraints (caller must check before dispatching here):
+      - x, norm_weight, gate_weight all bf16 contiguous
+      - x.shape == [num_tokens, 7168] with num_tokens in [1, 16]
+      - gate_weight.shape == [num_experts, 7168] with num_experts in {256, 384}
+      - SM 9.x or 10.x device
+
+    Logits output is fp32 (hard-coded by DSV4 router).
+    """
+    num_tokens, hidden = x.shape
+    num_experts = gate_weight.shape[0]
+    normed_x = torch.empty_like(x)
+    logits = torch.empty(num_tokens, num_experts, device=x.device, dtype=torch.float32)
+    torch.ops._moe_C.dsv4_norm_router_gemm(
+        logits, normed_x, x, norm_weight, gate_weight, float(eps)
+    )
+    return normed_x, logits
 
 
 def topk_softmax(
@@ -2821,6 +2835,7 @@ def swap_blocks_batch(
     src_ptrs: torch.Tensor,
     dst_ptrs: torch.Tensor,
     sizes: torch.Tensor,
+    is_src_access_order_any: bool = False,
 ) -> None:
     """
     Batch version of swap_blocks: submit all copies in a single driver call.
@@ -2829,8 +2844,16 @@ def swap_blocks_batch(
     of sizes[i] bytes. All three tensors must be int64 CPU tensors.
     On CUDA 12.8+ this uses cuMemcpyBatchAsync for minimal submission
     overhead; on older CUDA it falls back to a loop of cudaMemcpyAsync.
+
+    is_src_access_order_any: if True, pass CU_MEMCPY_SRC_ACCESS_ORDER_ANY to
+        cuMemcpyBatchAsync, letting the DMA engine prefetch source bytes
+        out of stream order. Only safe when no GPU stream is concurrently
+        writing to the source. Defaults to False (STREAM ordering), which
+        is always safe.
     """
-    torch.ops._C_cache_ops.swap_blocks_batch(src_ptrs, dst_ptrs, sizes)
+    torch.ops._C_cache_ops.swap_blocks_batch(
+        src_ptrs, dst_ptrs, sizes, is_src_access_order_any
+    )
 
 
 def convert_fp8(
@@ -3167,6 +3190,14 @@ if hasattr(torch.ops._C, "weight_packed_linear"):
         )
 
 
+class CPUQuantMethod(IntEnum):
+    UNQUANT = 0
+    INT8_W8A8 = 1
+    FP8_W8A16 = 2
+    INT4_W4A8 = 3
+    MXFP4 = 4
+
+
 if hasattr(torch.ops._C, "fused_experts_cpu"):
 
     @register_fake("_C::fused_experts_cpu")
@@ -3177,16 +3208,59 @@ if hasattr(torch.ops._C, "fused_experts_cpu"):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         inplace: bool,
-        use_int8_w8a8: bool,
-        use_fp8_w8a16: bool,
+        moe_comp_method: CPUQuantMethod,
         w1_scale: torch.Tensor | None,
         w2_scale: torch.Tensor | None,
+        w1_zero: torch.Tensor | None,
+        w2_zero: torch.Tensor | None,
         block_size: list[int] | None,
-        a1_scale: torch.Tensor | None,
-        a2_scale: torch.Tensor | None,
+        w1_bias: torch.Tensor | None,
+        w2_bias: torch.Tensor | None,
+        alpha: float | None,
+        limit: float | None,
         is_vnni: bool,
     ) -> torch.Tensor:
         return torch.empty_like(hidden_states)
+
+
+def fused_experts_cpu(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    inplace: bool,
+    moe_comp_method: CPUQuantMethod,
+    w1_scale: torch.Tensor | None,
+    w2_scale: torch.Tensor | None,
+    w1_zero: torch.Tensor | None,
+    w2_zero: torch.Tensor | None,
+    block_size: list[int] | None,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
+    alpha: float | None = None,
+    limit: float | None = None,
+    is_vnni: bool = True,
+) -> torch.Tensor:
+    return torch.ops._C.fused_experts_cpu(
+        hidden_states,
+        w1,
+        w2,
+        topk_weights,
+        topk_ids,
+        inplace,
+        moe_comp_method,
+        w1_scale,
+        w2_scale,
+        w1_zero,
+        w2_zero,
+        block_size,
+        w1_bias,
+        w2_bias,
+        alpha,
+        limit,
+        is_vnni,
+    )
 
 
 if hasattr(torch.ops._C, "int8_scaled_mm_with_quant"):
@@ -3205,6 +3279,11 @@ if hasattr(torch.ops._C, "int8_scaled_mm_with_quant"):
         return torch.empty((M, N), dtype=out_dtype)
 
 
+class CPUQuantAlgo(IntEnum):
+    AWQ = 0
+    GPTQ = 1
+
+
 if hasattr(torch.ops._C, "convert_weight_packed_scale_zp"):
 
     @register_fake("_C::convert_weight_packed_scale_zp")
@@ -3212,12 +3291,27 @@ if hasattr(torch.ops._C, "convert_weight_packed_scale_zp"):
         qweight: torch.Tensor,
         qzeros: torch.Tensor,
         scales: torch.Tensor,
+        quant_method_4bit: CPUQuantAlgo,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         return (
             torch.empty_like(qweight),
             torch.empty_like(qzeros),
             torch.empty_like(scales),
         )
+
+
+def convert_weight_packed_scale_zp(
+    qweight: torch.Tensor,
+    qzeros: torch.Tensor,
+    scales: torch.Tensor,
+    quant_method_4bit: CPUQuantAlgo,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    return torch.ops._C.convert_weight_packed_scale_zp(
+        qweight,
+        qzeros,
+        scales,
+        quant_method_4bit,
+    )
 
 
 if hasattr(torch.ops._C, "int4_scaled_mm_cpu"):
@@ -3234,7 +3328,188 @@ if hasattr(torch.ops._C, "int4_scaled_mm_cpu"):
         return torch.empty((x.size(0), N), dtype=x.dtype, device=x.device)
 
 
-_supports_cpu_w4a8_int8 = bool(hasattr(torch.ops._C, "convert_weight_packed_scale_zp"))
+def int4_scaled_mm_cpu(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    w_zeros: torch.Tensor,
+    w_scales: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> torch.Tensor:
+    x_shape = x.shape
+    x_2d = x.reshape(-1, x_shape[-1]) if len(x_shape) > 2 else x
+
+    out = torch.ops._C.int4_scaled_mm_cpu(
+        x_2d,
+        w,
+        w_zeros,
+        w_scales,
+        bias,
+    )
+    out = out.reshape(x_shape[:-1] + (out.size(-1),)) if len(x_shape) > 2 else out
+    return out
+
+
+if hasattr(torch.ops._C, "fp8_scaled_mm_cpu"):
+
+    @register_fake("_C::fp8_scaled_mm_cpu")
+    def fp8_scaled_mm_cpu_fake(
+        mat1: torch.Tensor,
+        mat2: torch.Tensor,
+        scales2: torch.Tensor,
+        block_size: list[int],
+        bias: torch.Tensor | None,
+        out_dtype: torch.dtype,
+        is_vnni: bool,
+    ) -> torch.Tensor:
+        M = mat1.size(0)
+        N = mat2.size(0)
+        return torch.empty((M, N), dtype=out_dtype, device=mat1.device)
+
+
+_supports_cpu_fp8_w8a16 = bool(hasattr(torch.ops._C, "fp8_scaled_mm_cpu"))
+
+
+def fp8_scaled_mm_cpu(
+    mat1: torch.Tensor,
+    mat2: torch.Tensor,
+    scales2: torch.Tensor,
+    block_size: list[int],
+    bias: torch.Tensor | None,
+    out_dtype: torch.dtype,
+    is_vnni: bool,
+) -> torch.Tensor:
+    return torch.ops._C.fp8_scaled_mm_cpu(
+        mat1, mat2, scales2, block_size, bias, out_dtype, is_vnni
+    )
+
+
+def chunk_gated_delta_rule_cpu(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    initial_state: torch.Tensor,
+    output_final_state: bool,
+    cu_seqlens: torch.Tensor,
+    head_first: bool,
+    use_qk_l2norm_in_kernel: bool,
+    eps: float = 1e-5,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.ops._C.chunk_gated_delta_rule_cpu(
+        query,
+        key,
+        value,
+        g,
+        beta,
+        initial_state,
+        output_final_state,
+        cu_seqlens,
+        head_first,
+        use_qk_l2norm_in_kernel,
+        eps,
+    )
+
+
+def fused_sigmoid_gating_delta_rule_update_cpu(
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    initial_state_source: torch.Tensor,
+    initial_state_indices: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    use_qk_l2norm_in_kernel: bool,
+    softplus_beta: float = 1.0,
+    softplus_threshold: float = 20.0,
+) -> torch.Tensor:
+    return torch.ops._C.fused_sigmoid_gating_delta_rule_update_cpu(
+        A_log,
+        dt_bias,
+        q,
+        k,
+        v,
+        a,
+        b,
+        initial_state_source,
+        initial_state_indices,
+        cu_seqlens,
+        use_qk_l2norm_in_kernel,
+        softplus_beta,
+        softplus_threshold,
+    )
+
+
+def fused_gdn_gating_cpu(
+    A_log: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    dt_bias: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.ops._C.fused_gdn_gating_cpu(
+        A_log,
+        a,
+        b,
+        dt_bias,
+    )
+
+
+def causal_conv1d_weight_pack(
+    weight: torch.Tensor,
+) -> torch.Tensor:
+    return torch.ops._C.causal_conv1d_weight_pack(
+        weight,
+    )
+
+
+def causal_conv1d_fwd_cpu(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    conv_states: torch.Tensor | None,
+    query_start_loc: torch.Tensor | None,
+    cache_indices: torch.Tensor | None,
+    has_initial_state: torch.Tensor | None,
+    silu_activation: bool,
+    is_vnni: bool,
+) -> torch.Tensor:
+    return torch.ops._C.causal_conv1d_fwd_cpu(
+        x,
+        weight,
+        bias,
+        conv_states,
+        query_start_loc,
+        cache_indices,
+        has_initial_state,
+        silu_activation,
+        -1,
+        is_vnni,
+    )
+
+
+def causal_conv1d_update_cpu(
+    x: torch.Tensor,
+    conv_states: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    silu_activation: bool,
+    conv_state_indices: torch.Tensor | None,
+    is_vnni: bool,
+) -> torch.Tensor:
+    return torch.ops._C.causal_conv1d_update_cpu(
+        x,
+        conv_states,
+        weight,
+        bias,
+        silu_activation,
+        None,
+        conv_state_indices,
+        -1,
+        is_vnni,
+    )
 
 
 class CPUDNNLGEMMHandler:

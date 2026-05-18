@@ -233,6 +233,19 @@ def dispatch_cpu_unquantized_gemm(
         layer.cpu_linear = torch.nn.functional.linear
         return
 
+    if layer.weight.ndim != 2:
+        # this is not a linear layer
+        # For now it should be a causal_conv1d op
+        if torch.cpu._is_amx_tile_supported():
+            # prepack conv weight
+            layer.weight.data = ops.causal_conv1d_weight_pack(
+                layer.weight.view(
+                    layer.weight.size(0),
+                    layer.weight.size(2),
+                )
+            )
+        return
+
     N, K = layer.weight.size()
     dtype = layer.weight.dtype
 
@@ -302,13 +315,6 @@ def cpu_unquantized_gemm(
     bias: torch.Tensor | None = None,
 ):
     return layer.cpu_linear(x, weight, bias)
-
-
-def cublas_gemm_bf16_bf16_fp32(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-):
-    return ops.router_gemm_bf16_fp32(x, weight)
 
 
 def dispatch_unquantized_gemm() -> Callable[..., torch.Tensor]:
