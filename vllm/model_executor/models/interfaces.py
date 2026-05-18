@@ -1594,6 +1594,27 @@ class SupportsEncoderCudaGraph(Protocol):
         """
         ...
 
+    def postprocess_encoder_output(
+        self,
+        output: torch.Tensor,
+        indices: list[int],
+        per_item_out_tokens: list[int],
+        dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
+        clone: bool = False,
+        batch_mm_kwargs: dict[str, Any] | None = None,
+    ) -> None:
+        """
+        Post-process encoder output, directly call scatter_output_slices by default.
+
+        By default, delegates directly to scatter_output_slices.
+        Override this for models that require additional processing on the raw
+        encoder output prior to scattering, e.g. Step3-VL, which merges features
+        according to dynamic patch counts before scattering.
+        """
+        from vllm.model_executor.models.utils import scatter_output_slices
+
+        scatter_output_slices(output, indices, per_item_out_tokens, dest, clone)
+
     def prepare_encoder_cudagraph_capture_inputs(
         self,
         token_budget: int,
