@@ -8,8 +8,8 @@ from tests.tool_parsers.common_tests import (
     ToolParserTestConfig,
     ToolParserTests,
 )
-
 from vllm.tool_parsers.qwen3xml_tool_parser import StreamingXMLToolCallParser
+
 
 class TestQwen3xmlToolParser(ToolParserTests):
     @pytest.fixture
@@ -73,16 +73,16 @@ class TestQwen3xmlToolParser(ToolParserTests):
         )
 
     def test_function_name_is_cleared_after_function_end(self):
-          parser = StreamingXMLToolCallParser()
-          parser._start_element("tool_call", {})
-          parser._start_element("function", {"name": "search"})
-          parser._start_element("parameter", {"name": "query"})
-          parser._char_data("manager")
-          parser._end_element("parameter")
-          parser._end_element("function")
+        parser = StreamingXMLToolCallParser()
+        parser._start_element("tool_call", {})
+        parser._start_element("function", {"name": "search"})
+        parser._start_element("parameter", {"name": "query"})
+        parser._char_data("manager")
+        parser._end_element("parameter")
+        parser._end_element("function")
 
-          delta_count = len(parser.deltas)
-          parser._auto_close_open_parameter_if_needed("tool_call")
+        delta_count = len(parser.deltas)
+        parser._auto_close_open_parameter_if_needed("tool_call")
 
-          assert parser.current_function_name is None
-          assert len(parser.deltas) == delta_count
+        assert parser.current_function_name is None
+        assert len(parser.deltas) == delta_count
