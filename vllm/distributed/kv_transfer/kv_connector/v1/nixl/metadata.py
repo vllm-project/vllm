@@ -19,6 +19,10 @@ TransferHandle = int
 ReqId = str
 
 GET_META_MSG = b"get_meta_msg"
+REGISTER_BLOCKS_MSG = b"register_blocks_msg"
+PUSH_TRIGGER_MSG = b"push_trigger_msg"
+
+PUSH_TRIGGER_BASE_PORT = 29600  # Base port for push trigger TCP sockets
 #
 # NIXL Connector Version
 #
@@ -160,6 +164,8 @@ class ReqMeta:
     local_physical_block_ids: BlockIds
     tp_size: int
     remote: RemoteMeta | None = None
+    # Remote block size, populated from REGISTER_BLOCKS_MSG ACK in push mode.
+    remote_block_size: int | None = None
 
 
 class NixlConnectorMetadata(KVConnectorMetadata):
@@ -182,6 +188,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             local_physical_block_ids=local_block_ids,
             # P workers don't need to receive tp_size from proxy here.
             tp_size=kv_transfer_params.get("tp_size", 1),
+            remote_block_size=kv_transfer_params.get("remote_block_size"),
         )
 
     def add_new_req_to_save(
