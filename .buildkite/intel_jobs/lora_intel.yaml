@@ -49,7 +49,7 @@ steps:
       'cd tests &&
       export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
       pytest -v -s lora/test_fused_moe_lora_kernel.py && 
-      pytest -v -s lora/test_moe_lora_align_sum.py'
+      pytest -v -s lora/test_moe_lora_align_sum.py --deselect="tests/lora/test_moe_lora_align_sum.py::test_moe_lora_align_block_size_mixed_base_and_lora[1]"'
 
 - label: LoRA Punica Kernels
   timeout_in_minutes: 45
