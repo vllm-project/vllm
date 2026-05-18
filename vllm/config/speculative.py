@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import ast
 import copy
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
@@ -50,6 +49,7 @@ MTPModelTypes = Literal[
     "pangu_ultra_moe_mtp",
     "step3p5_mtp",
     "hy_v3_mtp",
+    "gemma4_mtp",
 ]
 NgramGPUTypes = Literal["ngram_gpu"]
 DFlashModelTypes = Literal["dflash"]
@@ -62,11 +62,12 @@ SpeculativeMethod = Literal[
     "mlp_speculator",
     "draft_model",
     "suffix",
+    "custom_class",
     EagleModelTypes,
     NgramGPUTypes,
 ]
 RejectionSampleMethod = Literal["standard", "synthetic"]
-DraftSampleMethod = Literal["greedy", "gumbel"]
+DraftSampleMethod = Literal["greedy", "probabilistic"]
 
 
 @config
@@ -144,9 +145,6 @@ class SpeculativeConfig:
     provided. Defaults to 1."""
 
     # Alternative drafting strategies
-    speculative_token_tree: str | None = None
-    """Specifies the tree structure for speculative token generation.
-    """
     parallel_drafting: bool = False
     """Enable parallel drafting, where all speculative tokens are generated
     in parallel rather than sequentially. This can improve performance but
@@ -258,10 +256,10 @@ class SpeculativeConfig:
     draft_sample_method: DraftSampleMethod = "greedy"
     """How the draft model samples tokens. 'greedy' always picks the argmax
     token, and the draft probabilities are treated as one-hot during rejection
-    sampling. 'gumbel' adds Gumbel noise for stochastic sampling, and the full
-    draft logits are used for the probability ratio test during rejection
-    sampling. This comes at the cost of additional GPU memory usage. This
-    parameter currently only applies to Model Runner V2."""
+    sampling. 'probabilistic' samples stochastically from the draft
+    distribution and uses the full draft logits for the probability ratio test
+    during rejection sampling. This comes at the cost of additional GPU memory
+    usage."""
 
     def compute_hash(self) -> str:
         """
@@ -469,6 +467,17 @@ class SpeculativeConfig:
                     "architectures": ["Qwen3_5MoeMTP" if is_moe else "Qwen3_5MTP"],
                 }
             )
+        if hf_config.model_type == "intern_s2_preview":
+            text_config = getattr(hf_config, "text_config", None)
+            is_moe = getattr(text_config, "model_type", None) == "qwen3_5_moe_text"
+            hf_config.model_type = "qwen3_5_mtp"
+            n_predict = getattr(text_config, "mtp_num_hidden_layers", None)
+            hf_config.update(
+                {
+                    "n_predict": n_predict,
+                    "architectures": ["Qwen3_5MoeMTP" if is_moe else "Qwen3_5MTP"],
+                }
+            )
         if hf_config.model_type == "longcat_flash":
             hf_config.model_type = "longcat_flash_mtp"
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
@@ -491,6 +500,17 @@ class SpeculativeConfig:
                 {"n_predict": n_predict, "architectures": ["HYV3MTPModel"]}
             )
 
+        if hf_config.model_type == "gemma4_assistant":
+            hf_config.model_type = "gemma4_mtp"
+            text_config = getattr(hf_config, "text_config", hf_config)
+            # The assistant runs all decoder layers in a single forward
+            # call to produce one draft token, so n_predict=1.
+            # num_kv_shared_layers must be 0: cross-model KV sharing is
+            # set up by the proposer after model construction.
+            if hasattr(text_config, "num_kv_shared_layers"):
+                text_config.num_kv_shared_layers = 0
+            hf_config.update({"n_predict": 1, "architectures": ["Gemma4MTPModel"]})
+
         return hf_config
 
     def __post_init__(self):
@@ -503,7 +523,16 @@ class SpeculativeConfig:
         # default.
 
         # infer method from user args
-        if self.method is None:
+        # Check if the model field contains a custom module path (e.g., 'pkg.Mod')
+        if (
+            self.model is not None
+            and "." in self.model
+            and not self.model.startswith(("http://", "https://", "file://"))
+            and "/" not in self.model  # not a HuggingFace repo (org/model)
+        ):
+            # Treat as a custom class path
+            self.method = "custom_class"
+        elif self.method is None:
             if self.model in ("ngram", "[ngram]"):
                 self.method = "ngram"
             else:
@@ -537,6 +566,14 @@ class SpeculativeConfig:
                 self.model = "suffix"
             elif self.method == "extract_hidden_states":
                 self.model = "extract_hidden_states"
+            elif self.method == "custom_class":
+                # method was set explicitly, but model should already contain the
+                # custom module path. If not, this is a configuration error.
+                if self.model is None:
+                    raise ValueError(
+                        "method='custom_class' requires 'model' to contain the "
+                        "custom proposer module path (e.g., 'my_module.MyProposer')."
+                    )
             else:
                 raise ValueError(
                     "num_speculative_tokens was provided but without speculative model."
@@ -580,6 +617,18 @@ class SpeculativeConfig:
             self.draft_parallel_config = self.target_parallel_config
         elif self.method == "suffix":
             self._validate_suffix_decoding()
+        elif self.method == "custom_class":
+            # Custom class proposer does not need a draft model.
+            # It will dynamically load the user-provided class at runtime.
+            logger.warning_once(
+                "Using a custom class-based proposer backend. This is an "
+                "experimental feature and the proposer interface is subject to "
+                "breaking changes in future vLLM releases."
+            )
+            self.prompt_lookup_max = 0
+            self.prompt_lookup_min = 0
+            self.draft_model_config = self.target_model_config
+            self.draft_parallel_config = self.target_parallel_config
         elif self.method == "extract_hidden_states":
             from vllm.transformers_utils.configs.extract_hidden_states import (
                 ExtractHiddenStatesConfig,
@@ -727,23 +776,10 @@ class SpeculativeConfig:
                             f" must be divisible by {n_predict=}"
                         )
 
-                if self.speculative_token_tree is None:
-                    if self.num_speculative_tokens is None:
-                        raise ValueError(
-                            "A speculative model was provided, but neither "
-                            "`speculative_token_tree` nor `num_speculative_tokens` "
-                            "was provided"
-                        )
-
-                    # Generate chain of tokens.
-                    self.speculative_token_tree = str(
-                        [(i + 1) * (0,) for i in range(self.num_speculative_tokens)]
-                    )
-                else:
-                    # Sort the token tree breadth-first.
-                    tree_choices = ast.literal_eval(self.speculative_token_tree)
-                    self.speculative_token_tree = str(
-                        sorted(tree_choices, key=lambda t: (len(t), t))
+                if self.num_speculative_tokens is None:
+                    raise ValueError(
+                        "A speculative model was provided, but "
+                        "`num_speculative_tokens` was not provided"
                     )
 
                 self.draft_tensor_parallel_size = (
@@ -976,34 +1012,6 @@ class SpeculativeConfig:
                 self.draft_parallel_config
             )
 
-        aux_hidden_states_supported = [
-            "llama",
-            "qwen",
-            "minicpm",
-            "gpt_oss",
-            "hunyuan_vl",
-            "hunyuan_v1_dense",
-            "afmoe",
-            "nemotron_h",
-            "deepseek_v2",
-            "deepseek_v3",
-            "kimi_k2",
-            "kimi_k25",
-            "minimax_m2",
-            "gemma4",
-        ]
-        if (
-            self.method in ("eagle3", "extract_hidden_states", "dflash")
-            and self.target_model_config
-            and not any(
-                supported_model in self.target_model_config.hf_text_config.model_type
-                for supported_model in aux_hidden_states_supported
-            )
-        ):
-            raise ValueError(
-                f"{self.method} is only supported for {aux_hidden_states_supported}"
-                f" models. Got {self.target_model_config.hf_text_config.model_type=}"
-            )
         self.verify_equal_vocab_size_if_draft_model()
         return self
 
@@ -1040,6 +1048,14 @@ class SpeculativeConfig:
             slots_per_req += 1
         return slots_per_req
 
+    def use_gemma4_mtp(self) -> bool:
+        return (
+            self.method == "mtp"
+            and self.draft_model_config is not None
+            and getattr(self.draft_model_config.hf_config, "model_type", None)
+            == "gemma4_mtp"
+        )
+
     def use_eagle(self) -> bool:
         return self.method in ("eagle", "eagle3", "mtp", "dflash")
 
@@ -1059,7 +1075,13 @@ class SpeculativeConfig:
         method = self.method
         model = (
             None
-            if method in ("ngram", "suffix", "extract_hidden_states")
+            if method
+            in (
+                "ngram",
+                "suffix",
+                "extract_hidden_states",
+                "custom_class",
+            )
             else self.draft_model_config.model
         )
         num_spec_tokens = self.num_speculative_tokens

@@ -19,6 +19,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticTensorSym,
     kMxfp4Static,
+    kMxfp8Dynamic,
+    kMxfp8Static,
 )
 from vllm.platforms import current_platform
 
@@ -50,6 +52,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         self.is_fp8 = False
         self.is_mxfp4 = False
         self.is_block_fp8 = False
+        self.is_mxfp8 = False
 
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -152,6 +155,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
             is_fp8=self.is_fp8,
             is_mxfp4=self.is_mxfp4,
             is_block_fp8=self.is_block_fp8,
+            is_mxfp8=self.is_mxfp8,
         )
 
 
@@ -170,6 +174,46 @@ class XPUExpertsFp8(XPUExperts):
             num_dispatchers,
         )
         self.is_fp8 = True
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        SUPPORTED_W_A = [
+            (kFp8StaticTensorSym, None),
+            (kFp8StaticTensorSym, kFp8DynamicTensorSym),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
+
+
+class XPUExpertsMxfp8(XPUExpertsFp8):
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+        max_num_tokens: int | None = None,
+        num_dispatchers: int | None = None,
+    ):
+        super().__init__(
+            moe_config,
+            quant_config,
+            max_num_tokens,
+            num_dispatchers,
+        )
+        assert quant_config.quant_dtype == "mxfp8"
+        self.is_mxfp8 = True
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        SUPPORTED_W_A = [
+            (kMxfp8Static, None),
+            (kMxfp8Static, kMxfp8Dynamic),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
 
 
 class XPUExpertsBlockFp8(XPUExperts):
