@@ -639,7 +639,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Install FlashInfer JIT cache (requires CUDA-version-specific index URL)
 # https://docs.flashinfer.ai/installation.html
 # From versions.json: .flashinfer.version
-ARG FLASHINFER_VERSION=0.6.8.post1
+ARG FLASHINFER_VERSION=0.6.11.post2
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
         --extra-index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
@@ -856,6 +856,28 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         ); \
         # Force-reinstall the matching CUDA wheel so the correct nixl_ep_cpp.so is installed.
         uv pip install --system --force-reinstall --no-deps nixl-cu${CUDA_MAJOR}; \
+    fi
+
+# Optional override: install mooncake-transfer-engine from a URL instead of the
+# PyPI release pulled in above. Use this for wheels built with non-default CMake
+# flags (e.g. `STORE_USE_ETCD=ON` for master HA). The URL's manylinux glibc
+# floor must be <= the FINAL_BASE_IMAGE's glibc.
+ARG MOONCAKE_WHEEL_AARCH64
+ARG MOONCAKE_WHEEL_X86_64
+RUN if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
+        if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
+            WHEEL="${MOONCAKE_WHEEL_AARCH64}"; \
+        else \
+            WHEEL="${MOONCAKE_WHEEL_X86_64}"; \
+        fi && \
+        if [ -n "${WHEEL}" ]; then \
+            uv pip install --system "${WHEEL}" && \
+            CUDA_MAJOR="${CUDA_VERSION%%.*}" && \
+            if [ ! -f /usr/local/cuda/lib64/libcudart.so ] && \
+               [ -f "/usr/local/cuda/lib64/libcudart.so.${CUDA_MAJOR}" ]; then \
+                ln -s "libcudart.so.${CUDA_MAJOR}" /usr/local/cuda/lib64/libcudart.so; \
+            fi; \
+        fi; \
     fi
 
 ENV VLLM_USAGE_SOURCE production-docker-image
