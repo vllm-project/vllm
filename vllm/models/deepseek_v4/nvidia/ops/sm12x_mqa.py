@@ -147,7 +147,7 @@ def fp8_mqa_logits_triton(
     if num_q == 0 or seq_len_kv == 0:
         return logits
 
-    grid = (triton.cdiv(num_q, 8), triton.cdiv(seq_len_kv, 128))
+    grid = (triton.cdiv(num_q, 16), triton.cdiv(seq_len_kv, 128))
     _fp8_mqa_logits_kernel[grid](
         q,
         k_fp8,
@@ -169,7 +169,7 @@ def fp8_mqa_logits_triton(
         weights.stride(1),
         logits.stride(0),
         logits.stride(1),
-        BLOCK_M=8,
+        BLOCK_M=16,
         BLOCK_N=128,
         BLOCK_D=64,
         num_warps=4,
