@@ -653,8 +653,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return cuda_graph_size
 
     def _remove_request(self, req_id: str) -> bool:
+        req_index = self.req_states.req_id_to_index.get(req_id)
+        if req_index is None:
+            return False
         if not self.req_states.remove_request(req_id):
             return False
+        self.model_state.remove_request(req_index)
         if self.encoder_cache is not None:
             self.encoder_cache.remove_request(req_id)
         if self.prompt_logprobs_worker is not None:
@@ -677,7 +681,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def add_requests(self, scheduler_output: SchedulerOutput) -> None:
         for new_req_data in scheduler_output.scheduled_new_reqs:
-            assert new_req_data.prompt_token_ids is not None
             assert new_req_data.prefill_token_ids is not None
             req_id = new_req_data.req_id
 
@@ -686,7 +689,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # with the updated prompt_token_ids and mm_features.
             self._remove_request(req_id)
 
-            prompt_len = len(new_req_data.prompt_token_ids)
+            if new_req_data.prompt_token_ids is not None:
+                prompt_len = len(new_req_data.prompt_token_ids)
+            else:
+                assert new_req_data.prompt_embeds is not None
+                prompt_len = len(new_req_data.prompt_embeds)
             self.req_states.add_request(
                 req_id=req_id,
                 prompt_len=prompt_len,
@@ -1091,8 +1098,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
 
         inputs_embeds = None
-        if self.supports_mm_inputs and self.is_first_pp_rank:
-            # Run MM encoder (if needed) and get multimodal embeddings.
+        if (
+            self.supports_mm_inputs or self.model_config.enable_prompt_embeds
+        ) and self.is_first_pp_rank:
+            # Run MM encoder (if needed) and get input embeddings.
             # Only first PP rank prepares multimodal embeddings.
             # NOTE(woosuk): We must call get_mm_embeddings even during dummy runs
             # to obtain inputs_embeds, because the compiled model expects this input.

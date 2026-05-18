@@ -53,6 +53,9 @@ class ModelState(ABC):
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         return None
 
+    def remove_request(self, req_index: int) -> None:
+        return None
+
     def apply_staged_writes(self) -> None:
         return None
 
