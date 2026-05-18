@@ -84,13 +84,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // Fused SiLU+Mul + per-block quantization
   ops.def(
-    "silu_and_mul_per_block_quant("
-    "Tensor! out, "
-    "Tensor input, "
-    "Tensor! scales, "
-    "int group_size, "
-    "Tensor? scale_ub=None, "
-    "bool is_scale_transposed=False) -> ()");
+      "silu_and_mul_per_block_quant("
+      "Tensor! out, "
+      "Tensor input, "
+      "Tensor! scales, "
+      "int group_size, "
+      "Tensor? scale_ub=None, "
+      "bool is_scale_transposed=False) -> ()");
   ops.impl("silu_and_mul_per_block_quant", torch::kCUDA,
             &silu_and_mul_per_block_quant);
 
