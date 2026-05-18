@@ -37,6 +37,8 @@ def _fused_inv_rope_fp8_quant_per_head(
     ROPE_START: tl.constexpr,
     HALF_ROPE: tl.constexpr,
     TMA_ALIGNED_SCALES: tl.constexpr,
+    USE_GDC: tl.constexpr,
+    launch_pdl: tl.constexpr,  # triton metadata
 ):
     # int64: stride multiply overflows int32 past num_tokens=32768 (IMA).
     pid_token = tl.program_id(0).to(tl.int64)
@@ -46,7 +48,9 @@ def _fused_inv_rope_fp8_quant_per_head(
     head_in_group = pid_gh % heads_per_group
     global_head = pid_gh
     qb_start = head_in_group * CHUNKS_PER_HEAD
-
+    if USE_GDC:
+        tl.extra.cuda.gdc_launch_dependents()
+        tl.extra.cuda.gdc_wait()
     # Padding rows in the TMA-aligned scale buffer: fill with zero and skip quant.
     if pid_token >= num_tokens:
         if TMA_ALIGNED_SCALES:
@@ -133,6 +137,8 @@ def _fused_inv_rope_fp8_quant_per_head(
             scale_ptr + g * scale_stride_group + pid_token + qb_indices * scale_stride_k
         )
         tl.store(scale_addrs, scales)
+    if USE_GDC:
+        tl.extra.cuda.gdc_launch_dependents()
 
 
 def fused_inv_rope_fp8_quant(
@@ -243,7 +249,7 @@ def _fused_inv_rope_fp8_quant_kernel_impl(
         (scale_inner * tma_aligned_T, 1, tma_aligned_T),
     )
     grid = (tma_aligned_T, n_groups * heads_per_group)
-    pdl_kwargs = {} if current_platform.is_rocm() else {"launch_pdl": False}
+    use_gdc = current_platform.is_cuda() and current_platform.has_device_capability(90)
     _fused_inv_rope_fp8_quant_per_head[grid](
         o,
         positions,
@@ -266,8 +272,9 @@ def _fused_inv_rope_fp8_quant_kernel_impl(
         ROPE_START=rope_start,
         HALF_ROPE=half_rope,
         TMA_ALIGNED_SCALES=tma_aligned_scales,
+        USE_GDC=use_gdc,
+        launch_pdl=use_gdc,
         num_stages=1,
-        **pdl_kwargs,
         num_warps=1,
     )
     return fp8_buf, scale_buf
