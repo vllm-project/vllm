@@ -20,6 +20,7 @@ import torch
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import cdiv
 
 logger = init_logger(__name__)
 
@@ -480,6 +481,8 @@ if has_flashinfer():
         dtype: torch.dtype,
         use_8x4_sf_layout: bool,
         backend: str,
+        block_size: int = 16,
+        use_nvfp4: bool = True,
     ) -> torch.Tensor:
         from flashinfer import mm_fp4 as flashinfer_mm_fp4_
 
@@ -490,8 +493,9 @@ if has_flashinfer():
             B_scale,
             g_scale,
             dtype,
-            block_size=16,
+            block_size=block_size,
             use_8x4_sf_layout=use_8x4_sf_layout,
+            use_nvfp4=use_nvfp4,
             backend=backend,
         )
 
@@ -507,8 +511,35 @@ if has_flashinfer():
         dtype: torch.dtype,
         use_8x4_sf_layout: bool,
         backend: str,
+        block_size: int = 16,
+        use_nvfp4: bool = True,
     ) -> torch.Tensor:
         return torch.empty(A.shape[0], B.shape[1], dtype=dtype, device=A.device)
+
+    @torch.library.custom_op(
+        "vllm::flashinfer_mxfp4_quantize",
+        mutates_args=[],
+        device_types="cuda",
+    )
+    def flashinfer_mxfp4_quantize(
+        a: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        from flashinfer import mxfp4_quantize as _mxfp4_quantize
+
+        return _mxfp4_quantize(a)
+
+    @torch.library.register_fake("vllm::flashinfer_mxfp4_quantize")
+    def flashinfer_mxfp4_quantize_fake(
+        a: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        m, k = a.shape
+        sf_vec_size = 32
+        padded_m = cdiv(m, 128) * 128
+        sf_cols = cdiv(k // sf_vec_size, 4) * 4
+        return (
+            torch.empty(m, k // 2, dtype=torch.uint8, device=a.device),
+            torch.empty(padded_m, sf_cols, dtype=torch.uint8, device=a.device),
+        )
 
     @torch.library.custom_op(
         "vllm::bmm_fp8",
@@ -658,14 +689,19 @@ def flashinfer_scaled_fp4_mm(
     b: torch.Tensor,
     block_scale_a: torch.Tensor,
     block_scale_b: torch.Tensor,
-    alpha: torch.Tensor,
+    alpha: torch.Tensor | None,
     out_dtype: torch.dtype,
     backend: str,
+    block_size: int = 16,
+    use_nvfp4: bool = True,
 ) -> torch.Tensor:
     assert a.ndim == 2 and b.ndim == 2
     assert block_scale_a.ndim == 2 and block_scale_b.ndim == 2
     assert a.stride(-1) == 1 and b.stride(-1) == 1
     assert a.shape[1] == b.shape[1]
+
+    if alpha is None:
+        alpha = torch.ones(1, dtype=torch.float32, device=a.device)
 
     if backend in ("cutlass", "cudnn"):
         block_scale_a = block_scale_a.view(torch.uint8)
@@ -682,7 +718,50 @@ def flashinfer_scaled_fp4_mm(
         out_dtype,
         use_8x4_sf_layout=use_8x4_sf_layout,
         backend=backend,
+        block_size=block_size,
+        use_nvfp4=use_nvfp4,
     )
+
+
+def flashinfer_scaled_fp4_mm_out(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    block_scale_a: torch.Tensor,
+    block_scale_b: torch.Tensor,
+    alpha: torch.Tensor,
+    out: torch.Tensor,
+    out_dtype: torch.dtype | None,
+    use_8x4_sf_layout: bool,
+    backend: str,
+) -> torch.Tensor:
+    assert a.ndim == 2 and b.ndim == 2 and out.ndim == 2
+    assert block_scale_a.ndim == 2 and block_scale_b.ndim == 2
+    assert a.stride(-1) == 1
+    assert a.shape[1] == b.shape[0]
+    assert out.shape == (a.shape[0], b.shape[1])
+    assert out.device.type == "cuda"
+
+    if backend in ("cutlass", "cudnn"):
+        if block_scale_a.dtype != torch.uint8:
+            block_scale_a = block_scale_a.view(torch.uint8)
+        if block_scale_b.dtype != torch.uint8:
+            block_scale_b = block_scale_b.view(torch.uint8)
+
+    from flashinfer import mm_fp4 as flashinfer_mm_fp4_
+
+    flashinfer_mm_fp4_(
+        a,
+        b,
+        block_scale_a,
+        block_scale_b,
+        alpha,
+        out_dtype or out.dtype,
+        out=out,
+        block_size=16,
+        use_8x4_sf_layout=use_8x4_sf_layout,
+        backend=backend,
+    )
+    return out
 
 
 def flashinfer_scaled_fp8_mm(
@@ -863,7 +942,9 @@ __all__ = [
     "supports_trtllm_attention",
     "can_use_trtllm_attention",
     "use_trtllm_attention",
+    "flashinfer_mxfp4_quantize",
     "flashinfer_scaled_fp4_mm",
+    "flashinfer_scaled_fp4_mm_out",
     "flashinfer_scaled_fp8_mm",
     "flashinfer_scaled_fp8_mm_out",
     "flashinfer_quant_nvfp4_8x4_sf_layout",

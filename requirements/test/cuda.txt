@@ -41,7 +41,6 @@ attrs==24.2.0
     # via
     #   aiohttp
     #   hypothesis
-    #   jsonlines
     #   jsonschema
     #   pytest-subtests
     #   referencing
@@ -357,8 +356,6 @@ joblib==1.4.2
     #   librosa
     #   nltk
     #   scikit-learn
-jsonlines==4.0.0
-    # via lm-eval
 jsonpointer==3.0.0
     # via jsonschema
 jsonschema==4.23.0
@@ -387,7 +384,7 @@ librosa==0.10.2.post1
     # via -r requirements/test/cuda.in
 llvmlite==0.47.0
     # via numba
-lm-eval==0.4.11
+lm-eval==0.4.12
     # via -r requirements/test/cuda.in
 lxml==5.3.0
     # via
@@ -1141,5 +1138,3 @@ yarl==1.17.1
     #   schemathesis
 zipp==3.23.0
     # via importlib-metadata
-zstandard==0.23.0
-    # via lm-eval

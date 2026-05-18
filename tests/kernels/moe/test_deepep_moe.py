@@ -19,7 +19,9 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.fused_batched_moe import BatchedTritonExperts
+from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
+    BatchedTritonExperts,
+)
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
