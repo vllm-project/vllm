@@ -101,7 +101,7 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
                 },
                 {
                     "kv_connector": "MooncakeStoreConnector",
-                    "kv_role": "kv_producer"
+                    "kv_role": "kv_both"
                 }
             ]
         }
