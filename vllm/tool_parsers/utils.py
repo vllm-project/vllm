@@ -450,6 +450,96 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
     return candidate, added_text
 
 
+def _normalize_type(raw_type: str) -> str:
+    """Map a raw type alias to its canonical JSON Schema type name."""
+    t = raw_type.strip().lower()
+    if t in ("string", "str", "text", "varchar", "char", "enum"):
+        return "string"
+    if t.startswith(("int", "uint", "long", "short", "unsigned")):
+        return "integer"
+    if t.startswith(("num", "float")):
+        return "number"
+    if t in ("boolean", "bool", "binary"):
+        return "boolean"
+    if t in ("object",) or t.startswith("dict"):
+        return "object"
+    if t in ("array", "arr", "sequence") or t.startswith("list"):
+        return "array"
+    if t == "null":
+        return "null"
+    return t
+
+
+def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
+    """Best-effort coercion of a raw string value to a JSON Schema type.
+
+    Tries each type in priority order (null > integer > number > boolean >
+    object > array > string) and returns the first successful coercion.
+    Falls back to the original string when no coercion succeeds.
+
+    Args:
+        value: The raw string value from the model output.
+        schema_type: One or more JSON Schema type strings
+            (e.g. ``"string"`` or ``["string", "null"]``).
+            Common aliases (``"int"``, ``"bool"``, ``"varchar"``, …)
+            are normalized internally.
+    """
+    if isinstance(schema_type, str):
+        schema_type = [schema_type]
+
+    normalized_types = {_normalize_type(t) for t in schema_type}
+
+    # Priority: null > integer > number > boolean > object > array > string
+    type_priority = [
+        "null",
+        "integer",
+        "number",
+        "boolean",
+        "object",
+        "array",
+        "string",
+    ]
+
+    for candidate_type in type_priority:
+        if candidate_type not in normalized_types:
+            continue
+
+        if candidate_type == "null":
+            if value.lower() == "null":
+                return None
+            continue
+        if candidate_type == "string":
+            return value
+        if candidate_type == "integer":
+            try:
+                return int(value)
+            except (ValueError, TypeError):
+                continue
+        if candidate_type == "number":
+            try:
+                val = float(value)
+                return val if val != int(val) else int(val)
+            except (ValueError, TypeError):
+                continue
+        if candidate_type == "boolean":
+            lower_val = value.lower().strip()
+            if lower_val in ("true", "1"):
+                return True
+            if lower_val in ("false", "0"):
+                return False
+            continue
+        if candidate_type in ("object", "array"):
+            try:
+                return json.loads(value)
+            except (json.JSONDecodeError, ValueError, TypeError):
+                continue
+
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, ValueError):
+        return value
+
+
 def compute_tool_delta(
     previously_sent_args: str,
     new_call: ToolCall,
