@@ -30,8 +30,6 @@ from mistral_common.tokens.tokenizers.sentencepiece import (
     SentencePieceTokenizer,
 )
 from mistral_common.tokens.tokenizers.tekken import Tekkenizer
-from pydantic import ValidationError
-
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.logger import init_logger
@@ -65,45 +63,6 @@ def _pop_unallowed_keys_and_warn(
                 f"for {err_dict_name}. It has been popped from the "
                 "object."
             )
-
-
-def maybe_serialize_tool_calls(request: "MistralChatCompletionRequest"):
-    # SEE: https://github.com/vllm-project/vllm/pull/9951
-    # Credits go to: @gcalmettes
-    # NOTE: There is currently a bug in pydantic where attributes
-    # declared as iterables are replaced in the instances by
-    # pydantic-core ValidatorIterator instance. In particular, this
-    # affects tool_calls defined in ChatCompletionAssistantMessageParam
-    # model:
-    # see:
-    #   - https://github.com/pydantic/pydantic/issues/9467
-    # As a result, tool_calls from assistant messages are never
-    # deserialized in the request object if the tool_calls iterator is
-    # not consumed. This affect messages passed to the MistralTokenizer
-    # since no chat template is applied and therefore the tools_calls
-    # iterator is not directly consumed.
-    # Issue is tracked on Pydantic side, with resolution planned for
-    # v2.11 release. In the meantime, the official workaround is to
-    # consume the iterator so the tool_calls are correctly deserialized
-    # in the OpenAI ChatCompletionAssistantMessageParam object
-    # https://github.com/pydantic/pydantic/issues/9467#issuecomment-2442097291 # noqa: E501
-    # Official Pydantic Issues:
-    #   - https://github.com/pydantic/pydantic/issues/9541
-    # TODO: remove when pydantic v2.11 is released
-    for i, message in enumerate(request.messages):
-        if message.get("role") == "assistant":
-            if (tool_calls_validator := message.get("tool_calls", None)) is not None:
-                try:
-                    validated_tool_calls = list(tool_calls_validator)
-                except ValidationError as e:
-                    raise ValueError(
-                        "Validating messages' `tool_calls` raised an error. "
-                        "Please ensure `tool_calls` are iterable of tool calls."
-                    ) from e
-            else:
-                validated_tool_calls = []
-
-            request.messages[i]["tool_calls"] = validated_tool_calls
 
 
 def truncate_tool_call_ids(request: "MistralChatCompletionRequest"):
