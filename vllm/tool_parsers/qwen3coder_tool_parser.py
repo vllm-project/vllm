@@ -454,6 +454,16 @@ class Qwen3CoderToolParser(ToolParser):
                 tool_start_idx : tool_end_idx + len(self.tool_call_end_token)
             ]
 
+        # A single delta can deliver multiple phases at once (header +
+        # opening brace + params + closing brace) when stream_interval is
+        # large or speculative decoding bursts many tokens. We accumulate
+        # all phases into one DeltaMessage instead of returning early
+        # after each phase, so a tool call that arrives in one shot is
+        # still streamed with its arguments populated.
+        pending_header_name: str | None = None
+        pending_header_id: str | None = None
+        pending_args = ""
+
         # Looking for function header
         if not self.header_sent:
             if self.tool_call_prefix in tool_text:
@@ -486,20 +496,11 @@ class Qwen3CoderToolParser(ToolParser):
                     # accesses streamed_args_for_tool[index].
                     self.streamed_args_for_tool.append("")
 
-                    # Send header with function info
-                    return DeltaMessage(
-                        tool_calls=[
-                            DeltaToolCall(
-                                index=self.current_tool_index,
-                                id=self.current_tool_id,
-                                function=DeltaFunctionCall(
-                                    name=self.current_function_name, arguments=""
-                                ),
-                                type="function",
-                            )
-                        ]
-                    )
-            return None
+                    pending_header_name = self.current_function_name
+                    pending_header_id = self.current_tool_id
+                    # Fall through to body processing in the same delta.
+            if not self.header_sent:
+                return None
 
         # We've sent header, now handle function body
         if self.in_function:
@@ -511,14 +512,7 @@ class Qwen3CoderToolParser(ToolParser):
             if not self.json_started:
                 self.json_started = True
                 self.streamed_args_for_tool[self.current_tool_index] += "{"
-                return DeltaMessage(
-                    tool_calls=[
-                        DeltaToolCall(
-                            index=self.current_tool_index,
-                            function=DeltaFunctionCall(arguments="{"),
-                        )
-                    ]
-                )
+                pending_args += "{"
 
             # Find all parameter start positions in current tool_text
             param_starts = []
@@ -622,14 +616,7 @@ class Qwen3CoderToolParser(ToolParser):
                         len(self.streamed_args_for_tool),
                     )
 
-                return DeltaMessage(
-                    tool_calls=[
-                        DeltaToolCall(
-                            index=self.current_tool_index,
-                            function=DeltaFunctionCall(arguments=combined),
-                        )
-                    ]
-                )
+                pending_args += combined
 
             # Check for function end AFTER processing parameters.
             # This ordering is critical: with speculative decoding a
@@ -672,21 +659,25 @@ class Qwen3CoderToolParser(ToolParser):
                         len(self.streamed_args_for_tool),
                     )
 
-                result = DeltaMessage(
-                    tool_calls=[
-                        DeltaToolCall(
-                            index=self.current_tool_index,
-                            function=DeltaFunctionCall(arguments="}"),
-                        )
-                    ]
-                )
+                pending_args += "}"
 
                 self.in_function = False
-                self.json_closed = True
                 self.accumulated_params = {}
 
-                return result
-
+        if pending_header_name is not None or pending_args:
+            return DeltaMessage(
+                tool_calls=[
+                    DeltaToolCall(
+                        index=self.current_tool_index,
+                        id=pending_header_id,
+                        function=DeltaFunctionCall(
+                            name=pending_header_name,
+                            arguments=pending_args,
+                        ),
+                        type="function" if pending_header_name else None,
+                    )
+                ]
+            )
         return None
 
     def get_structural_tag(self, request: ChatCompletionRequest):
