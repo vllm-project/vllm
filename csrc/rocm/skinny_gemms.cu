@@ -1218,60 +1218,83 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   const int max_lds_len = get_lds_size() / 2;
 
-#define WVSPLITK_CFG(_THRDS, _WVPRGRP, _YTILE, _UNRL, _N)                     \
+// Like WVSPLITK_CFG but lets the caller pick A_CHUNK. The original macro
+// hard-coded A_CHUNK=8; this is a compatibility-preserving expansion that
+// lets a single dispatch branch select wider/narrower per-thread global
+// loads. Used today by the gfx11 K=2048 N=1 fast path (Qwen3.5 decode):
+// AC=16 with WvPrGrp=32 and UNRL=8 beats the (AC=8, W=16, UN=4) default
+// by ~30% on M ∈ {256, 1024} and ~4% on M=248320.  Reproduce the YT/UN
+// half of the sweep via benchmarks/kernels/sweep_bf16_kernel.py; the
+// A_CHUNK and WvPrGrp axes are not yet exposed by wvSplitK_sweep (TODO:
+// extend the op to 4 axes like wvSplitK_int4g_sweep already does).
+#define WVSPLITK_CFG_AC(_THRDS, _WVPRGRP, _YTILE, _UNRL, _N, _AC)             \
   {                                                                           \
     dim3 block(_THRDS, _WVPRGRP);                                             \
     int __wvPrGrp = mindiv(M_in, CuCount * _YTILE, _WVPRGRP);                 \
     if ((Kbp_in * N_in <= max_lds_len) && (M_in % _YTILE == 0))               \
-      wvSplitK_hf_sml_<fptype, _THRDS, _YTILE, _WVPRGRP, 8, _UNRL, _N>        \
+      wvSplitK_hf_sml_<fptype, _THRDS, _YTILE, _WVPRGRP, _AC, _UNRL, _N>      \
           <<<grid, block, 0, stream>>>(K_in, Kap_in, Kbp_in, M_in, Bx_in,     \
                                        By_in, af4, bf4, biasf4, c, __wvPrGrp, \
                                        CuCount);                              \
     else if (Kbp_in * N_in <= max_lds_len * 1.2)                              \
-      wvSplitK_hf_<fptype, _THRDS, _YTILE, _WVPRGRP, 8, _UNRL, _N>            \
+      wvSplitK_hf_<fptype, _THRDS, _YTILE, _WVPRGRP, _AC, _UNRL, _N>          \
           <<<grid, block, 0, stream>>>(K_in, Kap_in, Kbp_in, M_in, Bx_in,     \
                                        By_in, af4, bf4, biasf4, c, __wvPrGrp, \
                                        CuCount);                              \
     else                                                                      \
-      wvSplitK_hf_big_<fptype, _THRDS, _YTILE, _WVPRGRP, 8, _UNRL, _N>        \
+      wvSplitK_hf_big_<fptype, _THRDS, _YTILE, _WVPRGRP, _AC, _UNRL, _N>      \
           <<<grid, block, 0, stream>>>(K_in, Kap_in, Kbp_in, M_in, Bx_in,     \
                                        By_in, af4, bf4, biasf4, c, __wvPrGrp, \
                                        CuCount);                              \
   }
 
-#define WVSPLIT_TILE_CFG(_THRDS, _WVPRGRP, _sYT, __N)                \
-  {                                                                  \
-    bool fit_lds = (Kbp_in * N_in <= max_lds_len);                   \
-    if (is_gfx11()) {                                                \
-      if (_sYT <= 1)                                                 \
-        WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 4, __N)                    \
-      else if (K_in < 1024)                                          \
-        WVSPLITK_CFG(_THRDS, _WVPRGRP, 2, 4, __N)                    \
-      else if ((K_in % 1024 == 512) && (_sYT >= 40 || K_in >= 4096)) \
-        WVSPLITK_CFG(_THRDS, _WVPRGRP, 4, 1, __N)                    \
-      else if (K_in <= 2048)                                         \
-        WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 4, __N)                    \
-      else if (__N >= 2 && !fit_lds) {                               \
-        if (K_in % 1024 == 0 && Kbp_in < max_lds_len / 2)            \
-          WVSPLITK_CFG(_THRDS, _WVPRGRP, 2, 4, __N)                  \
-        else                                                         \
-          WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 4, __N)                  \
-      } else if (__N == 1)                                           \
-        WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 2, __N)                    \
-      else                                                           \
-        WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 1, __N)                    \
-    } else {                                                         \
-      if (_sYT <= 1)                                                 \
-        WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 4, __N)                    \
-      else if ((__N == 1) || (!fit_lds) || (_sYT <= 4 * 2))          \
-        WVSPLITK_CFG(_THRDS, _WVPRGRP, 2, 2, __N)                    \
-      else if (_sYT <= 4 * 3)                                        \
-        WVSPLITK_CFG(_THRDS, _WVPRGRP, 3, 2, __N)                    \
-      else if (__N == 4)                                             \
-        WVSPLITK_CFG(_THRDS, _WVPRGRP, 4, 1, __N)                    \
-      else                                                           \
-        WVSPLITK_CFG(_THRDS, _WVPRGRP, 4, 2, __N)                    \
-    }                                                                \
+// Backwards-compatible wrapper: existing call sites get A_CHUNK=8.
+#define WVSPLITK_CFG(_THRDS, _WVPRGRP, _YTILE, _UNRL, _N) \
+  WVSPLITK_CFG_AC(_THRDS, _WVPRGRP, _YTILE, _UNRL, _N, 8)
+
+#define WVSPLIT_TILE_CFG(_THRDS, _WVPRGRP, _sYT, __N)                        \
+  {                                                                          \
+    bool fit_lds = (Kbp_in * N_in <= max_lds_len);                           \
+    if (is_gfx11()) {                                                        \
+      if (_sYT <= 1)                                                         \
+        WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 4, __N)                            \
+      else if (K_in < 1024)                                                  \
+        WVSPLITK_CFG(_THRDS, _WVPRGRP, 2, 4, __N)                            \
+      else if ((K_in % 1024 == 512) && (_sYT >= 40 || K_in >= 4096))         \
+        WVSPLITK_CFG(_THRDS, _WVPRGRP, 4, 1, __N)                            \
+      else if ((K_in == 2048) && (__N == 1))                                 \
+        /* Tuned for gfx1151 (Qwen3.5 decode shapes M ∈ {256, 1024,        \
+           248320}, K=2048, N=1): beats the (AC=8, W=16, UN=4) baseline of   \
+           the K_in<=2048 branch below by 1.31-1.37x on small/mid M and 3.9% \
+           on the lm_head-sized M.  Compiles to 145 VGPRs / occupancy 9 (vs  \
+           46 / 8 for the default); zero spills.  VGPR-bound but DRAM-       \
+           saturated past 92% of LPDDR5X peak after subtracting the per-     \
+           launch dispatch floor.  Verify per shape with                     \
+           benchmarks/kernels/sweep_bf16_kernel.py. */                       \
+        WVSPLITK_CFG_AC(32, 32, 1, 8, __N, 16)                               \
+      else if (K_in <= 2048)                                                 \
+        WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 4, __N)                            \
+      else if (__N >= 2 && !fit_lds) {                                       \
+        if (K_in % 1024 == 0 && Kbp_in < max_lds_len / 2)                    \
+          WVSPLITK_CFG(_THRDS, _WVPRGRP, 2, 4, __N)                          \
+        else                                                                 \
+          WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 4, __N)                          \
+      } else if (__N == 1)                                                   \
+        WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 2, __N)                            \
+      else                                                                   \
+        WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 1, __N)                            \
+    } else {                                                                 \
+      if (_sYT <= 1)                                                         \
+        WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 4, __N)                            \
+      else if ((__N == 1) || (!fit_lds) || (_sYT <= 4 * 2))                  \
+        WVSPLITK_CFG(_THRDS, _WVPRGRP, 2, 2, __N)                            \
+      else if (_sYT <= 4 * 3)                                                \
+        WVSPLITK_CFG(_THRDS, _WVPRGRP, 3, 2, __N)                            \
+      else if (__N == 4)                                                     \
+        WVSPLITK_CFG(_THRDS, _WVPRGRP, 4, 1, __N)                            \
+      else                                                                   \
+        WVSPLITK_CFG(_THRDS, _WVPRGRP, 4, 2, __N)                            \
+    }                                                                        \
   }
 
 #define WVSPLIT_TILE(_sYT, __N)                                      \
