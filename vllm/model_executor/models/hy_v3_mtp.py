@@ -264,6 +264,10 @@ class HYV3MTP(nn.Module):
         return torch.concat((q, k, v))
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+        if self.quant_config is not None and (
+            cache_scale_mapper := self.quant_config.get_cache_scale_mapper()
+        ):
+            weights = cache_scale_mapper.apply(weights)
         cla_factor = _get_cla_factor(self.config)
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -335,14 +339,6 @@ class HYV3MTP(nn.Module):
             if "rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name:
                 continue
             if self.config.tie_word_embeddings and "lm_head.weight" in name:
-                continue
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)
-            ):
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                loaded_weight = loaded_weight[0]
-                weight_loader(param, loaded_weight)
                 continue
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is None:

@@ -386,16 +386,6 @@ class Jais2Model(nn.Module):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)
-            ):
-                # Loading kv cache scales for compressed-tensors quantization
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                loaded_weight = loaded_weight[0]
-                weight_loader(param, loaded_weight)
-                loaded_params.add(scale_name)
-                continue
             if "scale" in name:
                 name = maybe_remap_kv_scale_name(name, params_dict)
                 if name is None:
