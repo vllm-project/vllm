@@ -137,7 +137,9 @@ class PassConfig:
     fuse_minimax_qk_norm: bool = None  # type: ignore[assignment]
     """Enable fused allreduce+RMSNorm for MiniMax QK norm."""
     enable_qk_norm_rope_fusion: bool = None  # type: ignore[assignment]
-    """Enable fused Q/K RMSNorm + RoPE pass."""
+    """Fuse Q/K RMSNorm + RoPE into single kernel (ROCm-only).
+    Set via VLLM_ENABLE_QKNORM_ROPE_FUSION or auto-enabled with AITER.
+    """
     fuse_rope_kvcache_cat_mla: bool = None  # type: ignore[assignment]
     """Enable fused MLA KV cache update with RoPE."""
 
@@ -243,6 +245,21 @@ class PassConfig:
     def __post_init__(self) -> None:
         # Handle deprecation and defaults
 
+        # Initialize enable_qk_norm_rope_fusion from environment if not explicitly set
+        if self.enable_qk_norm_rope_fusion is None:
+            import vllm.envs as envs
+
+            # Only enable on ROCm if env var is set
+            if current_platform.is_rocm() and envs.VLLM_ENABLE_QKNORM_ROPE_FUSION:
+                self.enable_qk_norm_rope_fusion = True
+                logger.info_once(
+                    "QK-Norm+RoPE fusion enabled via VLLM_ENABLE_QKNORM_ROPE_FUSION "
+                    "environment variable (ROCm)",
+                    scope="global",
+                )
+            else:
+                self.enable_qk_norm_rope_fusion = False
+
         if not self.eliminate_noops:
             if self.fuse_norm_quant or self.fuse_act_quant:
                 logger.warning_once(
@@ -264,12 +281,18 @@ class PassConfig:
                     "Fusion enabled but reshape elimination disabled. "
                     "RMSNorm + padding fusion might not work"
                 )
-        if self.enable_qk_norm_rope_fusion and not current_platform.is_cuda_alike():
-            logger.warning_once(
-                "QK Norm + RoPE fusion enabled but the current platform is not "
-                "CUDA or ROCm. The fusion will be disabled."
-            )
-            self.enable_qk_norm_rope_fusion = False
+        # Enforce ROCm-only restriction for QK-Norm+RoPE fusion
+        if self.enable_qk_norm_rope_fusion:
+            if not current_platform.is_rocm():
+                logger.warning_once(
+                    "QK Norm + RoPE fusion is only supported on AMD/ROCm hardware. "
+                    "The fusion will be disabled."
+                )
+                self.enable_qk_norm_rope_fusion = False
+            else:
+                logger.info_once(
+                    "QK-Norm+RoPE fusion enabled for ROCm hardware", scope="global"
+                )
         if self.fuse_act_padding and not current_platform.is_rocm():
             logger.warning_once(
                 "Padding fusion enabled but the current platform is not ROCm. "
