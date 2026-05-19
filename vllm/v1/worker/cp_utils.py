@@ -25,22 +25,31 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
             if vllm_config.speculative_config is not None and interleave_size > 1:
                 assert layer_impl.supports_mtp_with_cp_non_trivial_interleave_size, (
                     "MTP with cp_kv_cache_interleave_size > 1 is not "
-                    f"supported in {layer_impl.__class__.__name__}."
+                    f"supported in {layer_impl.__class__.__name__}. "
+                    "Try setting --speculative-config '{\"num_speculative_tokens\": 0}' "
+                    "to disable speculative decoding, or use a backend that supports "
+                    "MTP with CP interleaving."
                 )
             if dcp_size > 1:
                 assert layer_impl.need_to_return_lse_for_decode, (
                     "Decode Context Parallelism (DCP) requires attention "
                     "implementations to return the softmax LSE during decode, "
-                    f"but {layer_impl.__class__.__name__} does not. "
-                    "Try a different backend by setting "
-                    "--attention-backend or disable DCP."
+                    f"but {layer_impl.__class__.__name__} does not.\n"
+                    "DCP-compatible backends: FLASH_ATTN, FLASHINFER, "
+                    "FLASH_ATTN_MLA, FLASHMLA, TRITON_MLA, CUTLASS_MLA.\n"
+                    "Switch via --attention-backend <backend> or the "
+                    "VLLM_ATTENTION_BACKEND environment variable, "
+                    "or disable DCP by setting --decode-context-parallel-size 0."
                 )
 
             if pcp_size > 1:
                 assert layer_impl.supports_pcp, (
-                    "PCP requires attention impls' support, "
-                    f"but the impl {layer_impl.__class__.__name__} "
-                    "does not support PCP."
+                    "Prefill Context Parallelism (PCP) requires attention "
+                    f"implementation support, but {layer_impl.__class__.__name__} "
+                    "does not support PCP.\n"
+                    "Switch via --attention-backend <backend> or the "
+                    "VLLM_ATTENTION_BACKEND environment variable, "
+                    "or disable PCP by setting --prefill-context-parallel-size 0."
                 )
 
 
