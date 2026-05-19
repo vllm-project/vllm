@@ -138,6 +138,9 @@ _tf32_hc_prenorm_gemm_impl: Callable[..., Any] | None = None
 _get_mn_major_tma_aligned_tensor_impl: Callable[..., Any] | None = None
 _get_mk_alignment_for_contiguous_layout_impl: Callable[..., Any] | None = None
 _transform_sf_into_required_layout_impl: Callable[..., Any] | None = None
+_transform_weights_for_mega_moe_impl: Callable[..., Any] | None = None
+_get_symm_buffer_for_mega_moe_impl: Callable[..., Any] | None = None
+_fp8_fp4_mega_moe_impl: Callable[..., Any] | None = None
 
 
 @functools.cache
@@ -187,6 +190,8 @@ def _lazy_init() -> None:
     global _get_mn_major_tma_aligned_tensor_impl
     global _get_mk_alignment_for_contiguous_layout_impl
     global _transform_sf_into_required_layout_impl
+    global _transform_weights_for_mega_moe_impl
+    global _get_symm_buffer_for_mega_moe_impl, _fp8_fp4_mega_moe_impl
     # fast path
     if (
         _cublaslt_gemm_nt_impl is not None
@@ -201,6 +206,9 @@ def _lazy_init() -> None:
         or _tf32_hc_prenorm_gemm_impl is not None
         or _get_mk_alignment_for_contiguous_layout_impl is not None
         or _transform_sf_into_required_layout_impl is not None
+        or _transform_weights_for_mega_moe_impl is not None
+        or _get_symm_buffer_for_mega_moe_impl is not None
+        or _fp8_fp4_mega_moe_impl is not None
     ):
         return
 
@@ -241,6 +249,13 @@ def _lazy_init() -> None:
     _transform_sf_into_required_layout_impl = getattr(
         _dg, "transform_sf_into_required_layout", None
     )
+    _transform_weights_for_mega_moe_impl = getattr(
+        _dg, "transform_weights_for_mega_moe", None
+    )
+    _get_symm_buffer_for_mega_moe_impl = getattr(
+        _dg, "get_symm_buffer_for_mega_moe", None
+    )
+    _fp8_fp4_mega_moe_impl = getattr(_dg, "fp8_fp4_mega_moe", None)
     DeepGemmQuantScaleFMT.init_oracle_cache()
 
 
@@ -337,6 +352,27 @@ def transform_sf_into_required_layout(*args, **kwargs):
     return _transform_sf_into_required_layout_impl(
         *args, disable_ue8m0_cast=not is_deep_gemm_e8m0_used(), **kwargs
     )
+
+
+def transform_weights_for_mega_moe(*args, **kwargs):
+    _lazy_init()
+    if _transform_weights_for_mega_moe_impl is None:
+        return _missing(*args, **kwargs)
+    return _transform_weights_for_mega_moe_impl(*args, **kwargs)
+
+
+def get_symm_buffer_for_mega_moe(*args, **kwargs):
+    _lazy_init()
+    if _get_symm_buffer_for_mega_moe_impl is None:
+        return _missing(*args, **kwargs)
+    return _get_symm_buffer_for_mega_moe_impl(*args, **kwargs)
+
+
+def fp8_fp4_mega_moe(*args, **kwargs):
+    _lazy_init()
+    if _fp8_fp4_mega_moe_impl is None:
+        return _missing(*args, **kwargs)
+    return _fp8_fp4_mega_moe_impl(*args, **kwargs)
 
 
 def fp8_fp4_mqa_topk_indices(
