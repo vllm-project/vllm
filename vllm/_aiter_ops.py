@@ -90,7 +90,7 @@ def is_aiter_found_and_supported() -> bool:
     VLLM_ROCM_USE_AITER=0, while preventing unwanted JIT warnings for auto-discovery.
     """
     if current_platform.is_rocm() and IS_AITER_FOUND:
-        from vllm.platforms.rocm import on_mi3xx, on_gfx12x
+        from vllm.platforms.rocm import on_gfx12x, on_mi3xx
 
         return on_mi3xx() or on_gfx12x()
     return False
@@ -142,16 +142,6 @@ def arch_only(*arch_preds: Callable[[], bool]) -> Callable[[Callable], Callable]
     (e.g. `on_mi3xx`, `on_gfx950`, `on_gfx12x`). They are imported lazily at
     call site to avoid pulling `vllm.platforms.rocm` into the import graph of
     code that doesn't need it.
-
-    Composes with `@if_aiter_supported` (which gates on the aiter package
-    being importable and the platform being a supported ROCm arch). The
-    canonical decorator order at a call site is:
-
-        @classmethod
-        @if_aiter_supported     # 1. is aiter available on this platform at all?
-        @arch_only(on_mi3xx)    # 2. is the running arch in the allowed set?
-        def is_foo_enabled(cls):
-            ...                  # 3. env var / config sub-check
     """
     assert arch_preds, "arch_only() requires at least one predicate"
 
@@ -168,9 +158,6 @@ def arch_only(*arch_preds: Callable[[], bool]) -> Callable[[Callable], Callable]
 
 
 def _on_mi3xx() -> bool:
-    # Deferred re-export so the arch predicates can be referenced as decorator
-    # arguments without a top-level `from vllm.platforms.rocm import ...`
-    # (which would risk an import cycle in some bootstrap orders).
     from vllm.platforms.rocm import on_mi3xx
 
     return on_mi3xx()
