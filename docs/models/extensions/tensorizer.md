@@ -14,7 +14,7 @@ To install `tensorizer`, run `pip install vllm[tensorizer]`.
 ## The basics
 
 To load a model using Tensorizer, the model first needs to be serialized by
-Tensorizer. [The example script](../../examples/others/tensorize_vllm_model.md) takes care of this process.
+Tensorizer. [The example script](../../../examples/features/tensorize_vllm_model.py) takes care of this process.
 
 Let's walk through a basic example by serializing `facebook/opt-125m` using the script, and then loading it for inference.
 
@@ -25,7 +25,7 @@ CLI arguments. The docstring for the script itself explains the CLI args
 and how to use it properly in great detail, and we'll use one of the examples from the docstring directly, assuming we want to serialize and save our model at our S3 bucket example `s3://my-bucket`:
 
 ```bash
-python examples/others/tensorize_vllm_model.py \
+python examples/features/tensorize_vllm_model.py \
    --model facebook/opt-125m \
    serialize \
    --serialized-directory s3://my-bucket \
@@ -35,7 +35,7 @@ python examples/others/tensorize_vllm_model.py \
 This saves the model tensors at `s3://my-bucket/vllm/facebook/opt-125m/v1`. If you intend on applying a LoRA adapter to your tensorized model, you can pass the HF id of the LoRA adapter in the above command, and the artifacts will be saved there too:
 
 ```bash
-python examples/others/tensorize_vllm_model.py \
+python examples/features/tensorize_vllm_model.py \
    --model facebook/opt-125m \
    --lora-path <lora_id> \
    serialize \
@@ -71,7 +71,7 @@ llm = LLM(
 As an example, CPU concurrency can be limited when serializing with `tensorizer` via the `limit_cpu_concurrency` parameter in the initializer for `TensorSerializer`. To set `limit_cpu_concurrency` to some arbitrary value, you would do so like this when serializing:
 
 ```bash
-python examples/others/tensorize_vllm_model.py \
+python examples/features/tensorize_vllm_model.py \
    --model facebook/opt-125m \
    --lora-path <lora_id> \
    serialize \

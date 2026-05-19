@@ -389,7 +389,7 @@ class TestIPCWeightTransferUpdateInfoValidation:
 
         # Create a dummy tensor and IPC handle
         dummy_tensor = torch.ones(10, 10, device="cuda:0")
-        ipc_handle = reduce_tensor(dummy_tensor)
+        _, ipc_handle = reduce_tensor(dummy_tensor)
         gpu_uuid = str(torch.cuda.get_device_properties(0).uuid)
         ipc_handles = [{gpu_uuid: ipc_handle}]
 
@@ -410,7 +410,7 @@ class TestIPCWeightTransferUpdateInfoValidation:
             pytest.skip("Need at least 1 GPU for this test")
 
         dummy_tensor = torch.ones(10, 10, device="cuda:0")
-        ipc_handle = reduce_tensor(dummy_tensor)
+        _, ipc_handle = reduce_tensor(dummy_tensor)
         gpu_uuid = str(torch.cuda.get_device_properties(0).uuid)
         ipc_handles = [{gpu_uuid: ipc_handle}, {gpu_uuid: ipc_handle}]
 
@@ -428,7 +428,7 @@ class TestIPCWeightTransferUpdateInfoValidation:
             pytest.skip("Need at least 1 GPU for this test")
 
         dummy_tensor = torch.ones(10, 10, device="cuda:0")
-        ipc_handle = reduce_tensor(dummy_tensor)
+        _, ipc_handle = reduce_tensor(dummy_tensor)
         gpu_uuid = str(torch.cuda.get_device_properties(0).uuid)
         ipc_handles = [{gpu_uuid: ipc_handle}, {gpu_uuid: ipc_handle}]
 
@@ -446,7 +446,7 @@ class TestIPCWeightTransferUpdateInfoValidation:
             pytest.skip("Need at least 1 GPU for this test")
 
         dummy_tensor = torch.ones(10, 10, device="cuda:0")
-        ipc_handle = reduce_tensor(dummy_tensor)
+        _, ipc_handle = reduce_tensor(dummy_tensor)
         gpu_uuid = str(torch.cuda.get_device_properties(0).uuid)
         ipc_handles = [{gpu_uuid: ipc_handle}]  # Only one handle
 
@@ -458,65 +458,9 @@ class TestIPCWeightTransferUpdateInfoValidation:
                 ipc_handles=ipc_handles,
             )
 
-    def test_valid_update_info_from_pickled(self, monkeypatch):
-        """Test creating IPCWeightTransferUpdateInfo from pickled handles."""
-        if torch.accelerator.device_count() < 1:
-            pytest.skip("Need at least 1 GPU for this test")
-
-        monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
-
-        dummy_tensor = torch.ones(10, 10, device="cuda:0")
-        ipc_handle = reduce_tensor(dummy_tensor)
-        gpu_uuid = str(torch.cuda.get_device_properties(0).uuid)
-        ipc_handles = [{gpu_uuid: ipc_handle}]
-
-        pickled = base64.b64encode(pickle.dumps(ipc_handles)).decode("utf-8")
-
-        info = IPCWeightTransferUpdateInfo(
-            names=["layer.weight"],
-            dtype_names=["float32"],
-            shapes=[[10, 10]],
-            ipc_handles_pickled=pickled,
-        )
-        assert info.ipc_handles == ipc_handles
-        assert info.ipc_handles_pickled is None
-
-    def test_pickled_requires_insecure_serialization_flag(self, monkeypatch):
-        """Test that pickled handles are rejected unless env flag is enabled."""
-        monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "0")
-
-        with pytest.raises(ValueError, match="VLLM_ALLOW_INSECURE_SERIALIZATION=1"):
-            IPCWeightTransferUpdateInfo(
-                names=[],
-                dtype_names=[],
-                shapes=[],
-                ipc_handles_pickled=base64.b64encode(pickle.dumps([])).decode("utf-8"),
-            )
-
-    def test_both_handles_and_pickled_raises(self):
-        """Test that providing both ipc_handles and ipc_handles_pickled raises."""
-        if torch.accelerator.device_count() < 1:
-            pytest.skip("Need at least 1 GPU for this test")
-
-        dummy_tensor = torch.ones(10, 10, device="cuda:0")
-        ipc_handle = reduce_tensor(dummy_tensor)
-        gpu_uuid = str(torch.cuda.get_device_properties(0).uuid)
-        ipc_handles = [{gpu_uuid: ipc_handle}]
-
-        pickled = base64.b64encode(pickle.dumps(ipc_handles)).decode("utf-8")
-
-        with pytest.raises(ValueError, match="Cannot specify both"):
-            IPCWeightTransferUpdateInfo(
-                names=["layer.weight"],
-                dtype_names=["float32"],
-                shapes=[[10, 10]],
-                ipc_handles=ipc_handles,
-                ipc_handles_pickled=pickled,
-            )
-
-    def test_neither_handles_nor_pickled_raises(self):
-        """Test that providing neither ipc_handles nor ipc_handles_pickled raises."""
-        with pytest.raises(ValueError, match="must be provided"):
+    def test_missing_ipc_handles_raises(self):
+        """Test that omitting ipc_handles raises TypeError."""
+        with pytest.raises(TypeError):
             IPCWeightTransferUpdateInfo(
                 names=["layer.weight"],
                 dtype_names=["float32"],
@@ -552,10 +496,10 @@ class TestIPCEngineParsing:
         # Create dummy IPC handles
         dummy_tensor1 = torch.ones(100, 100, device="cuda:0")
         dummy_tensor2 = torch.ones(50, device="cuda:0")
-        ipc_handle1 = reduce_tensor(dummy_tensor1)
-        ipc_handle2 = reduce_tensor(dummy_tensor2)
+        _, ipc_args1 = reduce_tensor(dummy_tensor1)
+        _, ipc_args2 = reduce_tensor(dummy_tensor2)
         gpu_uuid = str(torch.cuda.get_device_properties(0).uuid)
-        ipc_handles = [{gpu_uuid: ipc_handle1}, {gpu_uuid: ipc_handle2}]
+        ipc_handles = [{gpu_uuid: ipc_args1}, {gpu_uuid: ipc_args2}]
 
         update_info = engine.parse_update_info(
             {
@@ -585,10 +529,10 @@ class TestIPCEngineParsing:
 
         dummy_tensor1 = torch.ones(100, 100, device="cuda:0")
         dummy_tensor2 = torch.ones(50, device="cuda:0")
-        ipc_handle1 = reduce_tensor(dummy_tensor1)
-        ipc_handle2 = reduce_tensor(dummy_tensor2)
+        _, ipc_args1 = reduce_tensor(dummy_tensor1)
+        _, ipc_args2 = reduce_tensor(dummy_tensor2)
         gpu_uuid = str(torch.cuda.get_device_properties(0).uuid)
-        ipc_handles = [{gpu_uuid: ipc_handle1}, {gpu_uuid: ipc_handle2}]
+        ipc_handles = [{gpu_uuid: ipc_args1}, {gpu_uuid: ipc_args2}]
 
         pickled = base64.b64encode(pickle.dumps(ipc_handles)).decode("utf-8")
 
@@ -604,9 +548,35 @@ class TestIPCEngineParsing:
         assert isinstance(update_info, IPCWeightTransferUpdateInfo)
         assert update_info.names == ["w1", "w2"]
         assert len(update_info.ipc_handles) == 2
-        assert update_info.ipc_handles_pickled is None
         assert gpu_uuid in update_info.ipc_handles[0]
         assert gpu_uuid in update_info.ipc_handles[1]
+
+    def test_parse_update_info_both_handles_and_pickled_raises(self):
+        """Test that providing both ipc_handles and ipc_handles_pickled raises."""
+        if torch.accelerator.device_count() < 1:
+            pytest.skip("Need at least 1 GPU for this test")
+
+        config = WeightTransferConfig(backend="ipc")
+        parallel_config = create_mock_parallel_config()
+        engine = IPCWeightTransferEngine(config, parallel_config)
+
+        dummy_tensor = torch.ones(10, 10, device="cuda:0")
+        _, ipc_handle = reduce_tensor(dummy_tensor)
+        gpu_uuid = str(torch.cuda.get_device_properties(0).uuid)
+        ipc_handles = [{gpu_uuid: ipc_handle}]
+
+        pickled = base64.b64encode(pickle.dumps(ipc_handles)).decode("utf-8")
+
+        with pytest.raises(ValueError, match="Cannot specify both"):
+            engine.parse_update_info(
+                {
+                    "names": ["layer.weight"],
+                    "dtype_names": ["float32"],
+                    "shapes": [[10, 10]],
+                    "ipc_handles": ipc_handles,
+                    "ipc_handles_pickled": pickled,
+                }
+            )
 
 
 # --- Integration Test: IPC Weight Transfer Between Ray Tasks ---
@@ -629,13 +599,15 @@ class TrainerActor:
         self.tensor.fill_(42.0)  # Fill with 42 to verify correct transfer
 
         # Create IPC handle (tensor must stay alive for IPC to work)
-        ipc_handle = reduce_tensor(self.tensor)
+        # reduce_tensor returns (rebuild_func, args); we only send args
+        # since the receiver imports rebuild_cuda_tensor directly.
+        _, ipc_args = reduce_tensor(self.tensor)
         gpu_uuid = get_physical_gpu_id(0)
 
         torch.accelerator.synchronize()
 
         self.ipc_handle_dict = {
-            "ipc_handle": ipc_handle,
+            "ipc_handle": ipc_args,
             "gpu_uuid": gpu_uuid,
             "shape": tensor_shape,
             "dtype": tensor_dtype,
@@ -652,6 +624,12 @@ def inference_receive_ipc_tensor(
     mode: str = "ray",
 ) -> dict:
     """Inference task that receives tensor via IPCWeightTransferEngine."""
+    import os
+
+    # Worker-side: ipc_handles_pickled is deserialized via pickle.
+    if mode == "http":
+        os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
+
     from unittest.mock import MagicMock
 
     import torch
@@ -684,7 +662,6 @@ def inference_receive_ipc_tensor(
             # Clone tensor to keep it after engine cleans up
             received_tensors.append((name, tensor.clone()))
 
-    # Build update dict and go through parse_update_info (exercises __post_init__)
     ipc_handles = [{ipc_handle_dict["gpu_uuid"]: ipc_handle_dict["ipc_handle"]}]
 
     if mode == "ray":
@@ -695,6 +672,7 @@ def inference_receive_ipc_tensor(
             "ipc_handles": ipc_handles,
         }
     elif mode == "http":
+        # Simulate HTTP transport: pickle + base64 encode handles
         pickled = base64.b64encode(pickle.dumps(ipc_handles)).decode("utf-8")
         update_dict = {
             "names": ["test.weight"],
@@ -743,7 +721,8 @@ def test_ipc_weight_transfer_between_processes(mode: str):
 
     Parametrized over transport modes:
     - 'ray':  ipc_handles passed directly.
-    - 'http': ipc_handles pickled + base64-encoded, unpickled via __post_init__.
+    - 'http': ipc_handles pickled + base64-encoded, deserialized in
+              parse_update_info before constructing the dataclass.
 
     IPC requires same-GPU access, so we use a placement group to co-locate
     the trainer actor and inference task on the same GPU.
@@ -801,7 +780,7 @@ def test_ipc_receive_weights_missing_gpu_uuid_raises():
 
     # Create IPC handle with wrong GPU UUID
     dummy_tensor = torch.ones(10, 10, device="cuda:0")
-    ipc_handle = reduce_tensor(dummy_tensor)
+    _, ipc_handle = reduce_tensor(dummy_tensor)
     wrong_uuid = "wrong-uuid-12345"
     ipc_handles = [{wrong_uuid: ipc_handle}]
 
