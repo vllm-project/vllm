@@ -25,6 +25,12 @@ The score models is designed to compute similarity scores between two input prom
 !!! note
     Only when a classification model outputs num_labels equal to 1 can it be used as a scoring model and have its scoring API enabled.
 
+### Score Types
+
+The three supported scoring functions are as illustrated in the figure below.
+
+![Score Types](../../assets/models/pooling_models/score_types.svg)
+
 ## Supported Models
 
 ### Cross-encoder models
