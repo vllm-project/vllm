@@ -55,15 +55,15 @@ logger = init_logger(__name__)
 # ---------------------------------------------------------------------------
 
 # Matches a single complete Python-style function call at the start of a line.
-# Group 1 → function name  (e.g. "get_weather")
-# Group 2 → raw argument string inside the parentheses
+# Group 1 -> function name  (e.g. "get_weather")
+# Group 2 -> raw argument string inside the parentheses
 _CALL_RE = re.compile(
     r"^([A-Za-z_][A-Za-z0-9_]*)\((.*)\)\s*$",
     re.DOTALL,
 )
 
 # Lookahead: a line *looks* like it might be a function call (partial match
-# during streaming — we see the opening paren but not the closing one yet).
+# during streaming -- we see the opening paren but not the closing one yet).
 _PARTIAL_CALL_RE = re.compile(
     r"^([A-Za-z_][A-Za-z0-9_]*)\(",
     re.DOTALL,
@@ -95,7 +95,7 @@ def _parse_kwargs(raw_args: str) -> dict[str, Any]:
         kwargs: dict[str, Any] = {}
         for keyword in call_node.keywords:
             if keyword.arg is None:
-                # **kwargs spread — skip; not expected from Granite
+                # **kwargs spread -- skip; not expected from Granite
                 continue
             kwargs[keyword.arg] = ast.literal_eval(keyword.value)
         return kwargs
@@ -135,19 +135,21 @@ class GranitePythonicToolParser(ToolParser):
     with ``type="function"`` and a JSON-serialised ``arguments`` string.
 
     Multiple consecutive tool calls (one per line) are supported.
-    Lines that do not look like function calls are returned as plain ``content``.
+    Lines that do not look like function calls are returned as plain
+    ``content``.
     """
 
     def __init__(
         self,
-        tokenizer,  # TokenizerLike — kept untyped to avoid circular import
+        tokenizer,  # TokenizerLike -- kept untyped to avoid circular import
         tools: list[Tool] | None = None,
     ) -> None:
         super().__init__(tokenizer, tools)
+        # _stream_buffer holds incomplete lines during streaming.
+        # Base class provides: current_tool_id, streamed_args_for_tool,
+        # prev_tool_call_arr -- we use those directly instead of private
+        # duplicates so the rest of the vLLM serving layer stays in sync.
         self._stream_buffer: str = ""
-        self._current_tool_id: int = -1
-        self._streamed_args: list[str] = []
-        self._prev_tool_calls: list[dict[str, Any]] = []
 
     # ------------------------------------------------------------------
     # Batch (non-streaming) extraction
@@ -158,7 +160,12 @@ class GranitePythonicToolParser(ToolParser):
         model_output: str,
         request: ChatCompletionRequest,
     ) -> ExtractedToolCallInformation:
-        """Parse a complete (non-streaming) model response."""
+        """Parse a complete (non-streaming) model response.
+
+        This method is intentionally **stateless**: it does not mutate any
+        instance attributes so it is safe to call multiple times on the
+        same parser instance without side-effects.
+        """
         result = ExtractedToolCallInformation(
             tools_called=False,
             tool_calls=[],
@@ -180,9 +187,9 @@ class GranitePythonicToolParser(ToolParser):
                         ),
                     )
                     tool_calls.append(tc)
-                    self._prev_tool_calls.append(
-                        {"name": func_name, "arguments": json_args}
-                    )
+                    # Do NOT mutate self.prev_tool_call_arr here -- batch
+                    # extraction is stateless; streaming state is managed
+                    # separately in _process_line.
                 else:
                     text_lines.append(raw_line)
 
@@ -219,12 +226,16 @@ class GranitePythonicToolParser(ToolParser):
         line (ending with ``\\n``) or the stream ends.  Each complete line
         is tested against ``_CALL_RE``:
 
-        * **Match** → emit a ``DeltaToolCall``.
-        * **No match** → emit the line as ``content``.
+        * **Match** -> emit a ``DeltaToolCall``.
+        * **No match** -> emit the line as ``content``.
 
         A *partial* line that looks like the start of a function call
         (``name(``) is held in the buffer so we don't accidentally emit
         it as plain text before the closing ``)`` arrives.
+
+        If the buffer holds a **complete** call without a trailing newline
+        (i.e. the model finished generating without appending ``\\n``),
+        it is flushed immediately rather than waiting forever.
         """
         try:
             self._stream_buffer += delta_text
@@ -232,17 +243,22 @@ class GranitePythonicToolParser(ToolParser):
             content_parts: list[str] = []
             delta_tool_calls: list[DeltaToolCall] = []
 
-            # Process complete lines first
+            # Process complete newline-terminated lines first.
             while "\n" in self._stream_buffer:
                 line, self._stream_buffer = self._stream_buffer.split("\n", 1)
                 self._process_line(line, content_parts, delta_tool_calls)
 
-            # Flush the remaining buffer if it cannot possibly be a call start
+            # Flush the remaining buffer when:
+            #   (a) it is already a complete, parseable tool call, OR
+            #   (b) it cannot possibly be the start of a call.
+            # This handles models that finish a tool call without a trailing
+            # newline (e.g. get_weather(city="London") at EOS).
             remainder = self._stream_buffer
-            if remainder and not _PARTIAL_CALL_RE.match(remainder.strip()):
-                # Doesn't look like the start of a call — emit as content
-                self._process_line(remainder, content_parts, delta_tool_calls)
-                self._stream_buffer = ""
+            if remainder:
+                if (_try_parse_call(remainder) is not None
+                        or not _PARTIAL_CALL_RE.match(remainder.strip())):
+                    self._process_line(remainder, content_parts, delta_tool_calls)
+                    self._stream_buffer = ""
 
             content = "".join(content_parts) or None
             msg = DeltaMessage(
@@ -263,20 +279,25 @@ class GranitePythonicToolParser(ToolParser):
         content_parts: list[str],
         delta_tool_calls: list[DeltaToolCall],
     ) -> None:
-        """Classify *line* and append to the appropriate output list."""
+        """Classify *line* and append to the appropriate output list.
+
+        Uses base-class attributes (``current_tool_id``,
+        ``streamed_args_for_tool``, ``prev_tool_call_arr``) so the vLLM
+        serving layer remains consistent.
+        """
         parsed = _try_parse_call(line)
         if parsed is not None:
             func_name, json_args = parsed
-            self._current_tool_id += 1
-            self._streamed_args.append(json_args)
-            self._prev_tool_calls.append(
+            self.current_tool_id += 1
+            self.streamed_args_for_tool.append(json_args)
+            self.prev_tool_call_arr.append(
                 {"name": func_name, "arguments": json_args}
             )
             delta_tool_calls.append(
                 DeltaToolCall(
                     id=make_tool_call_id(),
                     type="function",
-                    index=self._current_tool_id,
+                    index=self.current_tool_id,
                     function=DeltaFunctionCall(
                         name=func_name,
                         arguments=json_args,
