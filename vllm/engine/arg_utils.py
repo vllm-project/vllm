@@ -607,6 +607,9 @@ class EngineArgs:
     reasoning_parser_plugin: str | None = None
 
     speculative_config: dict[str, Any] | None = None
+    spec_method: str | None = None
+    spec_model: str | None = None
+    spec_tokens: int | None = None
 
     show_hidden_metrics_for_version: str | None = (
         ObservabilityConfig.show_hidden_metrics_for_version
@@ -1435,6 +1438,12 @@ class EngineArgs:
         vllm_group.add_argument(
             "--speculative-config", "-sc", **vllm_kwargs["speculative_config"]
         )
+        speculative_kwargs = get_kwargs(SpeculativeConfig)
+        vllm_group.add_argument("--spec-method", **speculative_kwargs["method"])
+        vllm_group.add_argument("--spec-model", **speculative_kwargs["model"])
+        vllm_group.add_argument(
+            "--spec-tokens", **speculative_kwargs["num_speculative_tokens"]
+        )
         vllm_group.add_argument(
             "--kv-transfer-config", **vllm_kwargs["kv_transfer_config"]
         )
@@ -1634,6 +1643,21 @@ class EngineArgs:
         """Initializes and returns a SpeculativeConfig object based on
         `speculative_config`.
         """
+        for flag, key, value in (
+            ("--spec-method", "method", self.spec_method),
+            ("--spec-model", "model", self.spec_model),
+            ("--spec-tokens", "num_speculative_tokens", self.spec_tokens),
+        ):
+            if value is None:
+                continue
+            if self.speculative_config is None:
+                self.speculative_config = {}
+            if key in self.speculative_config:
+                raise ValueError(
+                    f"{flag} and --speculative-config['{key}'] are mutually exclusive"
+                )
+            self.speculative_config[key] = value
+
         if self.speculative_config is None:
             return None
 
