@@ -101,7 +101,7 @@ def parse_shape(s):
     return (int(parts[0]), int(parts[1]), s)
 
 
-def run_sweep(shapes, batch_sizes, warmup, rep, medium_only=False):
+def run_sweep(shapes, batch_sizes, warmup, rep, csv_path, medium_only=False):
     cu_count = get_cu_count()
     gpu_name = torch.cuda.get_device_name(0)
     dtype = torch.float16
@@ -127,8 +127,6 @@ def run_sweep(shapes, batch_sizes, warmup, rep, medium_only=False):
     print(f"warmup={warmup}, rep={rep}")
     print()
 
-    suffix = "_medium" if medium_only else ""
-    csv_path = f"/scratch/mgehre/tmp/int4g128_sweep{suffix}_results.csv"
     csv_file = open(csv_path, "w", newline="")  # noqa: SIM115
     writer = csv.writer(csv_file)
     writer.writerow(
@@ -444,8 +442,10 @@ def analyze_results(csv_path, best_per_shape, medium_only=False):
         )
 
     print()
-    suffix = "_medium" if medium_only else ""
-    summary_path = f"/scratch/mgehre/tmp/int4g128_sweep{suffix}_summary.txt"
+    # Co-locate the summary next to the CSV so both land where --csv pointed.
+    summary_path = csv_path.replace(".csv", "_summary.txt")
+    if summary_path == csv_path:
+        summary_path = csv_path + ".summary.txt"
     with open(summary_path, "w") as f:
         f.write(f"Int4 group-128 {variant_label} sweep summary\n")
         for r in best_per_shape:
@@ -480,10 +480,25 @@ def main():
     )
     parser.add_argument("--warmup", type=int, default=25, help="Warmup iterations")
     parser.add_argument("--rep", type=int, default=100, help="Benchmark repetitions")
+    parser.add_argument(
+        "--csv",
+        type=str,
+        default=None,
+        help="Output CSV path (default: int4g128_sweep[_medium]_results.csv in CWD)",
+    )
     args = parser.parse_args()
 
     shapes = args.shapes if args.shapes else SHAPES
-    run_sweep(shapes, args.batch_sizes, args.warmup, args.rep, medium_only=args.medium)
+    suffix = "_medium" if args.medium else ""
+    csv_path = args.csv or f"int4g128_sweep{suffix}_results.csv"
+    run_sweep(
+        shapes,
+        args.batch_sizes,
+        args.warmup,
+        args.rep,
+        csv_path,
+        medium_only=args.medium,
+    )
 
 
 if __name__ == "__main__":
