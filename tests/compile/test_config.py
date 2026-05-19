@@ -468,6 +468,38 @@ def test_cudagraph_sizes_post_init(
         )
 
 
+def test_spec_decode_cudagraph_sizes_keep_small_full_decode_batches_exact():
+    config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        cudagraph_capture_sizes=[
+            1,
+            2,
+            4,
+            8,
+            16,
+            24,
+            32,
+            40,
+            48,
+            56,
+            64,
+            72,
+            80,
+            88,
+            96,
+        ],
+        max_cudagraph_capture_size=96,
+    )
+
+    config.adjust_cudagraph_sizes_for_spec_decode(
+        uniform_decode_query_len=3,
+        tensor_parallel_size=1,
+    )
+
+    for num_reqs in range(1, 33):
+        assert 3 * num_reqs in config.cudagraph_capture_sizes
+
+
 @pytest.mark.skipif(
     not current_platform.support_static_graph_mode(),
     reason="Skip if not cudagraph mode supported",
