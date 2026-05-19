@@ -345,6 +345,16 @@ class AutoWeightsLoader:
         *,
         mapper: WeightsMapper | None = None,
     ) -> set[str]:
+        quant_config = getattr(self.module, "quant_config", None)
+        cache_scale_mapper = (
+            quant_config.get_cache_scale_mapper() if quant_config is not None else None
+        )
+        if cache_scale_mapper is not None:
+            mapper = (
+                mapper | cache_scale_mapper
+                if mapper is not None
+                else cache_scale_mapper
+            )
         if mapper is not None:
             weights = mapper.apply(weights)
         # filter out weights with first-prefix/substr to skip in name
