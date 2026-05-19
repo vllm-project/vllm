@@ -1016,7 +1016,10 @@ class Worker(WorkerBase):
             )
 
             model = self.model_runner.model
-            with torch.device(self.device):
+            with (
+                set_current_vllm_config(self.vllm_config),
+                torch.device(self.device),
+            ):
                 initialize_layerwise_reload(model)
 
         # Store state so update_weights/finish_weight_update can check
@@ -1092,7 +1095,10 @@ class Worker(WorkerBase):
             )
 
             model = self.model_runner.model
-            with torch.device(self.device):
+            with (
+                set_current_vllm_config(self.vllm_config),
+                torch.device(self.device),
+            ):
                 finalize_layerwise_reload(model, self.model_config)
 
         # Reset state
