@@ -721,6 +721,11 @@ def current_stream() -> torch.cuda.Stream:
                     "Fail to set current stream, current platform "
                     "may not support current_stream with torch API"
                 )
+    elif (
+        current_platform.is_rocm() or current_platform.is_cuda()
+    ) and _current_stream_tls.value.cuda_stream == 0:
+        # recreate the dedicated execution stream on demand.
+        torch.cuda.set_stream(torch.cuda.Stream())
     return _current_stream_tls.value
 
 

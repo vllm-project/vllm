@@ -46,7 +46,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, current_stream
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
@@ -350,8 +350,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     @functools.cached_property
     def main_stream(self) -> torch.cuda.Stream:
-        # Cache the default CUDA stream to avoid lookup overhead.
-        return torch.cuda.current_stream(self.device)
+        # return vLLM's non-default execution stream.
+        return current_stream()
 
     def get_kv_cache_spec(self):
         return get_kv_cache_spec(self.vllm_config)
