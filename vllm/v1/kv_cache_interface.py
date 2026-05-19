@@ -172,7 +172,7 @@ class KVCacheLayout(Enum):
     to physical (memory) order.
     """
 
-    LBHNC = (0, 1, 2, 3, 4)  # [L, B, H, N, C] identity
+    LBHNC = (0, 1, 2, 3, 4)  # [L, B, H, N, C] (identity)
     LBNHC = (0, 1, 3, 2, 4)  # [L, B, N, H, C]
     BLHNC = (1, 0, 2, 3, 4)  # [B, L, H, N, C]
     BHLNC = (1, 2, 0, 3, 4)  # [B, H, L, N, C]
