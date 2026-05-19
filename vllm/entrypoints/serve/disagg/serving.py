@@ -8,6 +8,7 @@ import time
 from collections.abc import AsyncGenerator
 from collections.abc import Sequence as GenericSequence
 
+import msgspec
 import numpy as np
 import pybase64 as base64
 from fastapi import Request
@@ -132,6 +133,10 @@ class ServingTokens(OpenAIServing):
                 f"sampling_params.n must be at most the server's max_num_seqs "
                 f"({max_num_seqs}), got {sampling_params.n}."
             )
+        try:
+            msgspec.msgpack.encode(sampling_params)
+        except (OverflowError, TypeError, ValueError) as e:
+            return self.create_error_response(e)
 
         engine_input: EngineInput
         if features := request.features:
@@ -467,12 +472,10 @@ class ServingTokens(OpenAIServing):
                         logprob=max(step_token.logprob, -9999.0),
                         top_logprobs=[
                             ChatCompletionLogProb(
-                                token=f"token_id:{token_id}",
-                                logprob=max(logprob.logprob, -9999.0),
+                                token=token,
+                                logprob=max(p[1].logprob, -9999.0),
                             )
-                            for i, (token_id, logprob) in enumerate(
-                                step_top_logprobs.items()
-                            )
+                            for i, p in enumerate(step_top_logprobs.items())
                             if num_output_top_logprobs is not None
                             and i < max(num_output_top_logprobs, 1)
                         ],
