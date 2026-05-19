@@ -357,6 +357,42 @@ def fused_qk_norm_rope(
     )
 
 
+def fused_qk_norm_mrope(
+    qkv: torch.Tensor,
+    num_heads_q: int,
+    num_heads_k: int,
+    num_heads_v: int,
+    head_dim: int,
+    eps: float,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    is_neox: bool,
+    mrope_section_t: int,
+    mrope_section_h: int,
+) -> None:
+    """Fused per-head QK RMSNorm + mRoPE (in-place on qkv).
+
+    cos/sin shape: [3, num_tokens, rotary_dim/2] — time/height/width streams.
+    """
+    torch.ops._C.fused_qk_norm_mrope(
+        qkv,
+        num_heads_q,
+        num_heads_k,
+        num_heads_v,
+        head_dim,
+        eps,
+        q_weight,
+        k_weight,
+        cos,
+        sin,
+        is_neox,
+        mrope_section_t,
+        mrope_section_h,
+    )
+
+
 def apply_repetition_penalties_torch(
     logits: torch.Tensor,
     prompt_mask: torch.Tensor,
