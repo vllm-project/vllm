@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.config import CompilationConfig
 from vllm.models.deepseek_v4.nvidia.model import (
     DeepseekV4MegaMoEExperts,
     _stage_deepseek_v4_mega_moe_inputs,
@@ -46,7 +47,8 @@ def test_deepseek_v4_mega_moe_ue8m0_uint8_to_float():
 
 def test_deepseek_v4_mega_moe_weight_loader_uses_ep_expert_ownership():
     vllm_config = SimpleNamespace(
-        scheduler_config=SimpleNamespace(max_num_batched_tokens=4)
+        compilation_config=CompilationConfig(),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=4),
     )
     experts = DeepseekV4MegaMoEExperts(
         vllm_config,
@@ -111,7 +113,7 @@ def test_deepseek_v4_mega_moe_weight_loader_uses_ep_expert_ownership():
     reason="DeepSeek V4 MegaMoE fused input staging requires CUDA.",
 )
 def test_deepseek_v4_mega_moe_fused_input_staging_is_bitwise_exact():
-    from vllm.third_party.deep_gemm.utils import per_token_cast_to_fp8
+    deep_gemm_utils = pytest.importorskip("deep_gemm.utils")
 
     device = torch.device("cuda")
     num_tokens = 7
@@ -150,7 +152,7 @@ def test_deepseek_v4_mega_moe_fused_input_staging_is_bitwise_exact():
         generator=generator,
     )
 
-    ref_x, ref_x_sf = per_token_cast_to_fp8(
+    ref_x, ref_x_sf = deep_gemm_utils.per_token_cast_to_fp8(
         hidden_states,
         use_ue8m0=True,
         gran_k=32,
