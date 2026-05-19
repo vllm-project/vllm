@@ -3,7 +3,9 @@
 """End-to-end save->lookup test for MooncakeStoreConnector on a hybrid
 (SWA + Full) attention config, using a dict-backed mock store."""
 
+import sys
 import threading
+import types
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -88,8 +90,11 @@ def _minimal_vllm_config(cache_block_size=16):
 
 def _build_worker_with_dict_store(vllm_config, kv_cache_config, store):
     """Build a MooncakeStoreWorker patching all distributed dependencies."""
+    fake_mooncake_store = types.ModuleType("mooncake.store")
+    fake_mooncake_store.MooncakeDistributedStore = lambda: store  # type: ignore[attr-defined]
+    fake_mooncake_store.ReplicateConfig = MagicMock  # type: ignore[attr-defined]
     with (
-        patch("mooncake.store.MooncakeDistributedStore", return_value=store),
+        patch.dict(sys.modules, {"mooncake.store": fake_mooncake_store}),
         patch.object(mooncake_store_worker, "MooncakeStoreConfig") as MCfg,
     ):
         sc = MCfg.load_from_env.return_value
