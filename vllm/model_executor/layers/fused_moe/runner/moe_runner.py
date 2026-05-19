@@ -428,9 +428,11 @@ class MoERunner(MoERunnerInterface):
                 and self.moe_config.ep_size <= 1
                 and states.shape[0] <= 128
             ):
-                torch.cuda.nvtx.range_push("moe_ar")
+                if not torch.compiler.is_compiling():
+                    torch.cuda.nvtx.range_push("moe_ar")
                 states = tensor_model_parallel_all_reduce(states)
-                torch.cuda.nvtx.range_pop()
+                if not torch.compiler.is_compiling():
+                    torch.cuda.nvtx.range_pop()
 
         return states[..., :trunc_size]
 
