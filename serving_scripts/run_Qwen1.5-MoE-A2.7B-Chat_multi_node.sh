@@ -7,7 +7,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=512G
-#SBATCH --time=00:35:00
+#SBATCH --time=00:45:00
 #SBATCH --signal=B:TERM@180
 #SBATCH --output=results/%x-%j.out
 #SBATCH --error=results/%x-%j.err
@@ -31,6 +31,7 @@ slurm_debug() {
 # SD = decode / output tokens per request
 SP="${SP:-128}"
 SD="${SD:-128}"
+NUM_PROMPTS="${NUM_PROMPTS:-10}"
 
 export HEAD_NODE
 HEAD_NODE=$(scontrol show hostnames "${SLURM_NODELIST}" | head -n1)
@@ -203,10 +204,14 @@ export NSYS_DIR="${TRACE_RUN_DIR}/nsight"
 export NSYS_TRACE="${NSYS_TRACE:-cuda,nvtx,osrt,cudnn,cublas}"
 export NSYS_DELAY="${NSYS_DELAY:-0}"
 
-# Keep both:
-# - NSYS_PROFILE_SERVER controls wrapping the API server itself.
-# - NSYS_PROFILE_WORKERS controls vLLM's --ray-workers-use-nsight.
-export NSYS_PROFILE_SERVER="${NSYS_PROFILE_SERVER:-1}"
+# Keep both knobs separate:
+# - NSYS_PROFILE_SERVER wraps the API server process on the head node.
+# - NSYS_PROFILE_WORKERS enables vLLM's --ray-workers-use-nsight on Ray actors.
+#
+# Default server profiling OFF: nested nsys on the head node breaks rank-0 worker
+# traces and server report finalization can consume several minutes at job end
+# (which caused job 7680791 to hit TIME LIMIT before worker copies finished).
+export NSYS_PROFILE_SERVER="${NSYS_PROFILE_SERVER:-0}"
 export NSYS_PROFILE_WORKERS="${NSYS_PROFILE_WORKERS:-1}"
 export NSYS_PROFILE_RAY="${NSYS_PROFILE_RAY:-0}"
 
@@ -323,6 +328,7 @@ NODE_COPY_INTERVAL="${NODE_COPY_INTERVAL:-20}"
 echo "=== runtime knobs ==="
 echo "MODEL_ID=${MODEL_ID} HOST=${HOST} PORT=${PORT} TP=${TP} PP=${PP} EP=${EP}"
 echo "GPUS_PER_NODE=${GPUS_PER_NODE} NUM_NODES=${NUM_NODES} CPUS_PER_TASK=${CPUS_PER_TASK}"
+echo "SP=${SP} SD=${SD} NUM_PROMPTS=${NUM_PROMPTS}"
 echo "MAX_MODEL_LEN=${MAX_MODEL_LEN}"
 echo "HEALTH_TIMEOUT=${HEALTH_TIMEOUT}"
 echo "RAY_READY_TIMEOUT=${RAY_READY_TIMEOUT}"
@@ -344,12 +350,30 @@ SERVER_STEP_PID=""
 HEAD_RAY_PID=""
 WORKER_RAY_PIDS=""
 
+count_worker_nsys_reports() {
+  find "${TRACE_RUN_DIR}/ray_worker_nsight" \
+    -type f -name "*.nsys-rep" 2>/dev/null | wc -l | tr -d ' '
+}
+
 print_copied_worker_reports() {
-  echo "=== Copied Ray worker Nsight reports under ${TRACE_RUN_DIR}/ray_worker_nsight ==="
+  local report_count
+  report_count="$(count_worker_nsys_reports)"
+  echo "=== Copied Ray worker Nsight reports under ${TRACE_RUN_DIR}/ray_worker_nsight (${report_count} *.nsys-rep) ==="
   find "${TRACE_RUN_DIR}/ray_worker_nsight" \
     -type f \
     \( -name "*.nsys-rep" -o -name "*.qdstrm" -o -name "*.sqlite" \) \
     -printf "%p %s bytes\n" 2>/dev/null | sort || true
+}
+
+warn_if_worker_reports_missing() {
+  local expected="${1:-${NUM_NODES}}"
+  local actual
+  actual="$(count_worker_nsys_reports)"
+  if [ "${actual}" -lt "${expected}" ]; then
+    echo "WARNING: expected at least ${expected} Ray-worker *.nsys-rep file(s), found ${actual}." >&2
+    echo "WARNING: worker traces live on each node under /tmp/ray/session_*/logs/nsight/ until copied." >&2
+    echo "WARNING: check ${TRACE_RUN_DIR}/ray_step_logs/ray_{head,worker}_*.out for copy-loop output." >&2
+  fi
 }
 
 copy_worker_reports_from_shared_dest() {
@@ -817,10 +841,12 @@ unset _health_wait_n
 unset _health_start
 
 echo "Server is healthy. Running ${SERVE_SCRIPT} ..."
-echo "SP=${SP} SD=${SD}"
+echo "SP=${SP} SD=${SD} NUM_PROMPTS=${NUM_PROMPTS}"
+echo "Expect Ray-worker Nsight under: ${TRACE_RUN_DIR}/ray_worker_nsight/<node>/session_*_worker_process_*.nsys-rep"
+print_copied_worker_reports
 
 HOST="${HEAD_NODE_IP}" PORT="${PORT}" MODEL_ID="${MODEL_ID}" \
-  SP="${SP}" SD="${SD}" \
+  SP="${SP}" SD="${SD}" NUM_PROMPTS="${NUM_PROMPTS}" \
   HEAD_NODE_IP="${HEAD_NODE_IP}" \
   GPUS_PER_NODE="${GPUS_PER_NODE}" CPUS_PER_TASK="${CPUS_PER_TASK}" \
   RAY_PORT="${RAY_PORT}" bash "${SERVE_SCRIPT}" "${SLURM_JOB_ID}" "${HEAD_NODE}"
@@ -836,11 +862,13 @@ sleep "${WORKER_REPORT_FLUSH_SLEEP}"
 
 echo "Worker report copies after server shutdown:"
 copy_worker_reports_from_shared_dest
+warn_if_worker_reports_missing "${NUM_NODES}"
 
 stop_ray_steps
 
 echo "Worker report copies after Ray shutdown:"
 copy_worker_reports_from_shared_dest
+warn_if_worker_reports_missing "${NUM_NODES}"
 
 echo "Server log:"
 find "${TRACE_RUN_DIR}/server" -maxdepth 1 -type f -printf "%p %s bytes\n" 2>/dev/null | sort || true
