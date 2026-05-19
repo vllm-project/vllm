@@ -68,7 +68,8 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
     ) -> None:
         super().__init__()
 
-        config = vllm_config.speculative_config.draft_model_config.hf_config  # type: ignore[union-attr]
+        assert vllm_config.speculative_config is not None
+        config = vllm_config.speculative_config.draft_model_config.hf_config
         self.config = config
         quant_config = vllm_config.quant_config
         self.rms_norm_eps = config.rms_norm_eps
