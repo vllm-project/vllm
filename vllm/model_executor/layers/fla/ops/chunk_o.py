@@ -13,6 +13,7 @@
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.triton_utils.shmem_budget import make_shmem_pruner
 
 from .index import prepare_chunk_indices
 from .op import exp
@@ -20,6 +21,31 @@ from .utils import FLA_CHUNK_SIZE, check_shared_mem, is_nvidia_hopper
 
 BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
+
+
+def _est_smem_chunk_fwd_o(config, named_args):
+    """Shared-memory estimate for ``chunk_fwd_kernel_o``.
+
+    Buffers held simultaneously inside the i_k accumulation loop:
+        persistent:  b_o [BT, BV] fp32   (size BT * BV * 4)
+                     b_A [BT, BT] fp32   (size BT * BT * 4)
+        per-stage:   b_q [BT, BK] bf16   (size BT * BK * 2)
+                     b_k [BK, BT] bf16   (size BK * BT * 2)
+                     b_h [BV, BK] bf16   (size BV * BK * 2)
+
+    The ``BKV_LIST`` hand-roll above already pre-filters the configs to
+    [32, 64] on non-shared-mem GPUs, but at ``num_stages=4`` and BT=64 the
+    BK=BV=64 config still needs ~131 KiB which exceeds the SM_120 opt-in
+    budget (~101 KiB). The pruner catches that with per-config precision.
+    """
+    BK = config.kwargs["BK"]
+    BV = config.kwargs["BV"]
+    BT = named_args.get("BT", 64)
+    num_stages = config.num_stages
+    persistent = BT * BV * 4 + BT * BT * 4
+    per_stage = BT * BK * 2 + BK * BT * 2 + BV * BK * 2
+    overhead = 4096  # Triton bookkeeping safety
+    return persistent + num_stages * per_stage + overhead
 
 
 @triton.heuristics(
@@ -37,6 +63,7 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
     key=["H", "K", "V", "BT"],
+    prune_configs_by={"early_config_prune": make_shmem_pruner(_est_smem_chunk_fwd_o)},
 )
 @triton.jit(do_not_specialize=["T"])
 def chunk_fwd_kernel_o(
