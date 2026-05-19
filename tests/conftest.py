@@ -224,19 +224,28 @@ def init_test_http_connection():
 def dist_init():
     from tests.utils import ensure_current_vllm_config
 
-    temp_file = tempfile.mkstemp()[1]
+    # Close the fd returned by mkstemp; FileStore opens the path itself.
+    # Leaving it open leaks one FD per test and eventually exhausts the
+    # ulimit, causing FileStore's destructor to throw c10::DistStoreError
+    # ("Too many open files") during gc and abort the process.
+    fd, temp_file = tempfile.mkstemp()
+    os.close(fd)
 
-    with ensure_current_vllm_config():
-        init_distributed_environment(
-            world_size=1,
-            rank=0,
-            distributed_init_method=f"file://{temp_file}",
-            local_rank=0,
-            backend="nccl",
-        )
-        initialize_model_parallel(1, 1)
-        yield
-    cleanup_dist_env_and_memory()
+    try:
+        with ensure_current_vllm_config():
+            init_distributed_environment(
+                world_size=1,
+                rank=0,
+                distributed_init_method=f"file://{temp_file}",
+                local_rank=0,
+                backend="nccl",
+            )
+            initialize_model_parallel(1, 1)
+            yield
+        cleanup_dist_env_and_memory()
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(temp_file)
 
 
 @pytest.fixture

@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -23,10 +23,12 @@ from vllm.model_executor.layers.deepseek_v4_attention import (
     DeepseekV4MLAModules,
     DeepseekV4MultiHeadLatentAttentionWrapper,
 )
-from vllm.model_executor.layers.fused_moe import FusedMoE, GateLinear
-from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     fused_topk_bias,
+)
+from vllm.model_executor.layers.fused_moe.router.norm_gate_linear import (
+    NormGateLinear,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -41,15 +43,7 @@ from vllm.model_executor.layers.mhc import (
     MHCPostOp,
     MHCPreOp,
 )
-from vllm.model_executor.layers.quantization import (
-    QuantizationConfig,
-    QuantizationMethods,
-)
-from vllm.model_executor.layers.quantization.fp8 import Fp8Config
-from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    is_layer_skipped,
-)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -57,13 +51,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import SupportsPP
-from vllm.model_executor.utils import set_weight_attrs
-from vllm.platforms import current_platform
-from vllm.sequence import IntermediateTensors
-from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import direct_register_custom_op
-
-from .utils import (
+from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
@@ -72,8 +60,11 @@ from .utils import (
     make_layers,
     maybe_prefix,
 )
-
-_DEEPSEEK_V4_EXPERT_DTYPES = ("fp4", "fp8")
+from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
+from vllm.sequence import IntermediateTensors
+from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import direct_register_custom_op
 
 
 class DeepseekV4MLP(nn.Module):
@@ -125,97 +116,6 @@ class DeepseekV4MLP(nn.Module):
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
-
-
-class DeepseekV4FP8Config(Fp8Config):
-    """FP8 config for DeepSeek V4 with expert-dtype-aware MoE dispatch.
-
-    DeepSeek V4 checkpoints always use FP8 block quantization for
-    linear/attention layers. The MoE expert weights vary by checkpoint:
-    - ``expert_dtype="fp4"`` (e.g. DeepSeek-V4-Flash): MXFP4 experts
-      with ue8m0 (e8m0fnu) FP8 linear scales.
-    - ``expert_dtype="fp8"`` (e.g. DeepSeek-V4-Flash-Base): FP8 block
-      experts with float32 FP8 linear scales.
-
-    The dispatch and the linear scale dtype are both keyed off
-    ``expert_dtype`` from the model's hf_config; missing values default
-    to ``"fp4"`` so existing FP4 checkpoints stay unchanged.
-
-    NOTE: ``expert_dtype`` is resolved lazily because this config is
-    constructed during VllmConfig setup, before ``set_current_vllm_config``
-    is active. Reading hf_config eagerly in ``__init__`` would always see
-    the default ``"fp4"`` and silently misroute Flash-Base checkpoints.
-    """
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._resolved_expert_dtype: str | None = None
-        # ``is_scale_e8m0`` is a property that resolves on first read,
-        # by which time the current vllm_config has been set.
-
-    @property
-    def expert_dtype(self) -> str:
-        if self._resolved_expert_dtype is None:
-            try:
-                hf_config = get_current_vllm_config().model_config.hf_config
-            except Exception:
-                # vllm_config not yet set; defer the decision until a
-                # later call lands inside set_current_vllm_config.
-                return "fp4"
-            expert_dtype = getattr(hf_config, "expert_dtype", "fp4")
-            if expert_dtype not in _DEEPSEEK_V4_EXPERT_DTYPES:
-                raise ValueError(
-                    f"Unsupported DeepSeek V4 expert_dtype={expert_dtype!r}; "
-                    f"expected one of {_DEEPSEEK_V4_EXPERT_DTYPES}."
-                )
-            self._resolved_expert_dtype = expert_dtype
-            from vllm.logger import init_logger
-
-            init_logger(__name__).info_once(
-                "DeepSeek V4 expert_dtype resolved to %r", expert_dtype
-            )
-        return self._resolved_expert_dtype
-
-    @property
-    def is_scale_e8m0(self) -> bool:
-        # FP4 checkpoints store FP8 linear scales as e8m0fnu; FP8 expert
-        # checkpoints (Flash-Base) store them as float32.
-        return self.expert_dtype == "fp4"
-
-    @classmethod
-    def get_name(cls) -> QuantizationMethods:
-        return "deepseek_v4_fp8"
-
-    @classmethod
-    def override_quantization_method(
-        cls, hf_quant_cfg, user_quant, hf_config=None
-    ) -> QuantizationMethods | None:
-        if not (
-            isinstance(hf_quant_cfg, dict)
-            and hf_quant_cfg.get("quant_method") in ("fp8", "deepseek_v4_fp8")
-        ):
-            return None
-        model_type = getattr(hf_config, "model_type", None)
-        if model_type == "deepseek_v4" or user_quant == "deepseek_v4_fp8":
-            return "deepseek_v4_fp8"
-        return None
-
-    def get_quant_method(self, layer, prefix):
-        if isinstance(layer, FusedMoE):
-            if is_layer_skipped(
-                prefix=prefix,
-                ignored_layers=self.ignored_layers,
-                fused_mapping=self.packed_modules_mapping,
-            ):
-                return UnquantizedFusedMoEMethod(layer.moe_config)
-            if self.expert_dtype == "fp4":
-                return Mxfp4MoEMethod(layer.moe_config)
-            # expert_dtype == "fp8": fall through to Fp8Config which
-            # returns Fp8MoEMethod with block-wise float32 scales.
-        return super().get_quant_method(layer, prefix)
-
-    def is_mxfp4_quant(self, prefix, layer):
-        return isinstance(layer, FusedMoE) and self.expert_dtype == "fp4"
 
 
 @triton.jit
@@ -755,23 +655,23 @@ class DeepseekV4MoE(nn.Module):
                 "deep_gemm_mega_moe for this checkpoint."
             )
 
-        self.gate = GateLinear(
-            config.hidden_size,
-            config.n_routed_experts,
-            out_dtype=torch.float32,
-            bias=False,
-            prefix=f"{prefix}.gate",
+        # Fused RMSNorm + gate: owns both ffn_norm and the gate matmul.
+        self.norm_gate = NormGateLinear(
+            hidden_size=config.hidden_size,
+            num_experts=config.n_routed_experts,
+            rms_eps=config.rms_norm_eps,
+            prefix=f"{prefix}.norm_gate",
         )
-        self.gate.e_score_correction_bias = None
-        self.gate.tid2eid = None
+        # Routing-side tensors live on ``norm_gate`` directly (not on the
+        # inner gate); they are initialized to None in NormGatedLinear and
+        # populated below depending on the MoE variant.
         is_hash_moe = extract_layer_index(prefix) < config.num_hash_layers
         self.hash_indices_dtype = torch.int64 if self.use_mega_moe else torch.int32
-
         if is_hash_moe:
             # hash MoE doesn't use e_score_correction_bias
             # Use randint instead of empty to avoid garbage values causing
             # invalid memory access in dummy mode (--load-format="dummy")
-            self.gate.tid2eid = nn.Parameter(
+            self.norm_gate.tid2eid = nn.Parameter(
                 torch.randint(
                     0,
                     config.n_routed_experts,
@@ -781,7 +681,7 @@ class DeepseekV4MoE(nn.Module):
                 requires_grad=False,
             )
         elif getattr(config, "topk_method", None) == "noaux_tc":
-            self.gate.e_score_correction_bias = nn.Parameter(
+            self.norm_gate.e_score_correction_bias = nn.Parameter(
                 torch.empty(config.n_routed_experts, dtype=torch.float32),
                 requires_grad=False,
             )
@@ -844,10 +744,9 @@ class DeepseekV4MoE(nn.Module):
         self.n_local_experts = config.n_routed_experts // self.tp_size
         self.experts_start_idx = self.tp_rank * self.n_local_experts
         self.experts_end_idx = self.experts_start_idx + self.n_local_experts
-
+        # We don't pass `gate` into FusedMoE
         self.experts = FusedMoE(
             shared_experts=self.shared_experts,
-            gate=self.gate,
             num_experts=config.n_routed_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
@@ -857,8 +756,8 @@ class DeepseekV4MoE(nn.Module):
             prefix=f"{prefix}.experts",
             scoring_func=self.scoring_func,
             routed_scaling_factor=self.routed_scaling_factor,
-            e_score_correction_bias=self.gate.e_score_correction_bias,
-            hash_indices_table=self.gate.tid2eid,
+            e_score_correction_bias=self.norm_gate.e_score_correction_bias,
+            hash_indices_table=self.norm_gate.tid2eid,
             swiglu_limit=self.swiglu_limit,
             router_logits_dtype=torch.float32,
         )
@@ -866,40 +765,40 @@ class DeepseekV4MoE(nn.Module):
     def forward(
         self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None = None
     ) -> torch.Tensor:
-        if self.gate.tid2eid is not None and input_ids is None:
+        if self.norm_gate.tid2eid is not None and input_ids is None:
             raise ValueError("DeepSeek V4 hash MoE routing requires input_ids.")
 
         if not self.use_mega_moe:
             return self._forward_fused_moe(hidden_states, input_ids)
 
         org_shape = hidden_states.shape
-        router_logits, _ = self.gate(hidden_states)
+        normed_x, router_logits = self.norm_gate(hidden_states)
         topk_weights, topk_ids = fused_topk_bias(
-            hidden_states=hidden_states,
+            hidden_states=normed_x,
             gating_output=router_logits,
             scoring_func=self.scoring_func,
-            e_score_correction_bias=self.gate.e_score_correction_bias.data
-            if self.gate.e_score_correction_bias is not None
+            e_score_correction_bias=self.norm_gate.e_score_correction_bias.data
+            if self.norm_gate.e_score_correction_bias is not None
             else None,
             topk=self.n_activated_experts,
             renormalize=self.renormalize,
             indices_type=self.hash_indices_dtype,
             input_tokens=input_ids,
-            hash_indices_table=self.gate.tid2eid,
+            hash_indices_table=self.norm_gate.tid2eid,
             routed_scaling_factor=self.routed_scaling_factor,
         )
         activation_clamp = (
             float(self.swiglu_limit) if self.swiglu_limit is not None else None
         )
         final_hidden_states = self.experts(
-            hidden_states,
+            normed_x,
             topk_weights,
             topk_ids,
             activation_clamp=activation_clamp,
         )
 
         if self.shared_experts is not None:
-            shared_output = self.shared_experts(hidden_states)
+            shared_output = self.shared_experts(normed_x)
             final_hidden_states += shared_output
 
         return final_hidden_states.view(org_shape)
@@ -907,21 +806,14 @@ class DeepseekV4MoE(nn.Module):
     def _forward_fused_moe(
         self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None = None
     ) -> torch.Tensor:
+        assert not self.experts.is_internal_router
         org_shape = hidden_states.shape
-        if self.experts.is_internal_router:
-            # In this case, the gate/router runs inside the FusedMoE class
-            final_hidden_states = self.experts(
-                hidden_states=hidden_states,
-                router_logits=hidden_states,
-                input_ids=input_ids,
-            )
-        else:
-            router_logits, _ = self.gate(hidden_states)
-            final_hidden_states = self.experts(
-                hidden_states=hidden_states,
-                router_logits=router_logits,
-                input_ids=input_ids,
-            )
+        normed_x, router_logits = self.norm_gate(hidden_states)
+        final_hidden_states = self.experts(
+            hidden_states=normed_x,
+            router_logits=router_logits,
+            input_ids=input_ids,
+        )
 
         return final_hidden_states.view(org_shape)
 
@@ -1125,7 +1017,8 @@ class DeepseekV4DecoderLayer(nn.Module):
         self.ffn = DeepseekV4MoE(vllm_config, prefix=f"{prefix}.ffn")
 
         self.attn_norm = RMSNorm(self.hidden_size, self.rms_norm_eps)
-        self.ffn_norm = RMSNorm(self.hidden_size, self.rms_norm_eps)
+        # ``ffn_norm`` is owned by ``self.ffn.norm_gate`` (fused with the
+        # router gate matmul); see ``NormGatedLinear``.
         self.hc_mult = config.hc_mult
         self.hc_sinkhorn_iters = config.hc_sinkhorn_iters
         self.hc_eps = config.hc_eps
@@ -1255,8 +1148,8 @@ class DeepseekV4DecoderLayer(nn.Module):
             self.hc_post_alpha,
             self.hc_sinkhorn_iters,
         )
-
-        x = self.ffn_norm(x)
+        # ffn_norm is now folded into self.ffn.norm_gate; ffn() takes
+        # the pre-norm activation directly.
         x = self.ffn(x, input_ids)
         return x, residual, post_mix, res_mix
 
@@ -1265,10 +1158,12 @@ class DeepseekV4DecoderLayer(nn.Module):
         x: torch.Tensor,
         positions: torch.Tensor,
         input_ids: torch.Tensor | None,
-        post_mix: torch.Tensor | None,
-        res_mix: torch.Tensor | None,
-        residual: torch.Tensor | None,
-    ) -> torch.Tensor:
+        post_mix: torch.Tensor | None = None,
+        res_mix: torch.Tensor | None = None,
+        residual: torch.Tensor | None = None,
+    ) -> tuple[
+        torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None
+    ]:
         residual = x
         x, post, comb = self.hc_pre(
             x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
@@ -1281,7 +1176,8 @@ class DeepseekV4DecoderLayer(nn.Module):
         x, post, comb = self.hc_pre(
             x, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base
         )
-        x = self.ffn_norm(x)
+        # ffn_norm is now folded into self.ffn.norm_gate; ffn() takes
+        # the pre-norm activation directly.
         x = self.ffn(x, input_ids)
         x = self.hc_post(x, residual, post, comb)
         return x, None, None, None
@@ -1291,10 +1187,12 @@ class DeepseekV4DecoderLayer(nn.Module):
         x: torch.Tensor,
         positions: torch.Tensor,
         input_ids: torch.Tensor | None,
-        post_mix: torch.Tensor | None,
-        res_mix: torch.Tensor | None,
-        residual: torch.Tensor | None,
-    ) -> torch.Tensor:
+        post_mix: torch.Tensor | None = None,
+        res_mix: torch.Tensor | None = None,
+        residual: torch.Tensor | None = None,
+    ) -> tuple[
+        torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None
+    ]:
         if current_platform.is_rocm():
             return self._forward_rocm(
                 x, positions, input_ids, post_mix, res_mix, residual
@@ -1534,7 +1432,7 @@ class DeepseekV4Model(nn.Module):
                     ):
                         loaded_weight = loaded_weight.view(torch.uint8)
                     for mapping in expert_mapping:
-                        param_name, weight_name, expert_id, shard_id = mapping
+                        param_name, weight_name, expert_id, expert_shard_id = mapping
                         if weight_name not in name:
                             continue
                         name_mapped = name.replace(weight_name, param_name)
@@ -1551,7 +1449,7 @@ class DeepseekV4Model(nn.Module):
                             param,
                             loaded_weight,
                             name_mapped,
-                            shard_id=shard_id,
+                            shard_id=expert_shard_id,
                             expert_id=expert_id,
                             return_success=True,
                         )
@@ -1629,7 +1527,13 @@ def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
         orig_to_new_suffix={
             "head.weight": "lm_head.weight",
             "embed.weight": "embed_tokens.weight",
-            ".ffn.gate.bias": ".ffn.gate.e_score_correction_bias",
+            # Pre-MoE norm + gate are now owned by ``DeepseekV4MoE.norm_gate``
+            # (see NormGatedLinear).
+            ".ffn_norm.weight": ".ffn.norm_gate.norm.weight",
+            ".ffn.gate.weight": ".ffn.norm_gate.gate.weight",
+            ".ffn.gate.bias": ".ffn.norm_gate.e_score_correction_bias",
+            # Hash MoE table also moved off the inner gate.
+            ".ffn.gate.tid2eid": ".ffn.norm_gate.tid2eid",
         },
         orig_to_new_substr={
             ".attn.compressor.": ".attn.mla_attn.compressor.",
@@ -1666,7 +1570,7 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP):
         else:
             self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.make_empty_intermediate_tensors = (
+        self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
             self.model.make_empty_intermediate_tensors
         )
 
