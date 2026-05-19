@@ -540,135 +540,155 @@ class Gemma4ToolParser(ToolParser):
 
         Format: ``<|tool_call>call:name{args}<tool_call|>``
         """
-        # Find all complete tool calls in current text
         all_matches = self.tool_call_regex.findall(current_text)
-        prev_start_count = previous_text.count(self.tool_call_start_token)
-        prev_end_count = previous_text.count(self.tool_call_end_token)
         curr_start_count = current_text.count(self.tool_call_start_token)
         curr_end_count = current_text.count(self.tool_call_end_token)
+        prev_start_count = previous_text.count(self.tool_call_start_token)
 
         tool_call_deltas: list[DeltaToolCall] = []
-        content_delta: str | None = None
 
-        # --- Step 1: Process all complete tool calls ---
+        # Step 1: Process all complete tool calls
         for i, (func_name, args_str) in enumerate(all_matches):
-            # Ensure state arrays are sized for this index
-            while len(self.prev_tool_call_arr) <= i:
-                self.prev_tool_call_arr.append({})
-                self.streamed_args_for_tool.append("")
+            deltas = self._process_complete_call(i, func_name, args_str)
+            tool_call_deltas.extend(deltas)
 
-            # Send function name if not yet sent
-            if "name" not in self.prev_tool_call_arr[i]:
-                self.prev_tool_call_arr[i]["name"] = func_name
-                tool_call_deltas.append(
-                    DeltaToolCall(
-                        index=i,
-                        type="function",
-                        id=make_tool_call_id(),
-                        function=DeltaFunctionCall(name=func_name),
-                    )
-                )
-
-            # Parse arguments and diff against previously streamed
-            final_args = _parse_gemma4_args(args_str)
-            final_args_json = json.dumps(final_args, ensure_ascii=False)
-            prev_streamed = self.streamed_args_for_tool[i]
-
-            if len(final_args_json) > len(prev_streamed):
-                diff = final_args_json[len(prev_streamed):]
-                self.streamed_args_for_tool[i] = final_args_json
-                self.prev_tool_call_arr[i]["arguments"] = final_args
-                tool_call_deltas.append(
-                    DeltaToolCall(
-                        index=i,
-                        function=DeltaFunctionCall(arguments=diff),
-                    )
-                )
-
-            # Update current_tool_id to track the last known tool call
-            self.current_tool_id = i
-            self.current_tool_name_sent = True
-
-        # --- Step 2: Handle partial (incomplete) tool call ---
-        # If there are more start tags than end tags, there's an incomplete
-        # tool call at the end of current_text.
+        # Step 2: Handle partial (incomplete) tool call
         if curr_start_count > curr_end_count:
-            partial_idx = len(all_matches)  # index of the incomplete call
+            partial_idx = len(all_matches)
+            deltas = self._process_partial_call(current_text, partial_idx)
+            tool_call_deltas.extend(deltas)
 
-            # Ensure state arrays are sized
-            while len(self.prev_tool_call_arr) <= partial_idx:
-                self.prev_tool_call_arr.append({})
-                self.streamed_args_for_tool.append("")
+        # Step 3: Handle content
+        content_delta = self._compute_content_delta(
+            current_text, previous_text, curr_start_count, prev_start_count, delta_text
+        )
 
-            func_name, args_part = self._extract_partial_call(current_text)
-
-            if func_name is not None:
-                # Send function name if not yet sent
-                if "name" not in self.prev_tool_call_arr[partial_idx]:
-                    self.prev_tool_call_arr[partial_idx]["name"] = func_name
-                    tool_call_deltas.append(
-                        DeltaToolCall(
-                            index=partial_idx,
-                            type="function",
-                            id=make_tool_call_id(),
-                            function=DeltaFunctionCall(name=func_name),
-                        )
-                    )
-                    self.current_tool_id = partial_idx
-                    self.current_tool_name_sent = True
-
-                # Stream argument diff
-                if self.current_tool_name_sent and args_part:
-                    partial_delta = self._emit_argument_diff_for_index(
-                        partial_idx, args_part
-                    )
-                    if partial_delta:
-                        tool_call_deltas.append(partial_delta)
-
-        # --- Step 3: Handle content ---
-        # Extract all plain text that is NOT part of tool call tags.
-        # This handles text before, between, and after tool calls.
-        if curr_start_count > 0 or prev_start_count > 0:
-            # Remove all complete tool call patterns
-            content_current = self.tool_call_regex.sub("", current_text)
-            content_previous = self.tool_call_regex.sub("", previous_text)
-
-            # Strip any trailing partial tool call (from <|tool_call> to end).
-            # After removing complete calls, any remaining <|tool_call> must
-            # be an incomplete one that's still being accumulated.
-            def _strip_trailing_partial(text: str) -> str:
-                idx = text.rfind(self.tool_call_start_token)
-                if idx != -1:
-                    return text[:idx]
-                return text
-
-            content_current = _strip_trailing_partial(content_current)
-            content_previous = _strip_trailing_partial(content_previous)
-
-            # The new content is the diff between current and previous plain text
-            if content_current.startswith(content_previous):
-                content_delta = content_current[len(content_previous):]
-            elif content_previous.startswith(content_current):
-                # Previous text is longer - this shouldn't happen in streaming
-                content_delta = content_current
-            else:
-                # Texts diverge - use current text as-is
-                content_delta = content_current
-
-            if content_delta == "":
-                content_delta = None
-        elif curr_start_count == 0 and prev_start_count == 0:
-            # Case A: No tool call tokens at all — treat as pure content
-            if delta_text:
-                content_delta = delta_text
-
-        # --- Step 4: Build and return DeltaMessage ---
+        # Step 4: Return result
         if content_delta or tool_call_deltas:
             return DeltaMessage(
                 content=content_delta,
                 tool_calls=tool_call_deltas or [],
             )
         return None
+
+    def _ensure_state_sized(self, index: int) -> None:
+        """Ensure state arrays have enough room for the given index."""
+        while len(self.prev_tool_call_arr) <= index:
+            self.prev_tool_call_arr.append({})
+            self.streamed_args_for_tool.append("")
+
+    def _process_complete_call(
+        self, index: int, func_name: str, args_str: str
+    ) -> list[DeltaToolCall]:
+        """Process a complete tool call: send name (once) + args diff."""
+        self._ensure_state_sized(index)
+        deltas: list[DeltaToolCall] = []
+
+        # Send function name if not yet sent
+        if "name" not in self.prev_tool_call_arr[index]:
+            self.prev_tool_call_arr[index]["name"] = func_name
+            deltas.append(
+                DeltaToolCall(
+                    index=index,
+                    type="function",
+                    id=make_tool_call_id(),
+                    function=DeltaFunctionCall(name=func_name),
+                )
+            )
+
+        # Parse arguments and diff against previously streamed
+        final_args = _parse_gemma4_args(args_str)
+        final_args_json = json.dumps(final_args, ensure_ascii=False)
+        prev_streamed = self.streamed_args_for_tool[index]
+
+        if len(final_args_json) > len(prev_streamed):
+            diff = final_args_json[len(prev_streamed):]
+            self.streamed_args_for_tool[index] = final_args_json
+            self.prev_tool_call_arr[index]["arguments"] = final_args
+            deltas.append(
+                DeltaToolCall(
+                    index=index,
+                    function=DeltaFunctionCall(arguments=diff),
+                )
+            )
+
+        # Track the last known tool call
+        self.current_tool_id = index
+        self.current_tool_name_sent = True
+
+        return deltas
+
+    def _process_partial_call(
+        self, current_text: str, partial_idx: int
+    ) -> list[DeltaToolCall]:
+        """Process an incomplete/partial tool call at the end of text."""
+        self._ensure_state_sized(partial_idx)
+        deltas: list[DeltaToolCall] = []
+
+        func_name, args_part = self._extract_partial_call(current_text)
+
+        if func_name is not None:
+            # Send function name if not yet sent
+            if "name" not in self.prev_tool_call_arr[partial_idx]:
+                self.prev_tool_call_arr[partial_idx]["name"] = func_name
+                deltas.append(
+                    DeltaToolCall(
+                        index=partial_idx,
+                        type="function",
+                        id=make_tool_call_id(),
+                        function=DeltaFunctionCall(name=func_name),
+                    )
+                )
+                self.current_tool_id = partial_idx
+                self.current_tool_name_sent = True
+
+            # Stream argument diff
+            if self.current_tool_name_sent and args_part:
+                partial_delta = self._emit_argument_diff_for_index(
+                    partial_idx, args_part
+                )
+                if partial_delta:
+                    deltas.append(partial_delta)
+
+        return deltas
+
+    def _compute_content_delta(
+        self,
+        current_text: str,
+        previous_text: str,
+        curr_start_count: int,
+        prev_start_count: int,
+        delta_text: str,
+    ) -> str | None:
+        """Extract plain text content by removing tool call patterns."""
+        # Case A: No tool call tokens at all — treat as pure content
+        if curr_start_count == 0 and prev_start_count == 0:
+            return delta_text if delta_text else None
+
+        # Remove all complete tool call patterns
+        content_current = self.tool_call_regex.sub("", current_text)
+        content_previous = self.tool_call_regex.sub("", previous_text)
+
+        # Strip any trailing partial tool call
+        content_current = self._strip_trailing_partial(content_current)
+        content_previous = self._strip_trailing_partial(content_previous)
+
+        # Compute the diff
+        if content_current.startswith(content_previous):
+            result = content_current[len(content_previous):]
+        elif content_previous.startswith(content_current):
+            result = content_current
+        else:
+            result = content_current
+
+        return result if result else None
+
+    def _strip_trailing_partial(self, text: str) -> str:
+        """Remove any trailing partial tool call (from <|tool_call> to end)."""
+        idx = text.rfind(self.tool_call_start_token)
+        if idx != -1:
+            return text[:idx]
+        return text
 
     def _emit_argument_diff_for_index(
         self, index: int, raw_args_str: str
