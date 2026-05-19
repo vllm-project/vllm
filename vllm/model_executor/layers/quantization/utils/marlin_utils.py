@@ -8,6 +8,7 @@ import torch
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
@@ -45,6 +46,9 @@ def query_marlin_supported_quant_types(
 ):
     if current_platform.is_cpu():
         return _query_cpu_marlin_supported_quant_types(has_zp, include_fp_type)
+
+    if current_platform.is_xpu():
+        return [scalar_types.uint4, scalar_types.uint4b8]
 
     if not current_platform.is_rocm():
         if device_capability is None:
@@ -226,7 +230,7 @@ def check_marlin_supports_layer(layer: LinearBase, group_size: int) -> bool:
     )[0]
 
 
-def check_moe_marlin_supports_layer(layer: LinearBase, group_size: int) -> bool:
+def check_moe_marlin_supports_layer(layer: RoutedExperts, group_size: int) -> bool:
     if current_platform.is_rocm():
         return False
     hidden_size = layer.hidden_size
@@ -479,9 +483,9 @@ def get_marlin_input_dtype(prefix: str | None = None):
     elif envs.VLLM_MARLIN_INPUT_DTYPE.lower() == "fp8":
         if not current_platform.is_device_capability(
             89
-        ) and not current_platform.is_device_capability(120):
+        ) and not current_platform.is_device_capability_family(120):
             raise ValueError(
-                "Marlin W4A8-FP8 only support SM89 or SM120 device "
+                "Marlin W4A8-FP8 only support SM89 or SM12x device "
                 "(It is slower than Marlin W4A16 on other devices). "
                 "You can consider using W4A8-INT8 instead"
                 "(set VLLM_MARLIN_INPUT_DTYPE=int8)."

@@ -21,7 +21,7 @@ from vllm.config.multimodal import (
     MultiModalConfig,
 )
 from vllm.config.pooler import PoolerConfig
-from vllm.config.quantization import OnlineQuantizationConfigArgs
+from vllm.config.quantization import QuantizationConfigArgs
 from vllm.config.scheduler import RunnerType
 from vllm.config.utils import config, getattr_iter
 from vllm.logger import init_logger
@@ -93,7 +93,9 @@ def get_default_eplb_num_redundant_experts(
 RunnerOption = Literal["auto", RunnerType]
 ConvertType = Literal["none", "embed", "classify"]
 ConvertOption = Literal["auto", ConvertType]
-TokenizerMode = Literal["auto", "hf", "slow", "mistral", "deepseek_v32", "deepseek_v4"]
+TokenizerMode = Literal[
+    "auto", "hf", "slow", "mistral", "deepseek_v32", "deepseek_v4", "fastokens"
+]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 LogprobsMode = Literal[
     "raw_logits", "raw_logprobs", "processed_logits", "processed_logprobs"
@@ -146,6 +148,9 @@ class ModelConfig:
     - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.
     - "deepseek_v4" will always use the tokenizer from `deepseek_v4`.
     - "qwen_vl" will always use the tokenizer from `qwen_vl`.
+    - "fastokens" loads a Hugging Face fast tokenizer powered by the
+      [fastokens](https://github.com/crusoecloud/fastokens) Rust BPE backend
+      (requires the `fastokens` package to be installed).
     - Other custom values can be supported via plugins."""
     trust_remote_code: bool = False
     """Trust remote code (e.g., from HuggingFace) when downloading the model
@@ -211,10 +216,11 @@ class ModelConfig:
     `quantization_config` attribute in the model config file. If that is
     `None`, we assume the model weights are not quantized and use `dtype` to
     determine the data type of the weights."""
-    quantization_config: dict[str, Any] | OnlineQuantizationConfigArgs | None = None
-    """Arguments for online quantization.
-    Auto-created when `quantization` equals to one of the string values of
-    the `OnlineQuantScheme` enum."""
+    quantization_config: dict[str, Any] | QuantizationConfigArgs | None = None
+    """User-facing quantization configuration. Carries per-layer-kind specs
+    (linear, moe) and ignore patterns; see :class:`QuantizationConfigArgs`.
+    Auto-populated from the matching online shorthand when `quantization` is
+    one of the values in `ONLINE_QUANT_SHORTHAND_NAMES`."""
     allow_deprecated_quantization: bool = False
     """Whether to allow deprecated quantization methods."""
     enforce_eager: bool = False
@@ -237,6 +243,10 @@ class ModelConfig:
     Processed means the values after applying all processors, including
     temperature and top_k/top_p.
     """
+    use_fp64_gumbel: bool = False
+    """Whether to use FP64 (instead of FP32) for the Gumbel noise used by the
+    sampler. FP64 reduces the chance of ties in Gumbel-max sampling at the cost
+    of significantly lower kernel throughput on most GPUs."""
     disable_sliding_window: bool = False
     """Whether to disable sliding window. If True, we will disable the sliding
     window functionality of the model, capping to sliding window size. If the
@@ -369,6 +379,7 @@ class ModelConfig:
             "spec_target_max_model_len",
             "enforce_eager",
             "logprobs_mode",
+            "use_fp64_gumbel",
             "disable_cascade_attn",
             "skip_tokenizer_init",
             "served_model_name",
@@ -531,6 +542,7 @@ class ModelConfig:
         if dict_overrides:
             self._apply_dict_overrides(hf_config, dict_overrides)
         self.hf_text_config = get_hf_text_config(self.hf_config)
+        self.model_arch_config = self.get_model_arch_config()
         self.attention_chunk_size = getattr(
             self.hf_text_config, "attention_chunk_size", None
         )
@@ -538,14 +550,15 @@ class ModelConfig:
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, hf_token=self.hf_token, revision=self.revision
         )
-        self.model_arch_config = self.get_model_arch_config()
 
         architectures = self.architectures
         registry = self.registry
         is_generative_model = registry.is_text_generation_model(architectures, self)
         is_pooling_model = registry.is_pooling_model(architectures, self)
 
-        self.runner_type = self._get_runner_type(architectures, self.runner)
+        self.runner_type = self._get_runner_type(
+            architectures, self.runner, self.convert
+        )
         self.convert_type = self._get_convert_type(
             architectures, self.runner_type, self.convert
         )
@@ -883,11 +896,15 @@ class ModelConfig:
         self,
         architectures: list[str],
         runner: RunnerOption,
+        convert: ConvertOption,
     ) -> RunnerType:
         if runner != "auto":
             return runner
 
-        runner_type = self._get_default_runner_type(architectures)
+        if convert in {"auto", "none"}:
+            runner_type = self._get_default_runner_type(architectures)
+        else:
+            runner_type = "pooling"
 
         # Don't log the most common case
         if runner_type != "generate":
@@ -965,6 +982,8 @@ class ModelConfig:
             # `override_quantization_method` method) must be checked in order
             # of preference (this is particularly important for GPTQ).
             overrides = [
+                "auto_gptq",
+                "gptq",
                 "gptq_marlin",
                 "awq_marlin",
                 "inc",
@@ -1373,7 +1392,7 @@ class ModelConfig:
                 )
             raise AssertionError(f"Unsupported block type: {block_type}")
 
-    def get_mamba_chunk_size(self) -> int | None:
+    def get_mamba_chunk_size(self) -> int:
         """
         Returns the mamba chunk size if it exists
         """
@@ -1384,7 +1403,7 @@ class ModelConfig:
             chunk_size = getattr(self.hf_text_config, "chunk_size", None)
 
         # Since Mamba1 does not have a chunk notion
-        # we use a default chunk size of 1024.
+        # we use a default chunk size of 2048.
         if chunk_size is None:
             chunk_size = 2048
 

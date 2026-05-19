@@ -175,27 +175,30 @@ class Sampler(nn.Module):
 
         # Find max number of tokens across all requests
         max_num_tokens = max(len(tids) for tids in logprob_token_ids.values())
+        pin = self.pin_memory
 
-        # Create padded token_ids tensor: [batch_size, max_num_tokens + 1]
-        # +1 for sampled token in first position
-        token_ids_tensor = torch.zeros(
-            batch_size, max_num_tokens + 1, dtype=torch.int64, device=device
+        # Build the padded token_ids and valid_mask matrices on pinned CPU,
+        # then upload non-blocking.
+        token_ids_cpu = torch.zeros(
+            batch_size, max_num_tokens + 1, dtype=torch.int64, pin_memory=pin
         )
-        token_ids_tensor[:, 0] = sampled  # First column is sampled token
-
         # Create mask for valid positions (True = valid, False = padded)
-        valid_mask = torch.zeros(
-            batch_size, max_num_tokens + 1, dtype=torch.bool, device=device
+        valid_mask_cpu = torch.zeros(
+            batch_size, max_num_tokens + 1, dtype=torch.bool, pin_memory=pin
         )
-        valid_mask[:, 0] = True  # Sampled token is always valid
-
-        # Fill in token IDs for each request
+        valid_mask_cpu[:, 0] = True  # Sampled token is always valid
         for req_idx, token_ids in logprob_token_ids.items():
             num_tokens = len(token_ids)
-            token_ids_tensor[req_idx, 1 : num_tokens + 1] = torch.tensor(
-                token_ids, dtype=torch.int64, device=device
+            token_ids_cpu[req_idx, 1 : num_tokens + 1] = torch.as_tensor(
+                token_ids, dtype=torch.int64
             )
-            valid_mask[req_idx, 1 : num_tokens + 1] = True
+            valid_mask_cpu[req_idx, 1 : num_tokens + 1] = True
+
+        token_ids_tensor = token_ids_cpu.to(device, non_blocking=True)
+        valid_mask = valid_mask_cpu.to(device, non_blocking=True)
+        # Sampled token in column 0 — fill on-device from the sampled GPU
+        # tensor so we don't need to D2H + re-upload.
+        token_ids_tensor[:, 0] = sampled
 
         # Compute logprobs using the fused Triton kernel (log_softmax + gather)
         logprobs = compute_token_logprobs(logits, token_ids_tensor)
@@ -364,9 +367,13 @@ class Sampler(nn.Module):
         any_penalties_or_bad_words = (
             bool(bad_words_token_ids) or not sampling_metadata.no_penalties
         )
+        holder = sampling_metadata.thinking_budget_state_holder
+        needs_thinking_combine = holder is not None and holder.has_tracked_requests()
 
         output_token_ids = sampling_metadata.output_token_ids
-        if predict_bonus_token and any_penalties_or_bad_words:
+        if predict_bonus_token and (
+            any_penalties_or_bad_words or needs_thinking_combine
+        ):
             # Combine base outputs with spec tokens when speculative decoding
             # is enabled.
             output_token_ids = self._combine_outputs_with_spec_tokens(
@@ -388,6 +395,17 @@ class Sampler(nn.Module):
 
         # Apply penalties (e.g., freq_penalties).
         logits = self.apply_penalties(logits, sampling_metadata, output_token_ids)
+        if holder is not None and holder.has_tracked_requests():
+            holder.update_state(
+                output_token_ids,
+                sampling_metadata.spec_token_ids,
+                repeat_indices=None,
+            )
+            logits = holder.apply_to_logits(
+                logits,
+                predict_bonus_token,
+                sampling_metadata.spec_token_ids,
+            )
         return logits
 
     @staticmethod

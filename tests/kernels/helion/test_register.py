@@ -24,6 +24,7 @@ import helion
 import helion.language as hl
 
 from tests.kernels.helion.helpers import dummy_kernel_registry
+from vllm.kernels.helion.case_key import CaseKey
 from vllm.kernels.helion.config_manager import ConfigManager
 from vllm.kernels.helion.register import (
     _HOP_AVAILABLE,
@@ -54,22 +55,22 @@ def _add_kernel(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
 def sample_configs():
     """Create real Helion config objects for testing."""
     return {
-        "hiddensize_4096_batchsize_32": helion.Config(
+        CaseKey({"batchsize": 32, "hiddensize": 4096}): helion.Config(
             block_sizes=[128],
             num_warps=4,
             num_stages=3,
         ),
-        "hiddensize_4096_batchsize_64": helion.Config(
+        CaseKey({"batchsize": 64, "hiddensize": 4096}): helion.Config(
             block_sizes=[256],
             num_warps=8,
             num_stages=4,
         ),
-        "hiddensize_4096_batchsize_128": helion.Config(
+        CaseKey({"batchsize": 128, "hiddensize": 4096}): helion.Config(
             block_sizes=[512],
             num_warps=16,
             num_stages=2,
         ),
-        "default": helion.Config(
+        CaseKey.default(): helion.Config(
             block_sizes=[64],
             num_warps=2,
             num_stages=2,
@@ -101,8 +102,7 @@ def configured_kernel(sample_kernel, sample_configs, config_manager_with_test_co
     """Create a ConfiguredHelionKernel for testing."""
 
     def test_config_picker(args, config_keys):
-        """Simple config picker that returns default."""
-        return "default"
+        return None
 
     with (
         patch(
@@ -115,7 +115,6 @@ def configured_kernel(sample_kernel, sample_configs, config_manager_with_test_co
         ),
         patch("vllm.kernels.helion.register.helion.kernel") as mock_kernel,
     ):
-        # Mock just the helion.kernel decorator to avoid actual kernel compilation
         mock_decorated = Mock()
         mock_kernel.return_value = Mock(return_value=mock_decorated)
 
@@ -199,7 +198,9 @@ class TestConfiguredHelionKernel:
 
     def test_init_raises_without_picker(self, sample_kernel, sample_configs):
         """Test that __init__ raises when no picker registered."""
-        configs = {"default": sample_configs["default"]}
+        configs: dict[CaseKey, helion.Config] = {
+            CaseKey.default(): sample_configs[CaseKey.default()]
+        }
         mock_config_manager = Mock(spec=ConfigManager)
         mock_config_manager.get_platform_configs = Mock(return_value=configs)
 
@@ -227,7 +228,7 @@ class TestConfiguredHelionKernel:
         """Test that config selector validates picker returns valid key."""
 
         def invalid_picker(args, config_keys):
-            return "invalid_key"
+            return {"invalid": 999}
 
         kernel = create_configured_kernel_with_configs(
             op_name="test_kernel",
@@ -263,7 +264,7 @@ class TestConfiguredHelionKernel:
         selector = kernel._create_config_selector(key_computer)
 
         result = selector((torch.randn(32, 4096),))
-        assert result is kernel.configs["default"]
+        assert result is kernel.configs[CaseKey.default()]
 
     def test_create_decorated_kernel_passes_helion_settings(
         self, sample_kernel, sample_configs
@@ -271,7 +272,7 @@ class TestConfiguredHelionKernel:
         """Test that _create_decorated_kernel passes helion_settings."""
 
         def default_picker(args, config_keys):
-            return "default"
+            return None
 
         settings = helion.Settings()
         settings.print_output_code = True
@@ -315,10 +316,10 @@ class TestConfiguredHelionKernel:
             x = args[0]
             batch_size = x.shape[0]
             if batch_size <= 32:
-                return "hiddensize_4096_batchsize_32"
+                return CaseKey({"batchsize": 32, "hiddensize": 4096})
             elif batch_size <= 64:
-                return "hiddensize_4096_batchsize_64"
-            return "hiddensize_4096_batchsize_128"
+                return CaseKey({"batchsize": 64, "hiddensize": 4096})
+            return CaseKey({"batchsize": 128, "hiddensize": 4096})
 
         mock_config_manager = Mock(spec=ConfigManager)
         mock_config_manager.get_platform_configs = Mock(return_value=sample_configs)
@@ -350,13 +351,13 @@ class TestConfiguredHelionKernel:
 
             tensor = torch.randn(50, 4096)  # batch=50, should select batchsize_64
 
-            # key receives unpacked args, autotuner receives args as tuple
             key_result = key_fn(tensor)
             autotuner = autotuner_fn(None, (tensor,))
             config = autotuner.autotune()
 
-            assert key_result == "hiddensize_4096_batchsize_64"
-            assert config is kernel.configs["hiddensize_4096_batchsize_64"]
+            expected_key = CaseKey({"batchsize": 64, "hiddensize": 4096})
+            assert key_result == str(expected_key)
+            assert config is kernel.configs[expected_key]
 
 
 class TestHelionKernelWrapper:
@@ -369,7 +370,7 @@ class TestHelionKernelWrapper:
             return torch.zeros_like(args[0])
 
         def default_picker(args, config_keys):
-            return "default"
+            return None
 
         mock_config_manager = Mock(spec=ConfigManager)
         mock_config_manager.get_platform_configs = Mock(
@@ -406,7 +407,7 @@ class TestHelionKernelWrapper:
             return torch.zeros_like(args[0])
 
         def default_picker(args, config_keys):
-            return "default"
+            return None
 
         mock_config_manager = Mock(spec=ConfigManager)
         mock_config_manager.get_platform_configs = Mock(return_value={})
@@ -441,7 +442,7 @@ class TestHelionKernelWrapper:
             return torch.zeros_like(args[0])
 
         def default_picker(args, config_keys):
-            return "default"
+            return None
 
         mock_config_manager = Mock(spec=ConfigManager)
         mock_config_manager.get_platform_configs = Mock(return_value={})
@@ -476,7 +477,7 @@ class TestHelionKernelWrapper:
             return torch.zeros_like(args[0])
 
         def default_picker(args, config_keys):
-            return "default"
+            return None
 
         expected_inputs = {"key1": (torch.randn(4),)}
         input_gen = Mock(return_value=expected_inputs)
@@ -516,7 +517,7 @@ class TestHelionKernelWrapper:
             return torch.zeros_like(args[0])
 
         def default_picker(args, config_keys):
-            return "default"
+            return None
 
         mock_config_manager = Mock(spec=ConfigManager)
         mock_config_manager.get_platform_configs = Mock(return_value={})
@@ -563,7 +564,7 @@ class TestHelionKernelWrapper:
             return torch.zeros_like(args[0])
 
         def default_picker(args, config_keys):
-            return "default"
+            return None
 
         mock_config_manager = Mock(spec=ConfigManager)
         mock_config_manager.get_platform_configs = Mock(return_value=sample_configs)
@@ -601,7 +602,9 @@ class TestHelionKernelWrapper:
         on the HOP path (no custom op registration needed)."""
         from vllm.kernels.helion.utils import get_canonical_gpu_name
 
-        configs = {"default": helion.Config(block_sizes=[4, 4])}
+        configs: dict[CaseKey, helion.Config] = {
+            CaseKey.default(): helion.Config(block_sizes=[4, 4])
+        }
         with (
             dummy_kernel_registry(configs=configs) as register,
             patch(
@@ -610,7 +613,7 @@ class TestHelionKernelWrapper:
             ) as mock_gpu,
         ):
             wrapper = register(
-                config_picker=lambda args, keys: "default",
+                config_picker=lambda args, keys: None,
             )(_add_kernel)
 
             mock_gpu.assert_called_once()
@@ -642,7 +645,7 @@ class TestHelionKernelWrapper:
             ) as mock_gpu,
         ):
             wrapper = register(
-                config_picker=lambda args, keys: "default",
+                config_picker=lambda args, keys: None,
             )(_add_kernel)
 
             # Init must have detected GPU and built the kernel
@@ -660,7 +663,7 @@ class TestHelionKernelWrapper:
             return torch.zeros_like(args[0])
 
         def default_picker(args, config_keys):
-            return "default"
+            return None
 
         mock_config_manager = Mock(spec=ConfigManager)
         mock_config_manager.get_platform_configs = Mock(return_value=sample_configs)
@@ -703,7 +706,7 @@ class TestHelionKernelWrapper:
             return torch.zeros_like(args[0])
 
         def default_picker(args, config_keys):
-            return "default"
+            return None
 
         mock_config_manager = Mock(spec=ConfigManager)
         mock_config_manager.get_platform_configs = Mock(return_value=sample_configs)
@@ -784,9 +787,9 @@ class TestKernelRegistry:
     def test_get_kernel_by_name_returns_kernel(self):
         """Test get_kernel_by_name returns registered kernel."""
         with dummy_kernel_registry() as register:
-            wrapper = register(
-                "test_kernel", config_picker=lambda args, keys: "default"
-            )(_add_kernel)
+            wrapper = register("test_kernel", config_picker=lambda args, keys: None)(
+                _add_kernel
+            )
 
         from vllm.kernels.helion.register import _REGISTERED_KERNELS
 
@@ -809,7 +812,7 @@ class TestKernelRegistry:
             mock_fake = Mock()
             mock_infer.return_value = mock_fake
             wrapper = register(
-                config_picker=lambda args, keys: "default",
+                config_picker=lambda args, keys: None,
             )(_add_kernel)
 
         mock_infer.assert_called_once_with(_add_kernel, None)
@@ -818,7 +821,7 @@ class TestKernelRegistry:
     def test_register_kernel_creates_wrapper(self):
         """Test register_kernel creates HelionKernelWrapper."""
         with dummy_kernel_registry() as register:
-            result = register("test_name", config_picker=lambda args, keys: "default")(
+            result = register("test_name", config_picker=lambda args, keys: None)(
                 _add_kernel
             )
 
@@ -829,16 +832,16 @@ class TestKernelRegistry:
     def test_register_kernel_auto_detects_name(self):
         """Test register_kernel uses function name when no name provided."""
         with dummy_kernel_registry() as register:
-            wrapper = register(config_picker=lambda args, keys: "default")(_add_kernel)
+            wrapper = register(config_picker=lambda args, keys: None)(_add_kernel)
 
         assert wrapper.op_name == "_add_kernel"
 
     def test_register_kernel_registers_in_global_registry(self):
         """Test register_kernel adds wrapper to global registry."""
         with dummy_kernel_registry() as register:
-            wrapper = register(
-                "test_kernel", config_picker=lambda args, keys: "default"
-            )(_add_kernel)
+            wrapper = register("test_kernel", config_picker=lambda args, keys: None)(
+                _add_kernel
+            )
 
         registered_kernels = get_registered_kernels()
         assert "test_kernel" in registered_kernels
@@ -852,7 +855,7 @@ class TestKernelRegistry:
         with dummy_kernel_registry() as register:
             result = register(
                 "test_name",
-                config_picker=lambda args, keys: "default",
+                config_picker=lambda args, keys: None,
                 helion_settings=settings,
             )(_add_kernel)
 
@@ -865,7 +868,7 @@ class TestKernelRegistry:
         with dummy_kernel_registry() as register:
             result = register(
                 "custom_name",
-                config_picker=lambda args, keys: "default",
+                config_picker=lambda args, keys: None,
                 fake_impl=mock_fake,
             )(_add_kernel)
 
@@ -875,12 +878,12 @@ class TestKernelRegistry:
     def test_register_kernel_raises_on_duplicate_registration(self):
         """Test register_kernel raises error on duplicate names."""
         with dummy_kernel_registry() as register:
-            register("duplicate_name", config_picker=lambda args, keys: "default")(
+            register("duplicate_name", config_picker=lambda args, keys: None)(
                 _add_kernel
             )
 
             with pytest.raises(ValueError, match="already registered"):
-                register("duplicate_name", config_picker=lambda args, keys: "default")(
+                register("duplicate_name", config_picker=lambda args, keys: None)(
                     _add_kernel
                 )
 
@@ -893,7 +896,7 @@ class TestKernelRegistry:
 
             @register_kernel(
                 "test",
-                config_picker=lambda args, keys: "default",
+                config_picker=lambda args, keys: None,
                 helion_settings=mock_settings,
             )
             def test_kernel(x):
@@ -910,7 +913,7 @@ class TestKernelRegistry:
         ):
             register(
                 "test",
-                config_picker=lambda args, keys: "default",
+                config_picker=lambda args, keys: None,
                 helion_settings=mock_settings,
             )(_add_kernel)
 
@@ -940,7 +943,7 @@ class TestKernelRegistry:
 
             wrapper = register_kernel(
                 "disabled_kernel",
-                config_picker=lambda args, keys: "default",
+                config_picker=lambda args, keys: None,
                 fake_impl=fake_impl,
             )(_add_kernel)
 
@@ -957,12 +960,14 @@ class TestTorchCompileHOP:
     def test_compiled_graph_contains_helion_hop(self):
         """Verify torch.compile on a HelionKernelWrapper emits a
         helion_kernel_wrapper_mutation HOP node in the FX graph."""
-        configs = {"default": helion.Config(block_sizes=[4, 4])}
+        configs: dict[CaseKey, helion.Config] = {
+            CaseKey.default(): helion.Config(block_sizes=[4, 4])
+        }
 
         with dummy_kernel_registry(configs=configs) as register:
             add_helion_kernel = register(
                 op_name="test_torch_compile_add_kernel",
-                config_picker=lambda args, keys: "default",
+                config_picker=lambda args, keys: None,
             )(_add_kernel)
 
         captured_graph: torch.fx.GraphModule | None = None
@@ -1013,12 +1018,14 @@ class TestTorchCompileHOP:
     def test_inductor_backend_compiles_helion_hop(self):
         """Test torch.compile with inductor backend and Helion fusion enabled."""
 
-        configs = {"default": helion.Config(block_sizes=[4, 4])}
+        configs: dict[CaseKey, helion.Config] = {
+            CaseKey.default(): helion.Config(block_sizes=[4, 4])
+        }
 
         with dummy_kernel_registry(configs=configs) as register:
             add_helion_kernel = register(
                 op_name="test_inductor_add_kernel",
-                config_picker=lambda args, keys: "default",
+                config_picker=lambda args, keys: None,
                 helion_settings=helion.Settings(
                     torch_compile_fusion=True, static_shapes=False
                 ),
