@@ -60,7 +60,6 @@ class DefaultModelState(ModelState):
                 dtype=self.dtype,
                 device=self.device,
             )
-        if self.supports_prompt_embeds:
             self.prompt_embeds: dict[int, torch.Tensor] = {}
             self.prompt_is_token_ids: dict[int, torch.Tensor | None] = {}
 
