@@ -14,7 +14,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_tokens"])
 def _fused_inv_rope_fp8_quant_per_head(
     o_ptr,
     positions_ptr,
