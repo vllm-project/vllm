@@ -24,6 +24,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsConfig,
     CompressedTensorsLinearMethod,
     CompressedTensorsW4A4Fp4,
+    CompressedTensorsW4A4Mxfp4,
     CompressedTensorsW4A8Fp8,
     CompressedTensorsW4A16Fp4,
     CompressedTensorsW8A8Fp8,
@@ -685,6 +686,34 @@ def test_compressed_tensors_mxfp8_moe_setup(vllm_runner):
             experts = layer.mlp.experts
             assert isinstance(experts, FusedMoE)
             assert isinstance(experts.quant_method, CompressedTensorsW8A8Mxfp8MoEMethod)
+
+        llm.apply_model(check_model)
+        output = llm.generate_greedy("Hello my name is", max_tokens=4)
+        assert output
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not current_platform.has_device_capability(80),
+    reason="MXFP4 requires ampere or newer",
+)
+def test_compressed_tensors_mxfp4(vllm_runner):
+    model_path = "nm-testing/TinyLlama-1.1B-Chat-v1.0-MXFP4"
+    with vllm_runner(model_path, enforce_eager=True) as llm:
+
+        def check_model(model):
+            layer = model.model.layers[0]
+
+            qkv_proj = layer.self_attn.qkv_proj
+            o_proj = layer.self_attn.o_proj
+            gate_up_proj = layer.mlp.gate_up_proj
+            down_proj = layer.mlp.down_proj
+
+            for proj in (qkv_proj, o_proj, gate_up_proj, down_proj):
+                assert isinstance(proj.quant_method, CompressedTensorsLinearMethod)
+                assert isinstance(proj.scheme, CompressedTensorsW4A4Mxfp4)
+
+                # Verify group size
+                assert proj.scheme.group_size == 32
 
         llm.apply_model(check_model)
         output = llm.generate_greedy("Hello my name is", max_tokens=4)

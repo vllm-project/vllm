@@ -27,6 +27,7 @@ from vllm.utils.network_utils import get_open_zmq_ipc_path, zmq_socket_ctx
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.executor import Executor
+from vllm.v1.executor.ray_utils import WORKER_SPECIFIC_ENV_VARS
 from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
 
 if TYPE_CHECKING:
@@ -154,15 +155,16 @@ class CoreEngineProcManager:
 
         try:
             for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
-                # Adjust device control in DP for non-CUDA platforms
-                # as well as external and ray launchers
-                # For CUDA platforms, we use torch.accelerator.set_device_index()()
+                # Adjust device control in DP for platforms that cannot rely
+                # on torch.accelerator.set_device_index(), and for Ray launchers.
                 device_control_context: contextlib.AbstractContextManager[None] = (
                     contextlib.nullcontext()
                 )
+                needs_device_env_isolation = not (
+                    current_platform.is_cuda_alike() or current_platform.is_xpu()
+                )
                 if is_dp and (
-                    not current_platform.is_cuda_alike()
-                    or vllm_config.parallel_config.use_ray
+                    needs_device_env_isolation or vllm_config.parallel_config.use_ray
                 ):
                     device_control_context = set_device_control_env_var(
                         vllm_config, local_dp_rank
@@ -356,7 +358,10 @@ class CoreEngineActorManager:
         self.local_engine_actors: list[ray.ActorHandle] = []
         self.remote_engine_actors: list[ray.ActorHandle] = []
 
-        env_vars_list = get_env_vars_to_copy(destination=actor_class.__name__)
+        env_vars_list = get_env_vars_to_copy(
+            destination=actor_class.__name__,
+            exclude_vars=WORKER_SPECIFIC_ENV_VARS,
+        )
         self.env_vars_dict = {
             name: os.environ[name] for name in env_vars_list if name in os.environ
         }

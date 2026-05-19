@@ -87,7 +87,7 @@ class DecodeBenchConnector(KVConnectorBase_V1, SupportsHMA):
         self,
         vllm_config: "VllmConfig",
         role: KVConnectorRole,
-        kv_cache_config: "KVCacheConfig | None" = None,
+        kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(vllm_config, role, kv_cache_config)
 

@@ -20,6 +20,7 @@ EXPECTED_VALUES = {
     "google/gemma-3-4b-it": 0.74,
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8": 0.84,
     "ibm-granite/granite-4.0-h-tiny": 0.80,
+    "Qwen/Qwen3.5-0.8B": 0.33,
 }
 
 SIMPLE_PROMPT = (
