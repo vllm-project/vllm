@@ -383,6 +383,7 @@ class BackgroundResources:
     output_queue_task: asyncio.Task | None = None
     stats_update_task: asyncio.Task | None = None
     shutdown_path: str | None = None
+    shutdown_timeout: int | None = None
 
     # Set if any of the engines are dead. Here so that the output
     # processing threads can access it without holding a ref to the client.
@@ -393,7 +394,7 @@ class BackgroundResources:
 
         self.engine_dead = True
         if self.engine_manager is not None:
-            self.engine_manager.shutdown()
+            self.engine_manager.shutdown(timeout=self.shutdown_timeout)
         if self.coordinator is not None:
             self.coordinator.shutdown()
 
@@ -488,7 +489,9 @@ class MPClient(EngineCoreClient):
         # This will ensure resources created so far are closed
         # when the client is garbage collected, even if an
         # exception is raised mid-construction.
-        self.resources = BackgroundResources(ctx=sync_ctx)
+        self.resources = BackgroundResources(
+            ctx=sync_ctx, shutdown_timeout=vllm_config.shutdown_timeout
+        )
         self._finalizer = weakref.finalize(self, self.resources)
         success = False
         try:

@@ -403,8 +403,7 @@ class MultiprocExecutor(Executor):
 
         return future if non_block else future.result()
 
-    @staticmethod
-    def _ensure_worker_termination(worker_procs: list[BaseProcess]):
+    def _ensure_worker_termination(self, worker_procs: list[BaseProcess]):
         """Ensure that all worker processes are terminated. Assumes workers have
         received termination requests. Waits for processing, then sends
         termination and kill signals if needed."""
@@ -424,7 +423,8 @@ class MultiprocExecutor(Executor):
         active_procs = lambda: [proc for proc in worker_procs if proc.is_alive()]
         # Give processes time to clean themselves up properly first
         logger.debug("Worker Termination: allow workers to gracefully shutdown")
-        if wait_for_termination(active_procs(), 4):
+        shutdown_timeout = max(self.vllm_config.shutdown_timeout, 4)
+        if wait_for_termination(active_procs(), shutdown_timeout):
             return
 
         # Send SIGTERM if still running
