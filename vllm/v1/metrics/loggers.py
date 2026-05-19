@@ -41,6 +41,10 @@ AggregateStatLoggerFactory = type["AggregateStatLoggerBase"]
 StatLoggerFactory = AggregateStatLoggerFactory | PerEngineStatLoggerFactory
 
 
+def _inc_counter_nonnegative(counter: Counter, value: int) -> None:
+    counter.inc(max(value, 0))
+
+
 class StatLoggerBase(ABC):
     """Interface for logging metrics.
 
@@ -1153,10 +1157,13 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         # Labeled prompt token counters by source
         pts = iteration_stats.prompt_token_stats
         for source in PromptTokenStats.ALL_SOURCES:
-            self.counter_prompt_tokens_by_source[source][engine_idx].inc(
-                pts.get_by_source(source)
+            _inc_counter_nonnegative(
+                self.counter_prompt_tokens_by_source[source][engine_idx],
+                pts.get_by_source(source),
             )
-        self.counter_prompt_tokens_cached[engine_idx].inc(pts.cached_tokens)
+        _inc_counter_nonnegative(
+            self.counter_prompt_tokens_cached[engine_idx], pts.cached_tokens
+        )
         self.counter_generation_tokens[engine_idx].inc(
             iteration_stats.num_generation_tokens
         )
