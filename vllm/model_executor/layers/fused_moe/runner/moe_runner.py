@@ -424,7 +424,7 @@ class MoERunner(MoERunnerInterface):
             # after changing the defer flag or toggling fuse_moe_allreduce:
             #   rm -rf /root/.cache/vllm/torch_compile_cache/*
             if not (
-                self.moe_config.defer_allreduce
+                self.defer_allreduce
                 and self.moe_config.ep_size <= 1
                 and states.shape[0] <= 128
             ):
