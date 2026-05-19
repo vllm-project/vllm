@@ -40,10 +40,10 @@ def test_eplb_config_save_load_paths_are_mutually_exclusive(tmp_path):
 
 def test_save_logical_load_roundtrip_creates_parents_and_tags_version(tmp_path):
     """`_save_logical_load` must:
-      - create missing parent directories,
-      - write a safetensors file containing every input tensor unchanged,
-      - tag the file with `version: "1"` metadata so a future reader can
-        gate on format compatibility."""
+    - create missing parent directories,
+    - write a safetensors file containing every input tensor unchanged,
+    - tag the file with `version: "1"` metadata so a future reader can
+      gate on format compatibility."""
     tensors: dict[str, torch.Tensor] = {
         "model_a": torch.arange(12, dtype=torch.float32).reshape(3, 4),
         "model_b": torch.full((2, 5), 7.0, dtype=torch.float32),
