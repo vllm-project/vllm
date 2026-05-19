@@ -5,7 +5,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import torch
-from compressed_tensors.config import CompressionFormat
+from compressed_tensors.config import CompressionFormat, SparsityCompressionConfig
 from compressed_tensors.quantization import (
     QuantizationArgs,
     QuantizationStrategy,
@@ -67,6 +67,7 @@ logger = init_logger(__name__)
 
 __all__ = ["CompressedTensorsLinearMethod"]
 
+SPARSITY_CONFIG_NAME: Literal["sparsity_config"] = "sparsity_config"
 QUANTIZATION_SCHEME_MAP_TYPE = dict[str, dict[str, QuantizationArgs] | None]
 
 
@@ -223,6 +224,9 @@ class CompressedTensorsConfig(QuantizationConfig):
         quant_format = cast(str, config.get("format"))
         target_scheme_map = cls._quantization_scheme_map_from_config(config=config)
 
+        # Check for deprecated sparsity config
+        cls._parse_sparsity_config(config=config)
+
         return cls(
             target_scheme_map=target_scheme_map,
             ignore=ignore,
@@ -233,6 +237,37 @@ class CompressedTensorsConfig(QuantizationConfig):
             total_num_heads=config.get("total_num_heads"),
             total_num_kv_heads=config.get("total_num_kv_heads"),
         )
+
+    @classmethod
+    def _parse_sparsity_config(
+        cls, config: dict[str, Any]
+    ) -> tuple[dict[str, SparsityCompressionConfig], list[str]]:
+        """
+        :param config: The `quantization_config` dictionary from config.json
+        :return: A tuple with two elements
+            1. A dictionary mapping target layer names to their corresponding
+                sparsity_config
+            2. A list of layer names to ignore for sparsity
+        """
+        if not (sparsity_config := config.get(SPARSITY_CONFIG_NAME)):
+            return dict(), []
+
+        sparsity_config = SparsityCompressionConfig.model_validate(sparsity_config)
+        sparse_scheme_map: dict[str, SparsityCompressionConfig] = {
+            target: sparsity_config for target in sparsity_config.targets or list()
+        }
+        sparsity_ignore_list = sparsity_config.ignore or list()
+
+        # Raise DeprecationError if non-empty sparse_scheme_map is detected
+        if sparse_scheme_map:
+            raise DeprecationWarning(
+                "Sparsity support has been removed from vLLM. "
+                "The 'sparsity_config' field in the quantization configuration "
+                "is no longer supported. Please use a model without sparsity "
+                "configuration or contact the vLLM team if you need sparsity support."
+            )
+
+        return sparse_scheme_map, sparsity_ignore_list
 
     @classmethod
     def _quantization_scheme_map_from_config(
