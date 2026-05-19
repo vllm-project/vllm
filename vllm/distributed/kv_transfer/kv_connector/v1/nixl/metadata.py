@@ -34,9 +34,8 @@ GET_META_MSG = b"get_meta_msg"
 #   2: Add remote_request_id to kv_transfer_params
 #   3: Add physical_blocks_per_logical_kv_block to NixlAgentMetadata
 #   4: Add KV block lease renewal through heartbeats
-#   5: Add split_k_and_v to NixlAgentMetadata
 #
-NIXL_CONNECTOR_VERSION: int = 5
+NIXL_CONNECTOR_VERSION: int = 4
 
 
 @dataclass
@@ -52,7 +51,6 @@ class NixlAgentMetadata:
     ssm_sizes: tuple[int, int]
     attn_backend_name: str
     physical_blocks_per_logical_kv_block: int
-    split_k_and_v: bool = False
 
 
 @dataclass

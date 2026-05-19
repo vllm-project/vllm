@@ -363,6 +363,44 @@ def get_current_attn_backend(
     return get_current_attn_backends(vllm_config, layer_names)[0]
 
 
+def infer_split_k_and_v(
+    attn_backend_name: str,
+    is_mamba: bool,
+    is_mla: bool,
+    cross_layers_blocks: bool,
+) -> bool:
+    """Infer if K and V registed as separate regions from attention backend name.
+
+    Args:
+        attn_backend_name: Name of the attention backend.
+        is_mamba: Whether the model uses Mamba (SSM) layers.
+        is_mla: Whether the model uses Multi-head Latent Attention.
+        cross_layers_blocks: Whether cross-layer block caching is used.
+
+    Returns:
+        True if K and V are registered as separate regions.
+    """
+    if is_mamba:
+        return False
+
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+    attn_backend = AttentionBackendEnum[attn_backend_name].get_class()
+    _MOCK_BLOCK_SIZE = 16
+    kv_cache_shape: tuple[int, ...] = attn_backend.get_kv_cache_shape(
+        num_blocks=1,
+        block_size=_MOCK_BLOCK_SIZE,
+        num_kv_heads=1,
+        head_size=1,
+    )
+    is_kv_layout_blocks_first = (
+        len(kv_cache_shape) == 5 and kv_cache_shape[0] == 1
+    )
+
+    # Whether to register regions for K and V separately (when present).
+    return not (cross_layers_blocks or is_mla or is_kv_layout_blocks_first)
+
+
 # ---- Per-engine transfer info ----
 
 

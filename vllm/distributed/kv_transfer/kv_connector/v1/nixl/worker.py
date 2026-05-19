@@ -24,6 +24,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineTransferInfo,
     TransferTopology,
     get_current_attn_backends,
+    infer_split_k_and_v,
     kv_postprocess_blksize_and_layout_on_receive,
     kv_postprocess_blksize_on_receive,
     kv_postprocess_layout_on_receive,
@@ -1002,7 +1003,6 @@ class NixlConnectorWorker:
             physical_blocks_per_logical_kv_block=(
                 self._physical_blocks_per_logical_kv_block
             ),
-            split_k_and_v=self.transfer_topo.split_k_and_v,
         )
         # Wrap metadata in payload with hash for defensive decoding
         assert self.compat_hash is not None
@@ -1297,12 +1297,18 @@ class NixlConnectorWorker:
         physical_blocks_per_logical = (
             nixl_agent_meta.physical_blocks_per_logical_kv_block
         )
+        remote_split_k_and_v = infer_split_k_and_v(
+            attn_backend_name=nixl_agent_meta.attn_backend_name,
+            is_mamba=transfer_topo.is_mamba,
+            is_mla=transfer_topo.is_mla,
+            cross_layers_blocks=transfer_topo.cross_layers_blocks,
+        )
         transfer_info = EngineTransferInfo(
             remote_tp_size=remote_tp_size,
             remote_block_size=nixl_agent_meta.block_size,
             remote_block_len=nixl_agent_meta.block_lens[0],
             remote_physical_blocks_per_logical=physical_blocks_per_logical,
-            remote_split_k_and_v=nixl_agent_meta.split_k_and_v,
+            remote_split_k_and_v=remote_split_k_and_v,
         )
         transfer_topo.register_remote_engine(engine_id, transfer_info)
         logger.info("Transfer plan: %s", transfer_topo.describe(engine_id))
@@ -1346,7 +1352,7 @@ class NixlConnectorWorker:
             remote_tp_rank,
             tp_ratio,
             transfer_topo.split_k_and_v,
-            nixl_agent_meta.split_k_and_v,
+            remote_split_k_and_v,
         )
 
         plan = self.tp_mappings[engine_id]
