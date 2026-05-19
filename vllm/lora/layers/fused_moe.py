@@ -37,6 +37,10 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         # For non-gated MoE (is_act_and_mul=False), only 1 slice is needed
         # since there's only up_proj (w1), not gate_proj + up_proj (w1 + w3)
         self._w13_slices = 2 if base_layer.moe_config.is_act_and_mul else 1
+        # Mirrors per-(lora_id) layout of `self.lora_a_stacked` (built in
+        # `create_lora_weights`) so `create_dummy_lora`'s n_slices fallback
+        # matches `lora_a_stacked` length under EP.
+        self.n_slices = base_layer.local_num_experts * (self._w13_slices + 1)
 
         self.base_layer.ensure_moe_quant_config_init()
         if getattr(self.base_layer.quant_method, "supports_internal_mk", False):
