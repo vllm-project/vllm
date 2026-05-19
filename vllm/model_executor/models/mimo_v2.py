@@ -219,17 +219,34 @@ def _mimo_v2_copy_paired_qkv_fp8(
             f"{expected_rows} from q={q_rows}, k={k_rows}, v={v_rows}."
         )
 
-    ckpt_tp = num_kv_heads
-    q_heads_per_ckpt_rank = divide(num_heads, ckpt_tp)
-    ckpt_q_rows = q_heads_per_ckpt_rank * head_dim
-    ckpt_k_rows = head_dim
-    ckpt_v_rows = v_head_dim
-    ckpt_chunk_rows = ckpt_q_rows + ckpt_k_rows + ckpt_v_rows
-    ckpt_chunk_scale_rows = cdiv(ckpt_chunk_rows, block_n)
-    if (
-        loaded_weight.shape[0] == ckpt_tp * ckpt_chunk_rows
-        and loaded_scale.shape[0] == ckpt_tp * ckpt_chunk_scale_rows
-    ):
+    # Detect ckpt_tp from scale shape; weight shape alone is degenerate.
+    ckpt_tp = None
+    q_heads_per_ckpt_rank = None
+    ckpt_q_rows = ckpt_k_rows = ckpt_v_rows = 0
+    ckpt_chunk_rows = ckpt_chunk_scale_rows = 0
+    for candidate in range(min(num_heads, num_kv_heads), 0, -1):
+        if num_heads % candidate != 0 or num_kv_heads % candidate != 0:
+            continue
+        cand_q_heads = num_heads // candidate
+        cand_kv_heads = num_kv_heads // candidate
+        cand_q_rows = cand_q_heads * head_dim
+        cand_k_rows = cand_kv_heads * head_dim
+        cand_v_rows = cand_kv_heads * v_head_dim
+        cand_chunk_rows = cand_q_rows + cand_k_rows + cand_v_rows
+        cand_chunk_scale_rows = cdiv(cand_chunk_rows, block_n)
+        if (
+            loaded_weight.shape[0] == candidate * cand_chunk_rows
+            and loaded_scale.shape[0] == candidate * cand_chunk_scale_rows
+        ):
+            ckpt_tp = candidate
+            q_heads_per_ckpt_rank = cand_q_heads
+            ckpt_q_rows = cand_q_rows
+            ckpt_k_rows = cand_k_rows
+            ckpt_v_rows = cand_v_rows
+            ckpt_chunk_rows = cand_chunk_rows
+            ckpt_chunk_scale_rows = cand_chunk_scale_rows
+            break
+    if ckpt_tp is not None:
         logger.info_once(
             "Detected MiMo-V2 TP%d pre-sharded fused-QKV FP8 checkpoint layout.",
             ckpt_tp,
@@ -287,14 +304,30 @@ def _mimo_v2_copy_paired_qkv_fp8(
                 kv_head_count = divide(num_kv_heads, tp_size)
                 kv_head_start = tp_rank * kv_head_count
             kv_head_end = kv_head_start + kv_head_count
-            k_parts = [
-                dequant_ckpt_shard(ckpt_rank, ckpt_q_rows, ckpt_k_rows)
-                for ckpt_rank in range(kv_head_start, kv_head_end)
-            ]
-            v_parts = [
-                dequant_ckpt_shard(ckpt_rank, ckpt_q_rows + ckpt_k_rows, ckpt_v_rows)
-                for ckpt_rank in range(kv_head_start, kv_head_end)
-            ]
+
+            kv_heads_per_ckpt_rank = divide(num_kv_heads, ckpt_tp)
+
+            def _kv_parts(
+                intra_chunk_offset: int, per_head_rows: int
+            ) -> list[torch.Tensor]:
+                parts: list[torch.Tensor] = []
+                next_kv_head = kv_head_start
+                while next_kv_head < kv_head_end:
+                    ckpt_rank = next_kv_head // kv_heads_per_ckpt_rank
+                    ckpt_head_start = ckpt_rank * kv_heads_per_ckpt_rank
+                    part_head_end = min(
+                        kv_head_end, ckpt_head_start + kv_heads_per_ckpt_rank
+                    )
+                    part_rows = (part_head_end - next_kv_head) * per_head_rows
+                    part_start = intra_chunk_offset + (
+                        next_kv_head - ckpt_head_start
+                    ) * per_head_rows
+                    parts.append(dequant_ckpt_shard(ckpt_rank, part_start, part_rows))
+                    next_kv_head = part_head_end
+                return parts
+
+            k_parts = _kv_parts(ckpt_q_rows, head_dim)
+            v_parts = _kv_parts(ckpt_q_rows + ckpt_k_rows, v_head_dim)
             local_dense = torch.cat([*q_parts, *k_parts, *v_parts], dim=0)
             local_weight, local_scale = _mimo_v2_quantize_block_weight(
                 local_dense,
