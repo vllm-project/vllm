@@ -102,24 +102,16 @@ function Ensure-Venv {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Path) | Out-Null
     $pyLauncher = Get-Command py.exe -ErrorAction SilentlyContinue
     $python312Exe = ""
-    $py312SwitchWorks = $false
     if ($pyLauncher) {
-        & $pyLauncher.Source "-3.12" "-c" "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 12) else 1)" *> $null
-        $py312SwitchWorks = $LASTEXITCODE -eq 0
-        if (-not $py312SwitchWorks) {
-            $pyList = & $pyLauncher.Source "-0p"
-            foreach ($line in $pyList) {
-                if ($line -match "3\.12" -and $line -match "([A-Za-z]:\\.*python\.exe)\s*$") {
-                    $python312Exe = $matches[1]
-                    break
-                }
+        $pyList = & $pyLauncher.Source "-0p"
+        foreach ($line in $pyList) {
+            if ($line -match "3\.12" -and $line -match "([A-Za-z]:\\.*python\.exe)\s*$") {
+                $python312Exe = $matches[1]
+                break
             }
         }
     }
-    if ($pyLauncher -and $py312SwitchWorks) {
-        Invoke-Native $pyLauncher.Source "-3.12" "-m" "venv" $Path
-    }
-    elseif ($python312Exe) {
+    if ($python312Exe) {
         Invoke-Native $python312Exe "-m" "venv" $Path
     }
     else {
