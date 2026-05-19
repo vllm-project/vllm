@@ -18,9 +18,40 @@ from .index import prepare_chunk_indices
 from .op import exp
 from .utils import FLA_CHUNK_SIZE, check_shared_mem, is_navi, is_nvidia_hopper
 
-BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
+# Autotune dimensions for chunk_fwd_kernel_o.
+#
+# BKV: navi (gfx11) has enough LDS for BK=BV=128 even though
+#      check_shared_mem() returns False against the default arch
+#      threshold.  Adding 128 lifts the kernel 1.14x at the Qwen3.5-
+#      A3B M=941 prefill shape (~4 ms saved per prefill step at ~30
+#      calls).
+# NUM_STAGES: navi gets {1, 2}; num_stages=1 wins when per-program
+#      work is small (same reasoning as fla/wy_fast).
+#
+# waves_per_eu is also a knob (caps VGPR usage so 3 waves fit per SIMD
+# on gfx11; per-program working-set is smaller than wy_fast.py so it
+# tolerates wpe=3) but it's a ROCm launch-site kwarg, not a
+# triton.Config attribute in Triton 3.6 -- passed at the kernel launch
+# below instead of via autotune.
+BKV_LIST = [32, 64, 128] if is_navi else ([64, 128] if check_shared_mem() else [32, 64])
 NUM_WARPS = [2, 4] if (is_nvidia_hopper or is_navi) else [2, 4, 8]
-NUM_STAGES = [2] if is_navi else [2, 3, 4]
+NUM_STAGES = [1, 2] if is_navi else [2, 3, 4]
+
+
+def _chunk_o_configs() -> list:
+    cfgs = []
+    for BK in BKV_LIST:
+        for BV in BKV_LIST:
+            for nw in NUM_WARPS:
+                for ns in NUM_STAGES:
+                    cfgs.append(
+                        triton.Config(
+                            {"BK": BK, "BV": BV},
+                            num_warps=nw,
+                            num_stages=ns,
+                        )
+                    )
+    return cfgs
 
 
 @triton.heuristics(
@@ -30,13 +61,7 @@ NUM_STAGES = [2] if is_navi else [2, 3, 4]
     }
 )
 @triton.autotune(
-    configs=[
-        triton.Config({"BK": BK, "BV": BV}, num_warps=num_warps, num_stages=num_stages)
-        for BK in BKV_LIST
-        for BV in BKV_LIST
-        for num_warps in NUM_WARPS
-        for num_stages in NUM_STAGES
-    ],
+    configs=_chunk_o_configs(),
     key=["H", "K", "V", "BT"],
 )
 @triton.jit(do_not_specialize=["T"])
@@ -164,6 +189,10 @@ def chunk_fwd_o(
     def grid(meta):
         return (triton.cdiv(V, meta["BV"]), NT, B * H)
 
+    # BK, BV autotuned via _chunk_o_configs.  waves_per_eu is a ROCm
+    # launch-site kwarg (not a triton.Config attribute), so it's passed
+    # here as a constant -- 3 lets three waves fit per SIMD on gfx11.
+    extra = {"waves_per_eu": 3} if is_navi else {}
     chunk_fwd_kernel_o[grid](
         q,
         k,
@@ -180,5 +209,6 @@ def chunk_fwd_o(
         K=K,
         V=V,
         BT=BT,
+        **extra,
     )
     return o

@@ -16,18 +16,51 @@ from vllm.triton_utils import tl, triton
 from .index import prepare_chunk_indices
 from .utils import is_navi
 
+# Autotune dimensions for recompute_w_u_fwd_kernel.
+#
+# On navi the per-program work is dominated by tiny 16x16 matmuls;
+# num_stages=1 wins (pipelining inflates VGPR pressure without giving
+# latency hiding back) and smaller BK/BV (32) wins over the original
+# fixed 64.  Net effect on the full GDN chain (kkt + solve_tril +
+# recompute_w_u, Qwen3.5-A3B prefill M=941): ~1.86x cold, ~2.26x
+# warm vs the prior navi tune (see commit message for absolute numbers).
+#
+# waves_per_eu is also a knob (caps VGPR usage so 2 waves fit per SIMD
+# on gfx11) but it's a ROCm launch-site kwarg, not a triton.Config
+# attribute in Triton 3.6 -- passed at the kernel launch below instead
+# of via autotune.
+#
+# Grid:
+#   navi: warps in {2, 4} x stages in {1, 2} x BK in {32, 64}
+#       x BV in {32, 64}  = 16 configs
+#   cuda: warps in {2, 4, 8} x stages in {1, 2, 3, 4} x BK in {64}
+#       x BV in {64}  = 12 configs
 _WY_WARPS = [2, 4] if is_navi else [2, 4, 8]
-_WY_STAGES = [2] if is_navi else [2, 3, 4]
+_WY_STAGES = [1, 2] if is_navi else [1, 2, 3, 4]
+_WY_BK = [32, 64] if is_navi else [64]
+_WY_BV = [32, 64] if is_navi else [64]
+
+
+def _wy_configs() -> list:
+    cfgs = []
+    for nw in _WY_WARPS:
+        for ns in _WY_STAGES:
+            for bk in _WY_BK:
+                for bv in _WY_BV:
+                    cfgs.append(
+                        triton.Config(
+                            {"BK": bk, "BV": bv},
+                            num_warps=nw,
+                            num_stages=ns,
+                        )
+                    )
+    return cfgs
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
 @triton.autotune(
-    configs=[
-        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in _WY_WARPS
-        for num_stages in _WY_STAGES
-    ],
-    key=["H", "K", "V", "BT", "BK", "BV", "IS_VARLEN"],
+    configs=_wy_configs(),
+    key=["H", "K", "V", "BT", "IS_VARLEN"],
 )
 @triton.jit(do_not_specialize=["T"])
 def recompute_w_u_fwd_kernel(
@@ -136,10 +169,12 @@ def recompute_w_u_fwd(
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
-    BK = 64
-    BV = 64
     u = torch.empty_like(v)
     w = k.new_empty(B, T, H, K)
+    # BK, BV autotuned (see _WY_BK / _WY_BV).  waves_per_eu is a ROCm
+    # launch-site kwarg (not a triton.Config attribute), so it's passed
+    # here as a constant hint -- 2 lets two waves fit per SIMD on gfx11.
+    extra = {"waves_per_eu": 2} if is_navi else {}
     recompute_w_u_fwd_kernel[(NT, B * H)](
         k=k,
         v=v,
@@ -156,7 +191,6 @@ def recompute_w_u_fwd(
         K=K,
         V=V,
         BT=BT,
-        BK=BK,
-        BV=BV,
+        **extra,
     )
     return w, u
