@@ -3,6 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: V1 Spec Decode
+  device: h200_35gb
   key: v1-spec-decode
   timeout_in_minutes: 30
   source_file_dependencies:
@@ -129,6 +130,19 @@ steps:
     - pytest -v -s -m 'cpu_test' v1/kv_connector/unit
     - pytest -v -s -m 'cpu_test' v1/metrics
 
+- label: Extract Hidden States Integration
+  key: extract-hidden-states-integration
+  timeout_in_minutes: 20
+  device: h200_18gb
+  source_file_dependencies:
+    - vllm/v1/spec_decode/extract_hidden_states.py
+    - vllm/model_executor/models/extract_hidden_states.py
+    - vllm/transformers_utils/configs/extract_hidden_states.py
+    - tests/v1/kv_connector/extract_hidden_states_integration
+  commands:
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - pytest -v -s v1/kv_connector/extract_hidden_states_integration
+
 - label: Regression
   key: regression
   timeout_in_minutes: 20
@@ -152,6 +166,7 @@ steps:
   working_dir: "/vllm-workspace/tests" # optional
 
 - label: Examples
+  device: h200_35gb
   key: examples
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/examples"
@@ -222,6 +237,7 @@ steps:
   - bash standalone_tests/python_only_compile.sh
 
 - label: Async Engine, Inputs, Utils, Worker
+  device: h200_35gb
   key: async-engine-inputs-utils-worker
   timeout_in_minutes: 50
   source_file_dependencies:
@@ -305,6 +321,20 @@ steps:
   - pytest -v -s transformers_utils
   - pytest -v -s config
 
+- label: Batch Invariance (A100)
+  key: batch-invariance-a100
+  timeout_in_minutes: 30
+  device: a100
+  source_file_dependencies:
+    - vllm/v1/attention
+    - vllm/model_executor/layers
+    - tests/v1/determinism/
+  commands:
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - pip install pytest-timeout pytest-forked
+    - pytest -v -s v1/determinism/test_batch_invariance.py
+    - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle[TRITON_MLA]
+
 - label: Batch Invariance (H100)
   key: batch-invariance-h100
   timeout_in_minutes: 30
@@ -339,6 +369,7 @@ steps:
     - pytest -v -s v1/determinism/test_nvfp4_batch_invariant.py
   
 - label: Acceptance Length Test (Large Models) # optional
+  device: h200_35gb
   key: acceptance-length-test-large-models
   timeout_in_minutes: 25
   gpu: h100

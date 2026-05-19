@@ -37,6 +37,7 @@ def attach_router(app: FastAPI):
             "lora_name": "body.name",
             "lora_path": "body.src",
             "load_inplace": "body.load_inplace || `false`",
+            "is_3d_lora_weight": "body.is_3d_lora_weight || `false`",
         },
     )
     @router.post("/v1/load_lora_adapter", dependencies=[Depends(validate_json_request)])
