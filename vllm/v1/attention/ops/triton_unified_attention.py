@@ -757,8 +757,32 @@ def unified_attention(
         if num_stages_2d is not None:
             config["num_stages"] = num_stages_2d
     else:
-        grid = (total_num_q_blocks, num_kv_heads, num_par_softmax_segments)
         tile_size = TILE_SIZE_DECODE
+
+        if current_platform.is_gfx1151():
+            is_large_mha = num_kv_heads >= 32 and head_size >= 128
+            is_small_head_or_mqa = head_size <= 64 or num_kv_heads == 1
+
+            BLOCK_M = 64 if is_large_mha else 16
+            BLOCK_Q = BLOCK_M // num_queries_per_kv
+            total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
+
+            if num_kv_heads == 8:
+                num_par_softmax_segments = 8
+            elif is_small_head_or_mqa:
+                num_par_softmax_segments = 32
+            else:
+                num_par_softmax_segments = 16
+            num_segments = num_par_softmax_segments
+
+            num_stages = 4 if is_large_mha else (1 if num_kv_heads == 1 else 3)
+            waves_per_eu = 6 if is_large_mha else (2 if is_small_head_or_mqa else 4)
+
+            config["num_warps"] = 4
+            config["num_stages"] = num_stages
+            config["waves_per_eu"] = waves_per_eu
+
+        grid = (total_num_q_blocks, num_kv_heads, num_par_softmax_segments)
 
     kernel_unified_attention[grid](
         output_ptr=out,
