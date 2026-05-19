@@ -40,7 +40,7 @@ from vllm.model_executor.models.utils import maybe_prefix
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from .deepseek_v4 import (
+from .model import (
     DeepseekV4DecoderLayer,
     make_deepseek_v4_expert_params_mapping,
 )
