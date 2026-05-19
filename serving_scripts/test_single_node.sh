@@ -6,7 +6,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=512G
-#SBATCH --time=00:15:00
+#SBATCH --time=00:45:00
 #SBATCH --output=results/%x-%j.out
 #SBATCH --error=results/%x-%j.err
 #SBATCH --mail-user=jason.miller@eng.ox.ac.uk
@@ -16,7 +16,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="arc-ray-qwen3-30b-a3b-instruct-single-node-tp2"
+SCRIPT_VERSION="arc-ray-qwen3-30b-a3b-instruct-single-node-tp2-nsys-v2"
 
 DEBUG_SLURM_SCRIPT="${DEBUG_SLURM_SCRIPT:-0}"
 slurm_debug() {
@@ -162,23 +162,30 @@ module load CUDA/12.9.0
 
 TRACE_BASE="/data/engs-glass/catz0932/inference-traces/vllm/results"
 TRACE_RUN_DIR="${TRACE_BASE}/${SLURM_JOB_ID}"
+RAY_TMP_ROOT="${TRACE_RUN_DIR}/ray_tmp"
+RAY_TMP_LINK_BASE="/tmp/vray-${SLURM_JOB_ID}"
 
 mkdir -p "${TRACE_RUN_DIR}/nsight"
 mkdir -p "${TRACE_RUN_DIR}/nccl_logs"
+mkdir -p "${RAY_TMP_ROOT}"
 
 export NSYS_ENABLE="${NSYS_ENABLE:-1}"
 export NSYS_DIR="${TRACE_RUN_DIR}/nsight"
 export NSYS_TRACE="${NSYS_TRACE:-cuda,nvtx,osrt,cudnn,cublas}"
 export NSYS_DELAY="${NSYS_DELAY:-0}"
-export NSYS_PROFILE_SERVER="${NSYS_PROFILE_SERVER:-1}"
+# Worker-only Nsight via vLLM flags (no outer nsys on api_server — avoids NCCL init failures).
+export NSYS_PROFILE_VLLM="${NSYS_PROFILE_VLLM:-1}"
 export NSYS_PROFILE_RAY="${NSYS_PROFILE_RAY:-0}"
 
 export NCCL_DEBUG_FILE="${TRACE_RUN_DIR}/nccl_logs/nccl_%h_%p.log"
 
 echo "TRACE_RUN_DIR=${TRACE_RUN_DIR}"
+echo "RAY_TMP_ROOT=${RAY_TMP_ROOT}"
 echo "NSYS_DIR=${NSYS_DIR}"
 echo "NCCL_DEBUG_FILE=${NCCL_DEBUG_FILE}"
-echo "NSYS_PROFILE_SERVER=${NSYS_PROFILE_SERVER}"
+echo "NSYS_TRACE=${NSYS_TRACE}"
+echo "NSYS_DELAY=${NSYS_DELAY}"
+echo "NSYS_PROFILE_VLLM=${NSYS_PROFILE_VLLM}"
 echo "NSYS_PROFILE_RAY=${NSYS_PROFILE_RAY}"
 echo "nsys path: $(command -v nsys || echo '<not found>')"
 nsys --version || true
@@ -272,11 +279,51 @@ cleanup() {
 }
 trap cleanup EXIT
 
+collect_ray_logs() {
+  echo "Collecting Ray logs from shared Ray temp dir..."
+  local out="${TRACE_RUN_DIR}/ray_logs"
+  mkdir -p "${out}"
+
+  for node_dir in "${RAY_TMP_ROOT}"/*; do
+    [ -d "${node_dir}" ] || continue
+
+    local node_name
+    node_name="$(basename "${node_dir}")"
+
+    local session
+    session="$(readlink -f "${node_dir}/session_latest" 2>/dev/null || true)"
+
+    if [ -z "${session}" ] || [ ! -d "${session}/logs" ]; then
+      echo "No Ray session logs found for ${node_name} under ${node_dir}" >&2
+      continue
+    fi
+
+    echo "Archiving Ray logs for ${node_name}: ${session}/logs"
+
+    tar \
+      -C "${session}" \
+      -czf "${out}/ray_logs_${node_name}.tgz" \
+      logs \
+      --exclude='logs/nsight/*.qdstrm' \
+      --exclude='logs/nsight/*.nsys-rep' \
+      --exclude='logs/events/*' \
+      2>/dev/null || true
+  done
+
+  echo "Ray log archives:"
+  find "${out}" -type f -printf "%p %s bytes\n" 2>/dev/null || true
+}
+
 echo "=== Ray head (local, ${GPUS_PER_NODE} GPUs) ==="
 (
   unset GLOO_SOCKET_IFNAME
   export VLLM_HOST_IP="${NODE_IP}"
   configure_socket_ifnames "${NODE_IP}" 0
+
+  rm -rf "${RAY_TMP_LINK_BASE}-${NODE}"
+  mkdir -p "${RAY_TMP_ROOT}/${NODE}"
+  ln -sfn "${RAY_TMP_ROOT}/${NODE}" "${RAY_TMP_LINK_BASE}-${NODE}"
+  echo "Ray temp dir link: ${RAY_TMP_LINK_BASE}-${NODE} -> ${RAY_TMP_ROOT}/${NODE}"
 
   if [ "${NSYS_ENABLE}" = "1" ] && [ "${NSYS_PROFILE_RAY}" = "1" ]; then
     echo "Profiling Ray head with Nsight Systems"
@@ -292,14 +339,16 @@ echo "=== Ray head (local, ${GPUS_PER_NODE} GPUs) ==="
         --node-ip-address="${NODE_IP}" \
         --port="${RAY_PORT}" \
         --num-gpus="${GPUS_PER_NODE}" \
-        --num-cpus="${CPUS_PER_TASK}"
+        --num-cpus="${CPUS_PER_TASK}" \
+        --temp-dir="${RAY_TMP_LINK_BASE}-${NODE}"
   else
     "${RAY_BIN}" start --block \
       --head \
       --node-ip-address="${NODE_IP}" \
       --port="${RAY_PORT}" \
       --num-gpus="${GPUS_PER_NODE}" \
-      --num-cpus="${CPUS_PER_TASK}"
+      --num-cpus="${CPUS_PER_TASK}" \
+      --temp-dir="${RAY_TMP_LINK_BASE}-${NODE}"
   fi
 ) &
 HEAD_RAY_PID=$!
@@ -324,35 +373,31 @@ PY
 
 echo "=== vLLM api_server (background process) ==="
 VLLM_TRACE_FLAGS=()
-if [ "${NSYS_ENABLE}" = "1" ] && [ "${NSYS_PROFILE_SERVER}" = "1" ]; then
+if [ "${NSYS_ENABLE}" = "1" ] && [ "${NSYS_PROFILE_VLLM}" = "1" ]; then
   VLLM_TRACE_FLAGS+=(
     --ray-workers-use-nsight
     --enable-layerwise-nvtx-tracing
+    --enable-mfu-metrics
+    --kv-cache-metrics
+    --kv-cache-metrics-sample 1.0
     --enable-logging-iteration-details
   )
 fi
 
-if [ "${NSYS_ENABLE}" = "1" ] && [ "${NSYS_PROFILE_SERVER}" = "1" ]; then
-  echo "Profiling vLLM server and Ray workers with Nsight Systems"
-  echo "API-server Nsight output: ${NSYS_DIR}/vllm_api_server_${NODE}.nsys-rep"
-
-  nsys profile \
-    --force-overwrite=true \
-    --trace="${NSYS_TRACE}" \
-    --sample=none \
-    --delay="${NSYS_DELAY}" \
-    --output="${NSYS_DIR}/vllm_api_server_${NODE}" \
-    python -m vllm.entrypoints.openai.api_server \
-      --model "${MODEL_ID}" \
-      --host "${HOST}" \
-      --port "${PORT}" \
-      --distributed-executor-backend ray \
-      --tensor-parallel-size "${TP}" \
-      --pipeline-parallel-size "${PP}" \
-      --max-model-len "${MAX_MODEL_LEN}" \
-      --enforce-eager \
-      "${VLLM_TRACE_FLAGS[@]}" \
-      --disable-custom-all-reduce &
+if [ "${NSYS_ENABLE}" = "1" ] && [ "${NSYS_PROFILE_VLLM}" = "1" ]; then
+  echo "Starting vLLM server with Ray worker Nsight profiling enabled"
+  echo "Ray worker Nsight reports should appear under ${RAY_TMP_ROOT}/${NODE}/session_*/logs/nsight"
+  python -m vllm.entrypoints.openai.api_server \
+    --model "${MODEL_ID}" \
+    --host "${HOST}" \
+    --port "${PORT}" \
+    --distributed-executor-backend ray \
+    --tensor-parallel-size "${TP}" \
+    --pipeline-parallel-size "${PP}" \
+    --max-model-len "${MAX_MODEL_LEN}" \
+    --enforce-eager \
+    "${VLLM_TRACE_FLAGS[@]}" \
+    --disable-custom-all-reduce &
 else
   python -m vllm.entrypoints.openai.api_server \
     --model "${MODEL_ID}" \
@@ -399,25 +444,34 @@ if [ -n "${SERVER_STEP_PID}" ] && kill -0 "${SERVER_STEP_PID}" 2>/dev/null; then
   SERVER_STEP_PID=""
 fi
 
-echo "Stopping Ray before copying Nsight reports..."
+echo "Stopping Ray so Nsight worker reports finalize..."
 if [ -n "${HEAD_RAY_PID}" ] && kill -0 "${HEAD_RAY_PID}" 2>/dev/null; then
   kill -TERM "${HEAD_RAY_PID}" 2>/dev/null || true
   wait "${HEAD_RAY_PID}" 2>/dev/null || true
 fi
 HEAD_RAY_PID=""
-"${RAY_BIN}" stop --force 2>/dev/null || true
 
 echo "Waiting briefly for Ray/Nsight files to flush..."
-sleep 10
+sleep 30
 
-echo "Copying Ray worker Nsight reports..."
-mkdir -p "${TRACE_RUN_DIR}/ray_worker_nsight/${NODE}"
-if [ -d /tmp/ray/session_latest/logs/nsight ]; then
-  cp -v /tmp/ray/session_latest/logs/nsight/*.nsys-rep \
-    "${TRACE_RUN_DIR}/ray_worker_nsight/${NODE}/" 2>/dev/null || true
-else
-  echo "No /tmp/ray/session_latest/logs/nsight on ${NODE}"
-fi
+collect_ray_logs
+
+echo "Collecting Ray worker Nsight reports from shared Ray temp dir..."
+mkdir -p "${TRACE_RUN_DIR}/ray_worker_nsight"
+
+echo "Looking for Nsight reports under ${RAY_TMP_ROOT}:"
+find "${RAY_TMP_ROOT}" \
+  -type f -name "*.nsys-rep" \
+  -printf "%p %s bytes\n" 2>/dev/null || true
+
+find "${RAY_TMP_ROOT}" \
+  -type f -name "*.nsys-rep" -print0 2>/dev/null \
+  | while IFS= read -r -d '' report; do
+      rel="${report#${RAY_TMP_ROOT}/}"
+      node_name="${rel%%/*}"
+      mkdir -p "${TRACE_RUN_DIR}/ray_worker_nsight/${node_name}"
+      cp -v "${report}" "${TRACE_RUN_DIR}/ray_worker_nsight/${node_name}/" || true
+    done
 
 echo "Trace files:"
 find "${TRACE_RUN_DIR}" -maxdepth 5 -type f -printf "%p %s bytes\n" 2>/dev/null || true
