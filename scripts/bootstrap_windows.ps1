@@ -192,7 +192,8 @@ function Set-BootstrapEnvironment {
     $nvcc = Join-Path $CudaPath "bin\nvcc.exe"
 
     $torchLib = Join-Path (Split-Path -Parent (Split-Path -Parent $PythonExe)) "Lib\site-packages\torch\lib"
-    $env:PATH = "$CudaPath\bin;$torchLib;$env:PATH"
+    $venvScripts = Split-Path -Parent $PythonExe
+    $env:PATH = "$venvScripts;$CudaPath\bin;$torchLib;$env:PATH"
     $env:CUDA_HOME = $CudaPath
     $env:CUDA_PATH = $CudaPath
     $env:CUDACXX = $nvcc
