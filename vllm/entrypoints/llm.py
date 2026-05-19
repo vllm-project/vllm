@@ -1177,7 +1177,6 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin):
             params=params,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
-            priority=priority,
             chat_template=chat_template,
             chat_template_content_format=chat_template_content_format,
             chat_template_kwargs=chat_template_kwargs,
