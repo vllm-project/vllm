@@ -1,4 +1,4 @@
-# KV Cache Lease Renewal
+# NIXL KV Cache Lease Renewal
 
 In disaggregated prefill/decode deployments, the Prefill instance (P) must hold KV cache blocks in GPU memory after completing a prefill, waiting for the Decode instance (D) to read them via RDMA. A mechanism is needed to determine when those blocks can safely be freed when D isn't able to retrieve them. This mechanism was introduced in [PR #41383](https://github.com/vllm-project/vllm/pull/41383).
 
@@ -28,7 +28,7 @@ When P finishes a prefill, it pins the KV blocks with an initial lease duration 
 
 ### Piggybacking on NIXL notifications
 
-Rather than introducing a new transport channel, heartbeats reuse NIXL's existing notification system (`send_notif` / `get_new_notifs`). The notification medium is backend-specific, with automatic fallback from IB/RoCE to TCP already handled by NIXL. **Heartbeat messages group requests on D by destination**, so that a single batched message is sent per-remote, enabling lease renewal of multiple request per timestep.
+Rather than introducing a new transport channel, heartbeats reuse NIXL's existing notification system (`send_notif` / `get_new_notifs`). The notification medium is backend-specific, with automatic fallback from IB/RoCE to TCP already handled by NIXL. Each single heartbeat message sent from D to a particular P renews all requests pinned in P on behalf of that D --- in other words, a single batched message per iteration renews the lease of multiple requests.
 
 ### Scheduler-side tracking (D)
 
