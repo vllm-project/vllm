@@ -346,7 +346,7 @@ def fused_indexer_q_rope_quant(
         )
         if has_cutedsl():
             # lazily import, otherwise some tests fail due to CUDA driver init failure.
-            from .fused_indexer_q_cutedsl import (
+            from vllm.models.deepseek_v4.nvidia.ops.fused_indexer_q_cutedsl import (
                 fused_indexer_q_rope_quant_mxfp4_cutedsl,
             )
 
@@ -400,7 +400,7 @@ def fused_indexer_q_rope_quant(
     index_q_fp8 = torch.empty_like(index_q, dtype=torch.float8_e4m3fn)
     if has_cutedsl():
         # lazily import, otherwise some tests fail due to CUDA driver init failure.
-        from .fused_indexer_q_cutedsl import (
+        from vllm.models.deepseek_v4.nvidia.ops.fused_indexer_q_cutedsl import (
             fused_indexer_q_rope_quant_fp8_cutedsl,
         )
 
