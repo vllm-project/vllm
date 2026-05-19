@@ -37,6 +37,7 @@ logger = init_logger(__name__)
 class WNA16MoEBackend(Enum):
     MARLIN = "MARLIN"
     BATCHED_MARLIN = "BATCHED_MARLIN"
+    CPU = "CPU"
 
 
 def backend_to_kernel_cls(
@@ -57,6 +58,13 @@ def backend_to_kernel_cls(
 
         return [BatchedMarlinExperts]
 
+    elif backend == WNA16MoEBackend.CPU:
+        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+            CPUExpertsInt4,
+        )
+
+        return [CPUExpertsInt4]
+
     else:
         raise ValueError(f"Unknown WNA16 MoE backend: {backend.value}")
 
@@ -65,6 +73,11 @@ def _get_priority_backends() -> list[WNA16MoEBackend]:
     """
     Get available backends in priority order based on platform and config.
     """
+    from vllm.platforms import current_platform
+
+    if current_platform.is_cpu():
+        return [WNA16MoEBackend.CPU]
+    
     _AVAILABLE_BACKENDS = [
         WNA16MoEBackend.MARLIN,
         WNA16MoEBackend.BATCHED_MARLIN,
@@ -149,15 +162,16 @@ def make_wna16_moe_kernel(
     moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
     experts_cls: type[mk.FusedMoEExperts] | None,
+    layer: torch.nn.Module,
     is_k_full: bool,
     w13_g_idx: torch.Tensor | None,
     w2_g_idx: torch.Tensor | None,
     w13_g_idx_sort_indices: torch.Tensor | None,
     w2_g_idx_sort_indices: torch.Tensor | None,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    shared_experts: torch.nn.Module | None = None,
 ) -> mk.FusedMoEKernel:
-    # Currently, we only support MarlinExperts and BatchedMarlinExperts
-    assert experts_cls in (MarlinExperts, BatchedMarlinExperts)
+    assert experts_cls is not None
 
     from vllm.model_executor.layers.fused_moe.all2all_utils import (
         maybe_make_prepare_finalize,
@@ -168,43 +182,68 @@ def make_wna16_moe_kernel(
         quant_config=moe_quant_config,
         routing_tables=routing_tables,
         allow_new_interface=True,
+        use_monolithic=issubclass(experts_cls, mk.FusedMoEExpertsMonolithic),
     )
     assert prepare_finalize is not None
-    assert isinstance(prepare_finalize, mk.FusedMoEPrepareAndFinalizeModular)
 
-    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
-        assert experts_cls == BatchedMarlinExperts
+    if experts_cls in (MarlinExperts, BatchedMarlinExperts):
+        assert isinstance(prepare_finalize, mk.FusedMoEPrepareAndFinalizeModular)
+        if (
+            prepare_finalize.activation_format
+            == mk.FusedMoEActivationFormat.BatchedExperts
+        ):
+            assert experts_cls == BatchedMarlinExperts
+            max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
+            assert max_num_tokens is not None
+            experts: mk.FusedMoEExperts = BatchedMarlinExperts(
+                max_num_tokens=max_num_tokens,
+                num_dispatchers=prepare_finalize.num_dispatchers(),
+                moe_config=moe_config,
+                quant_config=moe_quant_config,
+                w13_g_idx=w13_g_idx,
+                w2_g_idx=w2_g_idx,
+                w13_g_idx_sort_indices=w13_g_idx_sort_indices,
+                w2_g_idx_sort_indices=w2_g_idx_sort_indices,
+                is_k_full=is_k_full,
+            )
+        else:
+            assert experts_cls == MarlinExperts
+            experts = MarlinExperts(
+                moe_config=moe_config,
+                quant_config=moe_quant_config,
+                w13_g_idx=w13_g_idx,
+                w2_g_idx=w2_g_idx,
+                w13_g_idx_sort_indices=w13_g_idx_sort_indices,
+                w2_g_idx_sort_indices=w2_g_idx_sort_indices,
+                is_k_full=is_k_full,
+            )
+    elif (
+        prepare_finalize.activation_format
+        == mk.FusedMoEActivationFormat.BatchedExperts
+    ):
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
         assert max_num_tokens is not None
-        experts: mk.FusedMoEExperts = BatchedMarlinExperts(
+        experts = experts_cls(
             max_num_tokens=max_num_tokens,
             num_dispatchers=prepare_finalize.num_dispatchers(),
             moe_config=moe_config,
             quant_config=moe_quant_config,
-            w13_g_idx=w13_g_idx,
-            w2_g_idx=w2_g_idx,
-            w13_g_idx_sort_indices=w13_g_idx_sort_indices,
-            w2_g_idx_sort_indices=w2_g_idx_sort_indices,
-            is_k_full=is_k_full,
         )
     else:
-        assert experts_cls == MarlinExperts
-        experts = MarlinExperts(
+        experts = experts_cls(
             moe_config=moe_config,
             quant_config=moe_quant_config,
-            w13_g_idx=w13_g_idx,
-            w2_g_idx=w2_g_idx,
-            w13_g_idx_sort_indices=w13_g_idx_sort_indices,
-            w2_g_idx_sort_indices=w2_g_idx_sort_indices,
-            is_k_full=is_k_full,
         )
 
     return mk.FusedMoEKernel(
         prepare_finalize,
         experts,
-        inplace=not moe_config.disable_inplace,
+        shared_experts=shared_experts,
+        inplace=(
+            not moe_config.disable_inplace
+            and not issubclass(experts_cls, mk.FusedMoEExpertsMonolithic)
+        ),
     )
-
 
 # ---------------------------------------------------------------------------
 # Per-backend weight post-processing

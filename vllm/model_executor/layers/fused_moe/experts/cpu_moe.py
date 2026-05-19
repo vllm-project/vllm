@@ -5,7 +5,12 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm._custom_ops import CPUQuantMethod, fused_experts_cpu
+from vllm._custom_ops import (
+    CPUQuantAlgo,
+    CPUQuantMethod,
+    convert_weight_packed_scale_zp,
+    fused_experts_cpu,
+)
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -17,6 +22,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
     kFp8Static128BlockSym,
+    kInt4Static,
     kMxfp4Static,
 )
 from vllm.platforms import current_platform
@@ -322,5 +328,258 @@ class CPUExpertsMxfp4(mk.FusedMoEExpertsMonolithic):
             w2_bias,
             alpha,
             limit,
+            True,  # is_vnni
+        )
+
+
+def _symmetric_zp_packed(quant_algo: CPUQuantAlgo) -> int:
+    """Return the packed int32 zero-point value for symmetric INT4.
+
+    Symmetric INT4 has true zero_point=8.  The GPTQ unpack kernel
+    (unpack_4bit_to_32bit_signed) adds +1 to stored zeros, so we
+    store 7 per nibble: 0x77777777 → +1 → 8.
+
+    Note: compressed-tensors symmetric is the only case that needs
+    synthetic zeros.  GPTQ/AWQ checkpoints carry their own qzeros
+    and bypass this function entirely.
+    """
+    if quant_algo != CPUQuantAlgo.GPTQ:
+        raise ValueError(
+            f"Synthetic zero points only supported for GPTQ path, "
+            f"got {quant_algo}. AWQ/other formats should provide "
+            f"checkpoint zeros directly."
+        )
+    return 0x77777777  # each nibble=7, +1 in GPTQ unpack → 8
+
+
+def prepare_int4_moe_layer_for_cpu(
+    w13_packed: torch.Tensor,
+    w2_packed: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    group_size: int,
+    quant_algo: CPUQuantAlgo = CPUQuantAlgo.GPTQ,
+    w13_zeros: torch.Tensor | None = None,
+    w2_zeros: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+           torch.Tensor, torch.Tensor]:
+    """Repack INT4 MoE weights via convert_weight_packed_scale_zp for CPU.
+
+    Args:
+        w13_packed: [E, K//8, 2*I] int32 (packed int4)
+        w2_packed: [E, I//8, K] int32 (packed int4)
+        w13_scale: [E, num_groups, 2*I] float16/bf16
+        w2_scale: [E, num_groups, K] float16/bf16
+        group_size: quantization group size
+        quant_algo: CPUQuantAlgo.GPTQ or CPUQuantAlgo.AWQ
+        w13_zeros: optional [E, num_groups, N//8] int32 from checkpoint.
+                   If None, synthetic zeros are created for symmetric quant.
+        w2_zeros: optional [E, num_groups, N//8] int32 from checkpoint.
+                  If None, synthetic zeros are created for symmetric quant.
+
+    Returns:
+        (blocked_w13, blocked_w2, blocked_s13, blocked_s2,
+         blocked_z13, blocked_z2)
+    """
+    E = w13_packed.size(0)
+
+    if w13_zeros is None:
+        # Symmetric quantization: synthesize zero points.
+        num_groups_w13 = w13_scale.size(1)
+        N_w13 = w13_scale.size(2)  # 2*I
+        _zp = _symmetric_zp_packed(quant_algo)
+        w13_zeros = torch.full(
+            (E, num_groups_w13, N_w13 // 8), _zp, dtype=torch.int32,
+        )
+
+    if w2_zeros is None:
+        num_groups_w2 = w2_scale.size(1)
+        N_w2 = w2_scale.size(2)  # K
+        _zp = _symmetric_zp_packed(quant_algo)
+        w2_zeros = torch.full(
+            (E, num_groups_w2, N_w2 // 8), _zp, dtype=torch.int32,
+        )
+
+    blocked_w13, blocked_z13, blocked_s13 = convert_weight_packed_scale_zp(
+        w13_packed, w13_zeros, w13_scale, quant_algo
+    )
+    blocked_w2, blocked_z2, blocked_s2 = convert_weight_packed_scale_zp(
+        w2_packed, w2_zeros, w2_scale, quant_algo
+    )
+    return (blocked_w13, blocked_w2, blocked_s13, blocked_s2,
+            blocked_z13, blocked_z2)
+
+
+class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
+    """CPU INT4 W4A16 group-quantized monolithic MoE experts.
+
+    Weights are int4 (packed), activations are bf16/fp16.
+    Internally uses int8 compute via fused_experts_cpu with INT4_W4A8.
+    """
+
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+    ):
+        super().__init__(
+            moe_config,
+            quant_config,
+        )
+        self._w1_blocked_scale: torch.Tensor | None = None
+        self._w2_blocked_scale: torch.Tensor | None = None
+        self._w1_blocked_zero: torch.Tensor | None = None
+        self._w2_blocked_zero: torch.Tensor | None = None
+
+    @property
+    def expects_unquantized_inputs(self) -> bool:
+        return True
+
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        return current_platform.is_cpu()
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        return False
+
+    @staticmethod
+    def _supports_activation(activation: MoEActivation) -> bool:
+        return activation == MoEActivation.SILU
+
+    @staticmethod
+    def _supports_parallel_config(
+        moe_parallel_config: FusedMoEParallelConfig,
+    ) -> bool:
+        return True
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        SUPPORTED_W_A = [
+            (kInt4Static, None),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
+
+    @staticmethod
+    def _supports_routing_method(
+        routing_method: RoutingMethodType,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return routing_method in [
+            RoutingMethodType.Default,
+            RoutingMethodType.Renormalize,
+            RoutingMethodType.RenormalizeNaive,
+        ]
+
+    @staticmethod
+    def _supports_router_logits_dtype(
+        router_logits_dtype: torch.dtype | None,
+        routing_method: RoutingMethodType,
+    ) -> bool:
+        return True
+
+    def supports_expert_map(self) -> bool:
+        return False
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        """Repack INT4 MoE weights to blocked format for CPU kernel."""
+        from vllm.model_executor.utils import replace_parameter
+
+        w13_packed = layer.w13_weight_packed
+        w2_packed = layer.w2_weight_packed
+        w13_scale = layer.w13_weight_scale
+        w2_scale = layer.w2_weight_scale
+
+        # Use checkpoint zero points if available (GPTQ/AWQ),
+        # otherwise None triggers synthetic zeros for symmetric quant.
+        w13_zeros = getattr(layer, "w13_weight_zero_point", None)
+        w2_zeros = getattr(layer, "w2_weight_zero_point", None)
+
+        group_size = w13_packed.size(1) * 8 // w13_scale.size(1)
+
+        (
+            blocked_w13,
+            blocked_w2,
+            blocked_s13,
+            blocked_s2,
+            blocked_z13,
+            blocked_z2,
+        ) = prepare_int4_moe_layer_for_cpu(
+            w13_packed, w2_packed, w13_scale, w2_scale, group_size,
+            w13_zeros=w13_zeros,
+            w2_zeros=w2_zeros,
+        )
+
+        # Replace packed weights with blocked format
+        replace_parameter(layer, "w13_weight_packed", blocked_w13)
+        replace_parameter(layer, "w2_weight_packed", blocked_w2)
+
+        # Store blocked scales and zeros on self for apply()
+        self._w1_blocked_scale = blocked_s13
+        self._w2_blocked_scale = blocked_s2
+        self._w1_blocked_zero = blocked_z13
+        self._w2_blocked_zero = blocked_z2
+
+    def apply(
+        self,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        router_logits: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        apply_router_weight_on_input: bool,
+        # grouped topk + fused topk bias parameters
+        num_expert_group: int | None = None,
+        e_score_correction_bias: torch.Tensor | None = None,
+        routed_scaling_factor: float | None = None,
+        topk_group: int | None = None,
+    ) -> torch.Tensor:
+        from vllm.model_executor.layers.fused_moe.cpu_fused_moe import (
+            select_experts,
+        )
+
+        topk_weights, topk_ids = select_experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            use_grouped_topk=num_expert_group is not None,
+            top_k=self.moe_config.experts_per_token,
+            renormalize=self.moe_config.routing_method
+            in (
+                RoutingMethodType.Renormalize,
+                RoutingMethodType.RenormalizeNaive,
+            ),
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            scoring_func="softmax",
+            routed_scaling_factor=(
+                routed_scaling_factor if routed_scaling_factor is not None else 1.0
+            ),
+            e_score_correction_bias=e_score_correction_bias,
+        )
+
+        return fused_experts_cpu(
+            hidden_states,
+            w1,
+            w2,
+            topk_weights,
+            topk_ids,
+            False,  # inplace
+            CPUQuantMethod.INT4_W4A8,
+            self._w1_blocked_scale,
+            self._w2_blocked_scale,
+            self._w1_blocked_zero,
+            self._w2_blocked_zero,
+            None,  # block_size
             True,  # is_vnni
         )
