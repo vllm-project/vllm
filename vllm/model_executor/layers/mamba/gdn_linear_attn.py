@@ -476,9 +476,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         return (
             current_platform.is_cuda()
             and not self.gqa_interleaved_layout
-            and isinstance(
-                quant_config, (AWQMarlinConfig, AutoGPTQConfig, INCConfig)
-            )
+            and isinstance(quant_config, (AWQMarlinConfig, AutoGPTQConfig, INCConfig))
         )
 
     def split_ba(self, ba: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
