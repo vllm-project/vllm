@@ -321,3 +321,94 @@ def test_pruner_consumes_named_args():
         # BT=128 → 128000 bytes → over budget, falls back to smallest
         kept = pruner(configs, named_args={"BT": 128})
         assert len(kept) == 1
+
+
+# --------------------------------------------------------------------------
+# Second reference call site — chunk_o.py kernel estimator coverage
+#
+# The PR wires the helper into vllm/model_executor/layers/fla/ops/chunk_o.py
+# (function ``chunk_fwd_kernel_o``). These tests cover the estimator
+# function ``_est_smem_chunk_fwd_o`` defined alongside that kernel. They
+# verify the byte arithmetic + the helper integration is correct end-to-end
+# without requiring the full vllm + Triton runtime.
+# --------------------------------------------------------------------------
+
+
+def _est_chunk_fwd_o(config, named_args):
+    """Local copy of the kernel-side estimator for unit-test isolation.
+
+    Mirrors ``_est_smem_chunk_fwd_o`` in chunk_o.py. Duplicated here so the
+    test suite stays runnable without importing the FLA kernel module
+    (which pulls in vllm._C and triton at import time).
+    """
+    BK = config.kwargs["BK"]
+    BV = config.kwargs["BV"]
+    BT = named_args.get("BT", 64)
+    num_stages = config.num_stages
+    persistent = BT * BV * 4 + BT * BT * 4
+    per_stage = BT * BK * 2 + BK * BT * 2 + BV * BK * 2
+    overhead = 4096
+    return persistent + num_stages * per_stage + overhead
+
+
+def test_chunk_fwd_o_estimator_extreme_config_overflows_all_gpus():
+    """BK=BV=128 num_stages=4 BT=64 is the upper-extreme config.
+
+    The estimator is intentionally a slight over-estimate (peak co-resident
+    assumption). At this extreme, it predicts ~315 KiB — over BOTH the
+    SM_120 opt-in (~101 KiB) AND the H100 opt-in (~228 KiB). The pruner
+    catching this on H100 too is a useful side-benefit: even H100 had no
+    real headroom for this config under the worst-case allocation
+    pattern, and the autotune would have either soft-OOM'd or compiled
+    into spillover-heavy code. The hand-rolled ``BKV_LIST`` only switches
+    bins at boot — the pruner adds per-config + per-num_stages precision.
+    """
+    config = FakeConfig(kwargs={"BK": 128, "BV": 128}, num_stages=4)
+    bytes_needed = _est_chunk_fwd_o(config, {"BT": 64})
+    # persistent = 64*128*4 + 64*64*4 = 32768 + 16384 = 49152
+    # per_stage  = 64*128*2 + 128*64*2 + 128*128*2 = 65536
+    # total      = 49152 + 4 * 65536 + 4096 = 315392
+    assert bytes_needed == 315392
+    assert bytes_needed > 101_376  # over SM_120 (~99 KiB)
+    assert bytes_needed > 233_472  # over H100 (~228 KiB) too
+
+
+def test_chunk_fwd_o_estimator_h100_friendly_config_fits():
+    """BK=BV=128 num_stages=2 BT=64 fits H100 (228 KiB) — keeps perf there."""
+    config = FakeConfig(kwargs={"BK": 128, "BV": 128}, num_stages=2)
+    bytes_needed = _est_chunk_fwd_o(config, {"BT": 64})
+    # persistent = 49152
+    # per_stage = 65536; 2 stages → 131072
+    # total = 49152 + 131072 + 4096 = 184320
+    assert bytes_needed == 184320
+    assert bytes_needed > 101_376  # over SM_120 — pruner drops
+    assert bytes_needed < 233_472  # under H100 — pruner keeps
+
+
+def test_chunk_fwd_o_estimator_sm120_safe_config_fits():
+    """BK=BV=64 num_stages=2 BT=64 fits SM_120 (101 KiB)."""
+    config = FakeConfig(kwargs={"BK": 64, "BV": 64}, num_stages=2)
+    bytes_needed = _est_chunk_fwd_o(config, {"BT": 64})
+    # persistent = 64*64*4 + 64*64*4 = 32768
+    # per_stage  = 64*64*2 + 64*64*2 + 64*64*2 = 24576
+    # total      = 32768 + 2 * 24576 + 4096 = 32768 + 49152 + 4096 = 86016
+    assert bytes_needed == 86016
+    assert bytes_needed < 101_376  # fits SM_120
+
+
+def test_chunk_fwd_o_pruner_on_sm120_filters_large_configs():
+    """Wire the chunk_fwd_o estimator through make_shmem_pruner on SM_120."""
+    configs = [
+        FakeConfig(kwargs={"BK": 64, "BV": 64}, num_stages=2),  # 86016 — fits
+        FakeConfig(kwargs={"BK": 64, "BV": 64}, num_stages=4),  # 135168 — over
+        FakeConfig(kwargs={"BK": 128, "BV": 128}, num_stages=2),  # 184320 — over
+        FakeConfig(kwargs={"BK": 128, "BV": 128}, num_stages=4),  # 315392 — over
+    ]
+    pruner = make_shmem_pruner(_est_chunk_fwd_o)
+    with _mock_sm120():
+        kept = pruner(configs, named_args={"BT": 64})
+    # SM_120 budget 101376 - 1024 safety = 100352 effective
+    # Only the first (86016 bytes) fits
+    assert len(kept) == 1
+    assert kept[0].kwargs == {"BK": 64, "BV": 64}
+    assert kept[0].num_stages == 2

@@ -28,14 +28,20 @@ Usage
 
 
     def _est_smem(config, named_args):
-        # Author-supplied: return the bytes of shmem the kernel uses
-        # for this (config, named_args) pair. Should slightly over-
-        # estimate; an off-by-one Triton internal tile won't be tracked.
+        # Author-supplied: return the bytes of shmem the kernel uses for
+        # this (config, named_args) pair. Should slightly over-estimate
+        # so an off-by-one in Triton's internal allocation is covered by
+        # the pruner's safety margin.
         BV = config.kwargs["BV"]
+        BT = named_args.get("BT", 64)
         ns = config.num_stages
-        persistent = 4 * BV * 64 * 4
-        per_stage = 64 * 64 * 2 + 64 * BV * 2
-        return persistent + ns * per_stage + 4096
+        # Peak co-resident layout for this hypothetical kernel:
+        #   persistent: 4 fp32 tiles of shape [BT, BV]
+        #   per stage:  one bf16 [BT, BT] + one bf16 [BT, BV]
+        persistent = 4 * (BT * BV * 4)
+        per_stage = (BT * BT * 2) + (BT * BV * 2)
+        overhead = 4096  # Triton bookkeeping safety
+        return persistent + ns * per_stage + overhead
 
 
     @triton.autotune(
@@ -178,12 +184,16 @@ def make_shmem_pruner(
                 smallest = (est, c)
 
         if kept:
-            logger.info(
-                "shmem_budget: kept %d/%d configs within %d-byte budget",
-                len(kept),
-                len(configs),
-                budget + safety_margin_bytes,
-            )
+            if len(kept) < len(configs):
+                # Only log when the pruner actually had work to do — avoids
+                # spamming the log for every Triton autotune key on H100 +
+                # H200 where every config fits and the pruner is a no-op.
+                logger.info(
+                    "shmem_budget: kept %d/%d configs within %d-byte budget",
+                    len(kept),
+                    len(configs),
+                    budget + safety_margin_bytes,
+                )
             return [c for _, c in kept]
 
         gpu_id = 0
@@ -215,4 +225,4 @@ def make_shmem_pruner(
     return _prune
 
 
-__all__ = ["infer_shmem_budget", "make_shmem_pruner"]
+__all__ = ["ShmemPruner", "infer_shmem_budget", "make_shmem_pruner"]
