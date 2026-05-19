@@ -5,8 +5,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
-from vllm.v1.kv_offload.base import OffloadingSpec
-from vllm.v1.kv_offload.metrics import OffloadingMetricMetadata
+from vllm.v1.kv_offload.base import OffloadingMetricMetadata, OffloadingSpec
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig

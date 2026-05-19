@@ -14,12 +14,12 @@ from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
     LoadStoreSpec,
     OffloadingManager,
+    OffloadingMetricMetadata,
     OffloadingSpec,
 )
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.gpu_worker import CpuGpuOffloadingHandlers
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
-from vllm.v1.kv_offload.metrics import OffloadingMetricMetadata
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler
 
 

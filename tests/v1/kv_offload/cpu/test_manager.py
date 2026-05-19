@@ -145,9 +145,9 @@ def test_already_stored_block_not_evicted_during_prepare_store(eviction_policy):
 
 
 def test_filter_reused_manager_reports_stores_skipped_counter():
-    cpu_manager = CPUOffloadingManager(num_blocks=4, cache_policy="lru")
-    manager = FilterReusedOffloadingManager(
-        backing=cpu_manager,
+    manager = CPUOffloadingManager(
+        num_blocks=4,
+        cache_policy="lru",
         store_threshold=2,
     )
 

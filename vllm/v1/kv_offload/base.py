@@ -21,7 +21,6 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
     from vllm.v1.kv_cache_interface import KVCacheConfig
-    from vllm.v1.kv_offload.metrics import OffloadingMetricMetadata
     from vllm.v1.kv_offload.worker.worker import OffloadingHandler
 
 # `OffloadKey` identifies an offloaded block. It combines a block hash with
@@ -96,6 +95,27 @@ class OffloadingEvent:
     medium: str
     # True if blocks are removed, False if stored
     removed: bool
+
+
+@dataclass(frozen=True)
+class OffloadingMetricMetadata:
+    name: str
+    documentation: str
+
+
+@dataclass(frozen=True)
+class OffloadingCounterMetadata(OffloadingMetricMetadata):
+    pass
+
+
+@dataclass(frozen=True)
+class OffloadingGaugeMetadata(OffloadingMetricMetadata):
+    pass
+
+
+@dataclass(frozen=True)
+class OffloadingHistogramMetadata(OffloadingMetricMetadata):
+    buckets: tuple[float, ...] | None = None
 
 
 """

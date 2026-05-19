@@ -9,8 +9,10 @@ from typing_extensions import override
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
+    OffloadingCounterMetadata,
     OffloadingEvent,
     OffloadingManager,
+    OffloadingMetricMetadata,
     OffloadKey,
     PrepareStoreOutput,
     ReqContext,
@@ -20,7 +22,6 @@ from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
 from vllm.v1.kv_offload.cpu.policies.base import BlockStatus, CachePolicy
 from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
-from vllm.v1.kv_offload.metrics import OffloadingMetricMetadata
 
 _CACHE_POLICIES: dict[str, type[CachePolicy]] = {
     "lru": LRUCachePolicy,
@@ -41,13 +42,12 @@ class CPUOffloadingManager(OffloadingManager):
     @classmethod
     def get_metric_definitions(cls) -> dict[str, OffloadingMetricMetadata]:
         return {
-            "stores_skipped": OffloadingMetricMetadata(
+            "stores_skipped": OffloadingCounterMetadata(
                 name="vllm:kv_offload_stores_skipped",
                 documentation=(
                     "Number of KV offload stores skipped because the reuse "
                     "threshold was not reached."
                 ),
-                metric_type="counter",
             )
         }
 

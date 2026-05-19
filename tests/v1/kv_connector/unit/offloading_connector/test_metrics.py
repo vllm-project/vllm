@@ -15,7 +15,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
 )
-from vllm.v1.kv_offload.metrics import OffloadingMetricMetadata
+from vllm.v1.kv_offload.base import (
+    OffloadingGaugeMetadata,
+    OffloadingHistogramMetadata,
+)
 
 
 class _FakeMetric:
@@ -250,15 +253,13 @@ def test_prom_metrics_observes_manager_gauge_and_histogram():
         per_engine_labelvalues={0: ["model", "0"]},
     )
     prom_metrics._offloading_manager_metric_metadata = {
-        "pending_stores": OffloadingMetricMetadata(
+        "pending_stores": OffloadingGaugeMetadata(
             name="vllm:kv_offload_pending_stores",
             documentation="Number of currently pending KV offload stores.",
-            metric_type="gauge",
         ),
-        "lookup_latency": OffloadingMetricMetadata(
+        "lookup_latency": OffloadingHistogramMetadata(
             name="vllm:kv_offload_lookup_latency_seconds",
             documentation="KV offload lookup latency.",
-            metric_type="histogram",
             buckets=(0.1, 1.0),
         ),
     }

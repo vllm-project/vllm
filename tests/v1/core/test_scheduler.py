@@ -15,6 +15,7 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalKwargsItem,
@@ -3986,6 +3987,58 @@ def test_delayed_kv_connector_free_keeps_scheduler_active():
 
     assert request.request_id not in scheduler.requests
     assert not scheduler.has_finished_requests()
+
+
+def test_scheduler_kv_connector_stats_without_worker_stats():
+    """Test scheduler KV connector stats are emitted without worker stats."""
+
+    class GenericKVConnectorStats(KVConnectorStats):
+        def reset(self):
+            self.data = {}
+
+        def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
+            self.data.update(other.data)
+            return self
+
+        def reduce(self) -> dict[str, int | float]:
+            return {}
+
+        def is_empty(self) -> bool:
+            return not self.data
+
+    scheduler = create_scheduler()
+    scheduler_stats = GenericKVConnectorStats(data={"scheduler_only": 1})
+    scheduler.connector = Mock()
+    scheduler.connector.get_kv_connector_stats.return_value = scheduler_stats
+
+    model_output = ModelRunnerOutput(
+        req_ids=["req_0"],
+        req_id_to_index={"req_0": 0},
+        sampled_token_ids=[[123]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[None],
+        kv_connector_output=None,
+    )
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=None,
+        num_scheduled_tokens={"req_0": 1},
+        total_num_scheduled_tokens=1,
+        scheduled_spec_decode_tokens={},
+        scheduled_encoder_inputs={},
+        num_common_prefix_blocks=[0],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+
+    engine_core_outputs = scheduler.update_from_output(scheduler_output, model_output)
+
+    final_stats = next(
+        iter(engine_core_outputs.values())
+    ).scheduler_stats.kv_connector_stats
+    assert final_stats is scheduler_stats
+    assert final_stats.data["scheduler_only"] == 1
 
 
 # ==============================================================================
