@@ -3,6 +3,7 @@
 import importlib.metadata
 import json
 import types
+from functools import lru_cache
 from importlib.util import find_spec
 from typing import Any
 
@@ -12,7 +13,6 @@ import torch.nn.functional as F
 from packaging import version
 from torch.nn.parameter import Parameter
 
-from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -23,10 +23,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
-from vllm.model_executor.layers.quantization.utils.zentorch import has_zentorch_op
 from vllm.model_executor.utils import set_weight_attrs
-
-logger = init_logger(__name__)
 
 
 def torchao_version_at_least(torchao_version: str) -> bool:
@@ -39,20 +36,6 @@ def torchao_version_at_least(torchao_version: str) -> bool:
         except (ImportError, version.InvalidVersion):
             return False
     return False
-
-
-# torchao >= 0.17.0 is required for the Int8Tensor dynamic-quant fast path:
-# earlier versions don't expose ``Int8Tensor`` / ``act_quant_kwargs`` /
-# ``PerRow`` in the locations we use below.
-if torchao_version_at_least("0.17.0"):
-    from torchao.quantization.granularity import PerRow
-    from torchao.quantization.quantize_.workflows import Int8Tensor
-
-    _ZENTORCH_TORCHAO_ENABLED = True
-else:
-    Int8Tensor = None  # type: ignore[assignment]
-    PerRow = None  # type: ignore[assignment]
-    _ZENTORCH_TORCHAO_ENABLED = False
 
 
 def _bond_method_to_cls(func, obj):
@@ -146,11 +129,26 @@ def _check_torchao_fp8_activation_capability(torchao_config) -> None:
     )
 
 
-def _zentorch_da8w8_eligible() -> bool:
-    """Module-level gate for the TorchAO DA8W8 fast path."""
-    if not _ZENTORCH_TORCHAO_ENABLED:
-        return False
-    return has_zentorch_op("zentorch_dynamic_qlinear")
+@lru_cache(maxsize=1)
+def _load_platform_optimizer():
+    """Load optional platform optimizer resolver once."""
+    try:
+        from vllm.model_executor.layers.quantization.zentorch_torchao import (
+            get_optimized_method,
+        )
+        return get_optimized_method
+    except ModuleNotFoundError as exc:
+        if exc.name != "vllm.model_executor.layers.quantization.zentorch_torchao":
+            raise
+        return None
+
+
+def _get_platform_optimized_method(method, config):
+    """Return platform-optimized method wrapper, if available."""
+    resolver = _load_platform_optimizer()
+    if resolver is None:
+        return None
+    return resolver(method, config)
 
 
 class TorchAOConfig(QuantizationConfig):
@@ -299,11 +297,16 @@ class TorchAOConfig(QuantizationConfig):
                 current_torchao_config = TorchAOConfig(
                     c, self.skip_modules, self.is_checkpoint_torchao_serialized
                 )
-                return TorchAOLinearMethod(current_torchao_config)
+                method = TorchAOLinearMethod(current_torchao_config)
+                return (
+                    _get_platform_optimized_method(method, current_torchao_config)
+                    or method
+                )
             else:
                 return UnquantizedLinearMethod()
 
-        return TorchAOLinearMethod(self)
+        method = TorchAOLinearMethod(self)
+        return _get_platform_optimized_method(method, self) or method
 
     def get_scaled_act_names(self) -> list[str]:
         return []
@@ -386,18 +389,6 @@ class TorchAOLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        # Per-forward fast path is purely attribute-driven: the cached attrs
-        # below can only have been set by ``process_weights_after_loading``
-        # while the platform / op gate held.
-        if hasattr(layer, "_zentorch_dynamic_qlinear_weight"):
-            return torch.ops.zentorch.zentorch_dynamic_qlinear(
-                x,
-                layer._zentorch_dynamic_qlinear_weight,
-                layer._zentorch_dynamic_qlinear_scales,
-                bias,
-                zentorch_op_name="zentorch::zentorch_dynamic_qlinear",
-            )
-
         return F.linear(x, layer.weight, bias)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -433,51 +424,3 @@ class TorchAOLinearMethod(LinearMethodBase):
 
             _restore_weight_attrs(weight, recorded_weight_attr)
             layer.register_parameter("weight", weight)
-
-        # Runs *after* ``convert_to_packed_tensor_…`` so it always sees
-        # the final packed tensor, regardless of checkpoint source.
-        self._process_weights_after_loading_zentorch(layer)
-
-    def _process_weights_after_loading_zentorch(self, layer: torch.nn.Module) -> None:
-        """Cache zentorch-ready tensors on ``layer`` for the Zen CPU fast path.
-
-        Bit-for-bit no-op on any non-eligible configuration (non-Zen, no
-        zentorch, torchao<0.17, non-Int8Tensor weight, weight-only Int8Tensor,
-        unsupported granularity).
-        """
-        if not _zentorch_da8w8_eligible():
-            return
-
-        w = layer.weight
-
-        if not isinstance(w, Int8Tensor):
-            return
-        if w.act_quant_kwargs is None:
-            # Weight-only Int8Tensor — fallback to F.linear.
-            return
-        if w.act_quant_kwargs.granularity != PerRow():
-            logger.warning_once(
-                "zentorch will treat PerTensor granularity of activation"
-                " quantization as PerRow for DA8W8 fast path."
-            )
-
-        # PerRow weight scale: torchao stores it as (N, 1); squeeze to (N,)
-        # to match zentorch_dynamic_qlinear's expectation.
-        scales = w.scale
-        n = w.qdata.shape[0]
-        if scales.dim() == 2 and scales.shape == (n, 1):
-            scales = scales.squeeze(-1)
-        else:
-            # Unexpected granularity for weight quantization — fallback to F.linear.
-            return
-
-        layer._zentorch_dynamic_qlinear_weight = w.qdata
-        layer._zentorch_dynamic_qlinear_scales = scales
-        # Free the torchao-packed weight: the fast path no longer needs it,
-        # and leaving it in place would just hold memory. The dedicated
-        # ``_zentorch_freed_weight`` marker keeps the layer introspectable.
-        layer.register_parameter(
-            "weight", torch.nn.Parameter(torch.empty(0), requires_grad=False)
-        )
-        layer._zentorch_freed_weight = True
-        layer._zentorch_kind = "torchao_da8w8"

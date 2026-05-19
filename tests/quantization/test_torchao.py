@@ -408,18 +408,29 @@ def test_process_weights_after_loading_skips_zentorch_attrs_when_op_unavailable(
     monkeypatch,
 ):
     from vllm.model_executor.layers.quantization import torchao as torchao_module
+    from vllm.model_executor.layers.quantization import (
+        zentorch_torchao as zentorch_torchao_module,
+    )
     from vllm.model_executor.layers.quantization.torchao import (
         TorchAOConfig,
         TorchAOLinearMethod,
     )
 
-    monkeypatch.setattr(torchao_module, "has_zentorch_op", lambda *_: False)
+    torchao_module._load_platform_optimizer.cache_clear()
+    monkeypatch.setattr(zentorch_torchao_module, "has_zentorch_op", lambda *_: False)
+    monkeypatch.setattr(
+        zentorch_torchao_module.current_platform, "is_zen_cpu", lambda: True
+    )
 
     config = TorchAOConfig.__new__(TorchAOConfig)
     config.torchao_config = object()
     config.skip_modules = []
     config.is_checkpoint_torchao_serialized = True
-    linear_method = TorchAOLinearMethod(config)
+    base_method = TorchAOLinearMethod(config)
+    linear_method = (
+        torchao_module._get_platform_optimized_method(base_method, config)
+        or base_method
+    )
 
     from torchao.quantization import PerRow
     from torchao.quantization.quantize_.workflows import Int8Tensor
