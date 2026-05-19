@@ -236,7 +236,7 @@ def _fp8_mqa_logits_topk_triton(
     if logits_bytes > _SM120_MQA_TRITON_TOPK_MAX_LOGITS_BYTES:
         return False
 
-    from vllm.v1.attention.ops.deepseek_v4_ops.sm12x_mqa import (
+    from vllm.models.deepseek_v4.nvidia.ops.sm12x_mqa import (
         fp8_mqa_logits_triton,
     )
 

@@ -353,7 +353,7 @@ def fp8_fp4_mqa_topk_indices(
         and q[1] is None
     ):
         return False
-    from vllm.v1.attention.ops.deepseek_v4_ops import sm12x_deep_gemm_fallbacks
+    from vllm.models.deepseek_v4.nvidia.ops import sm12x_deep_gemm_fallbacks
 
     return sm12x_deep_gemm_fallbacks.fp8_fp4_mqa_topk_indices(
         q,
@@ -373,7 +373,7 @@ def _fp8_mqa_logits_sm12x(
     cu_seqlen_ke: torch.Tensor,
     clean_logits: bool,
 ) -> torch.Tensor:
-    from vllm.v1.attention.ops.deepseek_v4_ops import sm12x_deep_gemm_fallbacks
+    from vllm.models.deepseek_v4.nvidia.ops import sm12x_deep_gemm_fallbacks
 
     return sm12x_deep_gemm_fallbacks._fp8_mqa_logits_sm12x(
         q, kv, weights, cu_seqlen_ks, cu_seqlen_ke, clean_logits
@@ -458,7 +458,7 @@ def _fp8_paged_mqa_logits_sm12x(
     block_tables: torch.Tensor,
     max_model_len: int,
 ) -> torch.Tensor:
-    from vllm.v1.attention.ops.deepseek_v4_ops import sm12x_deep_gemm_fallbacks
+    from vllm.models.deepseek_v4.nvidia.ops import sm12x_deep_gemm_fallbacks
 
     return sm12x_deep_gemm_fallbacks._fp8_paged_mqa_logits_sm12x(
         q, kv_cache, weights, context_lens, block_tables, max_model_len
@@ -481,7 +481,7 @@ def fp8_fp4_paged_mqa_topk_indices(
         and q[1] is None
     ):
         return False
-    from vllm.v1.attention.ops.deepseek_v4_ops import sm12x_deep_gemm_fallbacks
+    from vllm.models.deepseek_v4.nvidia.ops import sm12x_deep_gemm_fallbacks
 
     return sm12x_deep_gemm_fallbacks.fp8_fp4_paged_mqa_topk_indices(
         q,
@@ -559,7 +559,7 @@ def _tf32_hc_prenorm_gemm_sm12x(
     sqrsum: torch.Tensor,
     num_split: int,
 ) -> torch.Tensor:
-    from vllm.v1.attention.ops.deepseek_v4_ops import sm12x_deep_gemm_fallbacks
+    from vllm.models.deepseek_v4.nvidia.ops import sm12x_deep_gemm_fallbacks
 
     return sm12x_deep_gemm_fallbacks._tf32_hc_prenorm_gemm_sm12x(
         x, fn, out, sqrsum, num_split

@@ -11,7 +11,7 @@ from vllm.model_executor.layers.sparse_attn_indexer import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
-from vllm.v1.attention.ops.deepseek_v4_ops import (
+from vllm.models.deepseek_v4.nvidia.ops import (
     sm12x_deep_gemm_fallbacks,
     sm12x_mqa,
 )
