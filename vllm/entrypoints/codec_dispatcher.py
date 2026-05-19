@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Codec v0.5 #87: bolt-on tool dispatcher.
 
@@ -34,12 +36,10 @@ needs review against SGLang's batching semantics.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
 from dataclasses import dataclass
-from typing import Optional
 
 import msgspec.msgpack
 
@@ -47,7 +47,9 @@ log = logging.getLogger(__name__)
 
 CODEC_BOLT_ON_DISPATCH = os.environ.get("CODEC_BOLT_ON_DISPATCH", "0") == "1"
 CODEC_TOOL_MANIFEST_URLS = os.environ.get("CODEC_TOOL_MANIFEST_URLS", "").strip()
-CODEC_TOOL_MANIFEST_REQUIRED = os.environ.get("CODEC_TOOL_MANIFEST_REQUIRED", "0") == "1"
+CODEC_TOOL_MANIFEST_REQUIRED = (
+    os.environ.get("CODEC_TOOL_MANIFEST_REQUIRED", "0") == "1"
+)
 
 
 # ── Wire types (mirror @codecai/tool-kit's CodecToolCall / Result shapes) ──
@@ -70,7 +72,7 @@ class CodecToolResult:
     response_ids: list[int]
     call_id: str
     is_error: bool = False
-    error_message: Optional[str] = None
+    error_message: str | None = None
 
 
 # msgspec encoders for the wire shape.
@@ -80,12 +82,14 @@ _result_decoder = msgspec.msgpack.Decoder()
 
 def encode_tool_call(call: CodecToolCall) -> bytes:
     """Encode a tool call to msgpack bytes for POSTing to a tool endpoint."""
-    return _call_encoder.encode({
-        "tool_name": call.tool_name,
-        "arguments_json": call.arguments_json,
-        "call_id": call.call_id,
-        "tokenizer_hash": call.tokenizer_hash,
-    })
+    return _call_encoder.encode(
+        {
+            "tool_name": call.tool_name,
+            "arguments_json": call.arguments_json,
+            "call_id": call.call_id,
+            "tokenizer_hash": call.tokenizer_hash,
+        }
+    )
 
 
 def decode_tool_result(data: bytes) -> CodecToolResult:
@@ -127,14 +131,14 @@ class ToolRegistry:
     def register_tool(self, tool: RegisteredTool) -> None:
         self._tools[tool.name] = tool
 
-    def get(self, name: str) -> Optional[RegisteredTool]:
+    def get(self, name: str) -> RegisteredTool | None:
         return self._tools.get(name)
 
     def all(self) -> list[RegisteredTool]:
         return list(self._tools.values())
 
     @classmethod
-    def from_env(cls, active_tokenizer_hash: str) -> "ToolRegistry":
+    def from_env(cls, active_tokenizer_hash: str) -> ToolRegistry:
         """Load tools from CODEC_TOOL_MANIFEST_URLS env var.
 
         ``active_tokenizer_hash`` is the sha256 of the model's tokenizer
@@ -149,17 +153,25 @@ class ToolRegistry:
             try:
                 manifest = _fetch_manifest(url)
                 tool_hash = manifest.get("tokenizerHash", "")
-                mode = "dispatch" if tool_hash == active_tokenizer_hash else "text-fallback"
-                registry.register_tool(RegisteredTool(
-                    manifest_url=url,
-                    name=manifest["name"],
-                    endpoint=manifest["endpoint"],
-                    tokenizer_hash=tool_hash,
-                    mode=mode,
-                ))
+                mode = (
+                    "dispatch"
+                    if tool_hash == active_tokenizer_hash
+                    else "text-fallback"
+                )
+                registry.register_tool(
+                    RegisteredTool(
+                        manifest_url=url,
+                        name=manifest["name"],
+                        endpoint=manifest["endpoint"],
+                        tokenizer_hash=tool_hash,
+                        mode=mode,
+                    )
+                )
                 log.info(
                     "codec_dispatcher: registered tool %s (mode=%s) from %s",
-                    manifest["name"], mode, url,
+                    manifest["name"],
+                    mode,
+                    url,
                 )
             except Exception as e:
                 if CODEC_TOOL_MANIFEST_REQUIRED:
@@ -167,8 +179,10 @@ class ToolRegistry:
                         f"codec_dispatcher: required manifest {url} failed to load: {e}"
                     ) from e
                 log.warning(
-                    "codec_dispatcher: dropping tool from %s (manifest load failed): %s",
-                    url, e,
+                    "codec_dispatcher: dropping tool from %s "
+                    "(manifest load failed): %s",
+                    url,
+                    e,
                 )
         return registry
 
@@ -183,6 +197,7 @@ def _fetch_manifest(url: str) -> dict:
     request equivalent.
     """
     import urllib.request
+
     with urllib.request.urlopen(url, timeout=30) as resp:
         body = resp.read()
     parsed = json.loads(body)
@@ -216,6 +231,7 @@ def dispatch_call(
     (CLI tools, batch eval drivers).
     """
     import urllib.request
+
     call = CodecToolCall(
         tool_name=tool.name,
         arguments_json=arguments_json,
@@ -248,13 +264,16 @@ async def dispatch_call_async(
     worker until the tool replies.
     """
     import asyncio
+
     return await asyncio.to_thread(dispatch_call, tool, arguments_json, call_id)
 
 
 # ── Reinjection hook ───────────────────────────────────────────────────────
 
 
-def reinject_ids_into_context(context_ids: list[int], reinject_ids: list[int]) -> list[int]:
+def reinject_ids_into_context(
+    context_ids: list[int], reinject_ids: list[int]
+) -> list[int]:
     """Insert ``reinject_ids`` into ``context_ids`` at the end (append).
 
     This is the simplest reinjection model — equivalent to the tool

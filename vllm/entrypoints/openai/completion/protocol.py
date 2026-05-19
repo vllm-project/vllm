@@ -354,6 +354,8 @@ class CompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def validate_stream_format(cls, data):
+        if not isinstance(data, dict):
+            return data
         fmt = data.get("stream_format", "json")
         if fmt != "json":
             # Binary formats require streaming — force it on silently.

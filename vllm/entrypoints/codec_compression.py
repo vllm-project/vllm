@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Negotiated transport compression for Codec binary streaming responses.
 
@@ -43,7 +44,7 @@ from __future__ import annotations
 
 import hashlib
 import zlib
-from typing import AsyncIterable, Optional
+from collections.abc import AsyncIterable
 
 from fastapi import BackgroundTasks
 from fastapi.responses import StreamingResponse
@@ -133,7 +134,7 @@ def clear_zstd_dicts() -> None:
     _ZSTD_DICT_HASHES.clear()
 
 
-def has_zstd_dict(stream_format: Optional[str]) -> bool:
+def has_zstd_dict(stream_format: str | None) -> bool:
     """Is there a registered dict for ``stream_format``?
 
     Returns False when ``stream_format`` is None — callers that don't know
@@ -143,7 +144,7 @@ def has_zstd_dict(stream_format: Optional[str]) -> bool:
     return bool(stream_format) and stream_format in _ZSTD_DICTS
 
 
-def get_zstd_dict_hash(stream_format: Optional[str]) -> Optional[str]:
+def get_zstd_dict_hash(stream_format: str | None) -> str | None:
     """sha256 hex digest of the registered dict for ``stream_format``,
     formatted as ``sha256:<hex>`` for the ``Codec-Zstd-Dict`` response
     header. Returns None when no dict is registered."""
@@ -173,8 +174,8 @@ def _parse_accept_encoding(header: str) -> list[str]:
 def negotiate_encoding(
     accept_encoding: str,
     *,
-    stream_format: Optional[str] = None,
-) -> Optional[str]:
+    stream_format: str | None = None,
+) -> str | None:
     """Pick the best encoding both sides can speak.
 
     Returns one of ``"zstd"``, ``"br"``, ``"gzip"``, or ``None`` (identity).
@@ -249,9 +250,7 @@ async def _compress_brotli(stream: AsyncIterable[bytes]) -> AsyncIterable[bytes]
     small streams (each flush emits a complete brotli block + header,
     forfeiting between-chunk dictionary sharing). The remaining finish()
     closes the stream once at end-of-input."""
-    compressor = brotli.Compressor(
-        quality=4, mode=brotli.MODE_GENERIC, lgwin=22
-    )
+    compressor = brotli.Compressor(quality=4, mode=brotli.MODE_GENERIC, lgwin=22)
     async for chunk in stream:
         out = compressor.process(chunk)
         if out:
@@ -266,10 +265,10 @@ def wrap_streaming_response(
     body_stream: AsyncIterable[bytes],
     *,
     media_type: str,
-    background: Optional[BackgroundTasks] = None,
-    extra_headers: Optional[dict[str, str]] = None,
-    stream_format: Optional[str] = None,
-    client_version: Optional[str] = None,
+    background: BackgroundTasks | None = None,
+    extra_headers: dict[str, str] | None = None,
+    stream_format: str | None = None,
+    client_version: str | None = None,
 ) -> StreamingResponse:
     """Build a StreamingResponse with the right compression based on the
     client's Accept-Encoding header.

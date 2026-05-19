@@ -30,12 +30,12 @@ field on ChatCompletionRequest / CompletionRequest.
 No new external dependencies — only stdlib + the codec_frame module
 in this same package.
 """
+
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, List, Optional, Tuple
-
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Tool-call data model (mirrors openai-style { id, name, arguments } shape)
@@ -51,9 +51,9 @@ class ToolCallEvent:
     `{"name": "...", "arguments": {...}}` shape; otherwise None.
     """
 
-    name: Optional[str]
+    name: str | None
     arguments_json: str
-    id: Optional[str] = None  # server-generated, e.g. "tc_<uuid>"
+    id: str | None = None  # server-generated, e.g. "tc_<uuid>"
 
     def to_wire_dict(self) -> dict:
         """Serialise to the dict shape encoded into msgpack frames and
@@ -78,7 +78,7 @@ class _WatcherState:
     start_id: int
     end_id: int
     inside: bool = False
-    region_ids: List[int] = field(default_factory=list)
+    region_ids: list[int] = field(default_factory=list)
 
 
 class ToolWatcher:
@@ -111,7 +111,7 @@ class ToolWatcher:
         self._st.inside = False
         self._st.region_ids = []
 
-    def feed(self, ids: List[int]) -> Tuple[List[int], List[List[int]]]:
+    def feed(self, ids: list[int]) -> tuple[list[int], list[list[int]]]:
         """Process a batch of newly-emitted token IDs.
 
         Returns:
@@ -126,8 +126,8 @@ class ToolWatcher:
         feed — keeps tool-call surfaces aligned with their stream
         position.
         """
-        out_ids: List[int] = []
-        completed: List[List[int]] = []
+        out_ids: list[int] = []
+        completed: list[list[int]] = []
         st = self._st
         for tok in ids:
             if not st.inside:
@@ -159,7 +159,7 @@ class ToolWatcher:
 
 
 def parse_tool_call(
-    region_body_text: str, *, call_id: Optional[str] = None
+    region_body_text: str, *, call_id: str | None = None
 ) -> ToolCallEvent:
     """Parse the body of a tool-call region (already detokenized) into
     a structured event.
@@ -180,7 +180,7 @@ def parse_tool_call(
     if not body:
         return ToolCallEvent(name=None, arguments_json="", id=call_id)
 
-    name: Optional[str] = None
+    name: str | None = None
     try:
         parsed: Any = json.loads(body)
         if isinstance(parsed, dict):
@@ -199,7 +199,7 @@ def parse_tool_call(
 # ---------------------------------------------------------------------------
 
 
-def detokenize_region(tokenizer, region_ids: List[int]) -> str:
+def detokenize_region(tokenizer, region_ids: list[int]) -> str:
     """Convenience wrapper around the tokenizer's batch decode that
     skips special tokens — tool-call body text is pure JSON, no chat
     template chrome.
@@ -224,7 +224,7 @@ def make_call_id(seq_no: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-def resolve_marker_id(tokenizer, marker: str) -> Optional[int]:
+def resolve_marker_id(tokenizer, marker: str) -> int | None:
     """Resolve a special-token string like ``<tool_call>`` to its single
     integer ID in the loaded tokenizer's vocab.
 

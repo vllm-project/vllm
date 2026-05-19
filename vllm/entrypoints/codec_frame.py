@@ -39,6 +39,7 @@ _OPENAI_BYPASS = os.environ.get("CODEC_OPENAI_BYPASS", "0") == "1"
 
 try:
     import numpy as _np  # type: ignore[import-untyped]
+
     _HAVE_NUMPY = True
 except ImportError:  # pragma: no cover
     _np = None
@@ -109,10 +110,21 @@ def decode_msgpack(data: bytes) -> dict:
 
 # ── protobuf hand-rolled encoder ───────────────────────────────────────────────
 # Schema:
-#   message CodecFrame  { repeated uint32 ids=1[packed]; bool done=2; optional string finish_reason=3; }
-#   message CodecRequest{ repeated uint32 prompt_ids=1[packed]; uint32 max_tokens=2; float temperature=3; repeated string stop=4; string stream_format=5; }
+#   message CodecFrame {
+#     repeated uint32 ids = 1 [packed];
+#     bool done = 2;
+#     optional string finish_reason = 3;
+#   }
+#   message CodecRequest {
+#     repeated uint32 prompt_ids = 1 [packed];
+#     uint32 max_tokens = 2;
+#     float temperature = 3;
+#     repeated string stop = 4;
+#     string stream_format = 5;
+#   }
 #
 # Wire types: 0=varint, 2=len-delimited, 5=32-bit float
+
 
 def _varint(n: int) -> bytes:
     out: list[int] = []
@@ -191,10 +203,10 @@ def encode_protobuf_frame(
     if ids_list:
         packed = b"".join(_varint(i) for i in ids_list)
         parts += [b"\x0a", _varint(len(packed)), packed]  # field 1, wt=2
-    parts += [b"\x10", b"\x01" if done else b"\x00"]       # field 2, wt=0
+    parts += [b"\x10", b"\x01" if done else b"\x00"]  # field 2, wt=0
     if finish_reason is not None:
         enc = finish_reason.encode()
-        parts += [b"\x1a", _varint(len(enc)), enc]          # field 3, wt=2
+        parts += [b"\x1a", _varint(len(enc)), enc]  # field 3, wt=2
     if tool_calls:
         # Field 4: repeated ToolCall — each a length-delimited sub-message
         # tagged 0x22 = (4 << 3) | 2.
@@ -229,33 +241,33 @@ def decode_protobuf_request(data: bytes) -> dict:
         tag_byte, pos = _decode_varint(data, pos)
         field = tag_byte >> 3
         wt = tag_byte & 0x7
-        if wt == 0:                              # varint
+        if wt == 0:  # varint
             val, pos = _decode_varint(data, pos)
             if field == 2:
                 result["max_tokens"] = val
             # other varint fields: consumed and ignored
-        elif wt == 1:                            # 64-bit — skip (not used in CodecRequest)
+        elif wt == 1:  # 64-bit — skip (not used in CodecRequest)
             pos += 8
-        elif wt == 2:                            # length-delimited
+        elif wt == 2:  # length-delimited
             length, pos = _decode_varint(data, pos)
-            payload = data[pos: pos + length]
+            payload = data[pos : pos + length]
             pos += length
-            if field == 1:                       # prompt_ids (packed uint32)
+            if field == 1:  # prompt_ids (packed uint32)
                 ids: list[int] = []
                 p = 0
                 while p < len(payload):
                     v, p = _decode_varint(payload, p)
                     ids.append(v)
                 result["prompt_ids"] = ids
-            elif field == 4:                     # stop (repeated string)
+            elif field == 4:  # stop (repeated string)
                 result.setdefault("stop", []).append(payload.decode())
-            elif field == 5:                     # stream_format
+            elif field == 5:  # stream_format
                 result["stream_format"] = payload.decode()
             # other len-delimited fields: consumed and ignored
-        elif wt == 5:                            # 32-bit float
+        elif wt == 5:  # 32-bit float
             val = _struct.unpack_from("<f", data, pos)[0]
             pos += 4
-            if field == 3:                       # temperature — last value wins (proto semantics)
+            if field == 3:  # temperature — last value wins (proto semantics)
                 result["temperature"] = val
             # other 32-bit fields: consumed and ignored
         else:
@@ -269,13 +281,13 @@ def decode_protobuf_request(data: bytes) -> dict:
 # ── shared helpers ─────────────────────────────────────────────────────────────
 
 CONTENT_TYPE: dict[str, str] = {
-    "json":     "text/event-stream",
-    "msgpack":  "application/x-msgpack",
+    "json": "text/event-stream",
+    "msgpack": "application/x-msgpack",
     "protobuf": "application/x-protobuf",
 }
 
 ENCODERS = {
-    "msgpack":  encode_msgpack,
+    "msgpack": encode_msgpack,
     "protobuf": encode_protobuf,
 }
 

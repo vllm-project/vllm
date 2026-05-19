@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Codec version negotiation — opt-on, two-stage, graceful downgrade.
 
 Implements the rules in `spec/versions/v0.4.md`:
@@ -27,11 +29,9 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Optional
 
 from fastapi import Request
 from fastapi.responses import Response
-
 
 # ── Version comparison ───────────────────────────────────────────────────────
 
@@ -183,7 +183,7 @@ def make_426_response(
     *,
     client_version: str,
     min_version: str = "0.4",
-    deployment_id: Optional[str] = None,
+    deployment_id: str | None = None,
 ) -> Response:
     """Build the structured 426 Upgrade Required response.
 
@@ -224,7 +224,7 @@ def make_426_response(
 # ── Well-known version-policy descriptor ─────────────────────────────────────
 
 
-def version_policy_document() -> Optional[dict]:
+def version_policy_document() -> dict | None:
     """Return the `.well-known/codec/version-policy.json` content for the
     current server state, or None when no v0.4 capability is mandatory
     (the spec says deployments without mandatory features SHOULD NOT

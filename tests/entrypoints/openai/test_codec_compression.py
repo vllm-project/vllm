@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for codec_compression.py — the negotiator + stream-compressor helpers.
 
 These tests cover regression classes discovered during the v0.4.1 cohort
@@ -5,12 +7,13 @@ bench: (a) brotli's per-chunk flush() inflating small streams, (b) silent
 fall-through when zstd/brotli modules are missing in the image, (c)
 preference-order violations.
 """
+
 from __future__ import annotations
 
 import asyncio
 import gzip
 import io
-from typing import AsyncIterable
+from collections.abc import AsyncIterable
 
 import pytest
 
@@ -47,10 +50,16 @@ def _msgpack_like_stream(n_chunks: int = 12, chunk_bytes: int = 80) -> list[byte
 def test_negotiate_prefers_zstd_with_dict():
     """Spec §Transport-Compression: preference order zstd > br > gzip > identity."""
     if not cc._ZSTD_AVAILABLE or not cc._BROTLI_AVAILABLE:
-        pytest.skip("zstandard or brotli not installed — would be caught by supervisor startup check")
+        pytest.skip(
+            "zstandard or brotli not installed — would be caught by "
+            "supervisor startup check"
+        )
     cc.set_zstd_dict("msgpack", b"\x00" * 16384)
     try:
-        assert cc.negotiate_encoding("zstd, br, gzip, identity", stream_format="msgpack") == "zstd"
+        assert (
+            cc.negotiate_encoding("zstd, br, gzip, identity", stream_format="msgpack")
+            == "zstd"
+        )
     finally:
         cc.clear_zstd_dicts()
 
@@ -115,13 +124,19 @@ def test_zstd_with_dict_round_trips():
         pytest.skip("zstandard not installed")
     import zstandard as _zstd  # type: ignore
 
-    dict_bytes = b"\x37\x00\x00\x00" + b"\x00" * 16380  # minimal valid zstd dict header is non-trivial;
-    # use a real dict-shaped buffer — zstandard accepts arbitrary bytes as a raw dict prefix
+    dict_bytes = (
+        b"\x37\x00\x00\x00" + b"\x00" * 16380
+    )  # minimal valid zstd dict header is non-trivial;
+    # use a real dict-shaped buffer — zstandard accepts arbitrary
+    # bytes as a raw dict prefix
     # If the empty-dict path errors, skip rather than fail the test (env-specific).
     try:
         cc.set_zstd_dict("msgpack", dict_bytes)
     except Exception:
-        pytest.skip("zstandard rejected synthetic dict; use a real trained dict via integration test")
+        pytest.skip(
+            "zstandard rejected synthetic dict; use a real trained "
+            "dict via integration test"
+        )
     try:
         chunks = _msgpack_like_stream()
         expected = b"".join(chunks)
@@ -129,7 +144,9 @@ def test_zstd_with_dict_round_trips():
             lambda: cc._compress_zstd(_from_chunks(chunks), dict_bytes=dict_bytes)
         )
         zdict = _zstd.ZstdCompressionDict(dict_bytes)
-        with _zstd.ZstdDecompressor(dict_data=zdict).stream_reader(io.BytesIO(compressed)) as r:
+        with _zstd.ZstdDecompressor(dict_data=zdict).stream_reader(
+            io.BytesIO(compressed)
+        ) as r:
             assert r.read() == expected
     finally:
         cc.clear_zstd_dicts()
