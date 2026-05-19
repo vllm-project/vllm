@@ -924,6 +924,7 @@ class AsyncLLM(EngineClient):
             raise self.dead_error
 
         if not self.output_processor.has_unfinished_requests():
+            await self.engine_core.check_health_async()
             return
 
         now = time.monotonic()
