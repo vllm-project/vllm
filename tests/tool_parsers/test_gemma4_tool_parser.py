@@ -818,6 +818,54 @@ class TestStreamingExtraction:
             f"Expected some content text, got: {content_str}"
         )
 
+    def test_streaming_text_between_tool_calls_in_single_delta(
+        self, parser, mock_request
+    ):
+        """Text before and between tool calls must be emitted as content.
+
+        Regression test for PR #43037 issue 3:
+        content extraction logic loses text appearing before or between
+        tool call tags.
+        """
+        sd = '<|"|>'
+        # One chunk with text before, between, and after tool calls
+        chunks = [
+            f"Let me help:\n"
+            f'<|tool_call>call:f1{{location:{sd}London{sd}}}<tool_call|>'
+            f"Result for f1:\n"
+            f'<|tool_call>call:f2{{location:{sd}Paris{sd}}}<tool_call|>'
+            f"Final result."
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+
+        # Collect content and tool calls
+        all_content = []
+        all_tool_calls = []
+        for delta, _ in results:
+            if delta:
+                if delta.content:
+                    all_content.append(delta.content)
+                if delta.tool_calls:
+                    all_tool_calls.extend(delta.tool_calls)
+
+        # Verify tool calls
+        assert len(all_tool_calls) >= 2, (
+            f"Expected at least 2 tool calls, got {len(all_tool_calls)}"
+        )
+
+        # Verify ALL text segments were captured as content
+        content_str = "".join(all_content)
+        assert "Let me help:" in content_str, (
+            f"Text before tool call missing: {content_str}"
+        )
+        assert "Result for f1:" in content_str, (
+            f"Text between tool calls missing: {content_str}"
+        )
+        assert "Final result." in content_str, (
+            f"Text after tool call missing: {content_str}"
+        )
+
     def test_streaming_multiple_tool_calls_sequential(
         self, parser, mock_request
     ):

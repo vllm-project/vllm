@@ -626,29 +626,41 @@ class Gemma4ToolParser(ToolParser):
                         tool_call_deltas.append(partial_delta)
 
         # --- Step 3: Handle content ---
-        # Case A: No tool call tokens at all — treat as pure content
-        if curr_start_count == 0 and prev_start_count == 0:
+        # Extract all plain text that is NOT part of tool call tags.
+        # This handles text before, between, and after tool calls.
+        if curr_start_count > 0 or prev_start_count > 0:
+            # Remove all complete tool call patterns
+            content_current = self.tool_call_regex.sub("", current_text)
+            content_previous = self.tool_call_regex.sub("", previous_text)
+
+            # Strip any trailing partial tool call (from <|tool_call> to end).
+            # After removing complete calls, any remaining <|tool_call> must
+            # be an incomplete one that's still being accumulated.
+            def _strip_trailing_partial(text: str) -> str:
+                idx = text.rfind(self.tool_call_start_token)
+                if idx != -1:
+                    return text[:idx]
+                return text
+
+            content_current = _strip_trailing_partial(content_current)
+            content_previous = _strip_trailing_partial(content_previous)
+
+            # The new content is the diff between current and previous plain text
+            if content_current.startswith(content_previous):
+                content_delta = content_current[len(content_previous):]
+            elif content_previous.startswith(content_current):
+                # Previous text is longer - this shouldn't happen in streaming
+                content_delta = content_current
+            else:
+                # Texts diverge - use current text as-is
+                content_delta = content_current
+
+            if content_delta == "":
+                content_delta = None
+        elif curr_start_count == 0 and prev_start_count == 0:
+            # Case A: No tool call tokens at all — treat as pure content
             if delta_text:
                 content_delta = delta_text
-        # Case B: All tool calls completed and text appears after them
-        elif curr_start_count > 0 and curr_start_count == curr_end_count:
-            # Find text after the last <tool_call|>
-            last_end = current_text.rfind(self.tool_call_end_token)
-            if last_end != -1:
-                text_after = current_text[last_end + len(self.tool_call_end_token):]
-                prev_last_end = previous_text.rfind(self.tool_call_end_token)
-                prev_text_after = ""
-                if prev_last_end != -1:
-                    prev_text_after = previous_text[
-                        prev_last_end + len(self.tool_call_end_token):
-                    ]
-                # New content is what appeared since last check
-                if text_after.startswith(prev_text_after):
-                    new_content = text_after[len(prev_text_after):]
-                else:
-                    new_content = text_after
-                if new_content:
-                    content_delta = new_content
 
         # --- Step 4: Build and return DeltaMessage ---
         if content_delta or tool_call_deltas:
