@@ -350,6 +350,166 @@ def dequantize_and_gather_k_cache_triton(
     )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Sparse variant — dequant only at the explicitly listed global slot ids.
+#
+# The dense kernel dequantizes every position in a contiguous window
+# ``[seq_len - gather_len, seq_len)`` per request. For C4A prefill the kv
+# buffer that path produces is later read sparsely by ``flash_mla_sparse_fwd``
+# at the topk-selected positions — i.e. the entries outside the topk union
+# are dequantized and discarded. This kernel cuts straight to the chase: it
+# dequantizes only at the positions the caller asks for.
+#
+# Slot ids are the global slot ids produced by ``compute_global_topk_indices_
+# and_lens`` (= block_table[req][i // block_size] * block_size + i %
+# block_size); ``-1`` entries are padding and produce no work and no write
+# (caller pre-zeros the destination row, matching the existing topk-padding
+# convention in DSv4's sparse path).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@triton.jit
+def _dequantize_and_gather_k_kernel_sparse(
+    out_ptr,
+    out_stride0,
+    slot_indices_ptr,  # [N] int32
+    k_cache_ptr,
+    N,
+    block_size: tl.constexpr,
+    fp8_dim: tl.constexpr,  # 448
+    bf16_dim: tl.constexpr,  # 64
+    scale_dim: tl.constexpr,  # 8
+    quant_block: tl.constexpr,  # 64
+    token_data_size: tl.constexpr,  # 576
+    block_stride: tl.constexpr,
+):
+    """1-program-per-output-row sparse FP8 dequant.
+
+    Same per-token instruction sequence as the dense Triton kernel (single
+    vectorized FP8 load + BF16 tail), but without any req / prefix-sum
+    bookkeeping — each program owns a single output row whose source is the
+    global slot id at ``slot_indices_ptr[pid]``.
+    """
+    pid = tl.program_id(0)
+    if pid >= N:
+        return
+
+    slot_id = tl.load(slot_indices_ptr + pid)
+    if slot_id < 0:
+        return  # -1 padding: leave output untouched
+
+    block_id = slot_id // block_size
+    pos_in_block = slot_id % block_size
+
+    # int64: block_id * block_stride can exceed 2^31 with many KV-cache blocks.
+    cache_block_ptr = k_cache_ptr + block_id.to(tl.int64) * block_stride
+    token_data_ptr = cache_block_ptr + pos_in_block * token_data_size
+    token_scale_ptr = (
+        cache_block_ptr + block_size * token_data_size + pos_in_block * scale_dim
+    )
+    token_fp8_ptr = token_data_ptr
+    token_bf16_ptr = token_data_ptr + fp8_dim
+    output_row_ptr = out_ptr + pid * out_stride0
+
+    block_idx = tl.arange(0, scale_dim)  # [8]
+    elem_idx = tl.arange(0, quant_block)  # [64]
+    offsets_2d = block_idx[:, None] * quant_block + elem_idx[None, :]  # [8, 64]
+    valid_mask = offsets_2d < fp8_dim
+    x_uint8 = tl.load(token_fp8_ptr + offsets_2d, mask=valid_mask, other=0)
+
+    scale_offsets = tl.arange(0, scale_dim)
+    encoded_scale = tl.load(token_scale_ptr + scale_offsets)
+    scale_per_block = tl.exp2(encoded_scale.to(tl.float32) - 127.0)
+
+    x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
+    x_float = x_fp8.to(tl.float32)
+    x_dequant = x_float * scale_per_block[:, None]
+    x_bf16 = x_dequant.to(tl.bfloat16)
+    tl.store(output_row_ptr + offsets_2d, x_bf16, mask=valid_mask)
+
+    bf16_offsets = tl.arange(0, bf16_dim)
+    bf16_cache_ptr = token_bf16_ptr.to(tl.pointer_type(tl.bfloat16))
+    bf16_vals = tl.load(bf16_cache_ptr + bf16_offsets)
+    tl.store(output_row_ptr + fp8_dim + bf16_offsets, bf16_vals)
+
+
+def dequantize_and_gather_k_cache_sparse_triton(
+    # [N, head_dim] bf16 — caller flattens any (queries × topk) layout to N.
+    out: torch.Tensor,
+    # [num_blocks, block_size, head_bytes]
+    k_cache: torch.Tensor,
+    # [N] int32 — global slot ids, ``-1`` = padding (skip).
+    slot_indices: torch.Tensor,
+    block_size: int,
+) -> None:
+    """Triton implementation of the sparse-gather dequant."""
+    N = slot_indices.shape[0]
+    if N == 0:
+        return
+
+    TOKEN_FP8_DIM = 448
+    TOKEN_BF16_DIM = 64
+    TOKEN_SCALE_DIM = 8
+    QUANT_BLOCK_SIZE = 64
+    TOKEN_DATA_SIZE = TOKEN_FP8_DIM + TOKEN_BF16_DIM * 2
+
+    _dequantize_and_gather_k_kernel_sparse[(N,)](
+        out,
+        out.stride(0),
+        slot_indices,
+        k_cache,
+        N,
+        block_size=block_size,
+        fp8_dim=TOKEN_FP8_DIM,
+        bf16_dim=TOKEN_BF16_DIM,
+        scale_dim=TOKEN_SCALE_DIM,
+        quant_block=QUANT_BLOCK_SIZE,
+        token_data_size=TOKEN_DATA_SIZE,
+        block_stride=k_cache.stride(0),
+        num_warps=1,
+    )
+
+
+def dequantize_and_gather_k_cache_sparse(
+    # [N, head_dim] bf16 — caller flattens any (queries × topk) layout to N.
+    out: torch.Tensor,
+    # [num_blocks, block_size, head_bytes]
+    k_cache: torch.Tensor,
+    # [N] int32 — global slot ids, ``-1`` = padding (skip).
+    slot_indices: torch.Tensor,
+    block_size: int,
+) -> None:
+    """Sparse gather + dequant of FP8 K-cache entries.
+
+    For each ``i`` in ``[0, N)``:
+      * if ``slot_indices[i] >= 0``: dequant the K-cache entry at that global
+        slot id into ``out[i, :]``;
+      * if ``slot_indices[i] == -1``: leave ``out[i, :]`` untouched.
+
+    Pair with ``compute_global_topk_indices_and_lens`` to drive ``out`` from
+    DSv4's per-token topk_indices. Caller is responsible for pre-zeroing
+    ``out`` if padding rows are read downstream.
+
+    Dispatches to the CuteDSL sparse kernel when available (cp.async + bit-
+    manip dequant — bandwidth-bound on Blackwell), and falls back to the
+    Triton sparse kernel otherwise.
+    """
+    if slot_indices.numel() == 0:
+        return
+
+    if has_cutedsl():
+        from .dequant_gather_k_cutedsl import (
+            dequantize_and_gather_k_cache_sparse_cutedsl,
+        )
+
+        dequantize_and_gather_k_cache_sparse_cutedsl(
+            out, k_cache, slot_indices, block_size
+        )
+        return
+
+    dequantize_and_gather_k_cache_sparse_triton(out, k_cache, slot_indices, block_size)
+
+
 def dequantize_and_gather_k_cache(
     # [num_reqs, max_num_tokens, head_size]
     out: torch.Tensor,

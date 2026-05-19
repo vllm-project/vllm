@@ -17,9 +17,15 @@ import pytest
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.utils.import_utils import has_cutedsl
 from vllm.v1.attention.ops.deepseek_v4_ops import (
     dequantize_and_gather_k_cache,
+    dequantize_and_gather_k_cache_sparse,
     quantize_and_insert_k_cache,
+)
+from vllm.v1.attention.ops.deepseek_v4_ops.cache_utils import (
+    dequantize_and_gather_k_cache_sparse_triton,
+    dequantize_and_gather_k_cache_triton,
 )
 from vllm.v1.attention.ops.deepseek_v4_ops.fused_compress_quant_cache import (
     _fused_kv_compress_norm_rope_insert_indexer_attn,
@@ -27,6 +33,14 @@ from vllm.v1.attention.ops.deepseek_v4_ops.fused_compress_quant_cache import (
 )
 
 from .test_fused_indexer_q_rope_quant import quantize_to_mxfp4
+
+_SPARSE_IMPLS = {"triton": dequantize_and_gather_k_cache_sparse_triton}
+if has_cutedsl():
+    from vllm.v1.attention.ops.deepseek_v4_ops.dequant_gather_k_cutedsl import (
+        dequantize_and_gather_k_cache_sparse_cutedsl,
+    )
+
+    _SPARSE_IMPLS["cutedsl"] = dequantize_and_gather_k_cache_sparse_cutedsl
 
 
 def _ue8m0_reference(x: torch.Tensor, block_size: int, fp8_max: float):
@@ -667,3 +681,252 @@ def test_fused_kv_insert_indexer(num_tokens: int, kv_block_size: int, use_fp4: b
             assert torch.equal(actual_scale, scale[i : i + 1]), (
                 f"token {i}: scale {actual_scale.item()} != {scale[i].item()}"
             )
+
+
+# ── Test F: sparse-gather variant ─────────────────────────────────────────────
+#
+# The sparse kernel must produce, at each output row `i`, exactly the bytes
+# the legacy kernel writes at the corresponding (req, position) in its
+# contiguous output — so feeding it the contiguous-slot list rebuilt from the
+# block_table must reproduce the legacy output bit-for-bit.
+
+
+def _make_v4_dequant_inputs(
+    seq_lens: list[int],
+    block_size: int,
+    seed: int = 0,
+):
+    """Populate a paged FP8 cache from random bf16 tokens via the production
+    quant_and_insert kernel. Returns (k_cache, block_tables, compressed_kv)."""
+    HEAD_DIM = 512
+    HEAD_BYTES = 584
+    device = "cuda"
+    torch.manual_seed(seed)
+
+    num_reqs = len(seq_lens)
+    total_tokens = sum(seq_lens)
+    blocks_per_req = [(s + block_size - 1) // block_size for s in seq_lens]
+    total_blocks = sum(blocks_per_req) + 1  # +1 slack
+    k_cache = torch.zeros(
+        total_blocks, block_size, HEAD_BYTES, dtype=torch.uint8, device=device
+    )
+
+    max_blocks = max(blocks_per_req)
+    block_table = torch.zeros((num_reqs, max_blocks), dtype=torch.int32, device=device)
+    slot_mappings = []
+    block_cursor = 0
+    for i, (s, nb) in enumerate(zip(seq_lens, blocks_per_req, strict=False)):
+        ids = torch.arange(block_cursor, block_cursor + nb, dtype=torch.int32)
+        block_table[i, :nb] = ids.to(device)
+        slot_ids = torch.empty(s, dtype=torch.int64)
+        for t in range(s):
+            slot_ids[t] = int(ids[t // block_size].item()) * block_size + (
+                t % block_size
+            )
+        slot_mappings.append(slot_ids.to(device))
+        block_cursor += nb
+
+    compressed_kv = torch.randn(
+        total_tokens, HEAD_DIM, dtype=torch.bfloat16, device=device
+    )
+    offset = 0
+    for s, slots in zip(seq_lens, slot_mappings, strict=False):
+        quantize_and_insert_k_cache(
+            compressed_kv[offset : offset + s],
+            k_cache.view(total_blocks, -1),
+            slots,
+            block_size=block_size,
+        )
+        offset += s
+
+    return k_cache, block_table, compressed_kv
+
+
+def _build_slot_indices(
+    seq_lens: list[int],
+    block_table: torch.Tensor,
+    block_size: int,
+    gather_lens: list[int] | None = None,
+) -> torch.Tensor:
+    """Reconstruct the global slot ids the legacy kernel implicitly visits.
+
+    Returns a flat [sum(gather_lens)] int32 tensor of slot ids ordered
+    (req-major, position-within-req-major). With ``gather_lens == seq_lens``
+    this is the full contiguous slot list per request.
+    """
+    device = block_table.device
+    parts = []
+    for r, s in enumerate(seq_lens):
+        gl = gather_lens[r] if gather_lens is not None else s
+        start = s - gl
+        for t in range(start, s):
+            block_in_seq = t // block_size
+            pos_in_block = t % block_size
+            phys_block = int(block_table[r, block_in_seq].item())
+            parts.append(phys_block * block_size + pos_in_block)
+    return torch.tensor(parts, dtype=torch.int32, device=device)
+
+
+@pytest.mark.parametrize("impl_name", list(_SPARSE_IMPLS.keys()))
+@pytest.mark.parametrize(
+    "seq_lens, gather_lens",
+    [
+        ([17], None),
+        ([8, 17], None),
+        ([8, 17], [3, 11]),
+        ([64, 33, 7, 128], [64, 33, 7, 64]),
+    ],
+)
+@pytest.mark.parametrize("block_size", [16, 64])
+def test_dequant_sparse_matches_legacy_on_contiguous(
+    impl_name, seq_lens, gather_lens, block_size
+):
+    """Sparse-kernel == legacy when slot_indices = contiguous slot list."""
+    sparse_fn = _SPARSE_IMPLS[impl_name]
+    HEAD_DIM = 512
+    device = "cuda"
+    k_cache, block_table, _ = _make_v4_dequant_inputs(seq_lens, block_size, seed=42)
+
+    num_reqs = len(seq_lens)
+    lens = gather_lens if gather_lens is not None else seq_lens
+    max_tokens = max(lens)
+    seq_lens_t = torch.tensor(seq_lens, dtype=torch.int32, device=device)
+    gather_lens_t = (
+        torch.tensor(gather_lens, dtype=torch.int32, device=device)
+        if gather_lens is not None
+        else None
+    )
+
+    out_legacy = torch.zeros(
+        num_reqs, max_tokens, HEAD_DIM, dtype=torch.bfloat16, device=device
+    )
+    dequantize_and_gather_k_cache_triton(
+        out_legacy, k_cache, seq_lens_t, gather_lens_t, block_table, block_size, 0
+    )
+
+    slot_indices = _build_slot_indices(seq_lens, block_table, block_size, gather_lens)
+    out_sparse_flat = torch.zeros(
+        slot_indices.shape[0], HEAD_DIM, dtype=torch.bfloat16, device=device
+    )
+    sparse_fn(out_sparse_flat, k_cache, slot_indices, block_size)
+
+    offset = 0
+    for r, gl in enumerate(lens):
+        ref = out_legacy[r, :gl]
+        got = out_sparse_flat[offset : offset + gl]
+        assert torch.equal(ref, got), (
+            f"{impl_name} req {r}: sparse-vs-legacy max diff "
+            f"{(ref - got).abs().max().item()}"
+        )
+        offset += gl
+
+
+@pytest.mark.parametrize("impl_name", list(_SPARSE_IMPLS.keys()))
+def test_dequant_sparse_skips_padding_minus_one(impl_name):
+    """``-1`` slot ids must leave the corresponding output rows untouched."""
+    sparse_fn = _SPARSE_IMPLS[impl_name]
+    HEAD_DIM = 512
+    device = "cuda"
+    seq_lens = [16]
+    block_size = 16
+    k_cache, block_table, _ = _make_v4_dequant_inputs(seq_lens, block_size, seed=1)
+
+    real = _build_slot_indices(seq_lens, block_table, block_size, [8])
+    slot_indices = torch.full(
+        (real.shape[0] * 2,), -1, dtype=torch.int32, device=device
+    )
+    slot_indices[::2] = real
+
+    SENTINEL = 7.5
+    out = torch.full(
+        (slot_indices.shape[0], HEAD_DIM),
+        SENTINEL,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    sparse_fn(out, k_cache, slot_indices, block_size)
+
+    assert torch.all(out[1::2] == SENTINEL), (
+        f"{impl_name} kernel wrote into a -1 padding row — should have been skipped"
+    )
+    assert not torch.all(out[::2] == SENTINEL), (
+        f"{impl_name} kernel did not write into real rows"
+    )
+
+
+@pytest.mark.parametrize("impl_name", list(_SPARSE_IMPLS.keys()))
+def test_dequant_sparse_empty_n_zero(impl_name):
+    """N=0 is a no-op (must not launch the kernel and not crash)."""
+    sparse_fn = _SPARSE_IMPLS[impl_name]
+    HEAD_DIM = 512
+    device = "cuda"
+    k_cache, _, _ = _make_v4_dequant_inputs([4], 16, seed=0)
+    slot_indices = torch.empty(0, dtype=torch.int32, device=device)
+    out = torch.empty(0, HEAD_DIM, dtype=torch.bfloat16, device=device)
+    # The public dispatcher short-circuits N=0; the per-impl wrappers don't
+    # all gate this themselves, so use the dispatcher for the empty-case test.
+    dequantize_and_gather_k_cache_sparse(out, k_cache, slot_indices, 16)
+    if impl_name == "triton":
+        sparse_fn(out, k_cache, slot_indices, 16)
+
+
+@pytest.mark.parametrize("impl_name", list(_SPARSE_IMPLS.keys()))
+def test_dequant_sparse_scattered_permutation(impl_name):
+    """Random permutation of valid slot ids must produce the same set of
+    output rows as the contiguous gather, just in permuted order."""
+    sparse_fn = _SPARSE_IMPLS[impl_name]
+    HEAD_DIM = 512
+    device = "cuda"
+    seq_lens = [128]
+    block_size = 16
+    k_cache, block_table, _ = _make_v4_dequant_inputs(seq_lens, block_size, seed=11)
+
+    real = _build_slot_indices(seq_lens, block_table, block_size)
+    perm = torch.randperm(real.shape[0], device=device)
+    permuted_indices = real[perm]
+
+    out_contig = torch.zeros(
+        real.shape[0], HEAD_DIM, dtype=torch.bfloat16, device=device
+    )
+    out_perm = torch.zeros_like(out_contig)
+
+    sparse_fn(out_contig, k_cache, real, block_size)
+    sparse_fn(out_perm, k_cache, permuted_indices, block_size)
+
+    assert torch.equal(out_perm, out_contig[perm]), (
+        f"{impl_name} permuted sparse output does not match contiguous "
+        f"reference after unpermutation"
+    )
+
+
+@pytest.mark.skipif(not has_cutedsl(), reason="cutedsl not available")
+def test_dequant_sparse_cutedsl_matches_triton_random():
+    """CuteDSL and Triton sparse paths must produce bit-identical output."""
+    HEAD_DIM = 512
+    device = "cuda"
+    block_size = 64
+    seq_lens = [2048, 1024, 4096, 512]
+    k_cache, block_table, _ = _make_v4_dequant_inputs(seq_lens, block_size, seed=21)
+
+    all_slots = _build_slot_indices(seq_lens, block_table, block_size)
+    g = torch.Generator(device=device).manual_seed(99)
+    N = all_slots.numel() // 2
+    perm = torch.randperm(all_slots.numel(), generator=g, device=device)
+    slot_indices = all_slots[perm[:N]].contiguous()
+    slot_indices[::13] = -1  # sparse padding pattern
+
+    out_triton = torch.zeros(N, HEAD_DIM, dtype=torch.bfloat16, device=device)
+    out_cutedsl = torch.zeros(N, HEAD_DIM, dtype=torch.bfloat16, device=device)
+    dequantize_and_gather_k_cache_sparse_triton(
+        out_triton, k_cache, slot_indices, block_size
+    )
+    dequantize_and_gather_k_cache_sparse_cutedsl(  # type: ignore[name-defined]
+        out_cutedsl, k_cache, slot_indices, block_size
+    )
+    valid = slot_indices >= 0
+    assert torch.equal(out_triton[valid], out_cutedsl[valid]), (
+        f"CuteDSL vs Triton sparse mismatch; max diff "
+        f"{(out_triton[valid].float() - out_cutedsl[valid].float()).abs().max().item()}"
+    )
+    assert torch.all(out_triton[~valid] == 0)
+    assert torch.all(out_cutedsl[~valid] == 0)
