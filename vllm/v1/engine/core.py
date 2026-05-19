@@ -466,9 +466,10 @@ class EngineCore:
         if not (self.async_scheduling and self.use_spec_decode and model_executed):
             return None
         draft_token_ids = self.model_executor.take_draft_token_ids()
-        if draft_token_ids is None:
-            return None
-        if draft_token_ids.num_valid_draft_tokens is not None:
+        if (
+            draft_token_ids is not None
+            and draft_token_ids.num_valid_draft_tokens is not None
+        ):
             self.scheduler.update_draft_token_ids(draft_token_ids)
         return draft_token_ids
 
@@ -588,9 +589,7 @@ class EngineCore:
             # we can compute the grammar bitmask for the deferred request.
             if self.use_spec_decode:
                 draft_token_ids = (
-                    async_draft_token_ids
-                    if async_draft_token_ids is not None
-                    else self.model_executor.take_draft_token_ids()
+                    async_draft_token_ids or self.model_executor.take_draft_token_ids()
                 )
                 assert draft_token_ids is not None
                 # Update the draft token ids in the scheduler output to

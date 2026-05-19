@@ -1691,10 +1691,7 @@ class Scheduler(SchedulerInterface):
     def update_draft_token_ids(self, draft_token_ids: DraftTokenIds) -> None:
         num_valid_list = draft_token_ids.num_valid_draft_tokens
         for i, (req_id, spec_token_ids) in enumerate(
-            zip(
-                draft_token_ids.req_ids,
-                draft_token_ids.draft_token_ids,
-            )
+            zip(draft_token_ids.req_ids, draft_token_ids.draft_token_ids)
         ):
             request = self.requests.get(req_id)
             if request is None or request.is_finished():
@@ -1727,10 +1724,7 @@ class Scheduler(SchedulerInterface):
 
         sched_spec_tokens = scheduler_output.scheduled_spec_decode_tokens
         for i, (req_id, spec_token_ids) in enumerate(
-            zip(
-                draft_token_ids.req_ids,
-                draft_token_ids.draft_token_ids,
-            )
+            zip(draft_token_ids.req_ids, draft_token_ids.draft_token_ids)
         ):
             request = self.requests.get(req_id)
             if request is None or request.is_finished():
@@ -1747,8 +1741,7 @@ class Scheduler(SchedulerInterface):
             effective_num_spec_tokens = orig_num_spec_tokens
             if num_valid_list is not None:
                 effective_num_spec_tokens = max(
-                    0,
-                    min(num_valid_list[i], orig_num_spec_tokens),
+                    0, min(num_valid_list[i], orig_num_spec_tokens)
                 )
 
             del spec_token_ids[effective_num_spec_tokens:]
