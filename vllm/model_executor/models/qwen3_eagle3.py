@@ -173,10 +173,15 @@ class Qwen3Eagle3Model(nn.Module):
             ]
         )
         if self.use_aux_hidden_state:
+            num_aux_features = getattr(self.config, "num_aux_layers", None)
+            if num_aux_features is None:
+                aux_ids = getattr(self.config, "eagle_aux_hidden_state_layer_ids", None)
+                num_aux_features = len(aux_ids) if aux_ids is not None else 3
+            self.num_aux_layers = num_aux_features
             if hasattr(self.config, "target_hidden_size"):
-                fc_input_size = self.config.target_hidden_size * 3
+                fc_input_size = self.config.target_hidden_size * num_aux_features
             else:
-                fc_input_size = self.config.hidden_size * 3
+                fc_input_size = self.config.hidden_size * num_aux_features
             if self.norm_before_fc:
                 self.input_norm = RMSNorm(
                     fc_input_size,
@@ -315,7 +320,11 @@ class Eagle3Qwen3ForCausalLM(Qwen3ForCausalLM):
                 "mask_hidden",
                 torch.zeros(
                     1,
-                    (3 if self.model.use_aux_hidden_state else 1)
+                    (
+                        self.model.num_aux_layers
+                        if self.model.use_aux_hidden_state
+                        else 1
+                    )
                     * self.config.hidden_size,
                 ),
                 persistent=False,
