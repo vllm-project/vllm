@@ -3,7 +3,11 @@
 import torch
 
 from vllm.config import VllmConfig
+from vllm.logger import init_logger
+from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.v1.worker.gpu_input_batch import InputBatch
+
+logger = init_logger(__name__)
 
 
 class SuffixDecodingProposer:
@@ -32,6 +36,22 @@ class SuffixDecodingProposer:
             max_cached_requests=config.suffix_decoding_max_cached_requests,
         )
 
+        self.force_max_spec_tokens = config.force_max_spec_tokens
+        self._pad_token_id = -1
+        self._pad_template = []
+        if self.force_max_spec_tokens:
+            tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
+            if tokenizer is None:
+                logger.warning(
+                    "force_max_spec_tokens is enabled but tokenizer is not "
+                    "available (skip_tokenizer_init=True). "
+                    "Disabling force_max_spec_tokens."
+                )
+                self.force_max_spec_tokens = False
+            else:
+                self._pad_token_id = tokenizer.eos_token_id
+                self._pad_template = [self._pad_token_id] * self.num_speculative_tokens
+
     def propose(
         self,
         input_batch: InputBatch,
@@ -44,6 +64,8 @@ class SuffixDecodingProposer:
         Propose speculative tokens for each request in the input batch. Suffix Decoding
         will speculate a dynamic number of tokens for each request every decoding step,
         so each entry in the returned list may have different lengths.
+        When force_max_spec_tokens is enabled, all non-empty entries
+        will be padded to num_speculative_tokens.
         """
         draft_token_ids: list[list[int]] = []
         for i, sampled_ids in enumerate(sampled_token_ids):
@@ -87,6 +109,8 @@ class SuffixDecodingProposer:
             )
 
             draft_token_ids.append(draft.token_ids)
+            if self.force_max_spec_tokens:
+                draft_token_ids[-1].extend(self._pad_template[len(draft.token_ids) :])
 
         # Stop requests that were not seen in the input batch.
         for req_id in (
