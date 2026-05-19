@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections import OrderedDict
 from collections.abc import Iterable, Sequence
 from typing import Any
 
@@ -58,6 +59,15 @@ class BlockHashToBlockMap:
         self._cache: dict[
             BlockHashWithGroupId, KVCacheBlock | dict[int, KVCacheBlock]
         ] = {}
+        # Lifetime insert-count per hash. A hash with count >= 2 represents
+        # content that has been re-cached by at least two requests — i.e. a
+        # shared prefix (most commonly the chat-template prelude in models
+        # like DeepSeek-V4-Flash). BlockPool.get_new_blocks uses this signal
+        # (via _is_popular_hash) to defer reassigning the underlying block.
+        self._insert_counts: dict[BlockHashWithGroupId, int] = {}
+
+    def get_insert_count(self, key: BlockHashWithGroupId) -> int:
+        return self._insert_counts.get(key, 0)
 
     def get_one_block(self, key: BlockHashWithGroupId) -> KVCacheBlock | None:
         """
@@ -76,6 +86,7 @@ class BlockHashToBlockMap:
         """
         Inserts the KVCacheBlock to the cache
         """
+        self._insert_counts[key] = self._insert_counts.get(key, 0) + 1
         blocks = self._cache.get(key)
         if blocks is None:
             # When key is not found, attach a single block to the key
@@ -181,6 +192,34 @@ class BlockPool:
 
         self.metrics_collector = metrics_collector
 
+        # Soft-pin: bounded recent-hit set used by `get_new_blocks` to avoid
+        # reassigning blocks whose hash was just successfully serving a cache
+        # hit. Cap is sized to roughly the pool size — `cached_block_hash_to_block`
+        # cannot hold meaningfully more than `num_gpu_blocks` keys at once, so
+        # a cap of 2x pool size leaves room for transient over-allocation
+        # without exposing us to unbounded memory growth.
+        self._recent_hit_hashes: OrderedDict[BlockHashWithGroupId, bool] = (
+            OrderedDict()
+        )
+        self._recent_hit_cap: int = max(num_gpu_blocks * 2, 1024)
+
+    def _record_hit(self, key: BlockHashWithGroupId) -> None:
+        rh = self._recent_hit_hashes
+        if key in rh:
+            rh.move_to_end(key)
+        else:
+            rh[key] = True
+            if len(rh) > self._recent_hit_cap:
+                rh.popitem(last=False)
+
+    def _is_popular_hash(self, key: BlockHashWithGroupId) -> bool:
+        """A hash is 'popular' (= worth defending) when it has been inserted
+        at least twice during the engine's lifetime: that means multiple
+        requests have cached the same content under this key. The canonical
+        example is the chat-template prelude that every request shares.
+        """
+        return self.cached_block_hash_to_block.get_insert_count(key) >= 2
+
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
     ) -> list[KVCacheBlock] | None:
@@ -196,6 +235,7 @@ class BlockPool:
             The cached blocks if exists, or None.
         """
         cached_blocks = []
+        keys_visited = []
         for group_id in kv_cache_group_ids:
             block_hash_with_group_id = make_block_hash_with_group_id(
                 block_hash, group_id
@@ -206,6 +246,11 @@ class BlockPool:
             if not block:
                 return None
             cached_blocks.append(block)
+            keys_visited.append(block_hash_with_group_id)
+        # Soft-pin: track recently-hit keys so future allocations prefer
+        # blocks not in this set.
+        for key in keys_visited:
+            self._record_hit(key)
         return cached_blocks
 
     def cache_full_blocks(
@@ -333,33 +378,77 @@ class BlockPool:
     def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
         """Get new blocks from the free block pool.
 
-        Note that we do not check block cache in this function.
+        With prefix-caching enabled, walks the free queue and prefers blocks
+        whose hash is not in the soft-pin set (see `_recent_hit_hashes`) and
+        not 'popular' by insert-count (see `_is_popular_hash`). Without these
+        preferences a strict head-of-LRU popleft destroys cache keys that
+        either were just serving hits or hold content shared across many
+        requests — a pathology for hybrid-KV-cache-manager workloads where
+        a chat-template prelude is identical across all requests
+        (e.g. DeepSeek-V4-Flash, see #42948).
 
         Args:
             num_blocks: The number of blocks to allocate.
 
         Returns:
-            A list of new block.
+            A list of new blocks.
         """
         if num_blocks > self.get_num_free_blocks():
             raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
 
-        ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
+        if not self.enable_caching:
+            ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
+            for block in ret:
+                assert block.ref_cnt == 0
+                block.ref_cnt += 1
+                if self.metrics_collector:
+                    self.metrics_collector.on_block_allocated(block)
+            return ret
 
-        # In order to only iterate the list once, we duplicated code a bit
-        if self.enable_caching:
-            for block in ret:
-                self._maybe_evict_cached_block(block)
-                assert block.ref_cnt == 0
-                block.ref_cnt += 1
-                if self.metrics_collector:
-                    self.metrics_collector.on_block_allocated(block)
+        # Caching enabled: walk the queue and prefer blocks not in the
+        # recent-hit set and not "popular". Scan budget sized dynamically so
+        # that we can always walk past every protected block plus a working
+        # margin for the request itself — but bounded by the actual queue
+        # length so we never scan more than what exists.
+        recent = self._recent_hit_hashes
+        safe: list[KVCacheBlock] = []
+        high_value: list[KVCacheBlock] = []
+        scan_budget = min(
+            len(recent) * 2 + num_blocks * 2,
+            self.free_block_queue.num_free_blocks,
+        )
+        queue_iter = iter(self.free_block_queue)
+        for block in queue_iter:
+            if len(safe) >= num_blocks or scan_budget <= 0:
+                break
+            scan_budget -= 1
+            bh = block.block_hash
+            if bh is None or (bh not in recent and not self._is_popular_hash(bh)):
+                safe.append(block)
+            else:
+                high_value.append(block)
+
+        if len(safe) >= num_blocks:
+            ret = safe[:num_blocks]
         else:
-            for block in ret:
-                assert block.ref_cnt == 0
-                block.ref_cnt += 1
-                if self.metrics_collector:
-                    self.metrics_collector.on_block_allocated(block)
+            # Not enough safe blocks within scan budget; fall back to
+            # high_value blocks we already passed, then continue walking
+            # if still short.
+            ret = safe + high_value[: num_blocks - len(safe)]
+            for block in queue_iter:
+                if len(ret) >= num_blocks:
+                    break
+                ret.append(block)
+
+        for block in ret:
+            self.free_block_queue.remove(block)
+
+        for block in ret:
+            self._maybe_evict_cached_block(block)
+            assert block.ref_cnt == 0
+            block.ref_cnt += 1
+            if self.metrics_collector:
+                self.metrics_collector.on_block_allocated(block)
         return ret
 
     def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:

@@ -283,6 +283,20 @@ class FreeKVCacheBlockQueue:
             curr_block.prev_free_block = self.fake_free_list_head
         return ret
 
+    def __iter__(self) -> Iterator[KVCacheBlock]:
+        """Walk the free queue from head to tail. Yields each free block in
+        LRU order (oldest first). Safe to remove blocks via `remove(block)`
+        during iteration; the iterator captures the `next_free_block` pointer
+        before yielding so detaching the current block doesn't break the
+        traversal.
+        """
+        curr = self.fake_free_list_head.next_free_block
+        tail = self.fake_free_list_tail
+        while curr is not None and curr is not tail:
+            nxt = curr.next_free_block
+            yield curr
+            curr = nxt
+
     def remove(self, block: KVCacheBlock) -> None:
         """Remove a block in the free list and reduce num_free_blocks by 1.
 
