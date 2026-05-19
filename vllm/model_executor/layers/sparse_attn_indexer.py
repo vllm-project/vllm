@@ -216,11 +216,9 @@ def sparse_attn_indexer(
                 k_quant_cast = k_quant
                 k_scale_cast = k_scale.view(torch.float32).squeeze(-1)
             if current_platform.is_xpu():
-                if not hasattr(torch.ops._xpu_C, "fp8_mqa_logits"):
-                    raise RuntimeError("_xpu_C.fp8_mqa_logits is unavailable")
                 if q_scale_slice is not None:
                     raise RuntimeError("XPU fp8_mqa_logits does not support FP4 Q")
-                logits = torch.ops._xpu_C.fp8_mqa_logits(
+                logits = torch.ops.vllm.xpu_fp8_mqa_logits(
                     q_slice_cast,
                     k_quant_cast,
                     k_scale_cast,
@@ -305,14 +303,12 @@ def sparse_attn_indexer(
             else padded_q_quant_decode_tokens
         )
         if current_platform.is_xpu():
-            if not hasattr(torch.ops._xpu_C, "fp8_paged_mqa_logits"):
-                raise RuntimeError("_xpu_C.fp8_paged_mqa_logits is unavailable")
             if padded_q_scale is not None:
                 raise RuntimeError(
                     "XPU fp8_paged_mqa_logits does not support FP4 Q"
                 )
             seq_lens_xpu = seq_lens[:, -1].contiguous() if seq_lens.ndim == 2 else seq_lens
-            logits = torch.ops._xpu_C.fp8_paged_mqa_logits(
+            logits = torch.ops.vllm.xpu_fp8_paged_mqa_logits(
                 padded_q_quant_cast,
                 kv_cache,
                 weights[:num_padded_tokens],

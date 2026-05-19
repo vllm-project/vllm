@@ -185,6 +185,76 @@ def _xpu_ops_deepseek_scaling_rope_fake(
     return query, key
 
 
+def _xpu_fp8_mqa_logits_impl(
+    q: torch.Tensor,
+    k_quant: torch.Tensor,
+    k_scale: torch.Tensor,
+    weights: torch.Tensor,
+    cu_seqlen_ks: torch.Tensor,
+    cu_seqlen_ke: torch.Tensor,
+) -> torch.Tensor:
+    return torch.ops._xpu_C.fp8_mqa_logits(
+        q,
+        k_quant,
+        k_scale,
+        weights,
+        cu_seqlen_ks,
+        cu_seqlen_ke,
+    )
+
+
+def _xpu_fp8_mqa_logits_fake(
+    q: torch.Tensor,
+    k_quant: torch.Tensor,
+    k_scale: torch.Tensor,
+    weights: torch.Tensor,
+    cu_seqlen_ks: torch.Tensor,
+    cu_seqlen_ke: torch.Tensor,
+) -> torch.Tensor:
+    return torch.empty(
+        (q.shape[0], k_quant.shape[0]),
+        dtype=torch.float32,
+        device=q.device,
+    )
+
+
+def _xpu_fp8_paged_mqa_logits_impl(
+    q: torch.Tensor,
+    kv_cache: torch.Tensor,
+    weights: torch.Tensor,
+    context_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+    schedule_metadata: torch.Tensor,
+    max_model_len: int,
+) -> torch.Tensor:
+    return torch.ops._xpu_C.fp8_paged_mqa_logits(
+        q,
+        kv_cache,
+        weights,
+        context_lens,
+        block_tables,
+        schedule_metadata,
+        max_model_len,
+    )
+
+
+def _xpu_fp8_paged_mqa_logits_fake(
+    q: torch.Tensor,
+    kv_cache: torch.Tensor,
+    weights: torch.Tensor,
+    context_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+    schedule_metadata: torch.Tensor,
+    max_model_len: int,
+) -> torch.Tensor:
+    batch_size, next_n = q.shape[:2]
+    return torch.empty(
+        (batch_size * next_n, max_model_len),
+        dtype=torch.float32,
+        device=q.device,
+    )
+
+
 def _topk_topp_sample_impl(
     random_sampled: torch.Tensor,
     logits_to_return: torch.Tensor | None,
@@ -461,6 +531,18 @@ class xpu_ops:
                 op_name="xpu_mxfp4_quantize",
                 op_func=_xpu_mxfp4_quantize_impl,
                 fake_impl=_xpu_mxfp4_quantize_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="xpu_fp8_mqa_logits",
+                op_func=_xpu_fp8_mqa_logits_impl,
+                fake_impl=_xpu_fp8_mqa_logits_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="xpu_fp8_paged_mqa_logits",
+                op_func=_xpu_fp8_paged_mqa_logits_impl,
+                fake_impl=_xpu_fp8_paged_mqa_logits_fake,
             )
 
             direct_register_custom_op(
