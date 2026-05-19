@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence
+from itertools import islice
 from typing import TYPE_CHECKING
 
 from vllm.entrypoints.openai.engine.protocol import (
@@ -26,6 +27,11 @@ class MiniMaxM2ReasoningParser(BaseThinkingReasoningParser):
     MiniMax M2 models don't generate <think> start token, only </think> end
     token. All content before </think> is reasoning, content after is the
     actual response.
+
+    Note: MiniMax M2 can emit multiple </think> tokens (interleaved thinking
+    where the model re-enters a thinking phase mid-response). Match the chat
+    template, which splits on the LAST </think>: everything before it is
+    reasoning, everything after is the final response.
     """
 
     @property
@@ -37,6 +43,37 @@ class MiniMaxM2ReasoningParser(BaseThinkingReasoningParser):
     def end_token(self) -> str:
         """The token that ends reasoning content."""
         return "</think>"
+
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
+        # The chat template treats the LAST </think> as the reasoning boundary,
+        # so any </think> in the output indicates reasoning has ended even if
+        # more </think> tokens follow.
+        return self.end_token_id in input_ids
+
+    def extract_content_ids(self, input_ids: list[int]) -> list[int]:
+        # Split on the LAST </think> so interleaved thinking rounds are
+        # treated as reasoning, not content.
+        prefix = input_ids[: max(0, len(input_ids) - 1)]
+        if self.end_token_id not in islice(prefix, 0, len(prefix)):
+            return []
+        last_idx = len(input_ids) - 1
+        while last_idx >= 0 and input_ids[last_idx] != self.end_token_id:
+            last_idx -= 1
+        return input_ids[last_idx + 1 :]
+
+    def extract_reasoning(
+        self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
+    ) -> tuple[str | None, str | None]:
+        # Strip optional leading <think> (model usually omits it).
+        head, sep, tail = model_output.partition(self.start_token)
+        body = tail if sep else head
+        if self.end_token not in body:
+            return body, None
+        # Split on the LAST </think>: the chat template uses
+        # `content.split('</think>')[-1]`, so interleaved thinking does not
+        # leak into the final response.
+        reasoning, _, content = body.rpartition(self.end_token)
+        return reasoning, content or None
 
     def extract_reasoning_streaming(
         self,
