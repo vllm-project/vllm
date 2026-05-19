@@ -31,7 +31,7 @@ def _est_smem_delta_h(config, named_args):
     BT = named_args.get("BT", 64)
     num_stages = config.num_stages
     persistent = 4 * BV * 64 * 4  # 4 x fp32 [BV,64] b_h buffers
-    per_stage = BT * 64 * 2 + BT * BV * 2  # b_w + b_v in bf16
+    per_stage = 2 * BT * 64 * 2 + BT * BV * 2  # b_w + b_k + b_v in bf16
     overhead = 4096  # Triton bookkeeping safety
     return persistent + num_stages * per_stage + overhead
 
