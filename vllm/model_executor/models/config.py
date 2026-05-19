@@ -14,6 +14,8 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+ROBOMETER_TOKENIZER = "Qwen/Qwen3-VL-4B-Instruct"
+
 
 class VerifyAndUpdateConfig:
     @staticmethod
@@ -541,6 +543,23 @@ class Qwen2ForRewardModelConfig(VerifyAndUpdateConfig):
             pooler_config.use_activation = False
 
 
+class RFMConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        pooler_config = model_config.pooler_config
+        hf_config = model_config.hf_config
+
+        if model_config.tokenizer == model_config.model:
+            model_config.tokenizer = ROBOMETER_TOKENIZER
+        if pooler_config.tok_pooling_type is None:
+            pooler_config.tok_pooling_type = "STEP"
+        if pooler_config.step_tag_id is None:
+            text_config = getattr(hf_config, "text_config", hf_config)
+            pooler_config.step_tag_id = text_config.vocab_size - 1
+        if pooler_config.use_activation is None:
+            pooler_config.use_activation = False
+
+
 class Qwen3ForSequenceClassificationConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -653,6 +672,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Qwen3VLForSequenceClassification": Qwen3VLForSequenceClassificationConfig,
     "Qwen3_5ForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
     "Qwen3_5MoeForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
+    "RFM": RFMConfig,
     "VoyageQwen3BidirectionalEmbedModel": VoyageQwen3BidirectionalEmbedModelConfig,
     "XLMRobertaModel": JinaRobertaModelConfig,
 }

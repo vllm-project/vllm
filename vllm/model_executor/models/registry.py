@@ -302,6 +302,7 @@ _TOKEN_CLASSIFICATION_MODELS = {
         "qwen3_asr_forced_aligner",
         "Qwen3ASRForcedAlignerForTokenClassification",
     ),
+    "RFM": ("rfm", "RFM"),
 }
 
 _SEQUENCE_CLASSIFICATION_MODELS = {
