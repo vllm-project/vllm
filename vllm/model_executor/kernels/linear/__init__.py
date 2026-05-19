@@ -821,7 +821,7 @@ _NVFP4_BACKEND_TO_KERNEL: dict[str, type[NvFp4LinearKernel]] = {
 }
 
 
-def init_nvfp4_linear_kernel(use_marlin: bool = False) -> NvFp4LinearKernel:
+def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
     """Select and instantiate the best NVFP4 linear kernel for the
     current platform."""
     config = NvFp4LinearLayerConfig()
@@ -848,7 +848,7 @@ def init_nvfp4_linear_kernel(use_marlin: bool = False) -> NvFp4LinearKernel:
         # Deprecated env-var overrides — only honoured when --linear-backend
         # is "auto". Will be removed in v0.21; users should migrate to
         # --linear-backend.
-        if use_marlin:  # force marlin if running weight-only quantization
+        if use_a16:  # force a16 if running weight-only quantization
             force_kernel = MarlinNvFp4LinearKernel
         elif envs.VLLM_USE_FBGEMM:
             warnings.warn(

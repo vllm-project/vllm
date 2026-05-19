@@ -25,7 +25,7 @@ __all__ = ["CompressedTensorsW4A4Fp4"]
 class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
     def __init__(self, use_a16: bool = False):
         self.use_a16 = use_a16
-        self.kernel = init_nvfp4_linear_kernel(use_marlin=use_a16)
+        self.kernel = init_nvfp4_linear_kernel(use_a16=use_a16)
         self.group_size = 16
 
     @classmethod
