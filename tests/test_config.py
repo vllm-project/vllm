@@ -334,6 +334,18 @@ def test_draft_runner(model_id, expected_runner_type, expected_convert_type):
     assert config.convert_type == expected_convert_type
 
 
+@pytest.mark.parametrize(
+    ("model_id", "runner"),
+    [
+        ("intfloat/multilingual-e5-small", "draft"),
+        ("intfloat/multilingual-e5-small", "generate"),
+    ],
+)
+def test_embedding_model_rejects_incompatible_runners(model_id, runner):
+    with pytest.raises(ValueError, match="Embedding models do not support"):
+        ModelConfig(model_id, runner=runner)
+
+
 MODEL_IDS_EXPECTED = [
     ("Qwen/Qwen1.5-7B", 32768),
     ("mistralai/Mistral-7B-v0.1", 4096),

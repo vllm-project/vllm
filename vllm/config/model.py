@@ -567,6 +567,11 @@ class ModelConfig:
                     f"You can pass `--convert {convert_option} to adapt "
                     "it into a pooling model."
                 )
+        if is_pooling_model and self.runner_type in ("draft", "generate"):
+            raise ValueError(
+                f"Embedding models do not support `--runner {self.runner_type}`. "
+                "Use `--runner pooling` or `--runner auto` for embedding models."
+            )
 
         # Note: Initialize these attributes early because transformers fallback
         # may fail to load dynamic modules in child processes
