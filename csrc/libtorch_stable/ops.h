@@ -169,8 +169,8 @@ torch::stable::Tensor hadacore_transform(torch::stable::Tensor& x,
 
 // Activation kernels (shared CUDA/ROCm)
 void silu_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input);
-void silu_and_mul_clamp(torch::stable::Tensor& out, torch::stable::Tensor& input,
-                        double limit);
+void silu_and_mul_clamp(torch::stable::Tensor& out,
+                        torch::stable::Tensor& input, double limit);
 void mul_and_silu(torch::stable::Tensor& out, torch::stable::Tensor& input);
 void gelu_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input);
 void gelu_tanh_and_mul(torch::stable::Tensor& out,

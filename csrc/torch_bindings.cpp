@@ -92,7 +92,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor? scale_ub=None, "
       "bool is_scale_transposed=False) -> ()");
   ops.impl("silu_and_mul_per_block_quant", torch::kCUDA,
-            &silu_and_mul_per_block_quant);
+           &silu_and_mul_per_block_quant);
 
   // Layernorm
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
