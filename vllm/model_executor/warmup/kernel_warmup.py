@@ -135,6 +135,7 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
                 skip_eplb=True,
                 is_profile=True,
             )
+        get_world_group().barrier()
         return
 
     world = get_world_group()
