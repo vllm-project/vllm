@@ -477,24 +477,35 @@ def _test_backend_correctness(
     # Note: flex_attention has known Triton kernel compatibility issues
     # with test infrastructures
     for backend_name in backend_to_test:
-        # KV cache is created in (num_blocks, 2, ...) layout.
-        # Backends still using (2, num_blocks, ...) need a transpose.
-        kv_cache_for_backend = kv_cache
         reset_kv_cache_layout = False
-        if hasattr(backend_name, "get_class"):
-            backend_cls = backend_name.get_class()
-            if backend_cls.get_kv_cache_shape(1, 16, 1, 128)[0] != 1:
-                kv_cache_for_backend = kv_cache.transpose(0, 1)
+
+        # Resolve backend class for both enum and string names.
+        actual_backend = backend_name
+        if backend_name == "FLEX_ATTENTION_SLOW":
+            actual_backend = AttentionBackendEnum.FLEX_ATTENTION
+        if hasattr(actual_backend, "get_class"):
+            backend_cls = actual_backend.get_class()
+        else:
+            backend_cls = None
+
+        # Apply stride order like runtime does in
+        # _reshape_kv_cache (attn_utils.py:182-210): permute to physical
+        # layout, make contiguous, then permute to logical layout.
+        kv_cache_for_backend = kv_cache
+        if backend_cls is not None:
+            try:
+                stride_order = backend_cls.get_kv_cache_stride_order()
+            except (AttributeError, NotImplementedError):
+                stride_order = tuple(range(kv_cache.ndim))
+            if stride_order != tuple(range(kv_cache.ndim)):
+                inv_order = [stride_order.index(i) for i in range(len(stride_order))]
+                kv_cache_for_backend = (
+                    kv_cache.permute(*stride_order).contiguous().permute(*inv_order)
+                )
 
         if backend_name == AttentionBackendEnum.FLASHINFER:
-            # For FlashInfer default to HND layout and
-            kv_cache_for_backend = (
-                kv_cache_for_backend.transpose(2, 3).contiguous().transpose(2, 3)
-            )
             set_kv_cache_layout("HND")
             reset_kv_cache_layout = True
-        elif backend_name == AttentionBackendEnum.TRITON_ATTN:
-            kv_cache_for_backend = kv_cache_for_backend.contiguous()
 
         try:
             backend_output = run_attention_backend(
