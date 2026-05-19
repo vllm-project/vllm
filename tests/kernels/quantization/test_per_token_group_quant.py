@@ -10,7 +10,17 @@ from vllm.platforms import current_platform
 
 
 @pytest.mark.parametrize(
-    "shape", [(31, 128), (32, 128), (63, 256), (64, 256), (16, 512)]
+    "shape",
+    [
+        (31, 128),
+        (32, 128),
+        (63, 256),
+        (64, 256),
+        (16, 512),
+        (31, 384),
+        (33, 640),
+        (65, 768),
+    ],
 )
 @pytest.mark.parametrize("column_major", [False, True])
 @pytest.mark.parametrize("tma_aligned", [False, True])
@@ -338,7 +348,10 @@ def test_per_token_group_quant_fp8_packed_zero_fills_padded_output_q(
         )
 
 
-@pytest.mark.parametrize("shape", [(32, 128), (64, 256), (16, 512)])
+@pytest.mark.parametrize(
+    "shape",
+    [(32, 128), (64, 256), (16, 512), (31, 384), (33, 640), (65, 768)],
+)
 @pytest.mark.parametrize("group_size", [64, 128])
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_per_token_group_quant_int8(shape, group_size: int):
