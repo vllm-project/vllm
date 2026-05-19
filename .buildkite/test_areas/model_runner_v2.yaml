@@ -100,7 +100,7 @@ steps:
     - export VLLM_USE_V2_MODEL_RUNNER=1
     - pytest -v -s distributed/test_pipeline_parallel.py -k "not ray and not Jamba"
     - pytest -v -s distributed/test_pp_cudagraph.py -k "not ray"
-    - pytest -v -s v1/distributed/test_pp_dp_v2.py"
+    - pytest -v -s v1/distributed/test_pp_dp_v2.py
 
 - label: Model Runner V2 Spec Decode
   device: h200_35gb
