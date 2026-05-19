@@ -181,9 +181,13 @@ class FixFunctionalizationPass(VllmInductorPass):
                     2: "key",
                 }
                 self.defunctionalize(graph, node, mutated_args=mutated_args)
-            elif at_target == torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert.default:  # noqa: E501
+            elif (
+                hasattr(torch.ops._C, "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert")
+                and at_target
+                == torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert.default
+            ):
                 # DeepSeek-V4 MLA specific op: mutates q and k_cache in-place.
-                mutated_args = {1: "q", 3: "k_cache"}
+                mutated_args = {1: "q", 2: "k_cache"}
                 self.defunctionalize(graph, node, mutated_args)
             elif (
                 hasattr(torch.ops.vllm, "fused_rope_unified_mla_kv_cache_update")
