@@ -939,7 +939,7 @@ class AiterAllreduceFusedRMSNormPattern(BasePattern, VllmPatternReplacement):
         def _replacement(
             input: torch.Tensor, weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
-            residual = torch.empty_like(input)
+            residual = torch.zeros_like(input)
             allreduce = self.FUSED_AR_RMSNORM_OP(
                 input_=input,
                 residual=residual,

@@ -171,7 +171,7 @@ def _silu_mul_quant_fp8_packed_kernel(
 
     pid_pack = tl.program_id(0)
     pid_m = tl.program_id(1)
-    m_offset = pid_m * BLOCK_M
+    m_offset = pid_m.to(tl.int64) * BLOCK_M
 
     if m_offset >= M:
         return
@@ -302,9 +302,11 @@ def _silu_mul_per_token_group_quant_fp8_colmajor(
     y_s_col_stride: tl.int64,
     # Information for float8
     eps,
+    clamp_limit,
     fp8_min: tl.constexpr,
     fp8_max: tl.constexpr,
     use_ue8m0: tl.constexpr,
+    HAS_CLAMP: tl.constexpr,
     # Meta-parameters
     GROUP_SIZE: tl.constexpr,
     BLOCK_M: tl.constexpr,
@@ -321,8 +323,8 @@ def _silu_mul_per_token_group_quant_fp8_colmajor(
     pid_n = tl.program_id(1)
     N_2 = N // 2
 
-    m_offset = pid_m * BLOCK_M
-    n_offset = pid_n * BLOCK_N
+    m_offset = pid_m.to(tl.int64) * BLOCK_M
+    n_offset = pid_n.to(tl.int64) * BLOCK_N
     if m_offset >= M:
         return
 
@@ -336,7 +338,16 @@ def _silu_mul_per_token_group_quant_fp8_colmajor(
     act_in = tl.load(act_in_ptrs)
     mul_in = tl.load(act_in_ptrs + N_2)
 
-    # silu & mul
+    # silu & mul — match C++ silu_and_mul: clamp in fp32 then store back to the
+    # input dtype, run silu in fp32 then narrow, and do the mul at input
+    # precision so HAS_CLAMP True/False share the same multiplication path.
+    if HAS_CLAMP:
+        act_in = tl.minimum(act_in.to(tl.float32), clamp_limit).to(
+            y_ptr.dtype.element_ty
+        )
+        mul_in = tl.clamp(mul_in.to(tl.float32), -clamp_limit, clamp_limit).to(
+            y_ptr.dtype.element_ty
+        )
     act_in = act_in.to(tl.float32)
     one_f32 = tl.cast(1, tl.float32)
     silu_out = (act_in / (one_f32 + tl.exp(-act_in))).to(y_ptr.dtype.element_ty)
@@ -367,6 +378,7 @@ def silu_mul_per_token_group_quant_fp8_colmajor(
     output: torch.Tensor | None = None,  # [M, N // 2]
     use_ue8m0: bool | None = None,
     eps: float = 1e-10,
+    clamp_limit: float | None = None,
 ):
     """
     silu+mul + block-fp8 quant with group size 128.
@@ -409,6 +421,7 @@ def silu_mul_per_token_group_quant_fp8_colmajor(
     assert N_2 % BLOCK_N == 0
     grid = (M // BLOCK_M, N_2 // BLOCK_N)
 
+    has_clamp = clamp_limit is not None
     _silu_mul_per_token_group_quant_fp8_colmajor[grid](
         input,
         output,
@@ -417,9 +430,11 @@ def silu_mul_per_token_group_quant_fp8_colmajor(
         N,
         output_scales.stride(-1),
         eps,
+        clamp_limit if has_clamp else 0.0,
         fp8_min,
         fp8_max,
         use_ue8m0,
+        has_clamp,
         GROUP_SIZE,
         BLOCK_M,
         BLOCK_N,
@@ -1245,7 +1260,7 @@ def process_fp8_weight_tensor_strategy(
         requantize_with_max_scale,
     )
 
-    if current_platform.is_fp8_fnuz():
+    if current_platform.is_fp8_fnuz() and weight.dtype == torch.float8_e4m3fn:
         weight, weight_scale, input_scale = normalize_e4m3fn_to_e4m3fnuz(
             weight=weight, weight_scale=weight_scale, input_scale=input_scale
         )
@@ -1271,7 +1286,7 @@ def process_fp8_weight_channel_strategy(
         normalize_e4m3fn_to_e4m3fnuz,
     )
 
-    if current_platform.is_fp8_fnuz():
+    if current_platform.is_fp8_fnuz() and weight.dtype == torch.float8_e4m3fn:
         weight, weight_scale, input_scale = normalize_e4m3fn_to_e4m3fnuz(
             weight=weight, weight_scale=weight_scale, input_scale=input_scale
         )
@@ -1288,7 +1303,7 @@ def process_fp8_weight_block_strategy(
         normalize_e4m3fn_to_e4m3fnuz,
     )
 
-    if current_platform.is_fp8_fnuz():
+    if current_platform.is_fp8_fnuz() and weight.dtype == torch.float8_e4m3fn:
         weight, weight_scale, _ = normalize_e4m3fn_to_e4m3fnuz(
             weight=weight, weight_scale=weight_scale
         )

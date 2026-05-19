@@ -504,6 +504,7 @@ class InputBatch:
         start_index = self.num_tokens_no_spec[req_index]
         end_token_index = start_index + num_spec_tokens
         self.token_ids_cpu[req_index, start_index:end_token_index] = spec_token_ids
+        self.is_token_ids[req_index, start_index:end_token_index] = True
         cur_spec_token_ids.extend(spec_token_ids)
 
     def remove_request(self, req_id: str) -> int | None:
@@ -883,7 +884,7 @@ class InputBatch:
             not self.no_penalties
             or bool(self.bad_words_token_ids)
             or self.logitsprocs_need_output_token_ids
-            or not thinking_budget_tracks_reqs
+            or thinking_budget_tracks_reqs
         )
         output_token_ids = (
             cast(list[list[int]], self.req_output_token_ids)

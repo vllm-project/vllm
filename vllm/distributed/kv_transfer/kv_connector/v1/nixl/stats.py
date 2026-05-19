@@ -4,7 +4,7 @@
 
 import copy
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -15,8 +15,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetric,
     PromMetricT,
 )
-from vllm.distributed.nixl_utils import nixlXferTelemetry
 from vllm.v1.metrics.utils import create_metric_per_engine
+
+if TYPE_CHECKING:
+    from vllm.distributed.nixl_utils import nixlXferTelemetry
 
 
 @dataclass
@@ -40,7 +42,7 @@ class NixlKVConnectorStats(KVConnectorStats):
             "num_kv_expired_reqs": [],
         }
 
-    def record_transfer(self, res: nixlXferTelemetry):
+    def record_transfer(self, res: "nixlXferTelemetry"):
         # Keep metrics units consistent with rest of the code: time us->s
         self.data["transfer_duration"].append(res.xferDuration / 1e6)
         self.data["post_duration"].append(res.postDuration / 1e6)

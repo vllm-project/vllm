@@ -43,7 +43,7 @@ steps:
   key: asynctp-correctness-tests-b200
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/"
-  device: b200
+  device: b200-k8s
   optional: true
   num_devices: 2
   commands:
@@ -68,7 +68,7 @@ steps:
   key: fusion-and-compile-unit-tests-2xb200
   timeout_in_minutes: 20
   working_dir: "/vllm-workspace/"
-  device: b200
+  device: b200-k8s
   source_file_dependencies:
   - csrc/quantization/fp4/
   - vllm/model_executor/layers/quantization/
@@ -137,7 +137,7 @@ steps:
   key: fusion-e2e-config-sweep-b200
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"
-  device: b200
+  device: b200-k8s
   num_devices: 1
   optional: true
   commands:
@@ -209,7 +209,7 @@ steps:
   key: fusion-e2e-tp2-b200
   timeout_in_minutes: 20
   working_dir: "/vllm-workspace/"
-  device: b200
+  device: b200-k8s
   num_devices: 2
   source_file_dependencies:
     - csrc/quantization/
