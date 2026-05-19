@@ -7,9 +7,11 @@ from openai_harmony import Message, Role
 from tests.entrypoints.openai.utils import verify_harmony_messages
 from vllm.entrypoints.openai.parser.harmony_utils import (
     auto_drop_analysis_messages,
+    extract_function_from_recipient,
     get_encoding,
     get_system_message,
     has_custom_tools,
+    is_function_recipient,
     parse_chat_input_to_harmony_message,
     parse_chat_output,
 )
@@ -17,6 +19,182 @@ from vllm.entrypoints.openai.responses.harmony import (
     response_input_to_harmony,
     response_previous_input_to_harmony,
 )
+
+
+class TestIsFunctionRecipient:
+    @pytest.mark.parametrize(
+        "recipient",
+        [
+            "functions.get_weather",
+            "functions.search_web",
+            "functions.math.sum",
+        ],
+    )
+    def test_functions_prefix_accepted(self, recipient):
+        assert is_function_recipient(recipient) is True
+
+    @pytest.mark.parametrize(
+        "recipient",
+        [
+            "get_weather",
+            "search_web",
+            "calculator",
+            "my-tool",
+        ],
+    )
+    def test_bare_function_name_accepted(self, recipient):
+        assert is_function_recipient(recipient) is True
+
+    @pytest.mark.parametrize(
+        "recipient",
+        [
+            "assistant",
+        ],
+    )
+    def test_assistant_rejected(self, recipient):
+        assert is_function_recipient(recipient) is False
+
+    @pytest.mark.parametrize(
+        "recipient",
+        [
+            "math.sum",
+            "code.run",
+            "namespace.tool_name",
+            "my.deeply.nested.tool",
+        ],
+    )
+    def test_dotted_function_names_accepted(self, recipient):
+        assert is_function_recipient(recipient) is True
+
+    @pytest.mark.parametrize(
+        "recipient",
+        [
+            "python",
+            "browser",
+            "container",
+        ],
+    )
+    def test_builtin_tool_names_rejected(self, recipient):
+        assert is_function_recipient(recipient) is False
+
+    @pytest.mark.parametrize(
+        "recipient",
+        [
+            "python.run",
+            "python.execute",
+            "browser.search",
+            "browser.open",
+            "container.exec",
+        ],
+    )
+    def test_builtin_dotted_variants_rejected(self, recipient):
+        assert is_function_recipient(recipient) is False
+
+    @pytest.mark.parametrize(
+        "recipient",
+        [
+            "",
+            "functions.",
+        ],
+    )
+    def test_empty_recipients_rejected(self, recipient):
+        assert is_function_recipient(recipient) is False
+
+    @pytest.mark.parametrize(
+        "recipient",
+        [
+            "<|start|>",
+            "<|end|>",
+            "<|channel|>",
+        ],
+    )
+    def test_harmony_tokens_rejected(self, recipient):
+        assert is_function_recipient(recipient) is False
+
+
+class TestIsFunctionRecipientWithAllowedNames:
+    """Tests for is_function_recipient with allowed_function_tool_names."""
+
+    def test_prefixed_always_accepted(self):
+        """functions. prefix is always accepted regardless of allowed names."""
+        fn_names = frozenset({"other_tool"})
+        assert is_function_recipient("functions.get_weather", fn_names) is True
+
+    def test_bare_name_accepted_when_in_allowed_names(self):
+        fn_names = frozenset({"get_weather", "search_web"})
+        assert is_function_recipient("get_weather", fn_names) is True
+        assert is_function_recipient("search_web", fn_names) is True
+
+    def test_bare_name_rejected_when_not_in_allowed_names(self):
+        fn_names = frozenset({"get_weather"})
+        assert is_function_recipient("unknown_tool", fn_names) is False
+
+    def test_dotted_name_accepted_when_in_allowed_names(self):
+        fn_names = frozenset({"math.sum", "namespace.tool_name"})
+        assert is_function_recipient("math.sum", fn_names) is True
+        assert is_function_recipient("namespace.tool_name", fn_names) is True
+
+    def test_dotted_name_rejected_when_not_in_allowed_names(self):
+        fn_names = frozenset({"get_weather"})
+        assert is_function_recipient("custom_server.search", fn_names) is False
+
+    def test_empty_allowed_names_rejects_bare_names(self):
+        """Empty frozenset means no function tools — bare names are not functions."""
+        fn_names: frozenset[str] = frozenset()
+        assert is_function_recipient("get_weather", fn_names) is False
+        assert is_function_recipient("math.sum", fn_names) is False
+
+    def test_builtin_tools_always_rejected(self):
+        fn_names = frozenset({"python", "browser", "container"})
+        assert is_function_recipient("python", fn_names) is False
+        assert is_function_recipient("browser", fn_names) is False
+        assert is_function_recipient("container", fn_names) is False
+
+    def test_builtin_dotted_always_rejected(self):
+        fn_names = frozenset({"python.run", "browser.search"})
+        assert is_function_recipient("python.run", fn_names) is False
+        assert is_function_recipient("browser.search", fn_names) is False
+
+    def test_none_allowed_names_uses_heuristic(self):
+        """When allowed names is None (Chat Completions), use heuristic."""
+        assert is_function_recipient("get_weather", None) is True
+        assert is_function_recipient("math.sum", None) is True
+        assert is_function_recipient("python", None) is False
+
+
+class TestExtractFunctionFromRecipient:
+    @pytest.mark.parametrize(
+        "recipient,expected",
+        [
+            ("functions.get_weather", "get_weather"),
+            ("functions.search_web", "search_web"),
+            ("functions.", ""),
+        ],
+    )
+    def test_strips_functions_prefix(self, recipient, expected):
+        assert extract_function_from_recipient(recipient) == expected
+
+    @pytest.mark.parametrize(
+        "recipient",
+        [
+            "get_weather",
+            "calculator",
+            "my-tool",
+        ],
+    )
+    def test_bare_name_returned_as_is(self, recipient):
+        assert extract_function_from_recipient(recipient) == recipient
+
+    @pytest.mark.parametrize(
+        "recipient,expected",
+        [
+            ("functions.math.sum", "math.sum"),
+            ("math.sum", "math.sum"),
+            ("namespace.tool_name", "namespace.tool_name"),
+        ],
+    )
+    def test_dotted_function_name_extraction(self, recipient, expected):
+        assert extract_function_from_recipient(recipient) == expected
 
 
 class TestCommonParseInputToHarmonyMessage:

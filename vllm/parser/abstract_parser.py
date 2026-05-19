@@ -459,7 +459,8 @@ class DelegatingParser(Parser):
             (ToolChoiceFunction, ChatCompletionNamedToolChoiceParam),
         ):
             # Forced Function Call
-            assert content is not None
+            if content is None:
+                return [], None
             function_calls.append(
                 FunctionCall(name=self._get_function_name(request), arguments=content)
             )
@@ -586,9 +587,15 @@ class DelegatingParser(Parser):
         tool_call_id_type: str = "random",
         function_name_returned: bool = False,
     ) -> tuple[DeltaMessage | None, bool]:
-        if request.tool_choice and isinstance(
-            request.tool_choice,
-            (ToolChoiceFunction, ChatCompletionNamedToolChoiceParam),
+        assert self._tool_parser is not None
+        supports_required_and_named = self._tool_parser.supports_required_and_named
+        if (
+            supports_required_and_named
+            and request.tool_choice
+            and isinstance(
+                request.tool_choice,
+                (ToolChoiceFunction, ChatCompletionNamedToolChoiceParam),
+            )
         ):
             delta_message, function_name_returned = extract_named_tool_call_streaming(
                 delta_text=delta_text,
@@ -600,7 +607,7 @@ class DelegatingParser(Parser):
             )
             return delta_message, function_name_returned
 
-        if request.tool_choice == "required":
+        if supports_required_and_named and request.tool_choice == "required":
             delta_message, function_name_returned = (
                 extract_required_tool_call_streaming(
                     previous_text=previous_text,
@@ -635,15 +642,11 @@ class DelegatingParser(Parser):
     def _in_reasoning_phase(self, state: StreamState) -> bool:
         if self._reasoning_parser is None:
             return False
-        if self._tool_parser is None:
-            return True
         return not state.reasoning_ended
 
     def _in_tool_call_phase(self, state: StreamState) -> bool:
         if self._tool_parser is None:
             return False
-        if self._reasoning_parser is None:
-            return True
         return state.reasoning_ended
 
     def parse_delta(
@@ -657,7 +660,9 @@ class DelegatingParser(Parser):
 
         if not state.prompt_reasoning_checked and prompt_token_ids is not None:
             state.prompt_reasoning_checked = True
-            if self.is_reasoning_end(prompt_token_ids):
+            if self._reasoning_parser is None or self.is_reasoning_end(
+                prompt_token_ids
+            ):
                 state.reasoning_ended = True
 
         current_text = state.previous_text + delta_text
@@ -707,9 +712,19 @@ class DelegatingParser(Parser):
                     function_name_returned=state.function_name_returned,
                 )
             )
+            if (
+                delta_message
+                and delta_message.tool_calls
+                and delta_message.tool_calls[0].id is not None
+            ):
+                state.history_tool_call_cnt += 1
 
-        # No parsers: pass through as content
-        if self._reasoning_parser is None and self._tool_parser is None:
+        # No phase active: pass through as content
+        if (
+            delta_message is None
+            and not self._in_reasoning_phase(state)
+            and not self._in_tool_call_phase(state)
+        ):
             delta_message = DeltaMessage(content=delta_text)
 
         state.previous_text = current_text
