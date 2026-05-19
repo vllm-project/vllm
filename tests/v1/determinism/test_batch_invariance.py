@@ -11,14 +11,11 @@ from utils import (
     TEST_MODEL,
     _extract_step_logprobs,
     _random_prompt,
-    is_device_capability_below_90,
     skip_unsupported,
 )
 
 import vllm.envs as envs
 from vllm import LLM, SamplingParams
-
-IS_DEVICE_CAPABILITY_BELOW_90 = is_device_capability_below_90()
 
 
 @skip_unsupported
@@ -65,7 +62,7 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
     assert max_batch_size >= 2, "Batch size should be >= 2 to mix needle."
 
     # Keep GPU memory usage low to avoid startup allocation failures.
-    gpu_mem_util = float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.4"))
+    gpu_mem_util = float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.5"))
     max_model_len = int(os.getenv("VLLM_MAX_MODEL_LEN", "5120"))
 
     # Sampling parameters: longer outputs with a more random-sounding
@@ -150,8 +147,14 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
     "backend",
     BACKENDS,
 )
+@pytest.mark.parametrize(
+    "block_m,block_n",
+    [(16, 16), (8, 16)],
+)
 def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
     backend,
+    block_m,
+    block_n,
 ):
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
@@ -175,8 +178,11 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
         max_model_len=8192,
         dtype="auto",  # not everything is supported
         gpu_memory_utilization=0.9,
-        enforce_eager=IS_DEVICE_CAPABILITY_BELOW_90,
-        attention_config={"backend": backend},
+        attention_config={
+            "backend": backend,
+            "flex_attn_block_m": block_m,
+            "flex_attn_block_n": block_n,
+        },
     )
 
     # Use more realistic prompts for better token generation
@@ -388,7 +394,6 @@ def test_simple_generation(backend):
         max_model_len=2048,
         dtype="auto",
         enable_prefix_caching=False,
-        enforce_eager=IS_DEVICE_CAPABILITY_BELOW_90,
         attention_config={"backend": backend},
     )
 
@@ -453,7 +458,6 @@ def test_logprobs_without_batch_invariance_should_fail(
         max_num_seqs=32,
         max_model_len=8192,
         dtype="auto",
-        enforce_eager=IS_DEVICE_CAPABILITY_BELOW_90,
         attention_config={"backend": backend},
     )
 
@@ -673,7 +677,6 @@ def test_decode_logprobs_match_prefill_logprobs(
         max_num_seqs=32,
         max_model_len=8192,
         dtype="auto",
-        enforce_eager=IS_DEVICE_CAPABILITY_BELOW_90,
         attention_config={"backend": backend},
     )
 
@@ -920,7 +923,6 @@ def LLM_with_max_seqs(
         dtype="auto",
         tensor_parallel_size=int(os.getenv("VLLM_TP_SIZE", "1")),
         enable_prefix_caching=False,
-        enforce_eager=IS_DEVICE_CAPABILITY_BELOW_90,
         attention_config=attention_config,
         # Enable for MOE models
         # enable_expert_parallel=True,

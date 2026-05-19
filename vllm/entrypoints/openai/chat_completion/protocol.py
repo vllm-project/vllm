@@ -11,7 +11,7 @@ from openai.types.chat.chat_completion_audio import (
     ChatCompletionAudio as OpenAIChatCompletionAudio,
 )
 from openai.types.chat.chat_completion_message import Annotation as OpenAIAnnotation
-from pydantic import Field, PrivateAttr, model_validator
+from pydantic import Field, PrivateAttr, model_serializer, model_validator
 
 from vllm.config import ModelConfig
 from vllm.config.utils import replace
@@ -107,6 +107,9 @@ class ChatCompletionResponse(OpenAIBaseModel):
     # vLLM-specific fields that are not in OpenAI spec
     prompt_logprobs: list[dict[int, Logprob] | None] | None = None
     prompt_token_ids: list[int] | None = None
+    # Rendered prompt text from chat templating (only set when
+    # ``return_prompt_text=True`` on the request).
+    prompt_text: str | None = None
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None, description="KVTransfer parameters."
     )
@@ -129,13 +132,33 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
     model: str
     choices: list[ChatCompletionResponseStreamChoice]
     usage: UsageInfo | None = Field(default=None)
+    # Set only on the final chunk of a stream to mirror non-streaming responses
+    # without the per-chunk serialization overhead.
+    system_fingerprint: str | None = None
     # not part of the OpenAI spec but for tracing the tokens
     prompt_token_ids: list[int] | None = None
+    # Rendered prompt text from chat templating (only set when
+    # ``return_prompt_text=True`` on the request); only sent on the first chunk.
+    prompt_text: str | None = None
 
 
 class ChatCompletionToolsParam(OpenAIBaseModel):
     type: Literal["function"] = "function"
     function: FunctionDefinition
+    defer_loading: bool | None = None
+
+    @model_validator(mode="after")
+    def _propagate_defer_loading(self) -> "ChatCompletionToolsParam":
+        if self.defer_loading is not None and self.function.defer_loading is None:
+            self.function.defer_loading = self.defer_loading
+        return self
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        data = handler(self)
+        if self.defer_loading is None:
+            data.pop("defer_loading", None)
+        return data
 
 
 class ChatCompletionNamedFunction(OpenAIBaseModel):
@@ -179,7 +202,19 @@ class ChatCompletionRequest(OpenAIBaseModel):
         | ChatCompletionNamedToolChoiceParam
         | None
     ) = "none"
-    reasoning_effort: Literal["none", "low", "medium", "high"] | None = None
+    reasoning_effort: (
+        Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"] | None
+    ) = Field(
+        default=None,
+        description=(
+            "Constrains effort on reasoning for reasoning models. "
+            "Currently supported values are none, minimal, low, medium, "
+            "high, xhigh, and max. Reducing reasoning effort can result in "
+            "faster responses and fewer tokens used on reasoning in a response. "
+            "Note that 'max' is specific to the DeepSeek V4 series and is not "
+            "part of the standard OpenAI API specification."
+        ),
+    )
     thinking_token_budget: int | None = None
     include_reasoning: bool = True
     parallel_tool_calls: bool | None = True
@@ -317,6 +352,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "only in the first chunk, and token_ids contains the delta tokens "
             "for each chunk. This is useful for debugging or when you "
             "need to map generated text back to input tokens."
+        ),
+    )
+    return_prompt_text: bool | None = Field(
+        default=None,
+        description=(
+            "If true, the response will include ``prompt_text`` containing the "
+            "prompt string produced by chat templating. In streaming mode it "
+            "is sent only on the first chunk. This is useful for inspecting "
+            "exactly what was fed into the model."
         ),
     )
 

@@ -21,7 +21,7 @@ from vllm.config.multimodal import (
     MultiModalConfig,
 )
 from vllm.config.pooler import PoolerConfig
-from vllm.config.quantization import OnlineQuantizationConfigArgs
+from vllm.config.quantization import QuantizationConfigArgs
 from vllm.config.scheduler import RunnerType
 from vllm.config.utils import config, getattr_iter
 from vllm.logger import init_logger
@@ -83,7 +83,9 @@ logger = init_logger(__name__)
 RunnerOption = Literal["auto", RunnerType]
 ConvertType = Literal["none", "embed", "classify"]
 ConvertOption = Literal["auto", ConvertType]
-TokenizerMode = Literal["auto", "hf", "slow", "mistral", "deepseek_v32"]
+TokenizerMode = Literal[
+    "auto", "hf", "slow", "mistral", "deepseek_v32", "deepseek_v4", "fastokens"
+]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 LogprobsMode = Literal[
     "raw_logits", "raw_logprobs", "processed_logits", "processed_logprobs"
@@ -134,7 +136,11 @@ class ModelConfig:
     - "slow" will always use the slow tokenizer.
     - "mistral" will always use the tokenizer from `mistral_common`.
     - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.
+    - "deepseek_v4" will always use the tokenizer from `deepseek_v4`.
     - "qwen_vl" will always use the tokenizer from `qwen_vl`.
+    - "fastokens" loads a Hugging Face fast tokenizer powered by the
+      [fastokens](https://github.com/crusoecloud/fastokens) Rust BPE backend
+      (requires the `fastokens` package to be installed).
     - Other custom values can be supported via plugins."""
     trust_remote_code: bool = False
     """Trust remote code (e.g., from HuggingFace) when downloading the model
@@ -200,10 +206,11 @@ class ModelConfig:
     `quantization_config` attribute in the model config file. If that is
     `None`, we assume the model weights are not quantized and use `dtype` to
     determine the data type of the weights."""
-    quantization_config: dict[str, Any] | OnlineQuantizationConfigArgs | None = None
-    """Arguments for online quantization.
-    Auto-created when `quantization` equals to one of the string values of
-    the `OnlineQuantScheme` enum."""
+    quantization_config: dict[str, Any] | QuantizationConfigArgs | None = None
+    """User-facing quantization configuration. Carries per-layer-kind specs
+    (linear, moe) and ignore patterns; see :class:`QuantizationConfigArgs`.
+    Auto-populated from the matching online shorthand when `quantization` is
+    one of the values in `ONLINE_QUANT_SHORTHAND_NAMES`."""
     allow_deprecated_quantization: bool = False
     """Whether to allow deprecated quantization methods."""
     enforce_eager: bool = False
@@ -226,6 +233,10 @@ class ModelConfig:
     Processed means the values after applying all processors, including
     temperature and top_k/top_p.
     """
+    use_fp64_gumbel: bool = False
+    """Whether to use FP64 (instead of FP32) for the Gumbel noise used by the
+    sampler. FP64 reduces the chance of ties in Gumbel-max sampling at the cost
+    of significantly lower kernel throughput on most GPUs."""
     disable_sliding_window: bool = False
     """Whether to disable sliding window. If True, we will disable the sliding
     window functionality of the model, capping to sliding window size. If the
@@ -325,6 +336,10 @@ class ModelConfig:
     mm_encoder_only: InitVar[bool | None] = None
     mm_encoder_tp_mode: InitVar[MMEncoderTPMode | None] = None
     mm_encoder_attn_backend: InitVar[AttentionBackendEnum | str | None] = None
+    mm_encoder_attn_dtype: InitVar[str | None] = None
+    mm_encoder_fp8_scale_path: InitVar[str | None] = None
+    mm_encoder_fp8_scale_save_path: InitVar[str | None] = None
+    mm_encoder_fp8_scale_save_margin: InitVar[float | None] = None
     interleave_mm_strings: InitVar[bool | None] = None
     skip_mm_profiling: InitVar[bool | None] = None
     video_pruning_rate: InitVar[float | None] = None
@@ -354,6 +369,7 @@ class ModelConfig:
             "spec_target_max_model_len",
             "enforce_eager",
             "logprobs_mode",
+            "use_fp64_gumbel",
             "disable_cascade_attn",
             "skip_tokenizer_init",
             "served_model_name",
@@ -446,6 +462,10 @@ class ModelConfig:
         mm_encoder_only: bool | None,
         mm_encoder_tp_mode: MMEncoderTPMode | None,
         mm_encoder_attn_backend: AttentionBackendEnum | str | None,
+        mm_encoder_attn_dtype: str | None,
+        mm_encoder_fp8_scale_path: str | None,
+        mm_encoder_fp8_scale_save_path: str | None,
+        mm_encoder_fp8_scale_save_margin: float | None,
         interleave_mm_strings: bool | None,
         skip_mm_profiling: bool | None,
         video_pruning_rate: float | None,
@@ -512,6 +532,7 @@ class ModelConfig:
         if dict_overrides:
             self._apply_dict_overrides(hf_config, dict_overrides)
         self.hf_text_config = get_hf_text_config(self.hf_config)
+        self.model_arch_config = self.get_model_arch_config()
         self.attention_chunk_size = getattr(
             self.hf_text_config, "attention_chunk_size", None
         )
@@ -519,14 +540,15 @@ class ModelConfig:
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, hf_token=self.hf_token, revision=self.revision
         )
-        self.model_arch_config = self.get_model_arch_config()
 
         architectures = self.architectures
         registry = self.registry
         is_generative_model = registry.is_text_generation_model(architectures, self)
         is_pooling_model = registry.is_pooling_model(architectures, self)
 
-        self.runner_type = self._get_runner_type(architectures, self.runner)
+        self.runner_type = self._get_runner_type(
+            architectures, self.runner, self.convert
+        )
         self.convert_type = self._get_convert_type(
             architectures, self.runner_type, self.convert
         )
@@ -565,6 +587,8 @@ class ModelConfig:
                 self.tokenizer_mode = "qwen_vl"
             elif arch == "DeepseekV32ForCausalLM":
                 self.tokenizer_mode = "deepseek_v32"
+            elif arch == "DeepseekV4ForCausalLM":
+                self.tokenizer_mode = "deepseek_v4"
 
             if self.tokenizer_mode != "auto":
                 logger.info(
@@ -640,6 +664,10 @@ class ModelConfig:
                 mm_encoder_only=mm_encoder_only,
                 mm_encoder_tp_mode=mm_encoder_tp_mode,
                 mm_encoder_attn_backend=mm_encoder_attn_backend,
+                mm_encoder_attn_dtype=mm_encoder_attn_dtype,
+                mm_encoder_fp8_scale_path=mm_encoder_fp8_scale_path,
+                mm_encoder_fp8_scale_save_path=mm_encoder_fp8_scale_save_path,
+                mm_encoder_fp8_scale_save_margin=mm_encoder_fp8_scale_save_margin,
                 interleave_mm_strings=interleave_mm_strings,
                 skip_mm_profiling=skip_mm_profiling,
                 video_pruning_rate=video_pruning_rate,
@@ -858,11 +886,15 @@ class ModelConfig:
         self,
         architectures: list[str],
         runner: RunnerOption,
+        convert: ConvertOption,
     ) -> RunnerType:
         if runner != "auto":
             return runner
 
-        runner_type = self._get_default_runner_type(architectures)
+        if convert in {"auto", "none"}:
+            runner_type = self._get_default_runner_type(architectures)
+        else:
+            runner_type = "pooling"
 
         # Don't log the most common case
         if runner_type != "generate":
@@ -940,6 +972,8 @@ class ModelConfig:
             # `override_quantization_method` method) must be checked in order
             # of preference (this is particularly important for GPTQ).
             overrides = [
+                "auto_gptq",
+                "gptq",
                 "gptq_marlin",
                 "awq_marlin",
                 "inc",
@@ -952,9 +986,14 @@ class ModelConfig:
                 # imports during override detection (e.g., MXFP4 imports Triton)
                 "mxfp4",
                 "gpt_oss_mxfp4",
+                "deepseek_v4_fp8",
                 "cpu_awq",
+                "humming",
                 "gguf",
             ]
+            # if the user specifies humming, we should always use humming
+            if self.quantization == "humming":
+                overrides = ["humming"] + overrides
             quantization_methods = [
                 q for q in supported_quantization if q not in overrides
             ]
@@ -1197,22 +1236,9 @@ class ModelConfig:
     def is_deepseek_mla(self) -> bool:
         return self.model_arch_config.is_deepseek_mla
 
-    @cached_property
+    @property
     def is_mm_prefix_lm(self) -> bool:
-        """Whether to use bidirectional attention for mm positions."""
-        if hasattr(self.hf_config, "is_mm_prefix_lm"):
-            return bool(self.hf_config.is_mm_prefix_lm)
-        # fallback to list of known models
-        MM_PREFIX_LM_MODELS = (
-            "bagel",
-            "gemma3",
-            "molmo2",
-            "paligemma",
-            "umm",
-        )
-        if not hasattr(self.hf_config, "model_type"):
-            return False
-        return self.hf_config.model_type in MM_PREFIX_LM_MODELS
+        return self.model_arch_config.is_mm_prefix_lm
 
     def get_head_size(self) -> int:
         return self.model_arch_config.head_size
@@ -1333,7 +1359,7 @@ class ModelConfig:
                 )
             raise AssertionError(f"Unsupported block type: {block_type}")
 
-    def get_mamba_chunk_size(self) -> int | None:
+    def get_mamba_chunk_size(self) -> int:
         """
         Returns the mamba chunk size if it exists
         """
@@ -1344,7 +1370,7 @@ class ModelConfig:
             chunk_size = getattr(self.hf_text_config, "chunk_size", None)
 
         # Since Mamba1 does not have a chunk notion
-        # we use a default chunk size of 1024.
+        # we use a default chunk size of 2048.
         if chunk_size is None:
             chunk_size = 2048
 

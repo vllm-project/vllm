@@ -9,14 +9,14 @@
 - Online APIs:
     - Pooling API (`/pooling`)
 
-The difference between the (sequence) embedding task and the token embedding task is that (sequence) embedding outputs one embedding for each sequence, while token embedding outputs a embedding for each token.
+The difference between the (sequence) embedding task and the token embedding task is that (sequence) embedding outputs one embedding for each sequence, while token embedding outputs an embedding for each token.
 
 Many embedding models support both (sequence) embedding and token embedding. For further details on (sequence) embedding, please refer to [this page](embed.md).
 
 !!! note
 
     Pooling multitask support is deprecated and will be removed in v0.20. When the default pooling task (embed) is not 
-    what you want, you need to manually specify it via via `PoolerConfig(task="token_embed")` offline or
+    what you want, you need to manually specify it via `PoolerConfig(task="token_embed")` offline or
     `--pooler-config.task token_embed` online.
 
 ## Typical Use Cases
@@ -94,7 +94,7 @@ The following [pooling parameters][vllm.PoolingParams] are supported.
 
 ### `LLM.encode`
 
-The [encode][vllm.LLM.encode] method is available to all pooling models in vLLM.
+The [encode][vllm.entrypoints.pooling.offline.PoolingOfflineMixin.encode] method is available to all pooling models in vLLM.
 
 Set `pooling_task="token_embed"` when using `LLM.encode` for token embedding Models:
 
@@ -110,7 +110,7 @@ print(f"Data: {data!r}")
 
 ### `LLM.score`
 
-The [score][vllm.LLM.score] method outputs similarity scores between sentence pairs.
+The [score][vllm.entrypoints.pooling.offline.PoolingOfflineMixin.score] method outputs similarity scores between sentence pairs.
 
 All models that support token embedding task also support using the score API to compute similarity scores by calculating the late interaction of two input prompts.
 
@@ -129,7 +129,7 @@ print(f"Score: {score}")
 
 ## Online Serving
 
-Please refer to the [pooling API](README.md#pooling-api) and use `"task":"token_embed"`.
+Please refer to the [Pooling API](README.md#pooling-api) and use `"task":"token_embed"`.
 
 ## More examples
 

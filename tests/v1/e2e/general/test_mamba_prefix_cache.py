@@ -179,6 +179,7 @@ def get_fake_allocate_slots_fn(original_allocate_slots_fn: Callable):
         num_external_computed_tokens: int = 0,
         delay_cache_blocks: bool = False,
         num_encoder_tokens: int = 0,
+        full_sequence_must_fit: bool = False,
     ):
         ret = original_allocate_slots_fn(
             self,
@@ -190,6 +191,7 @@ def get_fake_allocate_slots_fn(original_allocate_slots_fn: Callable):
             num_external_computed_tokens,
             delay_cache_blocks,
             num_encoder_tokens,
+            full_sequence_must_fit,
         )
         if cur_step_action is not None:
             cur_block_ids = self.coordinator.single_type_managers[0].req_to_blocks[
@@ -362,26 +364,34 @@ def get_fake_process_mamba_fn(
     def fake_post_process_mamba_fn(
         scheduler_output: SchedulerOutput,
         kv_cache_config: KVCacheConfig,
+        cache_config: CacheConfig,
         input_batch: GPUInputBatch,
         requests: dict[str, CachedRequestState],
         mamba_state_idx: dict[str, int],
-        forward_context: dict[str, Any],
-        mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
-        copy_bufs: mamba_utils.MambaCopyBuffers,
+        num_spec_tokens: int,
+        num_reqs: int,
+        *,
+        forward_context: dict[str, Any] | None = None,
+        mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...] | None = None,
+        copy_bufs: mamba_utils.MambaCopyBuffers | None = None,
     ):
         nonlocal copy_info
         copy_info = None
         ret = original_post_process_mamba_fn(
             scheduler_output,
             kv_cache_config,
+            cache_config,
             input_batch,
             requests,
             mamba_state_idx,
-            forward_context,
-            mamba_state_copy_funcs,
-            copy_bufs,
+            num_spec_tokens,
+            num_reqs,
+            forward_context=forward_context,
+            mamba_state_copy_funcs=mamba_state_copy_funcs,
+            copy_bufs=copy_bufs,
         )
         if cur_step_action is not None:
+            assert forward_context is not None
             check_copy_info(
                 cur_step_action.postprocess_copy_idx,
                 kv_cache_config,

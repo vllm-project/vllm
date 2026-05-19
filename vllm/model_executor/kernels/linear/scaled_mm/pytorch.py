@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 
 import torch
 
@@ -11,6 +12,13 @@ from .ScaledMMLinearKernel import (
     FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
 )
+
+
+def _get_num_tokens(output_shape: list) -> int:
+    # torch._scaled_mm works with 2D tensors, so input tensors are
+    # flattened if they are 3D. If output_shape is 3D, num_tokens is
+    # the product of all dims except the last (hidden dim).
+    return math.prod(output_shape[:-1])
 
 
 class TorchFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
@@ -78,7 +86,8 @@ class PerTensorTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
         if type(output) is tuple and len(output) == 2:
             output = output[0]
 
-        return torch.narrow(output, 0, 0, output_shape[0]).view(*output_shape)
+        num_tokens = _get_num_tokens(output_shape)
+        return torch.narrow(output, 0, 0, num_tokens).view(*output_shape)
 
 
 class RowWiseTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
@@ -135,17 +144,26 @@ class RowWiseTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
         #  For CUDA platform please validate if the torch._scaled_mm supports
         #  rowwise scaled GEMM before using it
 
+        # torch._scaled_mm rowwise requires scale_a = (m, 1), scale_b = (1, n).
+        # CompressedTensors stores weight_scale as (n, 1), so `.t()` yields (1, n).
+        # ModelOpt FP8_PER_CHANNEL_PER_TOKEN stores it as 1-D (n,); reshape to
+        # (1, n) so both paths satisfy the rowwise contract.
+        scale_b = Bs.view(1, -1) if Bs.dim() == 1 else Bs.t()
+        if As.dim() == 1:
+            As = As.view(-1, 1)
+
         # Fused GEMM_DQ Rowwise GEMM
         output = torch._scaled_mm(
             A,
             B,
             out_dtype=out_dtype,
             scale_a=As,
-            scale_b=Bs.t(),
+            scale_b=scale_b,
             bias=bias,
         )
 
-        return torch.narrow(output, 0, 0, output_shape[0]).view(*output_shape)
+        num_tokens = _get_num_tokens(output_shape)
+        return torch.narrow(output, 0, 0, num_tokens).view(*output_shape)
 
 
 class ChannelWiseTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
@@ -206,8 +224,9 @@ class ChannelWiseTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
             output = output[0]
 
         # Unpad (undo num_token_padding)
-        output = torch.narrow(output, 0, 0, output_shape[0])
-        x_scale = torch.narrow(As, 0, 0, output_shape[0])
+        num_tokens = _get_num_tokens(output_shape)
+        output = torch.narrow(output, 0, 0, num_tokens)
+        x_scale = torch.narrow(As, 0, 0, num_tokens)
 
         # DQ
         # C = sw * sx * (X * W) + bias
