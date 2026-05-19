@@ -15,6 +15,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
+from vllm.platforms import current_platform
 from vllm.utils.hashing import safe_hash
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
@@ -100,6 +101,11 @@ class ExampleConnector(KVConnectorBase_V1):
             kv_cache_config=kv_cache_config,
         )
         self._block_size = vllm_config.cache_config.block_size
+        # CPU is the only backend whose KV cache lays heads before block_size
+        # (shape [2, num_blocks, num_kv_heads, block_size, head_size]). Other
+        # backends use [2, num_blocks, block_size, num_kv_heads, head_size]
+        # or 4D layouts and go through the standard reshape branch.
+        self._uses_cpu_kv_layout = current_platform.is_cpu()
         self._requests_need_load: dict[str, Request] = {}
         self._storage_path = self._kv_transfer_config.get_from_extra_config(
             "shared_storage_path", "/tmp"
@@ -124,19 +130,26 @@ class ExampleConnector(KVConnectorBase_V1):
             dst_kv_cache_layer: torch.Tensor,
             src_kv_cache: torch.Tensor,
             slot_mapping: torch.Tensor,
-            attn_metadata: AttentionMetadata,
+            attn_metadata: AttentionMetadata | None,
         ) -> None:
             """Inject the KV cache into the layer.
 
             Args:
                 dst_kv_cache_layer (torch.Tensor): the destination KV cache
-                    layer. In shape [2, num_pages, page_size, xxx] if not
-                    using MLA, [num_pages, page_size, xxx] otherwise.
+                    layer. Shape depends on the attention backend:
+                      - MLA:   [num_pages, page_size, xxx]
+                      - CPU:   [2, num_blocks, num_kv_heads, block_size,
+                               head_size]
+                      - other: [2, num_pages, page_size, xxx]
                 src_kv_cache (torch.Tensor): the source KV cache. In shape
                     [2, num_tokens, xxx] if not using MLA, [num_tokens, xxx]
                     otherwise.
                 slot_mapping (torch.Tensor): the slot mapping. In shape
                     [num_tokens].
+                attn_metadata: per-layer attention metadata, or None when
+                    invoked via kv_connector_no_forward (no local forward
+                    pass). Dispatch falls back to the platform-derived
+                    layout in that case.
             """
             dst_kv_cache_layer_shape = dst_kv_cache_layer.shape
             if isinstance(attn_metadata, MLACommonMetadata):
@@ -150,6 +163,16 @@ class ExampleConnector(KVConnectorBase_V1):
                 block_idxs = slot_mapping // self._block_size
                 offsets = slot_mapping % self._block_size
                 dst_kv_cache_layer[block_idxs, :, offsets] = src_kv_cache
+            elif self._uses_cpu_kv_layout:
+                # CPU backend: [2, num_blocks, num_kv_heads,
+                # block_size, head_size]. Non-adjacent advanced indexing
+                # places the advanced dim first in the result, so transpose
+                # src from [2, N, ...] to [N, 2, ...] before assigning.
+                block_idxs = slot_mapping // self._block_size
+                offsets = slot_mapping % self._block_size
+                dst_kv_cache_layer[:, block_idxs, :, offsets, :] = (
+                    src_kv_cache.transpose(0, 1)
+                )
             else:
                 num_pages = dst_kv_cache_layer_shape[1]
                 page_size = dst_kv_cache_layer_shape[2]
@@ -162,10 +185,17 @@ class ExampleConnector(KVConnectorBase_V1):
         metadata: KVConnectorMetadata = self._get_connector_metadata()
         assert isinstance(metadata, ExampleConnectorMetadata)
 
+        # NOTE: attn_metadata may be None when start_load_kv is invoked via
+        # kv_connector_no_forward (i.e. all tokens are externally available
+        # and there is no local forward pass). KV still needs to be injected
+        # into the paged buffer in that case.
         attn_metadata = forward_context.attn_metadata
         if attn_metadata is None:
-            logger.warning("In connector.start_load_kv, but the attn_metadata is None")
-            return
+            logger.debug(
+                "start_load_kv called with attn_metadata=None "
+                "(kv_connector_no_forward path); injecting KV using the "
+                "platform-derived layout."
+            )
 
         # Load the KV for each request each layer
         for request in metadata.requests:
@@ -191,13 +221,17 @@ class ExampleConnector(KVConnectorBase_V1):
                 kv_cache = safetensors.torch.load_file(
                     filename, device=str(kv_cache_layer.device)
                 )["kv_cache"]
-                if isinstance(attn_metadata, dict):
-                    inject_kv_into_layer(
-                        kv_cache_layer,
-                        kv_cache,
-                        request.slot_mapping,
-                        attn_metadata[layer_name],
-                    )
+                layer_attn_meta = (
+                    attn_metadata[layer_name]
+                    if isinstance(attn_metadata, dict)
+                    else None
+                )
+                inject_kv_into_layer(
+                    kv_cache_layer,
+                    kv_cache,
+                    request.slot_mapping,
+                    layer_attn_meta,
+                )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """Blocking until the KV for a specific layer is loaded into vLLM's
@@ -244,6 +278,18 @@ class ExampleConnector(KVConnectorBase_V1):
                 block_idxs = slot_mapping // self._block_size
                 offsets = slot_mapping % self._block_size
                 return layer[block_idxs, :, offsets]
+            elif self._uses_cpu_kv_layout:
+                # CPU backend: [2, num_blocks, num_kv_heads,
+                # block_size, head_size]. Non-adjacent advanced indexing
+                # returns advanced-dim first; transpose back to [2, N, ...]
+                # to match the convention of the 4D fallback branch below.
+                # The transposed view is non-contiguous, so call .contiguous()
+                # here (safetensors.save_file requires contiguous tensors).
+                block_idxs = slot_mapping // self._block_size
+                offsets = slot_mapping % self._block_size
+                return (
+                    layer[:, block_idxs, :, offsets, :].transpose(0, 1).contiguous()
+                )
             num_pages, page_size = layer.shape[1], layer.shape[2]
             return layer.reshape(2, num_pages * page_size, -1)[:, slot_mapping, ...]
 
