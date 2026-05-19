@@ -4,6 +4,7 @@
 
 #include "cuda_compat.h"
 #include "flashinfer_fp8_activation.cuh"
+#include "nvfp4_silu_mul_quant_launcher.h"
 #include "silu_mul_fp8_quant_launcher.h"
 
 void silu_mul_fp8_quant_baseline(const at::Tensor& input,
@@ -53,4 +54,45 @@ void silu_mul_fp8_quant_tma_ws_persistent(
       output_scales.data_ptr<float>(), n_tokens.item<int32_t>(), H,
       scale_stride, n_compute, batch_size, use_tanh_silu, input.size(0),
       stream);
+}
+
+void nvfp4_silu_mul_quant(at::Tensor& output, at::Tensor& output_scale,
+                          const at::Tensor& input,
+                          const at::Tensor& input_global_scale,
+                          const at::Tensor& mask, int64_t n_experts) {
+  TORCH_CHECK(input.dtype() == torch::kBFloat16);
+  TORCH_CHECK(input_global_scale.dtype() == torch::kFloat32);
+  TORCH_CHECK(mask.dtype() == torch::kInt32);
+
+  int32_t m_topk = static_cast<int32_t>(input.size(0));
+  int32_t k = static_cast<int32_t>(input.size(1) / 2);
+
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  nvfp4::launch_silu_mul_nvfp4_quant(
+      output.data_ptr(), output_scale.data_ptr(), input.data_ptr(),
+      input_global_scale.data_ptr<float>(), mask.data_ptr<int32_t>(), m_topk, k,
+      static_cast<int32_t>(n_experts), stream);
+}
+
+void silu_mul_nvfp4_quant_tma_ws_persistent_bf16(
+    const at::Tensor& input, at::Tensor& output, at::Tensor& output_sf,
+    const at::Tensor& global_scale, const at::Tensor& n_tokens,
+    int64_t n_compute, int64_t batch_size, bool use_tanh_silu) {
+  TORCH_CHECK(input.dtype() == torch::kBFloat16);
+  TORCH_CHECK(output.dtype() == torch::kUInt8);
+  TORCH_CHECK(output_sf.dtype() == torch::kUInt8);
+  TORCH_CHECK(global_scale.dtype() == torch::kFloat32);
+  TORCH_CHECK(n_tokens.dtype() == torch::kInt32);
+
+  int64_t H = input.size(1) / 2;
+
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  vllm::launch_silu_mul_nvfp4_quant_tma_ws_persistent_bf16(
+      input.data_ptr(), output.data_ptr(), output_sf.data_ptr(),
+      global_scale.data_ptr<float>(), n_tokens.item<int32_t>(), H,
+      input.size(0), n_compute, batch_size, use_tanh_silu, stream);
 }
