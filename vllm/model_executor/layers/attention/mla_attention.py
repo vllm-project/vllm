@@ -964,6 +964,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         return MLAAttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
+            total_num_kv_heads=vllm_config.model_config.get_total_num_kv_heads(),
             head_size=self.head_size,
             dtype=kv_cache_dtype,
             cache_dtype_str=vllm_config.cache_config.cache_dtype,

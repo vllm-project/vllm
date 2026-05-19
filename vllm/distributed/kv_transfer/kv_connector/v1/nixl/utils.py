@@ -55,3 +55,10 @@ def get_representative_spec_type(spec: KVCacheSpec) -> type[KVCacheSpec]:
         inner = next(iter(spec.kv_cache_specs.values()))
         return type(inner)
     return type(spec)
+
+
+def get_representative_spec(spec: KVCacheSpec) -> KVCacheSpec:
+    """Get a representative spec instance from a possibly-wrapped spec."""
+    if isinstance(spec, UniformTypeKVCacheSpecs):
+        return next(iter(spec.kv_cache_specs.values()))
+    return spec

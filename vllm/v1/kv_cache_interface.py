@@ -78,6 +78,33 @@ def kv_cache_uses_per_token_head_scales(kv_cache_dtype: str) -> bool:
     return get_kv_quant_mode(kv_cache_dtype).is_per_token_head
 
 
+# ---------------------------------------------------------------------------
+# TP transfer slice
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class TPTransferSlice:
+    """One read operation in a TP transfer along the sharding dimension.
+
+    Describes: 'read remote_rank's remote_range and place it in local_range'.
+    All ranges are along the KV-head (sharding) dimension.
+    """
+
+    remote_rank: int
+    global_range: range  # position in the model's full head space
+    local_range: range  # position in the local worker's tensor
+    remote_range: range  # position in the remote worker's tensor
+
+    def __repr__(self) -> str:
+        return (
+            f"global[{self.global_range.start}:{self.global_range.stop}] "
+            f"= local[{self.local_range.start}:{self.local_range.stop}] "
+            f"<- remote_rank={self.remote_rank}"
+            f"[{self.remote_range.start}:{self.remote_range.stop}]"
+        )
+
+
 class KVCacheSpecKind(str, Enum):
     FULL_ATTENTION = "full_attention"
     MLA_ATTENTION = "mla_attention"
@@ -129,6 +156,20 @@ class KVCacheSpec:
         """
         return replace(self, block_size=block_size)
 
+    def get_tp_transfer_slices(
+        self,
+        local_tp_rank: int,
+        local_tp_size: int,
+        remote_tp_size: int,
+    ) -> list[TPTransferSlice]:
+        """Compute transfer slices for this local rank.
+
+        Must be overridden by subclasses that participate in PD transfers.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement get_tp_transfer_slices"
+        )
+
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
         """
@@ -145,6 +186,7 @@ class AttentionSpec(KVCacheSpec):
     num_kv_heads: int
     head_size: int
     dtype: torch.dtype
+    total_num_kv_heads: int | None = None
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE
     page_size_padded: int | None = None
 
@@ -182,6 +224,91 @@ class AttentionSpec(KVCacheSpec):
             * self.head_size
             * get_dtype_size(self.dtype)
         )
+
+    # ------------------------------------------------------------------
+    # TP transfer slice interface
+    # ------------------------------------------------------------------
+
+    def get_tp_transfer_slices(
+        self,
+        local_tp_rank: int,
+        local_tp_size: int,
+        remote_tp_size: int,
+    ) -> list[TPTransferSlice]:
+        """Compute transfer slices for this local rank.
+
+        Each slice describes one read: 'read remote_rank's remote_range
+        and place it in my local_range'.
+
+        Handles:
+        - Homogeneous TP (local_tp == remote_tp): 1:1 mapping
+        - D_TP > P_TP: local rank reads a sub-range from one remote
+        - P_TP > D_TP: local rank reads from multiple remotes
+        - GQA replication (total_kv_heads < remote_tp): load-balanced
+          remote selection to avoid redundant reads
+        """
+        assert self.total_num_kv_heads is not None, (
+            "total_num_kv_heads must be set for TP mapping. "
+            "Pass it when constructing the spec via get_kv_cache_spec()."
+        )
+        total = self.total_num_kv_heads
+
+        if local_tp_size >= remote_tp_size:
+            # D_TP >= P_TP: each local rank reads from one remote rank.
+            # Multiple local ranks may map to the same remote when D_TP > P_TP.
+            remote_rank = local_tp_rank * remote_tp_size // local_tp_size
+            remote_heads = max(1, total // remote_tp_size)
+            # Compute which sub-range of the remote's heads this local rank owns.
+            # When D_TP > P_TP and total >= local_tp, different local ranks
+            # index into different head offsets within the same remote block.
+            local_head = local_tp_rank * total // local_tp_size
+            remote_head_start = remote_rank * total // remote_tp_size
+            offset = local_head - remote_head_start
+            local_heads = max(1, total // local_tp_size)
+            return [
+                TPTransferSlice(
+                    remote_rank=remote_rank,
+                    global_range=range(local_head, local_head + local_heads),
+                    local_range=range(0, local_heads),
+                    remote_range=range(offset, offset + local_heads),
+                )
+            ]
+        else:
+            # P_TP > D_TP: one local rank reads from multiple remote ranks.
+            # GQA dedup: when total_kv_heads < remote_tp, several remote ranks
+            # hold the same head. Only read from unique ones.
+            abs_tp = remote_tp_size // local_tp_size
+            start = local_tp_rank * abs_tp
+
+            local_start = local_tp_rank * total // local_tp_size
+            local_end = (local_tp_rank + 1) * total // local_tp_size
+            local_heads = local_end - local_start
+
+            slices: list[TPTransferSlice] = []
+            seen_heads: set[int] = set()
+            for r in range(start, start + abs_tp):
+                head = r * total // remote_tp_size
+                if head in seen_heads:
+                    continue
+                seen_heads.add(head)
+
+                remote_start = r * total // remote_tp_size
+                remote_end = (r + 1) * total // remote_tp_size
+                remote_heads = remote_end - remote_start
+
+                slices.append(
+                    TPTransferSlice(
+                        remote_rank=r,
+                        global_range=range(remote_start, remote_end),
+                        local_range=range(
+                            remote_start - local_start,
+                            remote_end - local_start,
+                        ),
+                        remote_range=range(0, remote_heads),
+                    )
+                )
+
+            return slices
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -253,6 +380,7 @@ class FullAttentionSpec(AttentionSpec):
         merged_spec = cls(
             block_size=specs[0].block_size,
             num_kv_heads=specs[0].num_kv_heads,
+            total_num_kv_heads=specs[0].total_num_kv_heads,
             head_size=specs[0].head_size,
             head_size_v=specs[0].head_size_v,
             dtype=specs[0].dtype,
@@ -346,6 +474,30 @@ class MLAAttentionSpec(FullAttentionSpec):
         super().__post_init__()
         _apply_alignment_padding(self)
 
+    # ------------------------------------------------------------------
+    # TP transfer slice interface (MLA: cache is always replicated)
+    # ------------------------------------------------------------------
+
+    def get_tp_transfer_slices(
+        self,
+        local_tp_rank: int,
+        local_tp_size: int,
+        remote_tp_size: int,
+    ) -> list[TPTransferSlice]:
+        """MLA cache is fully replicated -- read full block from one remote.
+
+        Load-balances by picking the aligned remote rank.
+        """
+        aligned_remote = local_tp_rank * remote_tp_size // local_tp_size
+        return [
+            TPTransferSlice(
+                remote_rank=aligned_remote,
+                global_range=range(0, 1),
+                local_range=range(0, 1),
+                remote_range=range(0, 1),
+            )
+        ]
+
     @property
     def storage_block_size(self) -> int:
         return self.block_size // self.compress_ratio
@@ -386,6 +538,7 @@ class MLAAttentionSpec(FullAttentionSpec):
         return cls(
             block_size=specs[0].block_size,
             num_kv_heads=specs[0].num_kv_heads,
+            total_num_kv_heads=specs[0].total_num_kv_heads,
             head_size=specs[0].head_size,
             dtype=specs[0].dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
@@ -507,6 +660,30 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
     def __post_init__(self):
         _apply_alignment_padding(self)
 
+    # ------------------------------------------------------------------
+    # TP transfer slice interface (MLA: cache is always replicated)
+    # ------------------------------------------------------------------
+
+    def get_tp_transfer_slices(
+        self,
+        local_tp_rank: int,
+        local_tp_size: int,
+        remote_tp_size: int,
+    ) -> list[TPTransferSlice]:
+        """MLA cache is fully replicated -- read full block from one remote.
+
+        Load-balances by picking the aligned remote rank.
+        """
+        aligned_remote = local_tp_rank * remote_tp_size // local_tp_size
+        return [
+            TPTransferSlice(
+                remote_rank=aligned_remote,
+                global_range=range(0, 1),
+                local_range=range(0, 1),
+                remote_range=range(0, 1),
+            )
+        ]
+
     @property
     def storage_block_size(self) -> int:
         return self.block_size // self.compress_ratio
@@ -549,6 +726,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
         return cls(
             block_size=specs[0].block_size,
             num_kv_heads=specs[0].num_kv_heads,
+            total_num_kv_heads=specs[0].total_num_kv_heads,
             head_size=specs[0].head_size,
             dtype=specs[0].dtype,
             page_size_padded=specs[0].page_size_padded,
@@ -578,6 +756,43 @@ class MambaSpec(KVCacheSpec):
             assert self.page_size_padded >= page_size
             return self.page_size_padded
         return page_size
+
+    def get_tp_transfer_slices(
+        self,
+        local_tp_rank: int,
+        local_tp_size: int,
+        remote_tp_size: int,
+    ) -> list[TPTransferSlice]:
+        """Mamba SSM state is TP-sharded but not along KV heads.
+
+        The actual byte-level sub-projection slicing (conv x/B/C + ssm)
+        is handled by _build_mamba_remote via MambaConvSplitInfo.
+        Here we only determine which remote ranks to read from and how
+        many splits, so that TPMapping gets the right rank membership
+        and slice counts for _build_local_splits_from_plan.
+        """
+        if local_tp_size >= remote_tp_size:
+            remote_rank = local_tp_rank * remote_tp_size // local_tp_size
+            return [
+                TPTransferSlice(
+                    remote_rank=remote_rank,
+                    global_range=range(0, 1),
+                    local_range=range(0, 1),
+                    remote_range=range(0, 1),
+                )
+            ]
+        else:
+            abs_tp = remote_tp_size // local_tp_size
+            start = local_tp_rank * abs_tp
+            return [
+                TPTransferSlice(
+                    remote_rank=r,
+                    global_range=range(0, 1),
+                    local_range=range(0, 1),
+                    remote_range=range(0, 1),
+                )
+                for r in range(start, start + abs_tp)
+            ]
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         if vllm_config.cache_config.mamba_cache_mode == "all":
@@ -639,6 +854,7 @@ class SinkFullAttentionSpec(FullAttentionSpec):
         merged_spec = cls(
             block_size=specs[0].block_size,
             num_kv_heads=specs[0].num_kv_heads,
+            total_num_kv_heads=specs[0].total_num_kv_heads,
             head_size=specs[0].head_size,
             head_size_v=specs[0].head_size_v,
             sink_len=specs[0].sink_len,

@@ -46,12 +46,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
     ReadSpec,
     TPMapping,
-    _is_attention_spec,
-    _is_ssm_spec,
-    compute_tp_mapping,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     _NIXL_SUPPORTED_DEVICE,
+    get_representative_spec,
     get_representative_spec_type,
     zmq_ctx,
 )
@@ -69,6 +67,7 @@ from vllm.platforms import current_platform
 from vllm.utils.network_utils import make_zmq_path
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     FullAttentionSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
@@ -81,6 +80,14 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 logger = init_logger(__name__)
+
+
+def _is_attention_spec(spec_type: type) -> bool:
+    return issubclass(spec_type, AttentionSpec)
+
+
+def _is_ssm_spec(spec_type: type) -> bool:
+    return issubclass(spec_type, MambaSpec)
 
 
 class NixlConnectorWorker:
@@ -154,18 +161,23 @@ class NixlConnectorWorker:
         plan: TPMapping,
         src_blocks_data: list[tuple[int, int, int]],
         num_fa_descs: int,
+        remote_tp_size: int,
     ) -> Iterator[list[tuple[int, int, int]]]:
         """Build split handle data for P_TP > D_TP scenario.
 
         num_fa_descs is the boundary between FA and SSM descriptors.
-        Split counts are derived from source_ranks_per_group lengths.
-        FA uses rank_to_attention_slot for the slot offset;
-        SSM uses the rank's positional index.
+        Split counts are derived from per-group slice counts.
+        FA slot assignment replicates the old rank_to_attention_slot logic:
+        every rank (including SSM-only ranks) is mapped through
+        head_to_slot[rank * total_kv_heads // remote_tp_size].
         """
+        assert self.transfer_topo is not None
+        total_num_kv_heads = self.transfer_topo.total_num_kv_heads
+
         fa_idx = next(
             i for i, t in enumerate(self._group_spec_types) if _is_attention_spec(t)
         )
-        fa_num_splits = len(plan.source_ranks_per_group[fa_idx])
+        fa_num_splits = plan.num_slices_for_group(fa_idx)
 
         has_ssm_descs = num_fa_descs < len(src_blocks_data)
         ssm_idx = next(
@@ -173,13 +185,22 @@ class NixlConnectorWorker:
             None,
         )
         ssm_num_splits = (
-            len(plan.source_ranks_per_group[ssm_idx])
+            plan.num_slices_for_group(ssm_idx)
             if has_ssm_descs and ssm_idx is not None
             else 0
         )
 
+        # Replicate old rank_to_attention_slot: map each FA-slice remote rank
+        # to a head, then build head -> slot index.
+        fa_slices = plan.slices_per_group[fa_idx]
+        head_to_slot: dict[int, int] = {}
+        for i, s in enumerate(fa_slices):
+            head = s.remote_rank * total_num_kv_heads // remote_tp_size
+            head_to_slot[head] = i
+
         for p_idx, p_rank in enumerate(plan.all_source_ranks):
-            fa_slot = plan.rank_to_attention_slot.get(p_rank, 0)
+            head = p_rank * total_num_kv_heads // remote_tp_size
+            fa_slot = head_to_slot.get(head, 0)
 
             handle: list[tuple[int, int, int]] = []
             for j, (addr, local_len, dev) in enumerate(src_blocks_data):
@@ -438,11 +459,15 @@ class NixlConnectorWorker:
         self._physical_blocks_per_logical_kv_block = 1
         self._sync_block_size_with_kernel()
 
-        # Unwrap UniformTypeKVCacheSpecs to get the representative spec type
+        # Unwrap UniformTypeKVCacheSpecs to get the representative spec type/instance
         self._group_spec_types = tuple(
             get_representative_spec_type(g.kv_cache_spec)
             for g in self.kv_cache_config.kv_cache_groups
         )
+        self._group_specs = [
+            get_representative_spec(g.kv_cache_spec)
+            for g in self.kv_cache_config.kv_cache_groups
+        ]
 
         # Per-engine TP mappings. Generated during handshake.
         self.tp_mappings: dict[EngineId, TPMapping] = {}
@@ -1137,13 +1162,54 @@ class NixlConnectorWorker:
         plan: TPMapping,
         nixl_agent_meta: NixlAgentMetadata,
         block_size_ratio: int,
+        remote_tp_size: int,
     ) -> list[tuple[int, int, int]]:
         """Build remote FA descriptors for all layers."""
         assert self.transfer_topo is not None
         fa_group_idx = next(
             i for i, t in enumerate(self._group_spec_types) if _is_attention_spec(t)
         )
-        num_attn_reads = len(plan.source_ranks_per_group[fa_group_idx])
+        fa_slices = plan.slices_per_group[fa_group_idx]
+        num_attn_reads = len(fa_slices)
+
+        # Compute byte offset into the remote block from the first slice's
+        # remote_range. When D_TP > P_TP, different local ranks read
+        # different head sub-ranges from the same remote rank.
+        fa_spec = self._group_specs[fa_group_idx]
+        assert isinstance(fa_spec, AttentionSpec)
+        assert fa_spec.total_num_kv_heads is not None
+        remote_heads_per_rank = max(1, fa_spec.total_num_kv_heads // remote_tp_size)
+
+        # Derive rank_offset_factor from slices to match the old formula:
+        # rank_offset = rank_offset_factor * remote_kv_block_len.
+        # This encodes the chunk index into the remote block for D_TP > P_TP.
+        assert self.transfer_topo is not None
+        tp_size = self.transfer_topo.tp_size
+        total_num_kv_heads = self.transfer_topo.total_num_kv_heads
+        if self.transfer_topo.is_mla or tp_size <= remote_tp_size:
+            rank_offset_factor = 0
+        elif tp_size > total_num_kv_heads:
+            local_head = self.transfer_topo.tp_rank * total_num_kv_heads // tp_size
+            p_start = fa_slices[0].remote_rank * total_num_kv_heads // remote_tp_size
+            rank_offset_factor = local_head - p_start
+        else:
+            rank_offset_factor = self.transfer_topo.tp_rank % (
+                tp_size // remote_tp_size
+            )
+
+        logger.info(
+            "_build_fa_remote: fa_slices=%s, num_attn_reads=%d, "
+            "remote_heads_per_rank=%d, total_num_kv_heads=%d, "
+            "remote_tp_size=%d, block_size_ratio=%d, rank_offset_factor=%d",
+            fa_slices,
+            num_attn_reads,
+            remote_heads_per_rank,
+            fa_spec.total_num_kv_heads,
+            remote_tp_size,
+            block_size_ratio,
+            rank_offset_factor,
+        )
+
         num_blocks = nixl_agent_meta.num_blocks
         result: list[tuple[int, int, int]] = []
         for i, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr):
@@ -1157,13 +1223,20 @@ class NixlConnectorWorker:
                 local_block_len = remote_kv_block_len
 
             local_block_len = local_block_len // num_attn_reads
-            rank_offset = plan.rank_offset_factor * remote_kv_block_len
+            rank_offset = rank_offset_factor * remote_kv_block_len
+
+            if i == 0:
+                logger.info(
+                    "_build_fa_remote layer0: local_block_len=%d, "
+                    "remote_kv_block_len=%d, rank_offset=%d",
+                    local_block_len,
+                    remote_kv_block_len,
+                    rank_offset,
+                )
 
             page_size = nixl_agent_meta.block_lens[i]
             for block_id in range(num_blocks):
                 block_offset = block_id * page_size
-                # For each block, grab the kv heads chunk belonging to current local
-                # tp rank of size local_block_len.
                 addr = base_addr + block_offset + rank_offset
                 result.append((addr, local_block_len, nixl_agent_meta.device_id))
 
@@ -1300,10 +1373,27 @@ class NixlConnectorWorker:
         transfer_topo.register_remote_engine(engine_id, transfer_info)
         logger.info("Transfer plan: %s", transfer_topo.describe(engine_id))
 
-        self.tp_mappings[engine_id] = compute_tp_mapping(
-            transfer_topology=transfer_topo,
-            remote_tp_size=remote_tp_size,
-            group_spec_types=self._group_spec_types,
+        self.tp_mappings[engine_id] = TPMapping(
+            slices_per_group=tuple(
+                tuple(
+                    spec.get_tp_transfer_slices(
+                        local_tp_rank=transfer_topo.tp_rank,
+                        local_tp_size=transfer_topo.tp_size,
+                        remote_tp_size=remote_tp_size,
+                    )
+                )
+                for spec in self._group_specs
+            ),
+        )
+        logger.info(
+            "TPMapping for %s (local_tp_rank=%d, local_tp=%d, remote_tp=%d): "
+            "slices_per_group=%s, all_source_ranks=%s",
+            engine_id,
+            transfer_topo.tp_rank,
+            transfer_topo.tp_size,
+            remote_tp_size,
+            self.tp_mappings[engine_id].slices_per_group,
+            self.tp_mappings[engine_id].all_source_ranks,
         )
 
         remote_agent_name = self.nixl_wrapper.add_remote_agent(
@@ -1356,6 +1446,7 @@ class NixlConnectorWorker:
                 plan,
                 self.src_blocks_data,
                 self.num_descs,
+                remote_tp_size,
             ):
                 descs = self.nixl_wrapper.get_xfer_descs(
                     handle_data, self.nixl_memory_type
@@ -1374,6 +1465,7 @@ class NixlConnectorWorker:
             plan,
             nixl_agent_meta,
             block_size_ratio,
+            remote_tp_size,
         )
         logger.debug(
             "Created %s blocks for dst engine %s with remote rank %s and local rank %s",
@@ -2036,15 +2128,11 @@ class NixlConnectorWorker:
             ReadSpec(
                 remote_rank=rank,
                 local_block_ids=[
-                    list(local_block_ids[g])
-                    if rank in plan.source_ranks_per_group[g]
-                    else []
+                    list(local_block_ids[g]) if plan.has_rank_in_group(g, rank) else []
                     for g in range(num_groups)
                 ],
                 remote_block_ids=[
-                    list(remote_block_ids[g])
-                    if rank in plan.source_ranks_per_group[g]
-                    else []
+                    list(remote_block_ids[g]) if plan.has_rank_in_group(g, rank) else []
                     for g in range(num_groups)
                 ],
             )

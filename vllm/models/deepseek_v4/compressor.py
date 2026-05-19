@@ -158,6 +158,7 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
         return SlidingWindowMLASpec(  # only has one vector instead of K + V
             block_size=self.block_size,
             num_kv_heads=1,
+            total_num_kv_heads=vllm_config.model_config.get_total_num_kv_heads(),
             head_size=self.state_dim,
             dtype=self.dtype,
             sliding_window=self.sliding_window,
