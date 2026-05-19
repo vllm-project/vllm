@@ -472,6 +472,10 @@ class DeepseekV4ROCMAiterMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
     backend_cls = DeepseekV4ROCMAiterMLASparseBackend
 
     @classmethod
+    def get_padded_num_q_heads(cls, num_heads: int) -> int:
+        return num_heads
+
+    @classmethod
     def forward_mqa(  # type: ignore[override]
         cls,
         layer: "DeepseekV4MLAAttention",

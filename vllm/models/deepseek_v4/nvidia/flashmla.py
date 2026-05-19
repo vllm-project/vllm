@@ -63,6 +63,18 @@ class DeepseekV4SparseMLAAttentionImpl(SparseMLAAttentionImpl[FlashMLASparseMeta
     ) -> None:
         raise NotImplementedError
 
+    @classmethod
+    @abstractmethod
+    def get_padded_num_q_heads(cls, num_heads: int) -> int:
+        """Q head count the backend wants q allocated at.
+
+        The MLA wrapper allocates the q/output buffers at
+        ``[N, get_padded_num_q_heads(n_local_heads), head_dim]``. Must
+        satisfy ``result >= num_heads``. Backends with no padding constraint
+        return ``num_heads``.
+        """
+        raise NotImplementedError
+
 
 class DeepseekV4FlashMLASparseBackend(FlashMLASparseBackend):
     @staticmethod
@@ -103,6 +115,16 @@ class DeepseekV4FlashMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
     """FlashMLA sparse MLA implementation for DeepSeek V4's custom MLA layer."""
 
     backend_cls = DeepseekV4FlashMLASparseBackend
+
+    @classmethod
+    def get_padded_num_q_heads(cls, num_heads: int) -> int:
+        # FP8 decode kernel only supports h_q = 64 or 128.
+        if num_heads > 128:
+            raise ValueError(
+                f"DeepseekV4 FlashMLA does not support {num_heads} heads "
+                "(FP8 decode kernel requires h_q in {64, 128})."
+            )
+        return 64 if num_heads <= 64 else 128
 
     @classmethod
     def forward_mqa(  # type: ignore[override]
