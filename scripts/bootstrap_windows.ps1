@@ -91,6 +91,24 @@ function Import-VisualStudioDevShell {
     }
 }
 
+function Resolve-CudaToolkitPath {
+    param([string]$PreferredPath)
+    $candidates = @(
+        $PreferredPath,
+        $env:CUDA_PATH,
+        $env:CUDA_HOME,
+        "C:\tmp\cuda13_system",
+        "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0"
+    ) | Where-Object { $_ } | Select-Object -Unique
+
+    foreach ($candidate in $candidates) {
+        if (Test-Path (Join-Path $candidate "bin\nvcc.exe")) {
+            return $candidate
+        }
+    }
+    throw "Could not find a CUDA Toolkit with bin\nvcc.exe. Pass -CudaPath or create a space-free CUDA junction."
+}
+
 function Ensure-Venv {
     param([string]$Path)
     $python = Join-Path $Path "Scripts\python.exe"
@@ -156,13 +174,9 @@ function Ensure-Repo {
 
 function Set-BootstrapEnvironment {
     param([string]$PythonExe)
-    if (-not (Test-Path $CudaPath)) {
-        throw "CUDA path $CudaPath was not found. Install CUDA or pass -CudaPath. Use a space-free path or junction if possible."
-    }
+    $script:ResolvedCudaPath = Resolve-CudaToolkitPath -PreferredPath $CudaPath
+    $script:CudaPath = $script:ResolvedCudaPath
     $nvcc = Join-Path $CudaPath "bin\nvcc.exe"
-    if (-not (Test-Path $nvcc)) {
-        throw "nvcc.exe was not found at $nvcc."
-    }
 
     $torchLib = Join-Path (Split-Path -Parent (Split-Path -Parent $PythonExe)) "Lib\site-packages\torch\lib"
     $env:PATH = "$CudaPath\bin;$torchLib;$env:PATH"
