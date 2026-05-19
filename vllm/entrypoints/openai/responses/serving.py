@@ -443,6 +443,8 @@ class OpenAIServingResponses(OpenAIServing):
                 default_max_tokens, self.default_sampling_params
             )
 
+            await self._validate_sampling_params(sampling_params)
+
             trace_headers = (
                 None
                 if raw_request is None

@@ -177,6 +177,8 @@ class OpenAIServingCompletion(OpenAIServing):
                     self.default_sampling_params,
                 )
 
+            await self._validate_sampling_params(sampling_params)
+
             request_id_item = f"{request_id}-{i}"
 
             self._log_inputs(

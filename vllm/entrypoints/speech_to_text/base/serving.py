@@ -469,6 +469,8 @@ class OpenAISpeechToText(OpenAIServing):
         if request.response_format == "verbose_json":
             sampling_params.logprobs = 1
 
+        await self._validate_sampling_params(sampling_params)
+
         engine_request_ids = [
             request_id if len(engine_inputs) == 1 else f"{request_id}-{idx}"
             for idx in range(len(engine_inputs))

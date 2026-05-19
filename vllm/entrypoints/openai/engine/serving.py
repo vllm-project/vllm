@@ -390,6 +390,18 @@ class OpenAIServing(BeamSearchOnlineMixin):
 
         return None
 
+    async def _validate_sampling_params(
+        self,
+        params: SamplingParams | BeamSearchParams,
+    ) -> None:
+        # Run validation up-front so streaming requests fail with a clean
+        # JSON 400 from FastAPI's exception_handler instead of an
+        # HTTP 200 + SSE error frame on a half-closed keep-alive socket.
+        if isinstance(params, BeamSearchParams):
+            return
+        supported_tasks = await self.engine_client.get_supported_tasks()
+        self.input_processor._validate_params(params, supported_tasks)
+
     @staticmethod
     def _base_request_id(
         raw_request: Request | None, default: str | None = None

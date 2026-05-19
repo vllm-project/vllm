@@ -311,6 +311,8 @@ class OpenAIServingChat(OpenAIServing):
                     self.default_sampling_params,
                 )
 
+            await self._validate_sampling_params(sampling_params)
+
             self._log_inputs(
                 sub_request_id,
                 engine_input,
