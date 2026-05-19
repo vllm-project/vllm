@@ -2003,7 +2003,7 @@ steps:
   - vllm/model_executor/layers
   - vllm/sampling_metadata.py
   - vllm/v1/sample/
-  - vllm/beam_search.py
+  - vllm/entrypoints/generate/beam_search/
   - tests/samplers
   - tests/conftest.py
   - vllm/_aiter_ops.py

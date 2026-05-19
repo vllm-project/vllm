@@ -8,6 +8,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from tests.v1.attention.utils import MockMambaBuilder
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
 from vllm.v1.core.single_type_kv_cache_manager import (
@@ -634,6 +635,30 @@ def test_mamba_n1_d_side(has_mamba, is_hma_required, expected_count):
     count, is_async = sched.get_num_new_matched_tokens(req, num_computed_tokens=0)
     assert count == expected_count
     assert is_async is True
+
+
+@pytest.mark.cpu_test
+def test_mamba_n1_d_side_builds_decode_metadata():
+    req = create_request(num_tokens=10, do_remote_prefill=True)
+    sched = make_nixl_scheduler(has_mamba=True, is_hma_required=True)
+
+    num_computed_tokens, is_async = sched.get_num_new_matched_tokens(
+        req, num_computed_tokens=0
+    )
+
+    assert num_computed_tokens == req.num_prompt_tokens - 1
+    assert is_async is True
+
+    vllm_config = create_vllm_config()
+    metadata = MockMambaBuilder.build_mamba_metadata(
+        vllm_config,
+        seq_lens=[req.num_prompt_tokens],
+        query_lens=[1],
+        is_prefilling=[True],
+    )
+
+    assert metadata.num_decodes == 1
+    assert metadata.num_prefills == 0
 
 
 @pytest.mark.cpu_test
