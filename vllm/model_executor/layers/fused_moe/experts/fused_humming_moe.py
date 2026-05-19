@@ -4,7 +4,7 @@
 
 import json
 import math
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 from humming import dtypes
@@ -33,10 +33,17 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
     TopKWeightAndReduceNoOP,
 )
-from vllm.model_executor.layers.fused_moe.utils import _resize_cache
+from vllm.model_executor.layers.fused_moe.utils import (
+    _resize_cache,
+    swiglu_limit_func,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import current_platform
 from vllm.v1.worker.workspace import current_workspace_manager
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe import RoutedExperts
+
 
 logger = init_logger(__name__)
 
@@ -58,7 +65,7 @@ def get_humming_moe_gemm_type() -> str:
 class HummingExpertsBase(mk.FusedMoEExpertsModular):
     def __init__(
         self,
-        layer: torch.nn.Module,
+        layer: "RoutedExperts",
         moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
         max_num_tokens: int | None = None,
@@ -418,6 +425,18 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
 
         return supported, None if supported else reason
 
+    def apply_activation(
+        self,
+        activation: MoEActivation,
+        output: torch.Tensor,
+        input: torch.Tensor,
+    ) -> None:
+        swiglu_limit = self.quant_config.gemm1_clamp_limit
+        if activation == MoEActivation.SILU and swiglu_limit is not None:
+            swiglu_limit_func(output=output, input=input, swiglu_limit=swiglu_limit)
+        else:
+            self.activation(activation=activation, input=input, output=output)
+
 
 class HummingIndexedExperts(HummingExpertsBase):
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
@@ -510,7 +529,7 @@ class HummingIndexedExperts(HummingExpertsBase):
             **moe_kwargs1,
         )
 
-        self.activation(
+        self.apply_activation(
             activation=self.layer.activation,
             input=buffers["gate_up_output"],
             output=buffers["activation_output"],
@@ -600,7 +619,7 @@ class HummingGroupedExperts(HummingExpertsBase):
             sublayer_name="w13",
         )
 
-        self.activation(
+        self.apply_activation(
             activation=self.layer.activation,
             input=buffers["gate_up_output"],
             output=buffers["activation_output"],
@@ -687,7 +706,7 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
             sublayer_name="w13",
         )
 
-        self.activation(
+        self.apply_activation(
             activation=self.layer.activation,
             input=buffers["gate_up_output"],
             output=buffers["activation_output"],
