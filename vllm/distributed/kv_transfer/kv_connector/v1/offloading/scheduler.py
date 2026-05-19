@@ -128,7 +128,8 @@ class RequestOffloadState:
     req: Request
     group_states: tuple[RequestGroupState, ...] = field(init=False)
     req_context: ReqContext = field(init=False)
-    max_offload_tokens: int | None = field(init=False)
+    # upper bound on tokens to offload for this request; None means no cap
+    max_offload_tokens: int | None = None
     # number of hits in the GPU cache
     num_locally_computed_tokens: int = 0
     # In-flight job IDs. Per the connector's invariant, at any given time
@@ -144,21 +145,18 @@ class RequestOffloadState:
             kv_transfer_params=self.req.kv_transfer_params,
         )
         params = self.req.kv_transfer_params
-        val = params.get("max_offload_tokens") if params is not None else None
-        if val is not None:
-            if not isinstance(val, int):
-                logger.warning(
-                    "max_offload_tokens must be an int, got %s; ignoring",
-                    type(val).__name__,
-                )
-                val = None
-            elif val < 0:
-                logger.warning(
-                    "max_offload_tokens must be non-negative, got %d; ignoring",
-                    val,
-                )
-                val = None
-        self.max_offload_tokens = val
+        raw = params.get("max_offload_tokens") if params else None
+        if type(raw) is int and raw >= 0:
+            self.max_offload_tokens = raw
+            logger.debug(
+                "Request %s: max_offload_tokens set to %d",
+                self.req.request_id,
+                raw,
+            )
+        elif raw is not None:
+            logger.warning(
+                "max_offload_tokens must be a non-negative int, got %r; ignoring", raw
+            )
 
     def update_offload_keys(self) -> None:
         for group_config, group_state in zip(
@@ -657,11 +655,6 @@ class OffloadingConnectorScheduler:
             max_offload_tokens = req_status.max_offload_tokens
             if max_offload_tokens is not None:
                 num_offloadable_tokens = min(num_offloadable_tokens, max_offload_tokens)
-                logger.debug(
-                    "Storing %s tokens (max_offload_tokens=%s)",
-                    num_offloadable_tokens,
-                    max_offload_tokens,
-                )
 
             # Filter out blocks skipped due to sliding window attention / SSM
             new_offload_keys: list[OffloadKey] = []
