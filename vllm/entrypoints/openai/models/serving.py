@@ -72,6 +72,14 @@ class OpenAIModelRegistry:
             ]
         )
 
+    async def retrieve_model(self, model_id: str) -> ModelCard | None:
+        """Return the ModelCard for `model_id`, or None if not served."""
+        model_list = await self.show_available_models()
+        for card in model_list.data:
+            if card.id == model_id:
+                return card
+        return None
+
 
 class OpenAIServingModels:
     """Shared instance to hold data about the loaded base model(s) and adapters.
@@ -156,6 +164,15 @@ class OpenAIServingModels:
         ]
         model_list.data.extend(lora_cards)
         return model_list
+
+    async def retrieve_model(self, model_id: str) -> ModelCard | None:
+        """Return the ModelCard for `model_id`, including loaded LoRA adapters,
+        or None if not served."""
+        model_list = await self.show_available_models()
+        for card in model_list.data:
+            if card.id == model_id:
+                return card
+        return None
 
     async def load_lora_adapter(
         self, request: LoadLoRAAdapterRequest, base_model_name: str | None = None

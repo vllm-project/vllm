@@ -54,3 +54,24 @@ async def test_check_models(client: openai.AsyncOpenAI, qwen3_lora_files):
     assert served_model.root == MODEL_NAME
     assert all(lora_model.root == qwen3_lora_files for lora_model in lora_models)
     assert lora_models[0].id == "qwen3-lora"
+
+
+@pytest.mark.asyncio
+async def test_retrieve_base_model(client: openai.AsyncOpenAI):
+    model = await client.models.retrieve(MODEL_NAME)
+    assert model.id == MODEL_NAME
+    assert model.root == MODEL_NAME
+
+
+@pytest.mark.asyncio
+async def test_retrieve_lora_model(client: openai.AsyncOpenAI, qwen3_lora_files):
+    model = await client.models.retrieve("qwen3-lora")
+    assert model.id == "qwen3-lora"
+    assert model.root == qwen3_lora_files
+
+
+@pytest.mark.asyncio
+async def test_retrieve_unknown_model(client: openai.AsyncOpenAI):
+    with pytest.raises(openai.NotFoundError) as exc_info:
+        await client.models.retrieve("this-model-does-not-exist")
+    assert "does not exist" in str(exc_info.value)
