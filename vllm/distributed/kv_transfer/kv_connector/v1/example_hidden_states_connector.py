@@ -326,9 +326,9 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
                 "get_required_kvcache_layout should not be called "
                 "on the abstract base class"
             )
-        # NHC means we have (num_tokens, num_heads)
-        # HNC means we have (num_heads, num_tokens)
-        # For now, we only support NHC layout since this keeps the
+        # LBNHC means we have (num_tokens, num_heads)
+        # LBHNC means we have (num_heads, num_tokens)
+        # For now, we only support LBNHC layout since this keeps the
         # hidden states for each token together in memory.
-        # HNC is primarily used when sharding heads across devices.
-        return "NHC"
+        # LBHNC is primarily used when sharding heads across devices.
+        return "LBNHC"

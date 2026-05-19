@@ -172,10 +172,14 @@ class KVCacheLayout(Enum):
     to physical (memory) order.
     """
 
-    HNC = (0, 1, 2, 3, 4)  # [L, B, H, N, C] identity
-    NHC = (0, 1, 3, 2, 4)  # [L, B, N, H, C]
+    LBHNC = (0, 1, 2, 3, 4)  # [L, B, H, N, C] identity
+    LBNHC = (0, 1, 3, 2, 4)  # [L, B, N, H, C]
     BLHNC = (1, 0, 2, 3, 4)  # [B, L, H, N, C]
     BHLNC = (1, 2, 0, 3, 4)  # [B, H, L, N, C]
+
+    # Aliases — kept for env-var compat and brevity.
+    HNC = LBHNC
+    NHC = LBNHC
 
     @property
     def stride_order(self) -> tuple[int, ...]:
@@ -184,7 +188,14 @@ class KVCacheLayout(Enum):
     @property
     def layer_stride_order(self) -> tuple[int, ...]:
         """4D permutation [B, H, N, C] for per-layer tensors (drops L)."""
-        assert self.is_layer_compact
+        if not self.is_layer_compact:
+            compact = [m.name for m in KVCacheLayout if m.is_layer_compact]
+            raise ValueError(
+                f"KVCacheLayout.{self.name} cannot produce a 4D "
+                f"layer_stride_order because the layer (L) dimension "
+                f"is not outermost in the physical layout. "
+                f"Use a layer-compact layout: {compact}"
+            )
         return tuple(i - 1 for i in self.value if i != _DIM_L)
 
     @property

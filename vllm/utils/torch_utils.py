@@ -499,14 +499,14 @@ def create_kv_caches_with_random_flash(
     model_dtype: str | torch.dtype | None = None,
     seed: int | None = None,
     device: str | None = "cuda",
-    cache_layout: str | None = "NHC",
+    cache_layout: str | None = "LBNHC",
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
     set_random_seed(seed)
 
     dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
     generic_kv_cache_shape = (num_blocks, 2, block_size, num_heads, head_size)
-    assert cache_layout in ("NHC", "HNC")
-    stride_order = (0, 1, 2, 3, 4) if cache_layout == "NHC" else (0, 1, 3, 2, 4)
+    assert cache_layout in ("LBNHC", "LBHNC")
+    stride_order = (0, 1, 2, 3, 4) if cache_layout == "LBNHC" else (0, 1, 3, 2, 4)
 
     kv_cache_allocation_shape = tuple(generic_kv_cache_shape[i] for i in stride_order)
     scale = head_size**-0.5

@@ -55,10 +55,10 @@ class XPUPlatform(Platform):
     ) -> str:
         from vllm.v1.attention.backends.utils import set_kv_cache_layout
 
-        set_kv_cache_layout("NHC")
+        set_kv_cache_layout("LBNHC")
         logger.info(
-            "Setting VLLM_KV_CACHE_LAYOUT to 'NHC' for XPU; "
-            "only NHC layout is supported by XPU attention kernels."
+            "Setting VLLM_KV_CACHE_LAYOUT to 'LBNHC' for XPU; "
+            "only LBNHC layout is supported by XPU attention kernels."
         )
 
         # TurboQuant KV cache: route directly to TQ backend

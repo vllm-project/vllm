@@ -605,18 +605,18 @@ class NixlConnectorWorker:
                 kv_dtype = kv_cache.dtype
                 permute_shape = False
                 if (
-                    self.kv_cache_layout == "NHC"
+                    self.kv_cache_layout == "LBNHC"
                     and self.vllm_config.kv_transfer_config is not None
                     and self.vllm_config.kv_transfer_config.enable_permute_local_kv
                 ):
                     logger.info_once(
                         "'enable_permute_local_kv' flag is enabled while "
-                        "device KV Layout is NHC. Init host buffer with"
-                        " HNC to better support Decode/Prefill TP_ratio > 1."
+                        "device KV Layout is LBNHC. Init host buffer with"
+                        " LBHNC to better support Decode/Prefill TP_ratio > 1."
                     )
-                    # Since NHC will not support Decode/Prefill TP_ratio > 1,
+                    # Since LBNHC will not support Decode/Prefill TP_ratio > 1,
                     # we can leverage host_buffer for permute
-                    self.host_buffer_kv_cache_layout = "HNC"
+                    self.host_buffer_kv_cache_layout = "LBHNC"
                     kv_shape = (
                         tuple(kv_shape[i] for i in inv_order)
                         if not self.use_mla
@@ -1214,7 +1214,7 @@ class NixlConnectorWorker:
                                                  tp_ratio = 4 // 2 = 2
 
         Considering the KV Caches, if P-Worker_i has cache size [2, num_blocksP, kv_heads, block_size, head_dim]
-        then D-Worker_j has [2, num_blocksD, kv_heads//tp_ratio, block_size, head_dim]. Mind the "HNC" layout format.
+        then D-Worker_j has [2, num_blocksD, kv_heads//tp_ratio, block_size, head_dim]. Mind the "LBHNC" layout format.
         Assuming num_blocksD >= num_blocksP, D-Worker0 reads from P-Worker0 by preparing the kv_heads//tp_ratio
         first heads from all the slots of all the blocks. D-Worker1 will do the same, but reading the second split
         along the kv_heads dimension, and so forth until "tp_ratio" D TP workers have pulled from P-Worker0.
@@ -1418,10 +1418,10 @@ class NixlConnectorWorker:
         if not self.use_mla and nixl_agent_meta.kv_cache_layout != kv_cache_layout:
             if (
                 self.kv_transfer_config.enable_permute_local_kv
-                and nixl_agent_meta.kv_cache_layout == "HNC"
+                and nixl_agent_meta.kv_cache_layout == "LBHNC"
             ):
                 logger.info(
-                    "Remote is HNC and local is NHC, enabled additional permute "
+                    "Remote is LBHNC and local is LBNHC, enabled additional permute "
                     "on local device KV."
                 )
                 assert not self._is_hma_required, (

@@ -93,9 +93,10 @@ class NixlConnector(KVConnectorBase_V1, SupportsHMA):
             # which fallback to the default behavior.
             return None
         logger.info_once(
-            "NixlConnector setting KV cache layout to HNC for better xfer performance."
+            "NixlConnector setting KV cache layout to LBHNC for "
+            "better xfer performance."
         )
-        return "HNC"
+        return "LBHNC"
 
     ############################################################
     # Scheduler Side Methods

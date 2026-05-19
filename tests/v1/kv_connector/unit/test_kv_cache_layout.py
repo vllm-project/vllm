@@ -108,7 +108,9 @@ def test_reshape_mamba_spec():
     num_slots = 2
     slot_bytes = mamba_spec.page_size_bytes * NUM_BLOCKS
     raw = torch.arange(slot_bytes * num_slots, dtype=torch.int8, device="cuda")
-    views = reshape_kv_cache(raw, mamba_spec, NUM_BLOCKS, num_slots, KVCacheLayout.HNC)
+    views = reshape_kv_cache(
+        raw, mamba_spec, NUM_BLOCKS, num_slots, KVCacheLayout.LBHNC
+    )
 
     assert len(views) == num_slots
     for v in views:
@@ -129,7 +131,9 @@ def test_reshape_page_size_padded():
         padded_page * NUM_BLOCKS * num_slots, dtype=torch.int8, device="cuda"
     )
 
-    views = reshape_kv_cache(raw, padded_spec, NUM_BLOCKS, num_slots, KVCacheLayout.HNC)
+    views = reshape_kv_cache(
+        raw, padded_spec, NUM_BLOCKS, num_slots, KVCacheLayout.LBHNC
+    )
 
     expected_4d = compute_kv_cache_shape(padded_spec, NUM_BLOCKS)
     assert views[0].shape == expected_4d
@@ -178,7 +182,7 @@ def _make_tensor(shared_by, size=1024):
     return KVCacheTensor(size=size, shared_by=shared_by)
 
 
-@pytest.mark.parametrize("layout_name", ["HNC", "BLHNC"])
+@pytest.mark.parametrize("layout_name", ["LBHNC", "BLHNC"])
 def test_validate_block_contiguous_always_passes(layout_name):
     set_kv_cache_layout(layout_name)
     group_a = _make_group(["layer.0"], num_kv_heads=4, head_size=64)
@@ -187,7 +191,7 @@ def test_validate_block_contiguous_always_passes(layout_name):
     _validate_layout_compatibility([tensor], [group_a, group_b])
 
 
-@pytest.mark.parametrize("layout_name", ["NHC", "BHLNC"])
+@pytest.mark.parametrize("layout_name", ["LBNHC", "BHLNC"])
 def test_validate_non_block_contiguous_uniform_passes(layout_name):
     set_kv_cache_layout(layout_name)
     group_a = _make_group(["layer.0"], num_kv_heads=4, head_size=64)
@@ -196,7 +200,7 @@ def test_validate_non_block_contiguous_uniform_passes(layout_name):
     _validate_layout_compatibility([tensor], [group_a, group_b])
 
 
-@pytest.mark.parametrize("layout_name", ["NHC", "BHLNC"])
+@pytest.mark.parametrize("layout_name", ["LBNHC", "BHLNC"])
 def test_validate_non_block_contiguous_mismatched_raises(layout_name):
     set_kv_cache_layout(layout_name)
     group_a = _make_group(["layer.0"], num_kv_heads=4, head_size=64)
@@ -207,14 +211,14 @@ def test_validate_non_block_contiguous_mismatched_raises(layout_name):
 
 
 def test_validate_single_layer_always_passes():
-    set_kv_cache_layout("NHC")
+    set_kv_cache_layout("LBNHC")
     group = _make_group(["layer.0"], num_kv_heads=4, head_size=64)
     tensor = _make_tensor([["layer.0"]])
     _validate_layout_compatibility([tensor], [group])
 
 
 def test_validate_mismatched_head_size_only():
-    set_kv_cache_layout("NHC")
+    set_kv_cache_layout("LBNHC")
     group_a = _make_group(["layer.0"], num_kv_heads=4, head_size=64)
     group_b = _make_group(["layer.1"], num_kv_heads=4, head_size=128)
     tensor = _make_tensor([["layer.0"], ["layer.1"]])

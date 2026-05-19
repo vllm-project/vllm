@@ -468,7 +468,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         self,
         *args,
         hand_shake_latency: float = 1.8,
-        kv_cache_layout="HNC",
+        kv_cache_layout="LBHNC",
         kv_cache_config=None,
         **kwargs,
     ):
@@ -539,9 +539,9 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
                     device_id=remote_tp_rank,
                     num_blocks=1,
                     block_lens=remote_block_lens,
-                    # `self.kv_cache_layout` is only forced to HNC when vllm engine
-                    # is started. We mock HNC here.
-                    kv_cache_layout="HNC",
+                    # `self.kv_cache_layout` is only forced to LBHNC when vllm engine
+                    # is started. We mock LBHNC here.
+                    kv_cache_layout="LBHNC",
                     block_size=self.block_size,
                     ssm_sizes=(0, 0),
                     attn_backend_name=self.backend_name,
@@ -593,7 +593,7 @@ class TestNixlHandshake:
         worker.dst_xfer_side_handles = {
             FakeNixlConnectorWorker.REMOTE_ENGINE_ID: {0: 1}
         }
-        worker.kv_cache_layout = "HNC"
+        worker.kv_cache_layout = "LBHNC"
         num_xfers = 4
         while True:
             # For the same request_id, initiate multiple xfers across different
@@ -986,7 +986,9 @@ class TestNixlHandshake:
             worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
 
             # Metadata with different kv_cache_layout than local worker
-            mismatched_layout = "HNC" if worker.kv_cache_layout != "HNC" else "NHC"
+            mismatched_layout = (
+                "LBHNC" if worker.kv_cache_layout != "LBHNC" else "LBNHC"
+            )
             meta = NixlAgentMetadata(
                 engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
                 agent_metadata=FakeNixlWrapper.AGENT_METADATA,
@@ -1033,7 +1035,7 @@ class TestNixlHandshake:
                 vllm_config,
                 connector.engine_id,
                 hand_shake_latency=0,
-                kv_cache_layout="NHC",
+                kv_cache_layout="LBNHC",
             )
             worker = connector.connector_worker
 
@@ -1052,7 +1054,7 @@ class TestNixlHandshake:
                 num_blocks=1,
                 # prefill TP=1, decode TP=2, remote block_lens is double to local
                 block_lens=[i * 2 for i in worker.block_len_per_layer],
-                kv_cache_layout="HNC",
+                kv_cache_layout="LBHNC",
                 block_size=worker.block_size,
                 ssm_sizes=(0, 0),
                 attn_backend_name=worker.backend_name,
@@ -1513,7 +1515,7 @@ def test_register_kv_caches(default_vllm_config, dist_init, attn_backend):
     """
 
     vllm_config = create_vllm_config(attention_backend=attn_backend)
-    set_kv_cache_layout("HNC")
+    set_kv_cache_layout("LBHNC")
 
     # Import the appropriate backend based on the parameter
     if attn_backend == "FLASH_ATTN":
@@ -2375,7 +2377,7 @@ def test_compatibility_hash_validation(
         device_id=0,
         num_blocks=1,
         block_lens=[4096 * prefill_block_size],  # slot_size * block_size
-        kv_cache_layout="HNC",
+        kv_cache_layout="LBHNC",
         block_size=prefill_block_size,
         ssm_sizes=(0, 0),
         attn_backend_name=decode_worker.backend_name,

@@ -192,7 +192,7 @@ class FakeMoRIIOConnectorWorker(MoRIIOConnectorWorker):
     REMOTE_ENGINE_ID = "remote_engine"
 
     def __init__(
-        self, *args, hand_shake_latency: float = 1.8, kv_cache_layout="HNC", **kwargs
+        self, *args, hand_shake_latency: float = 1.8, kv_cache_layout="LBHNC", **kwargs
     ):
         super().__init__(*args, **kwargs)
 

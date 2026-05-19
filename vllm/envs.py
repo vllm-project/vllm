@@ -200,7 +200,7 @@ if TYPE_CHECKING:
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: int = 300
     VLLM_KV_CACHE_LAYOUT: (
-        Literal["NHC", "HNC", "NHD", "HND", "BLHNC", "BHLNC"] | None
+        Literal["LBNHC", "LBHNC", "NHC", "HNC", "NHD", "HND", "BLHNC", "BHLNC"] | None
     ) = None
     VLLM_SSM_CONV_STATE_LAYOUT: Literal["SD", "DS"] | None = None
     VLLM_COMPUTE_NANS_IN_LOGITS: bool = False
@@ -1473,18 +1473,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # KV Cache layout used throughout vllm.
     # Some common values are:
-    # - NHC
-    # - HNC
+    # - LBNHC
+    # - LBHNC
     # Where N=num_states, H=num_heads and C=state_content. The default value
     # will leave the layout choice to the backend. Mind that backends may only
     # implement and support a subset of all possible layouts.
     "VLLM_KV_CACHE_LAYOUT": env_with_choices(
-        "VLLM_KV_CACHE_LAYOUT", None, ["NHC", "HNC", "NHD", "HND", "BLHNC", "BHLNC"]
+        "VLLM_KV_CACHE_LAYOUT",
+        None,
+        ["LBNHC", "LBHNC", "NHC", "HNC", "NHD", "HND", "BLHNC", "BHLNC"],
     ),
     # SSM conv state layout used for Mamba models.
     # - SD: (state_len, dim) — dim contiguous (default)
     # - DS: (dim, state_len) — TP-sharded dim on dim1,
-    #   consistent with SSM temporal state and HNC KV cache layout.
+    #   consistent with SSM temporal state and LBHNC KV cache layout.
     "VLLM_SSM_CONV_STATE_LAYOUT": env_with_choices(
         "VLLM_SSM_CONV_STATE_LAYOUT", None, ["SD", "DS"]
     ),

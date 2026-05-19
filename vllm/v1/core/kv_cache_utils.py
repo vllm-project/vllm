@@ -1217,7 +1217,7 @@ def _validate_layout_compatibility(
 
     # The per-layer-per-block content [H, N, C] is contiguous therefore
     # these layouts are always valid.
-    if layout in (KVCacheLayout.HNC, KVCacheLayout.BLHNC):
+    if layout in (KVCacheLayout.LBHNC, KVCacheLayout.BLHNC):
         return
 
     layer_spec_map: dict[str, KVCacheSpec] = {}
@@ -1242,7 +1242,7 @@ def _validate_layout_compatibility(
                 f"Groups {kv_cache_groups} share a KVCacheTensor but have different "
                 f" (num_heads, state_content_size) for layers {all_layer_names}. "
                 f"Use a layout where [H, N, C] is contiguous "
-                f"(e.g. VLLM_KV_CACHE_LAYOUT=HNC or VLLM_KV_CACHE_LAYOUT=BLHNC)."
+                f"(e.g. VLLM_KV_CACHE_LAYOUT=LBHNC or VLLM_KV_CACHE_LAYOUT=BLHNC)."
             )
 
 

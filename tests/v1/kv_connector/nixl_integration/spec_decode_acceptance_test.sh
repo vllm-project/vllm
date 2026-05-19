@@ -226,7 +226,7 @@ run_test_for_device() {
     echo "Starting prefill instance $i on GPU $GPU_ID, port $PORT"
     env \
     ${GPU_DEVICE_VAR}=$GPU_ID \
-    VLLM_KV_CACHE_LAYOUT='HNC' \
+    VLLM_KV_CACHE_LAYOUT='LBHNC' \
     UCX_NET_DEVICES=all \
     VLLM_NIXL_SIDE_CHANNEL_HOST=$NIXL_SIDE_CHANNEL_HOST \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
@@ -263,7 +263,7 @@ run_test_for_device() {
     echo "Starting decode instance $i on GPU $GPU_ID, port $PORT"
     env \
     ${GPU_DEVICE_VAR}=$GPU_ID \
-    VLLM_KV_CACHE_LAYOUT='HNC' \
+    VLLM_KV_CACHE_LAYOUT='LBHNC' \
     UCX_NET_DEVICES=all \
     VLLM_NIXL_SIDE_CHANNEL_HOST=$NIXL_SIDE_CHANNEL_HOST \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \

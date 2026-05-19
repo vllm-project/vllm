@@ -391,7 +391,7 @@ def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL)
         )
 
     # 3. Run through FlashInfer with TRTLLM enabled
-    set_kv_cache_layout("HNC")
+    set_kv_cache_layout("LBHNC")
     get_kv_cache_layout.cache_clear()
 
     try:

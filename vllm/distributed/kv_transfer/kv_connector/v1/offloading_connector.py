@@ -162,7 +162,7 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: VllmConfig) -> str | None:
-        return "HNC"
+        return "LBHNC"
 
     def reset_cache(self) -> bool | None:
         assert self.connector_scheduler is not None

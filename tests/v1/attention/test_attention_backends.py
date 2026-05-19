@@ -483,7 +483,7 @@ def _test_backend_correctness(
             kv_cache_for_backend = (
                 kv_cache.permute(0, 2, 1, 3).contiguous().permute(0, 2, 1, 3)
             )
-            set_kv_cache_layout("HNC")
+            set_kv_cache_layout("LBHNC")
             reset_kv_cache_layout = True
         elif backend_name == AttentionBackendEnum.TRITON_ATTN:
             kv_cache_for_backend = kv_cache_for_backend.contiguous()
