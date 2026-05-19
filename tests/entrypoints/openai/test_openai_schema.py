@@ -74,10 +74,18 @@ def before_generate_case(context: schemathesis.hooks.HookContext, strategy):
                 and isinstance(case.body["messages"], list)
                 and len(case.body["messages"]) > 0
             ):
-                for message in case.body["messages"]:
-                    if not isinstance(message, dict):
-                        continue
+                # /v1/chat/completions sends messages as list[dict]; the batch
+                # endpoint nests them as list[list[dict]] (one row per
+                # conversation). Walk both shapes so this filter applies
+                # uniformly.
+                flat_messages: list[dict] = []
+                for entry in case.body["messages"]:
+                    if isinstance(entry, dict):
+                        flat_messages.append(entry)
+                    elif isinstance(entry, list):
+                        flat_messages.extend(m for m in entry if isinstance(m, dict))
 
+                for message in flat_messages:
                     tool_calls = message.get("tool_calls", [])
                     if isinstance(tool_calls, list):
                         for tool_call in tool_calls:

@@ -13,6 +13,7 @@ from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
+    _postprocess_messages,
     parse_chat_messages,
     parse_chat_messages_async,
 )
@@ -2714,3 +2715,73 @@ async def test_parse_chat_messages_video_vision_chunk_with_uuid_async(
     assert conversation == expected_conversation
     _assert_mm_data_is_vision_chunk_input(mm_data, 1)
     _assert_mm_uuids(mm_uuids, 1, expected_uuids=[video_uuid], modality="vision_chunk")
+
+
+def test_postprocess_messages_function_tool_call_parses_arguments():
+    messages = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": '{"city": "SF"}'},
+                }
+            ],
+        }
+    ]
+
+    _postprocess_messages(messages)
+
+    assert messages[0]["tool_calls"][0] == {
+        "id": "call_1",
+        "type": "function",
+        "function": {"name": "get_weather", "arguments": {"city": "SF"}},
+    }
+
+
+def test_postprocess_messages_function_tool_call_empty_arguments():
+    messages = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "ping", "arguments": ""},
+                }
+            ],
+        }
+    ]
+
+    _postprocess_messages(messages)
+
+    assert messages[0]["tool_calls"][0] == {
+        "id": "call_1",
+        "type": "function",
+        "function": {"name": "ping", "arguments": {}},
+    }
+
+
+def test_postprocess_messages_skips_non_function_tool_calls():
+    # `"type": "custom"` tool calls have no "function" key — must not crash.
+    messages = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "",
+                    "type": "custom",
+                    "custom": {"input": "", "name": ""},
+                }
+            ],
+        }
+    ]
+
+    _postprocess_messages(messages)
+
+    assert messages[0]["tool_calls"][0] == {
+        "id": "",
+        "type": "custom",
+        "custom": {"input": "", "name": ""},
+    }
