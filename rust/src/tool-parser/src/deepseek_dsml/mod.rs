@@ -155,8 +155,13 @@ impl DeepSeekDsmlToolParser {
     /// Flush buffered text and reset parser state.
     fn finish(&mut self) -> Result<ToolParseResult> {
         let mut result = ToolParseResult::default();
-        if self.mode == DsmlMode::Text && !self.buffer.is_empty() {
-            result.normal_text.push_str(&self.buffer);
+        match self.mode {
+            DsmlMode::Text => result.normal_text.push_str(&self.buffer),
+            DsmlMode::Done => {}
+            DsmlMode::ToolBlock => {
+                self.reset();
+                return Err(parsing_failed!("incomplete DeepSeek DSML tool call"));
+            }
         }
         self.reset();
         Ok(result)
