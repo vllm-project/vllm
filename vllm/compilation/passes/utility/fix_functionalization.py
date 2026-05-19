@@ -185,6 +185,10 @@ class FixFunctionalizationPass(VllmInductorPass):
                 hasattr(torch.ops._C, "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert")
                 and at_target
                 == torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert.default
+            ) or (
+                hasattr(torch.ops.vllm, "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert")
+                and at_target
+                == torch.ops.vllm.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert.default
             ):
                 # DeepSeek-V4 MLA specific op: mutates q and k_cache in-place.
                 mutated_args = {1: "q", 2: "k_cache"}
