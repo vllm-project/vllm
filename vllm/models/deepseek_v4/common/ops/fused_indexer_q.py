@@ -346,7 +346,7 @@ def fused_indexer_q_rope_quant(
         )
         if has_cutedsl():
             # lazily import, otherwise some tests fail due to CUDA driver init failure.
-            from .fused_indexer_q_cutedsl import (
+            from vllm.models.deepseek_v4.nvidia.ops.fused_indexer_q_cutedsl import (
                 fused_indexer_q_rope_quant_mxfp4_cutedsl,
             )
 
@@ -398,24 +398,41 @@ def fused_indexer_q_rope_quant(
         ), index_weights_out
 
     index_q_fp8 = torch.empty_like(index_q, dtype=torch.float8_e4m3fn)
-    _fused_indexer_q_rope_quant_kernel[(num_tokens, num_index_q_heads)](
-        positions,
-        index_q,
-        index_q.stride(0),
-        index_q.stride(1),
-        index_q_cos_sin_cache,
-        index_q_cos_sin_cache.stride(0),
-        index_q_cos_sin_cache.shape[-1] // 2,
-        index_q_fp8,
-        index_q_fp8.stride(0),
-        index_q_fp8.stride(1),
-        index_q_head_dim,
-        index_weights,
-        index_weights.stride(0),
-        index_weights_softmax_scale,
-        index_weights_head_scale,
-        index_weights_out,
-        index_weights_out.stride(0),
-        num_warps=1,  # TODO: Tune this
-    )
+    if has_cutedsl():
+        # lazily import, otherwise some tests fail due to CUDA driver init failure.
+        from vllm.models.deepseek_v4.nvidia.ops.fused_indexer_q_cutedsl import (
+            fused_indexer_q_rope_quant_fp8_cutedsl,
+        )
+
+        fused_indexer_q_rope_quant_fp8_cutedsl(
+            positions,
+            index_q,
+            index_q_cos_sin_cache,
+            index_weights,
+            index_weights_softmax_scale,
+            index_weights_head_scale,
+            index_q_fp8,
+            index_weights_out,
+        )
+    else:
+        _fused_indexer_q_rope_quant_kernel[(num_tokens, num_index_q_heads)](
+            positions,
+            index_q,
+            index_q.stride(0),
+            index_q.stride(1),
+            index_q_cos_sin_cache,
+            index_q_cos_sin_cache.stride(0),
+            index_q_cos_sin_cache.shape[-1] // 2,
+            index_q_fp8,
+            index_q_fp8.stride(0),
+            index_q_fp8.stride(1),
+            index_q_head_dim,
+            index_weights,
+            index_weights.stride(0),
+            index_weights_softmax_scale,
+            index_weights_head_scale,
+            index_weights_out,
+            index_weights_out.stride(0),
+            num_warps=1,  # TODO: Tune this
+        )
     return index_q_fp8, index_weights_out

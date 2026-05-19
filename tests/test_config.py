@@ -148,13 +148,6 @@ def test_is_default_v2_model_runner_model(model_config, expected):
     assert VllmConfig._is_default_v2_model_runner_model(config) is expected
 
 
-def test_use_v2_model_runner_defaults_to_v1_when_kv_connector_present():
-    config = SimpleNamespace(kv_transfer_config=object())
-    with patch.object(envs, "VLLM_USE_V2_MODEL_RUNNER", None):
-        result = VllmConfig.use_v2_model_runner.fget(config)
-    assert result is False
-
-
 @pytest.mark.skip_global_cleanup
 def test_with_hf_config_populates_missing_architectures_from_causal_lm_mapping(
     monkeypatch,

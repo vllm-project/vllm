@@ -22,7 +22,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.worker import (
 )
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -45,7 +47,11 @@ def _new_req_prefill_tokens(request: NewRequestData) -> list[int]:
 class MooncakeStoreScheduler:
     """Scheduler-side component for MooncakeStoreConnector."""
 
-    def __init__(self, vllm_config: VllmConfig):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        kv_cache_config: KVCacheConfig,
+    ):
         assert vllm_config.kv_transfer_config is not None
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
@@ -56,11 +62,11 @@ class MooncakeStoreScheduler:
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
         self.original_block_size = vllm_config.cache_config.block_size
-        self._block_size = vllm_config.cache_config.block_size
-        if self.pcp_size > 1:
-            self._block_size *= self.pcp_size
-        if self.dcp_size > 1:
-            self._block_size *= self.dcp_size
+        # LCM for multi-group HMA; bs * pcp * dcp for single-group. Matches
+        # the engine's own scheduler block size by construction.
+        self._block_size, self._hash_block_size = resolve_kv_cache_block_sizes(
+            kv_cache_config, vllm_config
+        )
 
         self._discard_partial_chunks = (
             vllm_config.kv_transfer_config.get_from_extra_config(
@@ -72,7 +78,7 @@ class MooncakeStoreScheduler:
         self.load_specs: dict[str, LoadSpec] = {}  # to be loaded
         self._request_trackers: dict[str, RequestTracker] = {}  # scheduled new requests
         self._preempted_req_ids: set[str] = set()  # preempted requests
-        self._unfinished_requests: dict[str, tuple[Request, list[int]]] = {}
+        self._unfinished_requests: dict[str, tuple[Request, tuple[list[int], ...]]] = {}
         self._unfinished_request_ids: set[str] = set()
 
     def get_num_new_matched_tokens(
@@ -126,9 +132,9 @@ class MooncakeStoreScheduler:
         num_external_tokens: int,
     ):
         """Update state after block allocation."""
-        local_block_ids: list[int] = []
+        local_block_ids: tuple[list[int], ...] = ()
         if num_external_tokens > 0:
-            local_block_ids = blocks.get_block_ids()[0]
+            local_block_ids = blocks.get_block_ids()
 
         self._unfinished_requests[request.request_id] = (request, local_block_ids)
         self._unfinished_request_ids.add(request.request_id)
@@ -189,11 +195,12 @@ class MooncakeStoreScheduler:
             request_tuple = self._unfinished_requests.get(request.req_id)
             request_real = request_tuple[0]  # type: ignore[index]
 
-            if not isinstance(request.block_ids[0], list):
-                unfolded_block_ids = request.block_ids.copy()
+            if isinstance(request.block_ids, tuple):
+                # Multi-group: preserve per-group structure.
+                unfolded_block_ids = tuple(b.copy() for b in request.block_ids)
             else:
-                # TODO: support HMA
-                unfolded_block_ids = request.block_ids[0].copy()
+                # Single-group legacy: list[int] -> 1-tuple.
+                unfolded_block_ids = (request.block_ids.copy(),)
 
             prefill_tokens = _new_req_prefill_tokens(request)
             request_tracker = RequestTracker(
@@ -237,9 +244,9 @@ class MooncakeStoreScheduler:
                 if req_id in self._preempted_req_ids:
                     # Resumed after preemption
                     if isinstance(new_block_ids, tuple):
-                        block_ids_list = new_block_ids[0].copy()
+                        new_block_ids = tuple(b.copy() for b in new_block_ids)
                     else:
-                        block_ids_list = new_block_ids.copy()
+                        new_block_ids = (new_block_ids.copy(),)
                     self._preempted_req_ids.discard(req_id)
                     load_spec = self.load_specs.pop(req_id, None)
                     request_tuple = self._unfinished_requests.get(req_id)
@@ -254,7 +261,7 @@ class MooncakeStoreScheduler:
                     request_tracker = RequestTracker(
                         req_id=req_id,
                         token_len=num_tokens_to_compute,
-                        allocated_block_ids=block_ids_list,
+                        allocated_block_ids=new_block_ids,
                         num_saved_tokens=0,
                         token_ids=prefill_tokens[:num_tokens_to_compute].copy(),
                         prefill_end_tokens=len(prefill_tokens),
@@ -361,7 +368,7 @@ class MooncakeStoreScheduler:
     def request_finished(
         self,
         request: Request,
-        block_ids: list[int],
+        block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
         """Determine whether to delay freeing blocks for async save."""
         if self.kv_role == "kv_consumer":
@@ -370,11 +377,12 @@ class MooncakeStoreScheduler:
         assert tracker is not None
         if tracker.num_saved_tokens <= 0:
             return False, None
-        delay_free_blocks = len(block_ids) > 0
+        total_blocks = sum(len(g) for g in block_ids)
+        delay_free_blocks = total_blocks > 0
         if delay_free_blocks:
             logger.debug(
                 "Delaying free of %d blocks for request %s",
-                len(block_ids),
+                total_blocks,
                 request.request_id,
             )
         return delay_free_blocks, None
