@@ -19,16 +19,18 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
 )
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
-from vllm.utils.deep_gemm import fp8_einsum
-from vllm.utils.torch_utils import direct_register_custom_op
-from vllm.v1.attention.ops.deepseek_v4_ops import (
+from vllm.models.deepseek_v4.common.ops import (
     combine_topk_swa_indices,
     compute_global_topk_indices_and_lens,
     dequantize_and_gather_k_cache,
     fused_indexer_q_rope_quant,
-    fused_inv_rope_fp8_quant,
     fused_q_kv_rmsnorm,
 )
+from vllm.models.deepseek_v4.nvidia.ops.fused_inv_rope_fp8_quant import (
+    fused_inv_rope_fp8_quant,
+)
+from vllm.utils.deep_gemm import fp8_einsum
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import rocm_inv_rope_einsum
 
 if TYPE_CHECKING:
