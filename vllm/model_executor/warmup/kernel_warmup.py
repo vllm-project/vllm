@@ -87,23 +87,69 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     future calls to FlashInfer will use the best implementation.
     Without autotuning, FlashInfer will rely on heuristics, which may
     be significantly slower.
+
+    Tuning is performed only on rank 0. The resulting cache is broadcast
+    to every rank so all ranks dispatch the same kernel tactic.
     """
+    import os
+    import tempfile
+
     import vllm.utils.flashinfer as fi_utils
+    from vllm.distributed.parallel_state import get_world_group
 
-    with torch.inference_mode(), fi_utils.autotune():
-        # Certain FlashInfer kernels (e.g. nvfp4 routed moe) are
-        # incompatible with autotuning. This state is used to skip
-        # those kernels during the autotuning process.
-        fi_utils._is_fi_autotuning = True
+    world = get_world_group()
+    is_leader = world.rank_in_group == 0
 
-        # We skip EPLB here since we don't want to record dummy metrics
-        # When autotuning with number of tokens m, flashinfer will autotune
-        # operations for all number of tokens up to m.
-        # So we only need to run with the max number of tokens.
-        runner._dummy_run(
-            runner.scheduler_config.max_num_batched_tokens,
-            skip_eplb=True,
-            is_profile=True,
+    cache_dir = tempfile.mkdtemp(prefix="vllm_flashinfer_autotune_")
+    cache_path = os.path.join(cache_dir, "autotune_cache.json")
+
+    # We skip EPLB here since we don't want to record dummy metrics.
+    # When autotuning with number of tokens m, flashinfer will autotune
+    # operations for all number of tokens up to m, so we only need to
+    # run with the max number of tokens.
+    dummy_run_kwargs = dict(
+        num_tokens=runner.scheduler_config.max_num_batched_tokens,
+        skip_eplb=True,
+        is_profile=True,
+    )
+
+    with torch.inference_mode():
+        if is_leader:
+            with fi_utils.autotune(tune_mode=True, cache=cache_path):
+                runner._dummy_run(**dummy_run_kwargs)
+        else:
+            runner._dummy_run(**dummy_run_kwargs)
+
+    # Broadcast autotune cache from rank 0 to all other ranks so every
+    # rank loads the same set of chosen tactics.
+    tune_results: bytes | None = None
+    if is_leader and os.path.exists(cache_path):
+        with open(cache_path, "rb") as f:
+            tune_results = f.read()
+
+    tune_results = world.broadcast_object(tune_results, src=0)
+
+    if tune_results is None:
+        logger.warning(
+            "No FlashInfer autotune cache entries found."
+            "Falling back to default tactics."
+        )
+    else:
+        if not is_leader:
+            with open(cache_path, "wb") as f:
+                f.write(tune_results)
+        from flashinfer.autotuner import AutoTuner
+
+        AutoTuner.get().load_configs(cache_path)
+        logger.info(
+            "FlashInfer autotune cache loaded on rank %d from %s.",
+            world.rank_in_group,
+            cache_path,
         )
 
-        fi_utils._is_fi_autotuning = False
+    try:
+        if os.path.exists(cache_path):
+            os.unlink(cache_path)
+        os.rmdir(cache_dir)
+    except OSError:
+        pass
