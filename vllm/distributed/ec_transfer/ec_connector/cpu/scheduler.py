@@ -9,9 +9,9 @@ Single class, two role branches:
   mmap region, and fires `XferAck`s back to peers each step.
 - **Consumer**: lazy ZMQ DEALER pool keyed by `(peer_host, peer_port)` plus
   a local `_remote_encodings` of outstanding transfers, a `_ready` set of
-  arrived-but-not-yet-loaded mm_hashes, and a
-  `_to_free_after_load` deferred-free list that closes the loop one
-  step after the worker has copied the bytes out of the mmap.
+  arrived-but-not-yet-loaded mm_hashes, a `_loaded` mmap cache that keeps
+  completed transfer blocks alive for local re-copy, and a `_pending_reload`
+  set tracking which `_loaded` entries were requested this step.
 
 Locking
 -------
@@ -106,7 +106,6 @@ class ECCPUScheduler:
             self._engine_id,
             nixl_agent_config(num_threads=1, capture_telemetry=True),
         )
-        self._agent_metadata: bytes = self._nixl.get_agent_metadata()
 
         # Build the mmap region + derived layout.
         layout = setup_ec_region(vllm_config)
@@ -116,15 +115,19 @@ class ECCPUScheduler:
         self._block_size_bytes = layout.block_size_bytes
         self._num_blocks = layout.num_blocks
 
-        # Register the mmap with NIXL. `register_memory` takes
-        # a list of `(addr, size, device_id)` reg descs; we register the
-        # whole region as a single contiguous DRAM chunk.
+        # Register the whole mmap as a single DRAM region bound to UCX.
+        # Reg descs are `(addr, size, device_id, name)` 4-tuples.
         reg_descs = self._nixl.get_reg_descs(
-            [(self._region.base_ptr, self._region.total_size_bytes, 0)],
+            [(self._region.base_ptr, self._region.total_size_bytes, 0, "")],
             _NIXL_DRAM,
         )
-        self._nixl.register_memory(reg_descs)
+        self._nixl.register_memory(reg_descs, backends=["UCX"])
         self._registered_reg_descs = reg_descs
+
+        # Snapshot agent metadata after register_memory so peers see our
+        # registered DRAM region; otherwise their `prep_xfer_dlist` against us
+        # has no backend that handles DRAM_SEG.
+        self._agent_metadata: bytes = self._nixl.get_agent_metadata()
 
         # Per-block xfer descs: one descriptor per block
         self._block_descs_list = build_block_descs(

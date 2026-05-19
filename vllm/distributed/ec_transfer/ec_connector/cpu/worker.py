@@ -150,8 +150,9 @@ class ECCPUWorker:
         torch.cuda.current_stream().wait_event(self._copy_event)
 
     def shutdown(self) -> None:
-        # cudaHostUnregister must run from the same CUDA context as the
-        # cudaHostRegister in __init__, i.e. this process.
+        # Drop the cached blocks view before region cleanup; otherwise
+        # mmap_obj.close() raises BufferError on its memoryview export.
+        self._cpu_blocks = None  # type: ignore[assignment]
         try:
             self._region.cleanup()
         except Exception:
