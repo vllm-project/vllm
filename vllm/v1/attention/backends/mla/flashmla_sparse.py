@@ -449,7 +449,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
     ) -> "FlashMLASparseMetadata.FP8SeparatePrefillDecode":
         num_tokens = common_attn_metadata.num_actual_tokens
 
-        (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens) = (
+        (num_decodes, _, num_decode_tokens, num_prefill_tokens) = (
             split_decodes_and_prefills(
                 common_attn_metadata,
                 decode_threshold=self.reorder_batch_threshold or 1,
@@ -670,7 +670,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         # `c128a_global_decode_topk_indices.shape[0]` lines up with q in
         # `_forward_decode`. The per-token C128A kernel handles non-uniform
         # query lengths.
-        (num_decodes, _, num_decode_tokens, num_prefill_tokens) = (
+        (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens) = (
             split_decodes_and_prefills(
                 cm,
                 decode_threshold=self.reorder_batch_threshold or 1,

@@ -829,11 +829,27 @@ class VllmConfig:
         executor_backend = self.parallel_config.distributed_executor_backend
         executor_class = Executor.get_class(self)
         executor_supports_async_sched = executor_class.supports_async_scheduling()
+        deepseek_v4_async_unsupported = False
+        if self.model_config is not None:
+            architectures = (
+                getattr(self.model_config.hf_config, "architectures", None) or []
+            )
+            model_type = getattr(self.model_config.hf_text_config, "model_type", None)
+            deepseek_v4_async_unsupported = (
+                model_type == "deepseek_v4"
+                or "DeepseekV4ForCausalLM" in architectures
+            )
 
         if self.scheduler_config.async_scheduling:
             # Async scheduling explicitly enabled, hard fail any incompatibilities.
             # Currently, async scheduling only support eagle speculative
             # decoding.
+            if deepseek_v4_async_unsupported:
+                raise ValueError(
+                    "Async scheduling is currently disabled for DeepSeek V4. "
+                    "The sparse MLA FlashInfer path can produce non-repeatable "
+                    "outputs with async scheduling; set async_scheduling=False."
+                )
             if self.speculative_config is not None:
                 if (
                     self.speculative_config.method not in get_args(EagleModelTypes)
@@ -856,7 +872,14 @@ class VllmConfig:
                 )
         elif self.scheduler_config.async_scheduling is None:
             # Enable async scheduling unless there is an incompatible option.
-            if (
+            if deepseek_v4_async_unsupported:
+                logger.warning_once(
+                    "Async scheduling is disabled by default for DeepSeek V4 "
+                    "because the sparse MLA FlashInfer path can produce "
+                    "non-repeatable outputs with async scheduling."
+                )
+                self.scheduler_config.async_scheduling = False
+            elif (
                 self.model_config is not None
                 and self.model_config.runner_type == "pooling"
             ):
@@ -900,6 +923,18 @@ class VllmConfig:
             "Asynchronous scheduling is %s.",
             "enabled" if self.scheduler_config.async_scheduling else "disabled",
         )
+
+        if (
+            deepseek_v4_async_unsupported
+            and self.cache_config is not None
+            and self.cache_config.enable_prefix_caching
+        ):
+            logger.warning_once(
+                "Prefix caching is disabled for DeepSeek V4 because the sparse "
+                "MLA FlashInfer path can produce non-repeatable outputs with "
+                "cache-hit requests."
+            )
+            self.cache_config.enable_prefix_caching = False
 
         if self.parallel_config.disable_nccl_for_dp_synchronization is None:
             if self.scheduler_config.async_scheduling:
@@ -1044,6 +1079,12 @@ class VllmConfig:
 
         # async tp is built on top of sequence parallelism and requires it.
         pass_config = self.compilation_config.pass_config
+        if deepseek_v4_async_unsupported and pass_config.fuse_allreduce_rms:
+            logger.warning_once(
+                "AllReduce + RMSNorm fusion is disabled for DeepSeek V4 "
+                "because this fused path can produce non-repeatable outputs."
+            )
+            pass_config.fuse_allreduce_rms = False
         if pass_config.fuse_gemm_comms:
             pass_config.enable_sp = True
         if pass_config.enable_sp:

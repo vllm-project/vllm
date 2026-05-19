@@ -162,6 +162,8 @@ def _get_dsv4_sparse_mla_raw_impl():
     op = core.get_trtllm_gen_fmha_module()
     run_func = getattr(op, "trtllm_paged_attention_decode_sparse_mla_dsv4", None)
     if run_func is None:
+        run_func = getattr(op, "dsv4_sparse_mla", None)
+    if run_func is None:
         return None
     return run_func, core.device_support_pdl, core.get_device_sm_count
 

@@ -70,7 +70,6 @@ def _qnorm_rope_insert_full_cache_kernel(
     q_ptr,
     q_stride0,
     q_stride1,
-    num_q_heads,
     q_fp8_ptr,
     q_fp8_stride0,
     q_fp8_stride1,
@@ -98,15 +97,6 @@ def _qnorm_rope_insert_full_cache_kernel(
     offsets = tl.arange(0, BLOCK_SIZE)
     mask = offsets < HEAD_SIZE
 
-    if STORE_Q_FP8 and head_idx >= num_q_heads:
-        q_fp8_row = q_fp8_ptr + token_idx * q_fp8_stride0 + head_idx * q_fp8_stride1
-        tl.store(
-            q_fp8_row + offsets,
-            tl.zeros((BLOCK_SIZE,), dtype=tl.float32).to(tl.float8e4nv),
-            mask=mask,
-        )
-        return
-
     position = tl.load(positions_ptr + token_idx)
 
     q_row = q_ptr + token_idx * q_stride0 + head_idx * q_stride1
@@ -123,16 +113,13 @@ def _qnorm_rope_insert_full_cache_kernel(
         ROPE_HEAD_DIM,
         BLOCK_SIZE,
     )
-    q_bf16 = values.to(tl.bfloat16)
-    tl.store(q_row + offsets, q_bf16, mask=mask)
-
     if STORE_Q_FP8:
         q_fp8_scale_inv = tl.load(q_fp8_scale_inv_ptr)
         q_fp8_row = q_fp8_ptr + token_idx * q_fp8_stride0 + head_idx * q_fp8_stride1
-        q_fp8_values = tl.clamp(
-            q_bf16.to(tl.float32) * q_fp8_scale_inv, -448.0, 448.0
-        )
+        q_fp8_values = tl.clamp(values * q_fp8_scale_inv, -448.0, 448.0)
         tl.store(q_fp8_row + offsets, q_fp8_values.to(tl.float8e4nv), mask=mask)
+    else:
+        tl.store(q_row + offsets, values.to(tl.bfloat16), mask=mask)
 
     if head_idx != 0:
         return
@@ -193,22 +180,22 @@ def qnorm_rope_and_insert_full_k_cache(
     assert q.dtype == torch.bfloat16
     assert kv.dtype == torch.bfloat16
     assert k_cache.dtype in (torch.bfloat16, torch.float8_e4m3fn)
+    assert positions.dtype in (torch.int32, torch.int64)
     assert cos_sin_cache.dtype == torch.float32
     if q_fp8 is not None:
         assert q_fp8.dtype == torch.float8_e4m3fn
         assert q_fp8.dim() == 3 and q_fp8.shape[0] == q.shape[0]
+        assert q_fp8.shape[1] == q.shape[1]
         assert q_fp8.shape[-1] == q.shape[-1]
         assert q_fp8_scale_inv is not None
         assert q_fp8_scale_inv.dtype == torch.float32
         assert q_fp8_scale_inv.numel() == 1
 
     num_tokens_full, num_heads, _ = q.shape
-    q_heads_for_grid = q_fp8.shape[1] if q_fp8 is not None else num_heads
-    _qnorm_rope_insert_full_cache_kernel[(num_tokens_full, q_heads_for_grid)](
+    _qnorm_rope_insert_full_cache_kernel[(num_tokens_full, num_heads)](
         q,
         q.stride(0),
         q.stride(1),
-        num_heads,
         q_fp8 if q_fp8 is not None else q,
         q_fp8.stride(0) if q_fp8 is not None else q.stride(0),
         q_fp8.stride(1) if q_fp8 is not None else q.stride(1),
@@ -700,6 +687,11 @@ def build_flashinfer_mixed_sparse_indices(
     if num_tokens == 0:
         return sparse_indices, sparse_topk_lens
 
+    window_block_size = triton.next_power_of_2(max(window_size, 1))
+    topk_block_size = triton.next_power_of_2(max(padded_topk, 1))
+    max_block_size = max(window_block_size, topk_block_size)
+    num_warps = 4 if max_block_size >= 256 else 1
+
     _build_flashinfer_mixed_sparse_indices_kernel[(num_tokens,)](
         sparse_indices,
         sparse_indices.stride(0),
@@ -730,13 +722,27 @@ def build_flashinfer_mixed_sparse_indices(
         DECODE_COMPRESSED_TOPK=decode_compressed_topk,
         DECODE_COMPRESSED_INDICES_ARE_LOCAL=decode_compressed_indices_are_local,
         HAS_DECODE_COMPRESSED_LENS=has_decode_compressed_lens,
-        BLOCK_SIZE=1024,
-        num_warps=8,
+        WINDOW_BLOCK_SIZE=window_block_size,
+        TOPK_BLOCK_SIZE=topk_block_size,
+        num_warps=num_warps,
     )
     return sparse_indices, sparse_topk_lens
 
 
-@triton.jit
+@triton.jit(
+    do_not_specialize=[
+        "sparse_indices_stride",
+        "decode_swa_stride",
+        "decode_compressed_stride",
+        "prefill_topk_stride",
+        "swa_block_table_stride",
+        "swa_block_size",
+        "compressed_block_table_stride",
+        "compressed_block_size",
+        "NUM_DECODE_TOKENS",
+        "PREFILL_TOPK_STRIDE",
+    ]
+)
 def _build_flashinfer_mixed_sparse_indices_kernel(
     sparse_indices_ptr,
     sparse_indices_stride,
@@ -758,22 +764,23 @@ def _build_flashinfer_mixed_sparse_indices_kernel(
     compressed_block_table_ptr,
     compressed_block_table_stride,
     compressed_block_size,
-    NUM_DECODE_TOKENS: tl.constexpr,
+    NUM_DECODE_TOKENS,
     WINDOW_SIZE: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
     TOP_K: tl.constexpr,
     PADDED_TOP_K: tl.constexpr,
-    PREFILL_TOPK_STRIDE: tl.constexpr,
+    PREFILL_TOPK_STRIDE,
     DECODE_COMPRESSED_TOPK: tl.constexpr,
     DECODE_COMPRESSED_INDICES_ARE_LOCAL: tl.constexpr,
     HAS_DECODE_COMPRESSED_LENS: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
+    WINDOW_BLOCK_SIZE: tl.constexpr,
+    TOPK_BLOCK_SIZE: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
 
     if token_idx < NUM_DECODE_TOKENS:
-        for i in range(0, WINDOW_SIZE, BLOCK_SIZE):
-            offset = i + tl.arange(0, BLOCK_SIZE)
+        for i in range(0, WINDOW_SIZE, WINDOW_BLOCK_SIZE):
+            offset = i + tl.arange(0, WINDOW_BLOCK_SIZE)
             mask = offset < WINDOW_SIZE
             values = tl.load(
                 decode_swa_indices_ptr + token_idx * decode_swa_stride + offset,
@@ -787,8 +794,8 @@ def _build_flashinfer_mixed_sparse_indices_kernel(
             )
 
         compressed_len = tl.zeros((), dtype=tl.int32)
-        for i in range(0, PADDED_TOP_K, BLOCK_SIZE):
-            offset = i + tl.arange(0, BLOCK_SIZE)
+        for i in range(0, PADDED_TOP_K, TOPK_BLOCK_SIZE):
+            offset = i + tl.arange(0, TOPK_BLOCK_SIZE)
             mask = offset < PADDED_TOP_K
             values = tl.load(
                 decode_compressed_indices_ptr
@@ -848,8 +855,8 @@ def _build_flashinfer_mixed_sparse_indices_kernel(
     swa_start_pos = pos - swa_len + 1
     topk_len = tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K)
 
-    for i in range(0, WINDOW_SIZE, BLOCK_SIZE):
-        offset = i + tl.arange(0, BLOCK_SIZE)
+    for i in range(0, WINDOW_SIZE, WINDOW_BLOCK_SIZE):
+        offset = i + tl.arange(0, WINDOW_BLOCK_SIZE)
         mask = offset < WINDOW_SIZE
         pos_offset = swa_start_pos + offset
         block_indices = pos_offset // swa_block_size
@@ -867,8 +874,8 @@ def _build_flashinfer_mixed_sparse_indices_kernel(
             mask=mask,
         )
 
-    for i in range(0, PADDED_TOP_K, BLOCK_SIZE):
-        offset = i + tl.arange(0, BLOCK_SIZE)
+    for i in range(0, PADDED_TOP_K, TOPK_BLOCK_SIZE):
+        offset = i + tl.arange(0, TOPK_BLOCK_SIZE)
         mask = offset < PADDED_TOP_K
         local_idx = tl.load(
             prefill_topk_indices_ptr + prefill_idx * prefill_topk_stride + offset,

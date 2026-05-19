@@ -169,6 +169,7 @@ class DeepseekSparseSWAMetadata:
     num_prefill_tokens: int = 0
 
     # Pre-computed prefill metadata shared across all DeepseekV4 attention layers.
+    prefill_query_start_loc: torch.Tensor | None = None
     prefill_seq_lens: torch.Tensor | None = None
     prefill_gather_lens: torch.Tensor | None = None
 
@@ -400,28 +401,34 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
 
         # --- Prefill query metadata (single Triton kernel + CPU slicing) ---
         if num_prefills > 0:
+            pfx_query_start_loc = torch.empty(
+                num_prefills + 1, dtype=torch.int32, device=seq_lens.device
+            )
             pfx_gather_lens = torch.empty(
                 num_prefills, dtype=torch.int32, device=seq_lens.device
             )
             _compute_prefill_metadata_kernel[(1,)](
+                pfx_query_start_loc,
                 pfx_gather_lens,
                 seq_lens,
                 query_start_loc,
                 num_prefills,
                 num_decodes,
                 self.window_size,
-                BLOCK_SIZE=triton.next_power_of_2(num_prefills),
+                BLOCK_SIZE=triton.next_power_of_2(num_prefills + 1),
             )
 
+            result["prefill_query_start_loc"] = pfx_query_start_loc
             result["prefill_seq_lens"] = seq_lens[num_decodes:]
             result["prefill_gather_lens"] = pfx_gather_lens
 
         return result
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_prefills", "num_decodes", "window_size"])
 def _compute_prefill_metadata_kernel(
     # Outputs
+    prefill_query_start_loc_ptr,
     prefill_gather_lens_ptr,
     # Inputs
     seq_lens_ptr,
@@ -431,8 +438,18 @@ def _compute_prefill_metadata_kernel(
     window_size,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """Compute prefill gather_lens in a single pass."""
+    """Compute prefill-local query offsets and gather_lens in a single pass."""
     offset = tl.arange(0, BLOCK_SIZE)
+    qsl_base = tl.load(query_start_loc_ptr + num_decodes)
+
+    qsl_mask = offset < (num_prefills + 1)
+    qsl_value = tl.load(
+        query_start_loc_ptr + num_decodes + offset,
+        mask=qsl_mask,
+        other=qsl_base,
+    )
+    tl.store(prefill_query_start_loc_ptr + offset, qsl_value - qsl_base, mask=qsl_mask)
+
     mask = offset < num_prefills
 
     seq_len = tl.load(seq_lens_ptr + num_decodes + offset, mask=mask)
