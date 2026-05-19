@@ -222,6 +222,8 @@ class EngineCore:
         self.aborts_queue = queue.Queue[list[str]]()
 
         self._idle_state_callbacks: list[Callable] = []
+        self._busy_since = 0.0
+        self._last_token_at = 0.0
 
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
@@ -369,7 +371,12 @@ class EngineCore:
                 "Disabling KVTransfer for this request."
             )
 
+        was_idle = not self.scheduler.has_unfinished_requests()
         self.scheduler.add_request(request)
+        if was_idle and self.scheduler.has_unfinished_requests():
+            self._busy_since = time.monotonic()
+            self._last_token_at = 0.0
+        self._reset_readiness_if_idle()
         if request.abort_immediately:
             # Immediately abort so the connector's request_finished hook runs
             # to free any pre-admission KV-transfer resources.
@@ -382,6 +389,43 @@ class EngineCore:
         # specific finish reason, TBD whether we propagate that
         # (i.e. client-aborted vs stop criteria met).
         self.scheduler.finish_requests(request_ids, RequestStatus.FINISHED_ABORTED)
+        self._reset_readiness_if_idle()
+
+    def _track_readiness_progress(
+        self, engine_core_outputs: dict[int, EngineCoreOutputs] | None
+    ) -> None:
+        if not engine_core_outputs:
+            return
+        for outputs in engine_core_outputs.values():
+            if any(output.new_token_ids for output in outputs.outputs):
+                self._last_token_at = time.monotonic()
+                return
+
+    def _reset_readiness_if_idle(self) -> None:
+        if not self.scheduler.has_unfinished_requests():
+            self._busy_since = 0.0
+            self._last_token_at = 0.0
+
+    def check_ready(self) -> str | None:
+        if not self.scheduler.has_unfinished_requests():
+            return None
+
+        now = time.monotonic()
+        if self._last_token_at <= 0.0:
+            if now - self._busy_since <= envs.VLLM_READY_CHECK_IDLE_TIMEOUT_S:
+                return None
+            return (
+                "Engine has unfinished requests but has not generated an "
+                "initial token."
+            )
+
+        if now - self._last_token_at > envs.VLLM_READY_CHECK_PROGRESS_TIMEOUT_S:
+            return (
+                "Engine has unfinished requests but has not generated a "
+                "token recently."
+            )
+
+        return None
 
     @contextmanager
     def log_error_detail(self, scheduler_output: SchedulerOutput):
@@ -468,6 +512,8 @@ class EngineCore:
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
+        self._track_readiness_progress(engine_core_outputs)
+        self._reset_readiness_if_idle()
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
@@ -570,6 +616,8 @@ class EngineCore:
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
+        self._track_readiness_progress(engine_core_outputs)
+        self._reset_readiness_if_idle()
 
         # NOTE(nick): We can either handle the deferred tasks here or save
         # in a field and do it immediately once step_with_batch_queue is

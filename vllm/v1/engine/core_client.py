@@ -245,6 +245,9 @@ class EngineCoreClient(ABC):
     async def abort_requests_async(self, request_ids: list[str]) -> None:
         raise NotImplementedError
 
+    async def check_ready_async(self) -> str | None:
+        raise NotImplementedError
+
     async def add_lora_async(self, lora_request: LoRARequest) -> bool:
         raise NotImplementedError
 
@@ -1112,6 +1115,9 @@ class AsyncMPClient(MPClient):
         if request_ids and not self.resources.engine_dead:
             await self._send_input(EngineCoreRequestType.ABORT, request_ids)
 
+    async def check_ready_async(self) -> str | None:
+        return await self.call_utility_async("check_ready")
+
     async def pause_scheduler_async(
         self, mode: PauseMode = "abort", clear_cache: bool = True
     ) -> None:
@@ -1426,7 +1432,6 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         return chosen_engine
 
     async def call_utility_async(self, method: str, *args) -> Any:
-        # Only the result from the first engine is returned.
         return (
             await asyncio.gather(
                 *[
@@ -1435,6 +1440,22 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 ]
             )
         )[0]
+
+    async def check_ready_async(self) -> str | None:
+        reasons = await asyncio.gather(
+            *[
+                self._call_utility_async("check_ready", engine=engine)
+                for engine in self.core_engines
+            ]
+        )
+        return next(
+            (
+                f"Engine {engine_idx} is not ready: {reason}"
+                for engine_idx, reason in enumerate(reasons)
+                if reason is not None
+            ),
+            None,
+        )
 
     @staticmethod
     async def process_engine_outputs(
