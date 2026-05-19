@@ -19,7 +19,7 @@ The kernel is imported via
 import pytest
 import torch
 
-from vllm.v1.attention.ops.deepseek_v4_ops import (
+from vllm.models.deepseek_v4.common.ops import (
     dequantize_and_gather_k_cache,
     quantize_and_insert_k_cache,
 )

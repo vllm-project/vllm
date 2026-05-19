@@ -13,8 +13,8 @@ from __future__ import annotations
 import pytest
 import torch
 
+from vllm.models.deepseek_v4.common.ops import fused_q_kv_rmsnorm
 from vllm.platforms import current_platform
-from vllm.v1.attention.ops.deepseek_v4_ops import fused_q_kv_rmsnorm
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_cuda_alike(),
