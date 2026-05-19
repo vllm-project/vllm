@@ -53,9 +53,22 @@ class SecondaryTierManager(ABC):
     async jobs; get_finished() polls for completion.
     """
 
-    def __init__(self, vllm_config: "VllmConfig", primary_kv_view: memoryview) -> None:
+    def __init__(
+        self,
+        vllm_config: "VllmConfig",
+        primary_kv_view: memoryview,
+        tier_type: str,
+    ) -> None:
+        """
+        Args:
+            vllm_config: Global vLLM configuration.
+            primary_kv_view: Memoryview of the primary tier's CPU KV cache.
+            tier_type: Tier type identifier, set by SecondaryTierFactory
+                from the registered tier type.
+        """
         self._vllm_config = vllm_config
         self._primary_kv_view: memoryview = primary_kv_view
+        self.tier_type = tier_type
 
     @abstractmethod
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
@@ -153,16 +166,3 @@ class SecondaryTierManager(ABC):
     def shutdown(self) -> None:
         """Release resources held by this tier (threads, connections, etc.)."""
         return
-
-    @staticmethod
-    @abstractmethod
-    def get_tier_type() -> str:
-        """
-        Get the type identifier of this tier (e.g., "example", "storage").
-
-        Must match the "type" field in the tier config dict.
-
-        Returns:
-            Tier type string.
-        """
-        pass

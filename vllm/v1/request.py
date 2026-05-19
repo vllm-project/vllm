@@ -139,11 +139,11 @@ class Request:
 
         # Used in async scheduling.
         self.num_output_placeholders = 0
+        self.async_tokens_to_discard = 0
+
         # V2+PP: Enforces `pp_size` cadence between same-request decode steps
         # so the worker's broadcast slot ring stays consistent.
         self.next_decode_eligible_step = 0
-        # Used in forced preemption (reset_prefix_cache) with async scheduling.
-        self.discard_latest_async_tokens = False
 
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0

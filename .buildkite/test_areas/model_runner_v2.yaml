@@ -3,6 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: Model Runner V2 Core Tests
+  device: h200_35gb
   key: model-runner-v2-core-tests
   timeout_in_minutes: 45
   source_file_dependencies:
@@ -26,6 +27,7 @@ steps:
   - pytest -v -s entrypoints/llm/test_struct_output_generate.py -k "xgrammar and not speculative_config6 and not speculative_config7 and not speculative_config8 and not speculative_config0"
 
 - label: Model Runner V2 Examples
+  device: h200_35gb
   key: model-runner-v2-examples
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/examples"
@@ -101,6 +103,7 @@ steps:
     - pytest -v -s v1/distributed/test_pp_dp_v2.py"
 
 - label: Model Runner V2 Spec Decode
+  device: h200_35gb
   key: model-runner-v2-spec-decode
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"

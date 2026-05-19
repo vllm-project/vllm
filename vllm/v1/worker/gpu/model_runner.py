@@ -402,19 +402,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 ) + spec.num_speculative_blocks
             max_num_blocks_per_group.append(max_num_blocks)
 
+        (self.attn_backends, self.attn_groups, attn_cg_support, kernel_block_sizes) = (
+            init_attn_backend(self.kv_cache_config, self.vllm_config, self.device)
+        )
+
         self.block_tables = BlockTables(
             block_sizes=block_sizes,
             max_num_reqs=self.max_num_reqs,
             max_num_batched_tokens=self.max_num_tokens,
             max_num_blocks_per_group=max_num_blocks_per_group,
             device=self.device,
+            kernel_block_sizes=kernel_block_sizes,
             cp_size=self.dcp_size,
             cp_rank=self.dcp_rank,
             cp_interleave=self.cp_interleave,
-        )
-
-        self.attn_backends, self.attn_groups, attn_cg_support = init_attn_backend(
-            self.kv_cache_config, self.vllm_config, self.device
         )
         initialize_mamba_ssu_backend(
             self.vllm_config.mamba_config, self.kv_cache_config
@@ -453,6 +454,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.attn_backends,
             self.device,
             self.cache_config.cache_dtype,
+            kernel_block_sizes,
         )
         self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
 
