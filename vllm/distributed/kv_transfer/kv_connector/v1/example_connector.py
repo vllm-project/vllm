@@ -291,7 +291,8 @@ class ExampleConnector(KVConnectorBase_V1):
                 block_idxs = slot_mapping // self._block_size
                 offsets = slot_mapping % self._block_size
                 return (
-                    layer[:, block_idxs, :, offsets, :].transpose(0, 1).contiguous()
+                    layer[:, block_idxs, :, offsets, :].transpose(0, 1)
+                    .reshape(2, slot_mapping.shape[0], -1).contiguous()
                 )
             num_pages, page_size = layer.shape[1], layer.shape[2]
             return layer.reshape(2, num_pages * page_size, -1)[:, slot_mapping, ...]
