@@ -66,7 +66,7 @@ sequenceDiagram
 
     note over D: Request scheduled for execution
     D->>P: KV transfer (RDMA read)
-    P-->>D: Transfer complete notification
+    P-->D: Transfer complete
     D->>D: Stop heartbeating
     P->>P: Free KV blocks
 ```
