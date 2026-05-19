@@ -26,6 +26,7 @@ def main() -> None:
         enforce_eager=True,
         max_model_len=64,
         gpu_memory_utilization=0.20,
+        attention_backend="TRITON_ATTN",
     )
     outputs = llm.generate(
         ["Windows CUDA source build test"],
