@@ -643,3 +643,107 @@ def test_resolve_awq_moe_uses_marlin_when_supported(monkeypatch) -> None:
     assert captured["cfg"].weight_bits == 4
     assert captured["cfg"].zero_point is True
     assert captured["moe"] is DummyLayer.moe_config
+
+
+# ---------------------------------------------------------------------------
+# Tests for get_layer_config step 4 (fused QKV / packed_modules_mapping)
+# ---------------------------------------------------------------------------
+
+
+class TestGetLayerConfigFusedQKV:
+    """Tests for step-4 (fused QKV / packed_modules_mapping) logic.
+
+    Focused on preventing false-positive substring matches.
+    """
+
+    def test_exact_fusion_key_match(self):
+        """A layer whose name contains 'qkv' maps to its extra_config entry."""
+        config = make_config(
+            extra_config={
+                "model.layers.0.self_attn.qkv_proj": {"bits": 8},
+            }
+        )
+        config.packed_modules_mapping = {
+            "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        }
+        bits, _, _ = config.get_layer_config(
+            DummyLayer(), "model.layers.0.self_attn.qkv_proj"
+        )
+        assert bits == 8
+
+    def test_false_substring_match_does_not_override(self):
+        """Regression test for the false-substring-match bug.
+
+        Scenario (Qwen3.6-35B-A3B VLM):
+        - packed_modules_mapping has "qkv" → ["qkv"] (from vision encoder).
+        - The GDN text-attention layer is named "in_proj_qkvz".
+        - "qkv" is a substring of "in_proj_qkvz", so old code would enter
+          step 4 and generate sub_name "in_proj_qkvz" (replacing "qkv" with
+          "qkv"). That name is NOT in extra_config, so get_config() falls
+          back to the global default (bits=4), even though correct is 16.
+        - Fix: skip the fusion key when none of the generated sub_names
+          actually exist in extra_config.
+        """
+        config = make_config(
+            extra_config={
+                "model.layers.0.in_proj_qkv": {"bits": 16},
+                "model.layers.0.in_proj_z": {"bits": 16},
+            }
+        )
+        config.packed_modules_mapping = {
+            "qkv": ["qkv"],
+        }
+        bits, _, _ = config.get_layer_config(
+            DummyLayer(), "model.layers.0.in_proj_qkvz"
+        )
+        # bits should be the global default (4) – no erroneous fusion match
+        assert bits == 4
+
+    def test_real_qkv_fusion_key_still_resolves(self):
+        """The true "qkv" fusion (vision encoder) still resolves correctly."""
+        config = make_config(
+            extra_config={
+                "vision_model.encoder.layers.0.self_attn.qkv": {"bits": 8},
+            }
+        )
+        config.packed_modules_mapping = {
+            "qkv": ["qkv"],
+        }
+        bits, _, _ = config.get_layer_config(
+            DummyLayer(), "vision_model.encoder.layers.0.self_attn.qkv"
+        )
+        assert bits == 8
+
+    def test_mixed_fp16_and_int4_fused_layer(self):
+        """All sub-keys must agree; inconsistent configs raise ValueError."""
+        config = make_config(
+            extra_config={
+                "model.layers.0.self_attn.q_proj": {"bits": 16},
+                "model.layers.0.self_attn.k_proj": {"bits": 4},
+                "model.layers.0.self_attn.v_proj": {"bits": 4},
+            }
+        )
+        config.packed_modules_mapping = {
+            "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        }
+        with pytest.raises(ValueError, match="consistent quant config"):
+            config.get_layer_config(DummyLayer(), "model.layers.0.self_attn.qkv_proj")
+
+    def test_fusion_triggered_by_regex_configured_sub_name(self):
+        """Fusion step 4 is still triggered when sub_names match via regex.
+
+        Ensures the guard does not regress when extra_config uses regex
+        patterns instead of exact keys to configure sub-modules.
+        """
+        config = make_config(
+            extra_config={
+                r"model\.layers\.\d+\.self_attn\.(q|k|v)_proj": {"bits": 8},
+            }
+        )
+        config.packed_modules_mapping = {
+            "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        }
+        bits, _, _ = config.get_layer_config(
+            DummyLayer(), "model.layers.0.self_attn.qkv_proj"
+        )
+        assert bits == 8
