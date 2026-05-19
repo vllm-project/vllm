@@ -9,7 +9,7 @@ from tests.utils import RemoteOpenAIServer
 from vllm.tokenizers import get_tokenizer
 
 # any model with a chat template should work here
-MODEL_NAME = "Qwen/Qwen3-0.6B"
+MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
 
 
 @pytest.fixture(scope="module")
