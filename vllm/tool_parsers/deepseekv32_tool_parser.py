@@ -26,7 +26,12 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
-from vllm.tool_parsers.utils import coerce_to_schema_type, partial_tag_overlap
+from vllm.tool_parsers.utils import (
+    coerce_to_schema_type,
+    extract_types_from_schema,
+    find_tool_properties,
+    partial_tag_overlap,
+)
 
 logger = init_logger(__name__)
 
@@ -137,18 +142,7 @@ class DeepSeekV32ToolParser(ToolParser):
         param_dict: dict[str, tuple[str, str]],
     ) -> dict[str, Any]:
         """Convert raw string param values using the tool schema types."""
-        param_config: dict = {}
-        if self.tools:
-            for tool in self.tools:
-                if (
-                    hasattr(tool, "function")
-                    and tool.function.name == function_name
-                    and hasattr(tool.function, "parameters")
-                ):
-                    schema = tool.function.parameters
-                    if isinstance(schema, dict) and "properties" in schema:
-                        param_config = schema["properties"]
-                    break
+        param_config = find_tool_properties(self.tools, function_name)
 
         converted: dict[str, Any] = {}
         for name, (value, string_attr) in param_dict.items():
@@ -156,10 +150,8 @@ class DeepSeekV32ToolParser(ToolParser):
                 converted[name] = value
                 continue
 
-            param_type = "string"
-            if name in param_config and isinstance(param_config[name], dict):
-                param_type = param_config[name].get("type", "string")
-            converted[name] = coerce_to_schema_type(value, param_type)
+            param_types = extract_types_from_schema(param_config.get(name, {}))
+            converted[name] = coerce_to_schema_type(value, param_types)
         return self._repair_param_dict(converted, param_config)
 
     def extract_tool_calls(
