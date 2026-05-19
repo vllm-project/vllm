@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence
-from typing import Any, Final, Literal, cast
+from typing import Any, Final
 
 from vllm import PoolingParams, PoolingRequestOutput, PromptType
 from vllm.config import VllmConfig
@@ -13,7 +13,7 @@ from vllm.entrypoints.chat_utils import (
     ConversationMessage,
 )
 from vllm.entrypoints.openai.engine.serving import RendererChatRequest, RendererRequest
-from vllm.inputs import EngineInput, SingletonPrompt, TokensInput
+from vllm.inputs import EngineInput, SingletonPrompt
 from vllm.renderers import BaseRenderer, TokenizeParams, merge_kwargs
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
 from vllm.tool_parsers import ToolParser
@@ -104,19 +104,10 @@ class PoolingIOProcessor:
         )
 
         prompts_seq = prompt_to_seq(ctx.prompts)
-        tokenization_kwargs = dict(ctx.tokenization_kwargs or {})
-        input_type = tokenization_kwargs.pop("input_type", None)
-        if input_type is not None and self.name != "token_embed":
-            raise ValueError("input_type is only supported with task 'token_embed'.")
         tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(
-            **tokenization_kwargs
+            **(ctx.tokenization_kwargs or {})
         )
-        prompt_extras = {"input_type": input_type} if input_type is not None else None
-        return self._preprocess_cmpl_offline(
-            prompts=prompts_seq,
-            tok_params=tok_params,
-            prompt_extras=prompt_extras,
-        )
+        return self._preprocess_cmpl_offline(prompts=prompts_seq, tok_params=tok_params)
 
     def post_process_offline(
         self,
@@ -152,7 +143,7 @@ class PoolingIOProcessor:
         ]
         tok_params = request.build_tok_params(model_config)
 
-        engine_inputs = renderer.render_cmpl(
+        return renderer.render_cmpl(
             parsed_prompts,
             tok_params,
             prompt_extras={
@@ -161,11 +152,6 @@ class PoolingIOProcessor:
                 if (v := getattr(request, k, None)) is not None
             },
         )
-        self._apply_colbert_input_type(
-            engine_inputs,
-            getattr(request, "input_type", None),
-        )
-        return engine_inputs
 
     def _preprocess_chat_online(
         self,
@@ -226,131 +212,9 @@ class PoolingIOProcessor:
             for prompt in prompts
         ]
 
-        engine_inputs = self.renderer.render_cmpl(
+        return self.renderer.render_cmpl(
             parsed_prompts, tok_params, prompt_extras=prompt_extras
         )
-        input_type = None if prompt_extras is None else prompt_extras.get("input_type")
-        self._apply_colbert_input_type(engine_inputs, input_type)
-        return engine_inputs
-
-    def _apply_colbert_input_type(
-        self,
-        engine_inputs: Sequence[EngineInput],
-        input_type: Literal["query", "document"] | None,
-    ) -> None:
-        if input_type is None:
-            return
-
-        if input_type not in ("query", "document"):
-            raise ValueError("input_type must be 'query' or 'document'")
-        if not self._is_colbert_model():
-            raise ValueError("input_type is only supported for ColBERT models.")
-
-        for engine_input in engine_inputs:
-            if engine_input["type"] == "enc_dec":
-                encoder_input = engine_input["encoder_prompt"]
-                if encoder_input["type"] != "token":
-                    raise ValueError(
-                        "input_type is only supported for tokenized prompts"
-                    )
-                encoder_tokens = cast(TokensInput, encoder_input)
-                encoder_tokens["prompt_token_ids"] = self._colbert_token_ids(
-                    list(encoder_tokens["prompt_token_ids"]),
-                    input_type,
-                )
-                continue
-
-            if engine_input["type"] != "token":
-                raise ValueError("input_type is only supported for tokenized prompts")
-
-            token_input = cast(TokensInput, engine_input)
-            token_input["prompt_token_ids"] = self._colbert_token_ids(
-                list(token_input["prompt_token_ids"]),
-                input_type,
-            )
-
-    def _colbert_token_ids(
-        self,
-        token_ids: list[int],
-        input_type: Literal["query", "document"],
-    ) -> list[int]:
-        prefix_id = self._colbert_prefix_token_id(input_type)
-
-        if input_type == "query":
-            max_base_len = 31 if prefix_id is not None else 32
-            token_ids = self._truncate_colbert_query(token_ids, max_base_len)
-        elif prefix_id is not None:
-            # Reserve one token slot for the document marker to keep length stable.
-            token_ids = self._truncate_colbert_query(token_ids, len(token_ids) - 1)
-
-        if prefix_id is not None:
-            token_ids = token_ids[:1] + [prefix_id] + token_ids[1:]
-
-        if input_type == "query":
-            pad_id = self._colbert_query_pad_token_id()
-            token_ids += [pad_id] * max(32 - len(token_ids), 0)
-
-        return token_ids
-
-    def _is_colbert_model(self) -> bool:
-        colbert_archs = {
-            "HF_ColBERT",
-            "ColBERTModel",
-            "ColBERTModernBertModel",
-            "ColBERTJinaRobertaModel",
-            "ColBERTLfm2Model",
-        }
-        arch = getattr(self.model_config, "architecture", None)
-        hf_archs = (
-            getattr(getattr(self.model_config, "hf_config", None), "architectures", ())
-            or ()
-        )
-        return arch in colbert_archs or any(a in colbert_archs for a in hf_archs)
-
-    def _truncate_colbert_query(
-        self,
-        token_ids: list[int],
-        max_len: int,
-    ) -> list[int]:
-        if max_len <= 0:
-            return []
-        if len(token_ids) <= max_len:
-            return token_ids
-
-        tokenizer = self.renderer.tokenizer
-        eos_token_id = getattr(tokenizer, "eos_token_id", None)
-        sep_token_id = getattr(tokenizer, "sep_token_id", None)
-        if token_ids[-1] in (eos_token_id, sep_token_id):
-            return token_ids[: max_len - 1] + [token_ids[-1]]
-
-        return token_ids[:max_len]
-
-    def _colbert_prefix_token_id(
-        self,
-        input_type: Literal["query", "document"],
-    ) -> int | None:
-        candidates = {
-            "query": ("[QueryMarker]", "[Q]", "[unused0]"),
-            "document": ("[DocumentMarker]", "[D]", "[unused1]"),
-        }[input_type]
-        tokenizer = self.renderer.tokenizer
-        if tokenizer is None:
-            raise ValueError("Tokenizer is required for ColBERT input_type support.")
-        unk_token_id = getattr(tokenizer, "unk_token_id", None)
-
-        for token in candidates:
-            token_id = tokenizer.convert_tokens_to_ids(token)
-            if isinstance(token_id, int) and token_id != unk_token_id:
-                return token_id
-
-        return None
-
-    def _colbert_query_pad_token_id(self) -> int:
-        tokenizer = self.renderer.tokenizer
-        token_id = getattr(tokenizer, "mask_token_id", None)
-        if token_id is not None:
-            return token_id
-        raise ValueError("ColBERT query expansion requires tokenizer.mask_token_id.")
 
     def _validate_chat_template(
         self,

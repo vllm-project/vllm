@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from typing import Generic, Literal, TypeAlias, TypeVar
+from typing import Generic, TypeAlias, TypeVar
 
 from pydantic import Field
 
@@ -31,13 +31,6 @@ class PoolingCompletionRequest(
     FixedMaxLenTokenizeParamsMixin,
 ):
     task: PoolingTask | None = None
-    input_type: Literal["query", "document"] | None = Field(
-        default=None,
-        description=(
-            "For ColBERT-style token embedding models, prepare the input "
-            "as a query or document before encoding."
-        ),
-    )
 
     def to_pooling_params(self):
         return PoolingParams(

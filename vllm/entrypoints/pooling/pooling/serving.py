@@ -69,11 +69,6 @@ class ServingPooling(PoolingServingBase):
         assert request.task is not None
         pooling_task = request.task
 
-        if getattr(request, "input_type", None) is not None and (
-            pooling_task != "token_embed"
-        ):
-            raise ValueError("input_type is only supported with task 'token_embed'.")
-
         # plugin task uses io_processor.parse_request to verify inputs
         if pooling_task != "plugin" and pooling_task != self.pooling_task:
             if pooling_task not in self.supported_tasks:

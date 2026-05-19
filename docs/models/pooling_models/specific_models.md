@@ -70,20 +70,6 @@ curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
 }'
 ```
 
-For ColBERT-style query embeddings, set `input_type` to `query`. vLLM will
-insert the model's query marker token and pad/truncate the query to 32 token
-embeddings with query-expansion tokens. Use `input_type: "document"` to insert
-the document marker without fixed-length query expansion.
-
-```shell
-curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
-    "model": "jinaai/jina-colbert-v2",
-    "input": "What is machine learning?",
-    "task": "token_embed",
-    "input_type": "query"
-}'
-```
-
 An example can be found here: [examples/pooling/score/colbert_rerank_online.py](../../../examples/pooling/score/colbert_rerank_online.py)
 
 ## ColQwen3 Multi-Modal Late Interaction Models
