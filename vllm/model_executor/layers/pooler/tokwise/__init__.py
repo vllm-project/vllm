@@ -18,6 +18,8 @@ from .methods import (
 from .poolers import (
     TokenPooler,
     TokenPoolerOutput,
+    TokenPoolingFn,
+    TokenPoolingHeadFn,
     pooler_for_token_classify,
     pooler_for_token_embed,
 )
@@ -34,6 +36,8 @@ __all__ = [
     "get_tok_pooling_method",
     "TokenPooler",
     "TokenPoolerOutput",
+    "TokenPoolingFn",
+    "TokenPoolingHeadFn",
     "pooler_for_token_classify",
     "pooler_for_token_embed",
 ]

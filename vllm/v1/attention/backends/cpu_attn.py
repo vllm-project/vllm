@@ -25,6 +25,7 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import (
+    KVCacheLayoutType,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
@@ -93,6 +94,10 @@ class CPUAttentionBackend(AttentionBackend):
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         return 2, num_blocks, num_kv_heads, block_size, head_size
+
+    @classmethod
+    def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
+        return "HND"
 
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
