@@ -252,6 +252,9 @@ Code example: [examples/online_serving/openai_responses_client_with_tools.py](..
 
 The following extra parameters in the request object are supported:
 
+!!! note
+    `chat_template_kwargs` is accepted on the Responses API for forward compatibility, but reasoning/thinking kwargs such as `enable_thinking=False` may not take effect until [#37739](https://github.com/vllm-project/vllm/pull/37739) is complete; see [#42962](https://github.com/vllm-project/vllm/issues/42962). Use the [Chat API](#chat-api) when those kwargs must be honored.
+
 ??? code
 
     ```python

@@ -208,6 +208,17 @@ class ResponsesRequest(OpenAIBaseModel):
         default=None,
         description=("Additional kwargs to pass to the HF processor."),
     )
+    chat_template_kwargs: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Additional keyword args to pass to the template renderer. "
+            "Status: accepted on the Responses API for forward compatibility, "
+            "but full propagation through chat-template and reasoning paths is "
+            "tracked in vLLM issue #42962 and PR #37739. Some kwargs, such as "
+            "enable_thinking=False, may not yet take effect on this endpoint; "
+            "use the Chat API when those kwargs must be honored."
+        ),
+    )
     priority: int = Field(
         default=0,
         description=(
