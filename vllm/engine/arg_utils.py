@@ -2442,23 +2442,28 @@ class EngineArgs:
     @staticmethod
     def _get_min_mm_batched_tokens(
         model_config: ModelConfig,
-    ) -> int | None:
+    ) -> tuple[int, str] | None:
         """Get the minimum max_num_batched_tokens needed for a multimodal
         prefix-LM model to process at least one item of any supported modality.
 
-        Returns None if the value cannot be determined at this stage.
+        Returns (token_count, modality_name) for the most expensive modality,
+        or None if the value cannot be determined at this stage.
         """
         try:
             from vllm.multimodal import MULTIMODAL_REGISTRY
 
             info = MULTIMODAL_REGISTRY.get_processing_info(model_config)
+            # mm_counts=1 per modality: get_mm_max_tokens_per_item returns the
+            # per-item token ceiling for memory planning. We need the worst-case
+            # single-item budget since prefix-LM models cannot chunk MM input.
             mm_counts = {modality: 1 for modality in info.supported_mm_limits}
             max_tokens = info.get_mm_max_tokens_per_item(
                 seq_len=model_config.max_model_len,
                 mm_counts=mm_counts,
             )
             if max_tokens is not None:
-                return max(max_tokens.values())
+                modality = max(max_tokens, key=max_tokens.__getitem__)
+                return (max_tokens[modality], modality)
         except Exception as e:
             logger.warning(
                 "Failed to determine min multimodal batched tokens: %s", e)
@@ -2518,13 +2523,16 @@ class EngineArgs:
             # chunked MM input, a single multimodal item must fit in one batch.
             # Raise the floor to accommodate the largest per-item token count.
             if model_config.is_multimodal_model and model_config.is_mm_prefix_lm:
-                mm_min = self._get_min_mm_batched_tokens(model_config)
-                if mm_min is not None and mm_min > self.max_num_batched_tokens:
+                result = self._get_min_mm_batched_tokens(model_config)
+                if (result is not None
+                        and result[0] > self.max_num_batched_tokens):
+                    mm_min, modality = result
                     logger.info(
                         "Raising max_num_batched_tokens from %d to %d to "
-                        "accommodate multimodal input for prefix-LM model %s.",
+                        "accommodate '%s' input for prefix-LM model %s.",
                         self.max_num_batched_tokens,
                         mm_min,
+                        modality,
                         model_config.model,
                     )
                     self.max_num_batched_tokens = mm_min
