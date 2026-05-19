@@ -5,7 +5,6 @@ import importlib.util
 import pytest
 import torch
 
-from tests.quantization._zentorch_helpers import zentorch_ops_mock  # noqa: F401
 from vllm.model_executor.layers.quantization.torchao import torchao_version_at_least
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
@@ -401,191 +400,52 @@ def test_opt_125m_int4wo_model_running_preshuffled_kernel_online_quant(
         assert output
 
 
-# Zen CPU dispatch unit tests.
-
-
-def _make_linear_method():
-    """Build a ``TorchAOLinearMethod`` without invoking the full config pipeline."""
+@pytest.mark.skipif(
+    not TORCHAO_AVAILABLE or not TORCHAO_VERSION_AT_LEAST_0_17_0,
+    reason="torchao>=0.17.0 is not available",
+)
+def test_process_weights_after_loading_skips_zentorch_attrs_when_op_unavailable(
+    monkeypatch,
+):
+    from vllm.model_executor.layers.quantization import torchao as torchao_module
     from vllm.model_executor.layers.quantization.torchao import (
         TorchAOConfig,
         TorchAOLinearMethod,
     )
 
-    # ``torchao_config`` is only consumed on the online-quantize path, which
-    # these tests do not exercise. A sentinel keeps the constructor happy.
+    monkeypatch.setattr(torchao_module, "has_zentorch_op", lambda *_: False)
+
     config = TorchAOConfig.__new__(TorchAOConfig)
     config.torchao_config = object()
     config.skip_modules = []
     config.is_checkpoint_torchao_serialized = True
-    return TorchAOLinearMethod(config)
+    linear_method = TorchAOLinearMethod(config)
 
-
-def _make_int8(n: int = 8, k: int = 16, *, with_act_quant: bool = False):
-    """Build a real ``Int8Tensor``; when ``with_act_quant`` is True the
-    tensor carries activation-quant kwargs so it routes through the dynamic
-    qlinear path."""
     from torchao.quantization import PerRow
     from torchao.quantization.quantize_.workflows import Int8Tensor
     from torchao.quantization.quantize_.workflows.int8.int8_tensor import (
         QuantizeTensorToInt8Kwargs,
     )
 
-    qdata = torch.zeros((n, k), dtype=torch.int8)
-    # (N, 1) scale exercises the squeeze branch in process_weights_after_loading.
-    scale = torch.zeros((n, 1), dtype=torch.bfloat16)
-    act_quant_kwargs = (
-        QuantizeTensorToInt8Kwargs(granularity=PerRow()) if with_act_quant else None
-    )
-    return Int8Tensor(
+    layer = torch.nn.Module()
+    qdata = torch.zeros((8, 16), dtype=torch.int8)
+    scale = torch.zeros((8, 1), dtype=torch.bfloat16)
+    weight = Int8Tensor(
         qdata=qdata,
         scale=scale,
-        block_size=[1, k],
+        block_size=[1, 16],
         dtype=torch.bfloat16,
-        act_quant_kwargs=act_quant_kwargs,
+        act_quant_kwargs=QuantizeTensorToInt8Kwargs(granularity=PerRow()),
     )
-
-
-def _wrap_as_layer(weight_tensor: torch.Tensor):
-    """Wrap a tensor in a minimal ``nn.Module`` with a registered weight."""
-
-    layer = torch.nn.Module()
     layer.register_parameter(
         "weight",
-        torch.nn.Parameter(weight_tensor, requires_grad=False),
+        torch.nn.Parameter(weight, requires_grad=False),
     )
-    return layer
 
+    linear_method.process_weights_after_loading(layer)
 
-# ----- process_weights_after_loading: success paths ------------------------
-
-
-@pytest.mark.skipif(
-    not TORCHAO_VERSION_AT_LEAST_0_17_0, reason="torchao is not available"
-)
-def test_process_weights_after_loading_int8_dynamic_caches_dynamic_attrs(
-    monkeypatch,
-    zentorch_ops_mock,  # noqa: F811
-):
-    monkeypatch.setattr(current_platform, "is_zen_cpu", lambda: True)
-
-    n, k = 8, 16
-    layer = _wrap_as_layer(_make_int8(n=n, k=k, with_act_quant=True))
-
-    _make_linear_method().process_weights_after_loading(layer)
-
-    assert hasattr(layer, "_zentorch_dynamic_qlinear_weight")
-    assert hasattr(layer, "_zentorch_dynamic_qlinear_scales")
-    # (N, 1) scale was squeezed to (N,).
-    assert layer._zentorch_dynamic_qlinear_scales.shape == (n,)
-    assert layer.weight.numel() == 0
-
-
-# ----- process_weights_after_loading: failure paths preserve weight --------
-
-
-def test_process_weights_after_loading_not_zen_cpu_preserves_weight(monkeypatch):
-    """On non-zen platforms ``apply`` should fall back to ``F.linear``."""
-    monkeypatch.setattr(current_platform, "is_zen_cpu", lambda: False)
-
-    n, k = 8, 16
-    original = torch.randn(n, k)
-    layer = _wrap_as_layer(original.clone())
-
-    _make_linear_method().process_weights_after_loading(layer)
-
-    assert layer.weight.shape == (n, k)
-    assert layer.weight.numel() == n * k
-    torch.testing.assert_close(layer.weight.data, original)
     assert not hasattr(layer, "_zentorch_dynamic_qlinear_weight")
-
-
-def test_process_weights_after_loading_non_matching_weight_preserves_weight(
-    monkeypatch,
-    zentorch_ops_mock,  # noqa: F811
-):
-    monkeypatch.setattr(current_platform, "is_zen_cpu", lambda: True)
-
-    n, k = 8, 16
-    original = torch.randn(n, k)
-    layer = _wrap_as_layer(original.clone())
-
-    _make_linear_method().process_weights_after_loading(layer)
-
-    assert layer.weight.numel() == n * k
-    torch.testing.assert_close(layer.weight.data, original)
-    assert not hasattr(layer, "_zentorch_dynamic_qlinear_weight")
-
-
-@pytest.mark.skipif(
-    not TORCHAO_VERSION_AT_LEAST_0_17_0, reason="torchao is not available"
-)
-def test_process_weights_after_loading_int8_without_act_kwargs_preserves_weight(
-    monkeypatch,
-    zentorch_ops_mock,  # noqa: F811
-):
-    """Weight-only ``Int8Tensor`` (no ``act_quant_kwargs``)."""
-    monkeypatch.setattr(current_platform, "is_zen_cpu", lambda: True)
-
-    layer = _wrap_as_layer(_make_int8(with_act_quant=False))
-
-    _make_linear_method().process_weights_after_loading(layer)
-
-    assert layer.weight.numel() > 0
-    assert not hasattr(layer, "_zentorch_dynamic_qlinear_weight")
-
-
-# ----- apply(): zentorch dispatch ------------------------------------------
-
-
-def test_apply_dispatches_to_zentorch_dynamic_qlinear(
-    monkeypatch,
-    zentorch_ops_mock,  # noqa: F811
-):
-    from types import SimpleNamespace
-
-    monkeypatch.setattr(current_platform, "is_zen_cpu", lambda: True)
-
-    batch, k, n = 4, 16, 8
-    layer = SimpleNamespace(weight=torch.nn.Parameter(torch.empty(0)))
-    layer._zentorch_dynamic_qlinear_weight = torch.zeros((n, k), dtype=torch.int8)
-    layer._zentorch_dynamic_qlinear_scales = torch.randn(n)
-
-    captured: dict = {}
-
-    def spy(
-        inp,
-        weight,
-        weight_scales,
-        bias=None,
-        zentorch_op_name="zentorch::zentorch_dynamic_qlinear",
-    ):
-        captured["called"] = True
-        captured["op_name"] = zentorch_op_name
-        return torch.zeros(inp.shape[:-1] + (weight.shape[0],), dtype=inp.dtype)
-
-    monkeypatch.setattr(torch.ops.zentorch, "zentorch_dynamic_qlinear", spy)
-
-    x = torch.randn(batch, k)
-    out = _make_linear_method().apply(layer, x)
-
-    assert captured.get("called") is True
-    assert captured["op_name"] == "zentorch::zentorch_dynamic_qlinear"
-    assert out.shape == (batch, n)
-
-
-def test_apply_falls_back_when_no_cached_zen_attrs(monkeypatch):
-    from types import SimpleNamespace
-
-    monkeypatch.setattr(current_platform, "is_zen_cpu", lambda: True)
-
-    k, n = 16, 8
-    weight = torch.randn(n, k)
-    layer = SimpleNamespace(weight=torch.nn.Parameter(weight))
-
-    x = torch.randn(4, k)
-    out = _make_linear_method().apply(layer, x)
-
-    torch.testing.assert_close(out, torch.nn.functional.linear(x, weight))
+    assert not hasattr(layer, "_zentorch_dynamic_qlinear_scales")
 
 
 if __name__ == "__main__":

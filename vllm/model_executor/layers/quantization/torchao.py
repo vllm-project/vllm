@@ -398,7 +398,6 @@ class TorchAOLinearMethod(LinearMethodBase):
                 zentorch_op_name="zentorch::zentorch_dynamic_qlinear",
             )
 
-        # Default path: let torch / torchao handle quantized linear.
         return F.linear(x, layer.weight, bias)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -451,7 +450,6 @@ class TorchAOLinearMethod(LinearMethodBase):
 
         w = layer.weight
 
-        # ---- DA8W8 (Int8Tensor with activation quant) ----
         if not isinstance(w, Int8Tensor):
             return
         if w.act_quant_kwargs is None:

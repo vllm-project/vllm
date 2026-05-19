@@ -157,10 +157,6 @@ class CPUWNA16LinearKernel(MPLinearKernel):
         scales.data = blocked_s
         packed_zp.data = blocked_zp
 
-    # ------------------------------------------------------------------
-    # zentorch fast path (Zen CPU, GPTQ-style W4A16)
-    # ------------------------------------------------------------------
-
     def _zentorch_woq_eligible(self, layer: torch.nn.Module) -> bool:
         """Eligibility predicate for the zentorch W4A16 GPTQ fast path.
 
@@ -298,6 +294,12 @@ class CPUWNA16LinearKernel(MPLinearKernel):
         if self._zentorch_woq_eligible(layer):
             self._process_weights_for_zentorch_woq(layer)
             return
+
+        if (not self.config.zero_points) and (self.w_zp_name is not None):
+            setattr(layer, self.w_zp_name, None)
+
+        if (not self.config.has_g_idx) and (self.w_gidx_name is not None):
+            setattr(layer, self.w_gidx_name, None)
 
         weights = getattr(layer, self.w_q_name)
         # Require GPTQ pack format
