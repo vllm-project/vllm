@@ -18,11 +18,6 @@ from vllm.distributed import (
 )
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
-from vllm.model_executor.layers.deepseek_v4_attention import (
-    DeepseekV4Indexer,
-    DeepseekV4MLAModules,
-    DeepseekV4MultiHeadLatentAttentionWrapper,
-)
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     fused_topk_bias,
@@ -61,6 +56,11 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.models.deepseek_v4.attention import (
+    DeepseekV4Indexer,
+    DeepseekV4MLAModules,
+    DeepseekV4MultiHeadLatentAttentionWrapper,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import tl, triton
