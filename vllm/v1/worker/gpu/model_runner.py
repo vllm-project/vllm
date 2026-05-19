@@ -337,6 +337,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.reset_encoder_cache()
         self.reset_mm_cache()
 
+    def update_config(self, *args, **kwargs) -> None:
+        # TODO(Wentao): Use full version instead of import when fully migrated to v2
+        from vllm.v1.worker.gpu_model_runner import GPUModelRunner as GPUModelRunnerV1
+
+        GPUModelRunnerV1.update_config(self, *args, **kwargs)  # type: ignore[arg-type]
+
+        # v2 reads config via self.vllm_config (e.g. in load_model), so keep it
+        # in sync with the attributes the v1 helper just replaced.
+        self.vllm_config.model_config = self.model_config
+        self.vllm_config.load_config = self.load_config
+
     @functools.cached_property
     def main_stream(self) -> torch.cuda.Stream:
         # Cache the default CUDA stream to avoid lookup overhead.
@@ -381,19 +392,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 ) + spec.num_speculative_blocks
             max_num_blocks_per_group.append(max_num_blocks)
 
+        (self.attn_backends, self.attn_groups, attn_cg_support, kernel_block_sizes) = (
+            init_attn_backend(self.kv_cache_config, self.vllm_config, self.device)
+        )
+
         self.block_tables = BlockTables(
             block_sizes=block_sizes,
             max_num_reqs=self.max_num_reqs,
             max_num_batched_tokens=self.max_num_tokens,
             max_num_blocks_per_group=max_num_blocks_per_group,
             device=self.device,
+            kernel_block_sizes=kernel_block_sizes,
             cp_size=self.dcp_size,
             cp_rank=self.dcp_rank,
             cp_interleave=self.cp_interleave,
-        )
-
-        self.attn_backends, self.attn_groups, attn_cg_support = init_attn_backend(
-            self.kv_cache_config, self.vllm_config, self.device
         )
         initialize_mamba_ssu_backend(
             self.vllm_config.mamba_config, self.kv_cache_config
@@ -432,6 +444,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.attn_backends,
             self.device,
             self.cache_config.cache_dtype,
+            kernel_block_sizes,
         )
         self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
 
