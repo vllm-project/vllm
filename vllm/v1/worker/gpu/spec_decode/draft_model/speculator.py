@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
-import numpy as np
 import torch
 import torch.nn as nn
 
@@ -56,26 +55,26 @@ logger = init_logger(__name__)
 @triton.jit
 def _prepare_draft_model_step0_kernel(
     # ---- Target model outputs (read-only) ----
-    target_input_ids_ptr,     # [src_tokens] int32
-    target_positions_ptr,     # [src_tokens] int64
-    last_sampled_ptr,         # [max_num_reqs] int32, indexed via idx_mapping
-    idx_mapping_ptr,          # [num_reqs]    int32
+    target_input_ids_ptr,  # [src_tokens] int32
+    target_positions_ptr,  # [src_tokens] int64
+    last_sampled_ptr,  # [max_num_reqs] int32, indexed via idx_mapping
+    idx_mapping_ptr,  # [num_reqs]    int32
     # ---- Expanded output buffers (write) ----
-    out_input_ids_ptr,        # [src_tokens + num_reqs] int32
-    out_positions_ptr,        # [src_tokens + num_reqs] int64
-    out_is_rejected_ptr,      # [src_tokens + num_reqs] bool
+    out_input_ids_ptr,  # [src_tokens + num_reqs] int32
+    out_positions_ptr,  # [src_tokens + num_reqs] int64
+    out_is_rejected_ptr,  # [src_tokens + num_reqs] bool
     # ---- Metadata outputs (write) ----
-    last_token_indices_ptr,   # [max_num_reqs] int64
+    last_token_indices_ptr,  # [max_num_reqs] int64
     out_query_start_loc_ptr,  # [max_num_reqs + 1] int32  (expanded)
-    out_seq_lens_ptr,         # [max_num_reqs]     int32  (seq_len + 1)
+    out_seq_lens_ptr,  # [max_num_reqs]     int32  (seq_len + 1)
     # ---- Input metadata (read-only) ----
-    query_start_loc_ptr,      # [num_reqs + 1] int32
-    seq_lens_ptr,             # [num_reqs]     int32
-    num_rejected_ptr,         # [num_reqs]     int32
+    query_start_loc_ptr,  # [num_reqs + 1] int32
+    seq_lens_ptr,  # [num_reqs]     int32
+    num_rejected_ptr,  # [num_reqs]     int32
     # ---- Scalar sizing ----
-    src_tokens,               # int32: total target-model input tokens
-    max_num_reqs,             # int32: pre-allocated buffer capacity
-    max_model_len,            # int32: for clamping seq_len + 1
+    src_tokens,  # int32: total target-model input tokens
+    max_num_reqs,  # int32: pre-allocated buffer capacity
+    max_model_len,  # int32: for clamping seq_len + 1
     BLOCK_SIZE: tl.constexpr,
 ):
     """
@@ -95,7 +94,7 @@ def _prepare_draft_model_step0_kernel(
     req_state_idx = tl.load(idx_mapping_ptr + req_idx)
 
     q_start = tl.load(query_start_loc_ptr + req_idx)
-    q_next  = tl.load(query_start_loc_ptr + req_idx + 1)
+    q_next = tl.load(query_start_loc_ptr + req_idx + 1)
     seq_len = tl.load(seq_lens_ptr + req_idx)
     num_rejected = tl.load(num_rejected_ptr + req_idx)
 
@@ -106,8 +105,8 @@ def _prepare_draft_model_step0_kernel(
     correction_token = tl.load(last_sampled_ptr + req_state_idx).to(tl.int32)
 
     # Position of the correction token = first position of the request + num_valid.
-    start_pos       = tl.load(target_positions_ptr + q_start)
-    correction_pos  = start_pos + num_valid
+    start_pos = tl.load(target_positions_ptr + q_start)
+    correction_pos = start_pos + num_valid
 
     # Output start in the expanded buffer.
     # Each request i contributes one extra slot → out_start[i] = q_start + i.
@@ -120,32 +119,30 @@ def _prepare_draft_model_step0_kernel(
     # Main loop: copy tokens / positions / rejection mask in blocks.
     # ------------------------------------------------------------------ #
     for i in range(0, total_out, BLOCK_SIZE):
-        j        = i + tl.arange(0, BLOCK_SIZE)
+        j = i + tl.arange(0, BLOCK_SIZE)
         in_bounds = j < total_out
 
-        is_valid      = j < num_valid
+        is_valid = j < num_valid
         is_correction = j == num_valid
-        is_rejected   = (j > num_valid) & in_bounds
+        is_rejected = (j > num_valid) & in_bounds
 
         # Source index (clamped to prevent out-of-bounds; mask guards loads).
         src_idx = tl.minimum(q_start + j, src_tokens - 1)
 
-        token_ids = tl.load(target_input_ids_ptr + src_idx,
-                            mask=is_valid, other=0)
-        positions = tl.load(target_positions_ptr + src_idx,
-                            mask=is_valid, other=0)
+        token_ids = tl.load(target_input_ids_ptr + src_idx, mask=is_valid, other=0)
+        positions = tl.load(target_positions_ptr + src_idx, mask=is_valid, other=0)
 
         # Inject correction token into its dedicated slot.
         token_ids = tl.where(is_correction, correction_token, token_ids)
-        positions = tl.where(is_correction, correction_pos,  positions)
+        positions = tl.where(is_correction, correction_pos, positions)
 
         # Zero-fill rejected slots; is_rejected_mask suppresses KV writes.
         token_ids = tl.where(is_rejected, 0, token_ids)
         positions = tl.where(is_rejected, 0, positions)
 
         out_idx = out_start + j
-        tl.store(out_input_ids_ptr  + out_idx, token_ids, mask=in_bounds)
-        tl.store(out_positions_ptr  + out_idx, positions, mask=in_bounds)
+        tl.store(out_input_ids_ptr + out_idx, token_ids, mask=in_bounds)
+        tl.store(out_positions_ptr + out_idx, positions, mask=in_bounds)
         tl.store(out_is_rejected_ptr + out_idx, is_rejected, mask=in_bounds)
 
     # ------------------------------------------------------------------ #
@@ -172,25 +169,25 @@ def _prepare_draft_model_step0_kernel(
         # Pad query_start_loc beyond num_reqs for CUDA-graph capture.
         for i in range(num_reqs + 1, max_num_reqs + 1, BLOCK_SIZE):
             block = i + tl.arange(0, BLOCK_SIZE)
-            mask  = block <= max_num_reqs
+            mask = block <= max_num_reqs
             tl.store(out_query_start_loc_ptr + block, total_expanded, mask=mask)
 
         # Pad seq_lens and last_token_indices beyond num_reqs.
         for i in range(num_reqs, max_num_reqs, BLOCK_SIZE):
             block = i + tl.arange(0, BLOCK_SIZE)
-            mask  = block < max_num_reqs
-            tl.store(out_seq_lens_ptr        + block, 0, mask=mask)
-            tl.store(last_token_indices_ptr  + block, 0, mask=mask)
+            mask = block < max_num_reqs
+            tl.store(out_seq_lens_ptr + block, 0, mask=mask)
+            tl.store(last_token_indices_ptr + block, 0, mask=mask)
 
 
 def prepare_draft_model_step0_inputs(
     input_buffers: InputBuffers,
     input_batch: InputBatch,
-    last_sampled: torch.Tensor,      # [max_num_reqs] int64
-    num_rejected: torch.Tensor,      # [num_reqs]     int64
+    last_sampled: torch.Tensor,  # [max_num_reqs] int64
+    num_rejected: torch.Tensor,  # [num_reqs]     int64
     expanded_input_ids: torch.Tensor,  # [max_tokens + max_reqs] int32
     expanded_positions: torch.Tensor,  # [max_tokens + max_reqs] int64
-    is_rejected_mask: torch.Tensor,    # [max_tokens + max_reqs] bool
+    is_rejected_mask: torch.Tensor,  # [max_tokens + max_reqs] bool
     last_token_indices: torch.Tensor,  # [max_num_reqs] int64
     max_num_reqs: int,
     max_model_len: int,
@@ -203,14 +200,14 @@ def prepare_draft_model_step0_inputs(
       - input_buffers.query_start_loc  (expanded: original[i] + i)
       - input_buffers.seq_lens         (= target_seq_lens + 1)
     """
-    num_reqs   = input_batch.num_reqs
+    num_reqs = input_batch.num_reqs
     src_tokens = input_batch.num_tokens
 
     # Pick BLOCK_SIZE from CPU numpy — no D2H sync.
-    qsl_np      = input_batch.query_start_loc_np
-    query_lens  = qsl_np[1 : num_reqs + 1] - qsl_np[:num_reqs]
-    max_total_out = int(query_lens.max()) + 2   # +1 correction, +1 alignment
-    BLOCK_SIZE  = min(512, next_power_of_2(max_total_out))
+    qsl_np = input_batch.query_start_loc_np
+    query_lens = qsl_np[1 : num_reqs + 1] - qsl_np[:num_reqs]
+    max_total_out = int(query_lens.max()) + 2  # +1 correction, +1 alignment
+    BLOCK_SIZE = min(512, next_power_of_2(max_total_out))
 
     _prepare_draft_model_step0_kernel[(num_reqs,)](
         input_batch.input_ids,
@@ -269,9 +266,9 @@ class DraftModelSpeculator:
         self.num_speculative_steps = self.speculative_config.num_speculative_tokens
 
         self.scheduler_config = vllm_config.scheduler_config
-        self.max_num_reqs   = self.scheduler_config.max_num_seqs
+        self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
-        self.max_model_len  = vllm_config.model_config.max_model_len
+        self.max_model_len = vllm_config.model_config.max_model_len
         self.dtype = vllm_config.model_config.dtype
 
         self.dp_size = vllm_config.parallel_config.data_parallel_size
@@ -341,7 +338,8 @@ class DraftModelSpeculator:
     def load_model(self, target_model: nn.Module) -> None:
         target_attn_layer_names = set(
             get_layers_from_vllm_config(
-                self.vllm_config, AttentionLayerBase  # type: ignore[type-abstract]
+                self.vllm_config,
+                AttentionLayerBase,  # type: ignore[type-abstract]
             ).keys()
         )
 
@@ -366,7 +364,8 @@ class DraftModelSpeculator:
 
         all_attn_layer_names = set(
             get_layers_from_vllm_config(
-                self.vllm_config, AttentionLayerBase  # type: ignore[type-abstract]
+                self.vllm_config,
+                AttentionLayerBase,  # type: ignore[type-abstract]
             ).keys()
         )
         self.draft_attn_layer_names = all_attn_layer_names - target_attn_layer_names
@@ -406,7 +405,7 @@ class DraftModelSpeculator:
 
     def _sample_tokens(
         self,
-        logits: torch.Tensor,       # [n, vocab_size] — modified in-place
+        logits: torch.Tensor,  # [n, vocab_size] — modified in-place
         temperature: torch.Tensor,  # [n]
     ) -> torch.Tensor:
         """Greedy (argmax) or Gumbel-max sampling, matching V1 convention."""
@@ -421,7 +420,7 @@ class DraftModelSpeculator:
         q = torch.empty_like(probs)
         q.exponential_()
         sampled = probs.div(q).argmax(dim=-1)
-        greedy  = probs.argmax(dim=-1)
+        greedy = probs.argmax(dim=-1)
         return torch.where(is_greedy, greedy, sampled)
 
     @torch.inference_mode()
@@ -489,14 +488,14 @@ class DraftModelSpeculator:
         input_batch: InputBatch,
         attn_metadata: dict[str, Any],
         slot_mappings: dict[str, torch.Tensor],
-        last_hidden_states: torch.Tensor,        # unused by draft model
+        last_hidden_states: torch.Tensor,  # unused by draft model
         aux_hidden_states: list[torch.Tensor] | None,  # unused
-        num_sampled: torch.Tensor,               # [num_reqs]
-        num_rejected: torch.Tensor,              # [num_reqs]
-        last_sampled: torch.Tensor,              # [max_num_reqs]
-        next_prefill_tokens: torch.Tensor,       # [max_num_reqs]
-        temperature: torch.Tensor,               # [max_num_reqs]
-        seeds: torch.Tensor,                     # [max_num_reqs]
+        num_sampled: torch.Tensor,  # [num_reqs]
+        num_rejected: torch.Tensor,  # [num_reqs]
+        last_sampled: torch.Tensor,  # [max_num_reqs]
+        next_prefill_tokens: torch.Tensor,  # [max_num_reqs]
+        temperature: torch.Tensor,  # [max_num_reqs]
+        seeds: torch.Tensor,  # [max_num_reqs]
         num_tokens_across_dp: torch.Tensor | None = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
@@ -506,8 +505,8 @@ class DraftModelSpeculator:
         assert self.model is not None
 
         num_tokens = input_batch.num_tokens_after_padding
-        num_reqs   = input_batch.num_reqs
-        skip_attn  = dummy_run and skip_attn_for_dummy_run
+        num_reqs = input_batch.num_reqs
+        skip_attn = dummy_run and skip_attn_for_dummy_run
 
         if not skip_attn:
             assert self.block_tables is not None
@@ -531,11 +530,9 @@ class DraftModelSpeculator:
                 input_batch.positions[:src_tokens]
             )
             qsl = input_batch.query_start_loc
-            query_lens   = qsl[1 : num_reqs + 1] - qsl[:num_reqs]
+            query_lens = qsl[1 : num_reqs + 1] - qsl[:num_reqs]
             adjusted_lens = query_lens - num_rejected[:num_reqs]
-            self.last_token_indices[:num_reqs] = (
-                qsl[:num_reqs] + adjusted_lens - 1
-            )
+            self.last_token_indices[:num_reqs] = qsl[:num_reqs] + adjusted_lens - 1
             hidden_states = self.run_model(src_tokens, None, None, num_tokens_across_dp)
         else:
             # V2-native kernel: expanded buffer + correction injection.
@@ -631,7 +628,7 @@ class DraftModelSpeculator:
         # ----------------------------------------------------------
         if skip_attn:
             qsl = input_batch.query_start_loc
-            query_lens    = qsl[1 : num_reqs + 1] - qsl[:num_reqs]
+            query_lens = qsl[1 : num_reqs + 1] - qsl[:num_reqs]
             adjusted_lens = query_lens - num_rejected[:num_reqs]
             last_positions = self.input_buffers.positions[
                 qsl[:num_reqs] + adjusted_lens - 1
