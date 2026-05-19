@@ -198,7 +198,7 @@ def _ref_combine_topk_swa_ragged(
 
 @torch.inference_mode()
 def test_compute_global_topk_ragged_indices_and_indptr() -> None:
-    from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse_dsv4 import (
+    from vllm.models.deepseek_v4.attention.impl.rocm import (
         compute_global_topk_ragged_indices_and_indptr,
     )
 
@@ -330,7 +330,7 @@ def test_sparse_attn_decode_ragged_kernel() -> None:
 
 @torch.inference_mode()
 def test_combine_topk_swa_indices_ragged() -> None:
-    from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse_dsv4 import (
+    from vllm.models.deepseek_v4.attention.impl.rocm import (
         combine_topk_swa_indices_ragged,
     )
 
