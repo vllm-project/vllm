@@ -307,17 +307,84 @@ def patch_worker_dependencies():
         }
 
 
+def _expected_descriptors(
+    local_blocks: list[int],
+    remote_blocks: list[int],
+    *,
+    local_base: int,
+    remote_base: int,
+    local_block_len: int,
+    remote_block_len: int,
+    is_blocks_first: bool,
+    local_off: int = 0,
+    remote_off: int = 0,
+    transfer_len: int | None = None,
+) -> tuple[list[int], list[int], list[int]]:
+    """Expected (src_ptrs, dst_ptrs, lengths) for one transfer.
+
+    Mirrors the production coalescer: a contiguous run of blocks fuses
+    into one descriptor only when offsets are zero and transfer_len
+    equals both block_lens. Blocks-first layout walks the K region
+    first and then the V region (offset = block_len // 2).
+    """
+    if is_blocks_first:
+        regions: tuple[int, ...] = (0, 1)
+        local_region_step = local_block_len // 2
+        remote_region_step = remote_block_len // 2
+        xfer = transfer_len if transfer_len is not None else local_region_step
+    else:
+        regions = (0,)
+        local_region_step = 0
+        remote_region_step = 0
+        xfer = transfer_len if transfer_len is not None else local_block_len
+
+    can_coalesce = (
+        local_off == 0
+        and remote_off == 0
+        and xfer == local_block_len
+        and xfer == remote_block_len
+    )
+
+    src, dst, lens = [], [], []
+    for region_idx in regions:
+        local_region_off = region_idx * local_region_step
+        remote_region_off = region_idx * remote_region_step
+        if can_coalesce:
+            src.append(
+                local_base + local_region_off + local_blocks[0] * local_block_len
+            )
+            dst.append(
+                remote_base + remote_region_off + remote_blocks[0] * remote_block_len
+            )
+            lens.append(xfer * len(local_blocks))
+            continue
+        for lb, rb in zip(local_blocks, remote_blocks):
+            local_block_off = lb * local_block_len
+            remote_block_off = rb * remote_block_len
+            src.append(local_base + local_region_off + local_block_off + local_off)
+            dst.append(remote_base + remote_region_off + remote_block_off + remote_off)
+            lens.append(xfer)
+    return src, dst, lens
+
+
 @pytest.mark.asyncio
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.TransferEngine",
     FakeMooncakeWrapper,
 )
-async def test_kv_producer(monkeypatch):
+@pytest.mark.parametrize(
+    "is_blocks_first", [False, True], ids=["kv_first", "blocks_first"]
+)
+async def test_kv_producer(monkeypatch, is_blocks_first):
     """
     Simulates a Producer Worker (Prefiller) receiving a transfer request
     from a Consumer (Decoder).
 
-    Verifies memory offset calculation: ptr = base_addr + block_id * block_len.
+    Verifies memory offset calculation under both K/V-first (FA-style)
+    and blocks-first (FlashInfer HND-style) layouts. The blocks-first
+    path expands each registered layer into K and V regions and emits
+    one descriptor per (region, block) pair; K/V-first coalesces
+    contiguous blocks into a single descriptor.
     """
 
     monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
@@ -332,6 +399,7 @@ async def test_kv_producer(monkeypatch):
             _make_test_kv_cache_config(),
         )
         prefill_worker = prefill_connector.connector_worker
+        prefill_worker.transfer_topo._is_kv_layout_blocks_first = is_blocks_first
         prefill_worker.kv_caches_base_addr = [0x1000]
         block_len = 4096
         prefill_worker.block_len_per_layer = [block_len]
@@ -366,6 +434,17 @@ async def test_kv_producer(monkeypatch):
         mock_socket.send_multipart = AsyncMock()
         identity = b"consumer-id"
 
+        def expected(local_blocks, remote_blocks):
+            return _expected_descriptors(
+                local_blocks,
+                remote_blocks,
+                local_base=0x1000,
+                remote_base=0x2000,
+                local_block_len=block_len,
+                remote_block_len=block_len,
+                is_blocks_first=is_blocks_first,
+            )
+
         with patch.object(
             prefill_worker, "_send_blocks", return_value=0
         ) as mock_send_blocks:
@@ -373,11 +452,9 @@ async def test_kv_producer(monkeypatch):
             # Worker processes the consumer's request
             await prefill_worker.send_kv_to_decode(identity, mock_socket, xfer_meta)
             # Verify transfer parameters are correct
-            src_ptr = 0x1000 + 10 * block_len
-            dst_ptr = 0x2000 + 20 * block_len
-            length = 2 * block_len
+            exp_src, exp_dst, exp_lens = expected([10, 11], [20, 21])
             mock_send_blocks.assert_called_once_with(
-                "consumer-host:54321", [src_ptr], [dst_ptr], [length]
+                "consumer-host:54321", exp_src, exp_dst, exp_lens
             )
             mock_socket.send_multipart.assert_called_once()
 
@@ -404,11 +481,9 @@ async def test_kv_producer(monkeypatch):
             # Worker processes the consumer's request
             await prefill_worker.send_kv_to_decode(identity, mock_socket, xfer_meta)
             # Verify transfer parameters are correct: 11 to 20
-            src_ptr = 0x1000 + 11 * block_len
-            dst_ptr = 0x2000 + 20 * block_len
-            length = 1 * block_len
+            exp_src, exp_dst, exp_lens = expected([11], [20])
             mock_send_blocks.assert_called_once_with(
-                "consumer-host:54321", [src_ptr], [dst_ptr], [length]
+                "consumer-host:54321", exp_src, exp_dst, exp_lens
             )
             mock_socket.send_multipart.assert_called_once()
 
@@ -579,8 +654,16 @@ async def test_worker_get_finished_timeout(monkeypatch):
         assert "tx-active" in prefill_worker.reqs_need_send
 
 
-def test_register_kv_caches():
-    """Tests the memory registration logic with the underlying Mooncake engine."""
+@pytest.mark.parametrize(
+    "is_blocks_first", [False, True], ids=["kv_first", "blocks_first"]
+)
+def test_register_kv_caches(is_blocks_first):
+    """Tests the memory registration logic with the underlying Mooncake engine.
+
+    K/V-first layout (split_k_and_v=True) registers each K and V slice as
+    its own region; blocks-first (split_k_and_v=False) registers each
+    layer tensor as a single region.
+    """
 
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector", kv_role="kv_consumer"
@@ -602,6 +685,7 @@ def test_register_kv_caches():
             _make_test_kv_cache_config(),
         )
         worker = connector.connector_worker
+        worker.transfer_topo._is_kv_layout_blocks_first = is_blocks_first
         mock_thread.return_value.is_alive.return_value = False
 
         kv_cache_shape = FlashAttentionBackend.get_kv_cache_shape(
@@ -618,18 +702,27 @@ def test_register_kv_caches():
 
             mock_batch_register.assert_called_once()
             registered_ptrs, registered_lens = mock_batch_register.call_args[0]
-            expected_ptrs = {
-                tensor.data_ptr()
-                for kv_pair in kv_caches.values()
-                for tensor in kv_pair
-            }
-            assert set(registered_ptrs) == expected_ptrs
-            assert set(registered_lens) == {tensor1[0].nbytes}
 
-            # Verify block_len_per_layer is set correctly.
-            assert len(worker.block_len_per_layer) == len(registered_ptrs)
-            for bl in worker.block_len_per_layer:
-                assert bl == tensor1[0].nbytes // tensor1.shape[1]
+            if is_blocks_first:
+                # One region per layer tensor; block_len covers both halves.
+                expected_ptrs = [tensor1.data_ptr(), tensor2.data_ptr()]
+                expected_lens = [tensor1.nbytes, tensor2.nbytes]
+                expected_block_len = tensor1.nbytes // tensor1.shape[0]
+            else:
+                # One region per K/V slice; block_len is the slice stride.
+                expected_ptrs = [
+                    tensor.data_ptr()
+                    for kv_pair in kv_caches.values()
+                    for tensor in kv_pair
+                ]
+                expected_lens = [tensor1[0].nbytes] * len(expected_ptrs)
+                expected_block_len = tensor1[0].nbytes // tensor1.shape[1]
+
+            assert list(registered_ptrs) == expected_ptrs
+            assert list(registered_lens) == expected_lens
+            assert worker.block_len_per_layer == [expected_block_len] * len(
+                expected_ptrs
+            )
 
 
 def test_register_kv_caches_supports_mixed_mla_and_eagle_shapes():
@@ -688,7 +781,10 @@ def test_register_kv_caches_supports_mixed_mla_and_eagle_shapes():
     FakeMooncakeWrapper,
 )
 @pytest.mark.parametrize("d_tp_size", [1, 4], ids=["p_tp2_d_tp1", "p_tp2_d_tp4"])
-async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
+@pytest.mark.parametrize(
+    "is_blocks_first", [False, True], ids=["kv_first", "blocks_first"]
+)
+async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size, is_blocks_first):
     """
     Tests heterogeneous TP support in the producer transfer path.
 
@@ -706,6 +802,10 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
 
     local_block_len = LOCAL_BLOCK_LEN
     remote_block_len = LOCAL_BLOCK_LEN * P_TP_SIZE // d_tp_size
+    # Region length the transfer plan operates on (full block for kv-first,
+    # K/V half for blocks-first).
+    plan_local_len = local_block_len // 2 if is_blocks_first else local_block_len
+    plan_remote_len = remote_block_len // 2 if is_blocks_first else remote_block_len
 
     monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
     vllm_config = create_vllm_config(
@@ -719,6 +819,7 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
             _make_test_kv_cache_config(),
         )
         prefill_worker = prefill_connector.connector_worker
+        prefill_worker.transfer_topo._is_kv_layout_blocks_first = is_blocks_first
 
         # Override TP rank/size to simulate P TP=2
         prefill_worker.tp_rank = P_TP_RANK
@@ -781,43 +882,35 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
 
                 await prefill_worker.send_kv_to_decode(identity, mock_socket, xfer_meta)
 
-                # Verify _send_blocks was called
-                mock_send_blocks.assert_called_once()
-                call_args = mock_send_blocks.call_args[0]
-                src_ptrs = call_args[1]
-                dst_ptrs = call_args[2]
-                lengths = call_args[3]
-
-                # Flatten nested per-group block IDs for assertions
-                flat_local = [b for g in local_block_ids for b in g]
-                flat_remote = [b for g in remote_block_ids for b in g]
-
-                # Heterogeneous TP: blocks cannot be coalesced because
-                # local and remote block_lens differ
-                assert len(src_ptrs) == len(flat_local)
-                assert len(dst_ptrs) == len(flat_local)
-                assert len(lengths) == len(flat_local)
-
                 # Compute expected offsets based on TP ratio
                 if d_tp_size <= P_TP_SIZE:
                     tp_ratio = P_TP_SIZE // d_tp_size
                     expected_src_off = 0
-                    expected_dst_off = (P_TP_RANK % tp_ratio) * local_block_len
-                    expected_xfer_len = local_block_len
+                    expected_dst_off = (P_TP_RANK % tp_ratio) * plan_local_len
+                    expected_xfer_len = plan_local_len
                 else:
                     ratio_abs = d_tp_size // P_TP_SIZE
-                    expected_src_off = (d_rank % ratio_abs) * remote_block_len
+                    expected_src_off = (d_rank % ratio_abs) * plan_remote_len
                     expected_dst_off = 0
-                    expected_xfer_len = remote_block_len
+                    expected_xfer_len = plan_remote_len
 
-                for idx, (lblk, rblk) in enumerate(zip(flat_local, flat_remote)):
-                    assert src_ptrs[idx] == (
-                        0x1000 + lblk * local_block_len + expected_src_off
-                    )
-                    assert dst_ptrs[idx] == (
-                        0x2000 + rblk * remote_block_len + expected_dst_off
-                    )
-                    assert lengths[idx] == expected_xfer_len
+                flat_local = [b for g in local_block_ids for b in g]
+                flat_remote = [b for g in remote_block_ids for b in g]
+                exp_src, exp_dst, exp_lens = _expected_descriptors(
+                    flat_local,
+                    flat_remote,
+                    local_base=0x1000,
+                    remote_base=0x2000,
+                    local_block_len=local_block_len,
+                    remote_block_len=remote_block_len,
+                    is_blocks_first=is_blocks_first,
+                    local_off=expected_src_off,
+                    remote_off=expected_dst_off,
+                    transfer_len=expected_xfer_len,
+                )
+                mock_send_blocks.assert_called_once_with(
+                    "consumer-host:54321", exp_src, exp_dst, exp_lens
+                )
 
                 # Verify successful response sent back to consumer
                 mock_socket.send_multipart.assert_called_once()
