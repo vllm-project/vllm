@@ -54,7 +54,7 @@ For further details on pooling models, please refer to [this page](../../models/
     - [Score API](../../models/pooling_models/scoring.md#score-api) (`/score`)
     - [Cohere Rerank API](../../models/pooling_models/scoring.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
     - Applicable to [score models](../../models/pooling_models/scoring.md) (cross-encoder, bi-encoder, late-interaction).
-- [pooling API](../../models/pooling_models/README.md#pooling-api) (`/pooling`)
+- [Pooling API](../../models/pooling_models/README.md#pooling-api) (`/pooling`)
     - Applicable to all [pooling models](../../models/pooling_models/README.md).
 
 ## Speech to Text APIs
