@@ -135,7 +135,11 @@ class IPCWeightTransferEngine(
         """
         super().__init__(config, parallel_config)
 
-    def init_transfer_engine(self, init_info: IPCWeightTransferInitInfo) -> None:
+    def init_transfer_engine(
+        self,
+        init_info: IPCWeightTransferInitInfo,
+        model: "torch.nn.Module | None" = None,
+    ) -> None:
         """
         Initialize the weight transfer mechanism.
         This is called once at the beginning of training.
@@ -143,8 +147,9 @@ class IPCWeightTransferEngine(
 
         Args:
             init_info: IPC initialization info (empty)
+            model: Unused for IPC.
         """
-        pass
+        del model
 
     def receive_weights(
         self,

@@ -121,7 +121,11 @@ class NCCLWeightTransferEngine(
         super().__init__(config, parallel_config)
         self.model_update_group: PyNcclCommunicator | None = None
 
-    def init_transfer_engine(self, init_info: NCCLWeightTransferInitInfo) -> None:
+    def init_transfer_engine(
+        self,
+        init_info: NCCLWeightTransferInitInfo,
+        model: "torch.nn.Module | None" = None,
+    ) -> None:
         """
         Initialize NCCL process group with the trainer.
 

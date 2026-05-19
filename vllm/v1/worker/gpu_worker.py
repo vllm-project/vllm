@@ -987,7 +987,12 @@ class Worker(WorkerBase):
         assert self.weight_transfer_engine is not None
         # Parse dict into backend-specific typed dataclass
         typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
-        self.weight_transfer_engine.init_transfer_engine(typed_init_info)
+        # Hand the loaded model to the engine; backends that need to
+        # inspect the module graph (e.g. Etha, for per-parameter
+        # placement inference) consume it, others ignore.
+        self.weight_transfer_engine.init_transfer_engine(
+            typed_init_info, model=self.model_runner.model
+        )
 
     def start_weight_update(self, is_checkpoint_format: bool = True) -> None:
         """

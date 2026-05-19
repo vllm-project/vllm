@@ -118,13 +118,21 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
             ) from e
 
     @abstractmethod
-    def init_transfer_engine(self, init_info: TInitInfo) -> None:
+    def init_transfer_engine(
+        self,
+        init_info: TInitInfo,
+        model: "torch.nn.Module | None" = None,
+    ) -> None:
         """
         Initialize the weight transfer mechanism.
         This is called once at the beginning of training.
 
         Args:
             init_info: Backend-specific initialization info
+            model: Optional reference to the loaded inference model.
+                Backends that need to inspect the model graph (e.g. to
+                infer per-parameter sharding placements) may consume
+                this; backends that don't can ignore it.
         """
         raise NotImplementedError
 

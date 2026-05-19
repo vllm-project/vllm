@@ -9,5 +9,5 @@ from vllm.config.utils import config
 class WeightTransferConfig:
     """Configuration for weight transfer during RL training."""
 
-    backend: Literal["nccl", "ipc"] = "nccl"
+    backend: Literal["nccl", "ipc", "etha"] = "nccl"
     """The backend to use for weight transfer."""
