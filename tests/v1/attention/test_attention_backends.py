@@ -488,6 +488,10 @@ def _test_backend_correctness(
         else:
             backend_cls = None
 
+        if backend_name == AttentionBackendEnum.FLASHINFER:
+            set_kv_cache_layout("HND")
+            reset_kv_cache_layout = True
+
         # Apply stride order like runtime does in
         # _reshape_kv_cache (attn_utils.py:182-210): permute to physical
         # layout, make contiguous, then permute to logical layout.
@@ -502,10 +506,6 @@ def _test_backend_correctness(
                 kv_cache_for_backend = (
                     kv_cache.permute(*stride_order).contiguous().permute(*inv_order)
                 )
-
-        if backend_name == AttentionBackendEnum.FLASHINFER:
-            set_kv_cache_layout("HND")
-            reset_kv_cache_layout = True
 
         try:
             backend_output = run_attention_backend(
