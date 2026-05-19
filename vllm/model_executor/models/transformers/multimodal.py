@@ -152,7 +152,9 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         # Keep these as batched, as they always have batch size as first dim
         mm_fields["image_grid_thw"] = MultiModalFieldConfig.batched("image")
         mm_fields["video_grid_thw"] = MultiModalFieldConfig.batched("image")
-        mm_fields["num_image_patches"] = MultiModalFieldConfig.batched("image")
+        mm_fields["num_image_patches"] = MultiModalFieldConfig.batched(
+            "image", keep_on_cpu=True
+        )
         return mm_fields
 
     def _get_hf_mm_data(
