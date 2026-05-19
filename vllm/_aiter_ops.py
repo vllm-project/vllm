@@ -805,7 +805,10 @@ def _rocm_aiter_per_tensor_quant_impl(
     quant_dtype: torch.dtype,
     scale: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    from aiter.ops.quant import per_tensor_quant_hip
+    from aiter.ops.quant import per_tensor_quant_hip, static_per_tensor_quant_fp8_hip
+
+    if quant_dtype == FP8_DTYPE and scale is not None:
+        return static_per_tensor_quant_fp8_hip(x, scale), scale.view(1)
 
     return per_tensor_quant_hip(x, scale, quant_dtype)
 

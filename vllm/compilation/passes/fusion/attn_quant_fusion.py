@@ -2,11 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import operator
 from collections.abc import Callable
 
 import torch
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
@@ -19,7 +21,12 @@ from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import _USE_LAYERNAME, _encode_layer_name
 
-from ..vllm_inductor_pass import VllmFusionPatternMatcherPass, VllmPatternReplacement
+from ..vllm_inductor_pass import (
+    VllmFusionPatternMatcherPass,
+    VllmInductorPass,
+    VllmPatternMatcherPass,
+    VllmPatternReplacement,
+)
 from .matcher_utils import MatcherQuantFP8
 from .rms_quant_fusion import QUANT_OPS
 
@@ -401,3 +408,130 @@ class AttnQuantFusionPass(VllmFusionPatternMatcherPass):
                         break
 
         self.dump_patterns(config, self.pm_pass)
+
+    def _rewrite_q_pre_quant_to_aiter(self, graph: torch.fx.Graph) -> int:
+        """Rewrite static FP8 Q-pre-quant nodes to AITER's per-tensor path.
+
+        Matches: rope → reshape(q) → static_scaled_fp8_quant → reshape →
+                 unified_attention(query=...)
+        Replaces the quant node with rocm_aiter_per_tensor_quant.
+        """
+        if not (rocm_aiter_ops.is_enabled()
+                and hasattr(torch.ops.vllm, "rocm_aiter_per_tensor_quant")):
+            return 0
+
+        replacements = 0
+        created_q: dict[torch.fx.Node, torch.fx.Node] = {}
+
+        for node in list(graph.nodes):
+            if not (node.op == "call_function"
+                    and node.target == auto_functionalized
+                    and len(node.args) > 0
+                    and node.args[0]
+                    == torch.ops._C.static_scaled_fp8_quant.default):
+                continue
+
+            q_flat = node.kwargs.get("input", None)
+            scale = node.kwargs.get("scale", None)
+            if q_flat is None or scale is None:
+                continue
+            if tuple(node.kwargs.get("group_shape", ())) != (-1, -1):
+                continue
+
+            if not (isinstance(q_flat, torch.fx.Node)
+                    and q_flat.op == "call_function"
+                    and q_flat.target == RESHAPE_OP):
+                continue
+
+            q_after = q_flat.args[0]
+            if not (isinstance(q_after, torch.fx.Node)
+                    and q_after.op == "call_function"
+                    and q_after.target == operator.getitem
+                    and len(q_after.args) == 2
+                    and q_after.args[1] == 1):
+                continue
+
+            rope_node = q_after.args[0]
+            if not (isinstance(rope_node, torch.fx.Node)
+                    and rope_node.op == "call_function"
+                    and rope_node.target == auto_functionalized
+                    and len(rope_node.args) > 0
+                    and rope_node.args[0] == torch.ops.vllm
+                    .fused_rope_and_unified_kv_cache_update.default):
+                continue
+
+            matched_getitems: list[torch.fx.Node] = []
+            for q_getitem in list(node.users):
+                if not (q_getitem.op == "call_function"
+                        and q_getitem.target == operator.getitem
+                        and len(q_getitem.args) == 2
+                        and q_getitem.args[1] == 1):
+                    continue
+                for q_view in list(q_getitem.users):
+                    if not (q_view.op == "call_function"
+                            and q_view.target == RESHAPE_OP):
+                        continue
+                    for attn in list(q_view.users):
+                        if not (attn.op == "call_function"
+                                and attn.target == auto_functionalized
+                                and len(attn.args) > 0
+                                and attn.args[0] == ATTN_OP):
+                            continue
+                        if attn.kwargs.get("query") is not q_view:
+                            continue
+                        if attn.kwargs.get("output_scale") is not None:
+                            continue
+                        if attn.kwargs.get("output_block_scale") is not None:
+                            continue
+                        key_node = attn.kwargs.get("key")
+                        dep_node = attn.kwargs.get("kv_cache_dummy_dep")
+                        if not (isinstance(key_node, torch.fx.Node)
+                                and key_node.op == "call_function"
+                                and key_node.target == operator.getitem
+                                and key_node.args[0] is rope_node
+                                and key_node.args[1] == 2):
+                            continue
+                        if not (isinstance(dep_node, torch.fx.Node)
+                                and dep_node.op == "call_function"
+                                and dep_node.target == operator.getitem
+                                and dep_node.args[0] is rope_node
+                                and dep_node.args[1] == 0):
+                            continue
+                        matched_getitems.append(q_getitem)
+                        break
+
+            if not matched_getitems:
+                continue
+
+            if node not in created_q:
+                with graph.inserting_before(matched_getitems[0]):
+                    aiter_pair = graph.call_function(
+                        torch.ops.vllm.rocm_aiter_per_tensor_quant.default,
+                        args=(q_flat, FP8_DTYPE, scale),
+                    )
+                    aiter_q = graph.call_function(
+                        operator.getitem, args=(aiter_pair, 0)
+                    )
+                created_q[node] = aiter_q
+            else:
+                aiter_q = created_q[node]
+
+            for q_getitem in matched_getitems:
+                q_getitem.replace_all_uses_with(aiter_q)
+                replacements += 1
+
+        if replacements > 0:
+            graph.eliminate_dead_code()
+            graph.lint()
+            if graph.owning_module is not None:
+                graph.owning_module.recompile()
+            logger.debug("Q pre-quant → AITER: %d replacements", replacements)
+
+        return replacements
+
+    @VllmInductorPass.time_and_log
+    def __call__(self, graph: torch.fx.Graph) -> None:
+        pm_matches = self.pm_pass.apply(graph)
+        fallback_matches = self._rewrite_q_pre_quant_to_aiter(graph)
+        self.matched_count = pm_matches + fallback_matches
+        VllmPatternMatcherPass.match_table[self.pass_name] += self.matched_count
