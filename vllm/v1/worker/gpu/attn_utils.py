@@ -180,7 +180,7 @@ def _allocate_and_reshape_kv_cache(
                 spec = spec_for_layer[layer_name]
                 key = id(spec)
                 if key not in seen_specs:
-                    block_size = None
+                    kernel_block_size = None
                     reshape_num_blocks = num_blocks
                     if kernel_block_sizes is not None and isinstance(
                         spec, AttentionSpec
@@ -197,7 +197,7 @@ def _allocate_and_reshape_kv_cache(
                         reshape_num_blocks,
                         num_layer_slots=num_layer_slots,
                         layout=layout,
-                        block_size=block_size,
+                        block_size=kernel_block_size,
                     )
                 kv_caches[layer_name] = seen_specs[key][slot_idx]
 
