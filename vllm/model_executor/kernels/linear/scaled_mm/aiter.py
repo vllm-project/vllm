@@ -412,8 +412,7 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             if not rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k):
                 return (
                     False,
-                    f"(N={n}, K={k}) is not in the aiter Triton "
-                    "blockscale tuned list.",
+                    f"(N={n}, K={k}) is not in the aiter Triton blockscale tuned list.",
                 )
         return True, None
 
