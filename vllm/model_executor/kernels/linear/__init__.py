@@ -160,6 +160,9 @@ from vllm.model_executor.kernels.linear.scaled_mm.triton import (
 from vllm.model_executor.kernels.linear.scaled_mm.xpu import (
     XPUFP8ScaledMMLinearKernel,
 )
+from vllm.model_executor.kernels.linear.scaled_mm.zentorch import (
+    ZentorchInt8ScaledMMLinearKernel,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import PlatformEnum, current_platform
 
@@ -257,7 +260,7 @@ def _filter_kernels_by_backend(
 
 # in priority/performance order (when available)
 _POSSIBLE_INT8_KERNELS: dict[PlatformEnum, list[type[Int8ScaledMMLinearKernel]]] = {
-    PlatformEnum.CPU: [CPUInt8ScaledMMLinearKernel],
+    PlatformEnum.CPU: [ZentorchInt8ScaledMMLinearKernel, CPUInt8ScaledMMLinearKernel],
     PlatformEnum.CUDA: [
         CutlassInt8ScaledMMLinearKernel,
         TritonInt8ScaledMMLinearKernel,
@@ -1023,6 +1026,7 @@ __all__ = [
     "RowWiseTorchFP8ScaledMMLinearKernel",
     "ROCmFP8ScaledMMLinearKernel",
     "TritonInt8ScaledMMLinearKernel",
+    "ZentorchInt8ScaledMMLinearKernel",
     "MPLinearKernel",
     "MPLinearLayerConfig",
     "AllSparkLinearKernel",

@@ -6,12 +6,10 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm import envs
-from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     convert_to_channelwise,
 )
-from vllm.model_executor.layers.quantization.utils.zentorch import has_zentorch_op
 from vllm.model_executor.layers.utils import check_cpu_sgl_kernel
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
@@ -24,8 +22,6 @@ from .ScaledMMLinearKernel import (
     Int8ScaledMMLinearKernel,
     Int8ScaledMMLinearLayerConfig,
 )
-
-logger = init_logger(__name__)
 
 
 class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
@@ -41,37 +37,7 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
     def can_implement(cls, c: Int8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
 
-    # ------------------------------------------------------------------
-    # zentorch fast path (Zen CPU, dynamic-symmetric W8A8)
-    # ------------------------------------------------------------------
-
-    def _zentorch_w8a8_eligible(self, layer: torch.nn.Module) -> bool:
-        """Eligibility predicate for the zentorch dynamic-symmetric W8A8 path.
-
-        Constraints (any failure -> oneDNN/sgl fallback, ``layer`` untouched):
-          * Zen CPU + ``zentorch_dynamic_qlinear`` registered.
-          * Dynamic activation scheme (``not is_static_input_scheme``).
-          * Symmetric activations (``input_symmetric``).
-          * Per-channel weight quantization. Per-tensor weights (fused or
-            non-fused) are rejected: zentorch's per-channel kernel adds no
-            benefit over oneDNN's per-tensor path and forging a fake
-            per-channel scale from a per-tensor one misrepresents the model.
-        """
-        if not has_zentorch_op("zentorch_dynamic_qlinear"):
-            return False
-        if self.config.is_static_input_scheme:
-            return False
-        if not self.config.input_symmetric:
-            return False
-        return self.config.is_channelwise
-
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # zentorch path: dynamic-symmetric W8A8 on AMD Zen CPUs
-        if self._zentorch_w8a8_eligible(layer):
-            self._process_weights_for_zentorch(layer)
-            self.linear_method = self._apply_weights_zentorch
-            return
-
         w_q_name, _, _, _, _ = self.layer_param_names
         weight = getattr(layer, w_q_name)
         dtype = weight.dtype
@@ -87,57 +53,6 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         else:
             self.linear_method = self._apply_weights_onednn
             self.process_weights_for_onednn(layer)
-
-    def _process_weights_for_zentorch(self, layer: torch.nn.Module) -> None:
-        """Prepare weights for ``zentorch_dynamic_qlinear``.
-
-        Keeps weight in [N, K] layout and converts the per-channel weight
-        scale to bf16 with shape ``(N,)``. Per-tensor schemes are filtered
-        out by the eligibility predicate and never reach this function.
-        """
-        w_q_name, w_s_name, _, _, _ = self.layer_param_names
-        weight = getattr(layer, w_q_name)
-        n = weight.shape[0]
-        replace_parameter(
-            layer,
-            w_q_name,
-            torch.nn.Parameter(weight.data.contiguous(), requires_grad=False),
-        )
-
-        weight_scale = getattr(layer, w_s_name)
-        ws = weight_scale.data
-        if ws.dim() == 2 and ws.shape[-1] == 1:
-            ws = ws.squeeze(-1)
-        ws = ws.to(torch.bfloat16).contiguous()
-        assert ws.shape == (n,), (
-            f"[zen_cpu] expected weight scale shape ({n},), got {tuple(ws.shape)}"
-        )
-
-        replace_parameter(
-            layer,
-            w_s_name,
-            torch.nn.Parameter(ws, requires_grad=False),
-        )
-        layer._zentorch_kind = "compressed_tensors_w8a8"
-        layer._zentorch_processed_weights = True
-        logger.info_once(
-            "[zen_cpu] Using zentorch_dynamic_qlinear for W8A8 (dynamic-symmetric)"
-        )
-
-    def _apply_weights_zentorch(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        w_q_name, w_s_name, _, _, _ = self.layer_param_names
-        return torch.ops.zentorch.zentorch_dynamic_qlinear(
-            x,
-            getattr(layer, w_q_name),
-            getattr(layer, w_s_name),
-            bias,
-            zentorch_op_name="zentorch::zentorch_dynamic_qlinear",
-        )
 
     def process_weights_for_onednn(self, layer: torch.nn.Module) -> None:
         # WEIGHT
