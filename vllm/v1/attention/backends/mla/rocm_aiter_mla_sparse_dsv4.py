@@ -31,9 +31,7 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
-    from vllm.model_executor.layers.deepseek_v4_attention import (
-        DeepseekV4MLAAttention,
-    )
+    from vllm.models.deepseek_v4.attention import DeepseekV4MLAAttention
 
 
 def _build_indptr_from_lengths(lengths: torch.Tensor) -> torch.Tensor:
