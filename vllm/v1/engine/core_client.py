@@ -20,7 +20,6 @@ import msgspec.msgpack
 import zmq
 import zmq.asyncio
 
-import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.envs import VLLM_ENGINE_READY_TIMEOUT_S
 from vllm.logger import init_logger
@@ -272,9 +271,6 @@ class EngineCoreClient(ABC):
     ) -> list[_R]:
         raise NotImplementedError
 
-    async def check_health_async(self) -> None:
-        raise NotImplementedError
-
 
 class InprocClient(EngineCoreClient):
     """
@@ -367,9 +363,6 @@ class InprocClient(EngineCoreClient):
 
     def dp_engines_running(self) -> bool:
         return False
-
-    async def check_health_async(self) -> None:
-        return
 
 
 @dataclass
@@ -1187,22 +1180,6 @@ class AsyncMPClient(MPClient):
         return await self.call_utility_async(
             "collective_rpc", method, timeout, args, kwargs
         )
-
-    async def check_health_async(self) -> None:
-        timeout = envs.VLLM_HEALTH_CHECK_TIMEOUT
-        if timeout <= 0:
-            return
-
-        try:
-            await asyncio.wait_for(
-                self.call_utility_async("health_ping"),
-                timeout=timeout,
-            )
-        except asyncio.TimeoutError as e:
-            raise EngineDeadError(
-                f"EngineCore did not respond to health ping within {timeout}s. "
-                "It may be stuck in a long operation or hung."
-            ) from e
 
 
 class DPAsyncMPClient(AsyncMPClient):

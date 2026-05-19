@@ -97,6 +97,7 @@ if TYPE_CHECKING:
     CMAKE_BUILD_TYPE: Literal["Debug", "Release", "RelWithDebInfo"] | None = None
     VERBOSE: bool = False
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
+
     VLLM_READY_CHECK_IDLE_TIMEOUT_S: int = 30
     VLLM_READY_CHECK_PROGRESS_TIMEOUT_S: int = 10
     VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5  # seconds
@@ -1038,6 +1039,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TEST_FORCE_LOAD_FORMAT": lambda: os.getenv(
         "VLLM_TEST_FORCE_LOAD_FORMAT", "dummy"
     ),
+
     # Maximum age in seconds for the last admitted request to still require
     # forward progress before /health/ready reports unhealthy.
     "VLLM_READY_CHECK_IDLE_TIMEOUT_S": lambda: int(
@@ -2162,7 +2164,6 @@ def compile_factors() -> dict[str, object]:
         "VLLM_TUNED_CONFIG_FOLDER",
         "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR",
         "VLLM_ENGINE_ITERATION_TIMEOUT_S",
-        "VLLM_HEALTH_CHECK_TIMEOUT",
         "VLLM_READY_CHECK_IDLE_TIMEOUT_S",
         "VLLM_READY_CHECK_PROGRESS_TIMEOUT_S",
         "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",

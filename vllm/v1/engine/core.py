@@ -778,10 +778,6 @@ class EngineCore:
         # Resume scheduling (applies to all levels)
         self.resume_scheduler()
 
-    def health_ping(self) -> bool:
-        """Cheap liveness check for EngineCore utility RPCs."""
-        return True
-
     def is_sleeping(self) -> bool:
         """Check if engine is sleeping at any level."""
         return self.is_scheduler_paused() or self.model_executor.is_sleeping

@@ -915,7 +915,6 @@ class AsyncLLM(EngineClient):
         logger.debug("Called check_health.")
         if self.errored:
             raise self.dead_error
-        await self.engine_core.check_health_async()
 
     async def check_ready(self) -> None:
         logger.debug("Called check_ready.")
@@ -923,7 +922,6 @@ class AsyncLLM(EngineClient):
             raise self.dead_error
 
         if not self.output_processor.has_unfinished_requests():
-            await self.engine_core.check_health_async()
             return
 
         now = time.monotonic()
