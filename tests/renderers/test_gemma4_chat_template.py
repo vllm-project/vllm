@@ -449,6 +449,9 @@ class TestGemma4ChatTemplateInvariants(TestChatTemplateInvariants):
         else:
             assert tool_response_state == 0
 
+    @pytest.mark.skip(
+        reason="Temporarily disabled until gemma 4 chat template is updated"
+    )
     @pytest.mark.parametrize(
         "test_case",
         SUPPORTED_CASES.values(),

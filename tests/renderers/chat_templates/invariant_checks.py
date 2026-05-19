@@ -93,7 +93,7 @@ TOOL_CALL_CASES = {
 TOOL_CALL_W_REASONING_CASES = {
     "tool_call_w_reasoning": (
         USER,
-        Assistant(reasoning=AUTO, tool_uses=[(AUTO, MISSING)]),
+        Assistant(reasoning=AUTO, content=MISSING, tool_uses=[(AUTO, MISSING)]),
     ),
     "tool_call_w_reasoning_w_response": (
         USER,

@@ -35,8 +35,8 @@ SUPPORTED_CASES = {
     scope="module",
     params=[
         pytest.param("Qwen/Qwen3.6-27B", id="qwen36"),
-        pytest.param("Qwen/Qwen3.5-397B-A17B-FP8", id="qwen35"),
-        pytest.param("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", id="nemotron3"),
+        pytest.param("Qwen/Qwen3.5-4B", id="qwen35"),
+        pytest.param("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8", id="nemotron3"),
     ],
 )
 def tokenizer(request):

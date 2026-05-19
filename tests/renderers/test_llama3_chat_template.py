@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Invariant checks for the largest Llama 3.x chat templates."""
+"""Invariant checks for Llama 3.x chat templates."""
 
 from pathlib import Path
 from typing import Any
@@ -48,12 +48,12 @@ SUPPORTED_CASES = {
     scope="module",
     params=[
         pytest.param(
-            ("meta-llama/Llama-3.1-70B-Instruct", LLAMA31_TEMPLATE),
-            id="llama31-70b",
+            ("meta-llama/Llama-3.1-8B-Instruct", LLAMA31_TEMPLATE),
+            id="llama31-8b",
         ),
         pytest.param(
-            ("meta-llama/Llama-3.2-3B-Instruct", LLAMA32_TEMPLATE),
-            id="llama32-3b",
+            ("meta-llama/Llama-3.2-1B-Instruct", LLAMA32_TEMPLATE),
+            id="llama32-1b",
         ),
         pytest.param(
             ("meta-llama/Llama-3.3-70B-Instruct", None),
