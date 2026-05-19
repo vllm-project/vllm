@@ -2,7 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 try:
-    from ._version import __version__, __version_tuple__
+    from ._version import (
+        __commit_id__,
+        __upstream_commit__,
+        __upstream_version__,
+        __version__,
+        __version_tuple__,
+    )
 except Exception as e:
     import warnings
 
@@ -10,6 +16,9 @@ except Exception as e:
 
     __version__ = "dev"
     __version_tuple__ = (0, 0, __version__)
+    __upstream_version__ = None
+    __upstream_commit__ = None
+    __commit_id__ = None
 
 
 def _prev_minor_version_was(version_str):

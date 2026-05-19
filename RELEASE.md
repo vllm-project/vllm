@@ -14,6 +14,45 @@ Our version numbers are expressed in the form `vX.Y.Z`, where `X` is the major v
 
 This versioning scheme is similar to [SemVer](https://semver.org/) for compatibility purposes, except that backwards compatibility is only guaranteed for a limited number of minor releases (see our [deprecation policy](https://docs.vllm.ai/en/latest/contributing/deprecation_policy) for details).
 
+## Fork Tagging and Metadata
+
+The `vllm-hust` fork keeps upstream compatibility and fork release state as
+separate pieces of metadata.
+
+### Fork version rules
+
+The fork keeps one explicit upstream anchor and one explicit fork release line:
+
+* Upstream anchor tags use `upstream/vX.Y.Z` or `upstream/vX.Y.ZrcN`.
+* Fork release tags use `vX.Y.Z.postN`.
+* Development builds between fork releases use `X.Y.Z.postN.devM+gSHA`.
+* A dirty worktree adds the `.dirty` local suffix to the generated version.
+
+For the current maintained line in this repository:
+
+* Upstream anchor: `upstream/v0.17.2rc0`
+* Current fork release line: `v0.17.2.post2`
+
+### Runtime metadata
+
+The generated version module exports both the public fork version and the
+upstream compatibility fields:
+
+* `__version__`: the full fork version, such as `0.17.2.post2.devM+gSHA`
+* `__upstream_version__`: the upstream compatibility version, such as `0.17.2rc0`
+* `__upstream_commit__`: the upstream anchor commit recorded for the fork line
+* `__commit_id__`: the current fork commit identifier embedded into the build
+
+Compatibility checks that need upstream semantics should compare
+`__upstream_version__`, not `__version__`.
+
+### Dirty worktree note
+
+Git tags can only point to committed objects. A dirty worktree affects the
+generated local version suffix, but it cannot be captured directly by a release
+tag. To create `upstream/v...` or `v...postN` tags that include a versioning
+change, commit that change first and tag the resulting commit.
+
 ## Release Branch
 
 Each release is built from a dedicated release branch.

@@ -10,10 +10,13 @@ from vllm import version
 
 def test_version_is_defined():
     assert version.__version__ is not None
+    assert hasattr(version, "__upstream_version__")
+    assert hasattr(version, "__upstream_commit__")
+    assert hasattr(version, "__commit_id__")
 
 
 def test_version_tuple():
-    assert len(version.__version_tuple__) in (3, 4, 5)
+    assert len(version.__version_tuple__) in (3, 4, 5, 6)
 
 
 @pytest.mark.parametrize(

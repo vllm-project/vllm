@@ -4,7 +4,13 @@
 
 # The version.py should be independent library, and we always import the
 # version library first.  Such assumption is critical for some customization.
-from .version import __version__, __version_tuple__  # isort:skip
+from .version import (  # isort:skip
+    __commit_id__,
+    __upstream_commit__,
+    __upstream_version__,
+    __version__,
+    __version_tuple__,
+)
 
 import typing
 
@@ -74,6 +80,9 @@ else:
 
 
 __all__ = [
+    "__commit_id__",
+    "__upstream_commit__",
+    "__upstream_version__",
     "__version__",
     "__version_tuple__",
     "LLM",
