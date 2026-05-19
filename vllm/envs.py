@@ -182,6 +182,7 @@ if TYPE_CHECKING:
     VLLM_FLASHINFER_MOE_BACKEND: Literal["throughput", "latency", "masked_gemm"] = (
         "latency"
     )
+    VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
     VLLM_XGRAMMAR_CACHE_MB: int = 0
@@ -1419,6 +1420,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "latency",
         ["throughput", "latency", "masked_gemm"],
     ),
+    # Override the directory for the FlashInfer autotune config cache.
+    "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR": lambda: os.getenv(
+        "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", None
+    ),
     # Flashinfer fused allreduce backend.
     "VLLM_FLASHINFER_ALLREDUCE_BACKEND": env_with_choices(
         "VLLM_FLASHINFER_ALLREDUCE_BACKEND",
@@ -1933,6 +1938,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_LOG_STATS_INTERVAL",
         "VLLM_DEBUG_LOG_API_SERVER_RESPONSE",
         "VLLM_TUNED_CONFIG_FOLDER",
+        "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR",
         "VLLM_ENGINE_ITERATION_TIMEOUT_S",
         "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
         "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
