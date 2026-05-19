@@ -239,6 +239,13 @@ class QKNormRoPEFusionPass(VllmPatternMatcherPass):
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
         self.matched_count = self.patterns.apply(graph)
+        if self.matched_count > 0:
+            logger.info_once(
+                "QK-Norm+RoPE fusion: Fused %d attention layer(s) "
+                "(RMSNorm+RoPE operations combined into single kernel)",
+                self.matched_count,
+                scope="global",
+            )
         logger.debug("Fused QK Norm+RoPE on %s sites", self.matched_count)
 
     def uuid(self) -> str:
