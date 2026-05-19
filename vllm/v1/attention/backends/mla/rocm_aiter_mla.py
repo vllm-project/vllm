@@ -326,6 +326,51 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             num_head_k,
         )
 
+        # FIX for PR #42509 regression: _mla_fp8_prefill_attn() requests its
+        # per-call scratch (logits/attn_lse/final_lse) from current_workspace_manager()
+        # *lazily* at the first prefill request -- but by then
+        # gpu_model_runner.lock_workspace() has already fired. Without pre-growing
+        # the workspace here, the assertion at workspace.py:_ensure_workspace_size
+        # ("Workspace is locked but allocation ... requires X MB, current size 0 MB")
+        # fails every request and the benchmark reports 0 successful completions.
+        #
+        # We grow the workspace once now with a worst-case flat float32 buffer that
+        # comfortably exceeds the largest plausible
+        #   (num_partial_tiles * tile_q, nhead, v_head_dim)
+        # logits tensor, so subsequent calls reuse this buffer without growth.
+        try:
+            from vllm.v1.worker.workspace import (
+                current_workspace_manager,
+                is_workspace_manager_initialized,
+            )
+        except Exception:  # noqa: BLE001
+            current_workspace_manager = None  # type: ignore[assignment]
+            is_workspace_manager_initialized = None  # type: ignore[assignment]
+
+        if (
+            current_workspace_manager is not None
+            and is_workspace_manager_initialized is not None
+            and is_workspace_manager_initialized()
+        ):
+            # 256 MB is ~8x the ~30 MB observed at TP=4 Kimi-K2.6-MXFP4 with
+            # max_qlen=2148; still tiny vs KV-cache and weight memory.
+            _FP8_PREFILL_WORKSPACE_PREALLOC_BYTES = 256 * 1024 * 1024
+            try:
+                current_workspace_manager().get_simultaneous(
+                    ((_FP8_PREFILL_WORKSPACE_PREALLOC_BYTES // 4,), torch.float32),
+                )
+                logger.info(
+                    "FP8 MLA prefill workspace pre-grown to %d MB to satisfy "
+                    "lazy scratch allocation before lock_workspace()",
+                    _FP8_PREFILL_WORKSPACE_PREALLOC_BYTES // (1024 * 1024),
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "FP8 MLA prefill workspace pre-grow failed (%s); first "
+                    "prefill request may still hit the workspace-lock assertion.",
+                    e,
+                )
+
     def _build_fp8_prefill_ps_metadata(
         self,
         metadata: AiterMLAMetadata,
