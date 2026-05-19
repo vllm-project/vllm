@@ -4,6 +4,7 @@
 
 import gc
 import os
+import threading
 from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import timedelta
@@ -156,6 +157,12 @@ class Worker(WorkerBase):
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
         # pending non-blocking PP send work from the previous iteration
         self._pp_send_work: list[Handle] = []
+        # Background thread that pre-computes the GPU P2P access cache.
+        # Joined and applied in determine_available_memory().
+        self._p2p_check_thread: threading.Thread | None = None
+        # Stores any exception raised inside _p2p_check_thread so it can be
+        # re-raised on the main thread at join time.
+        self._p2p_thread_exc: BaseException | None = None
 
     def sleep(self, level: int = 1) -> None:
         from vllm.device_allocator.cumem import CuMemAllocator
@@ -276,6 +283,50 @@ class Worker(WorkerBase):
 
             current_platform.check_if_supports_dtype(self.model_config.dtype)
 
+            # If the GPU P2P access cache does not yet exist, pre-compute it
+            # in a background thread so it overlaps with model weight loading
+            # instead of blocking startup. The thread only does local work
+            # (subprocess + file write) with no collective ops, so it is safe
+            # to run while the main thread initialises the distributed env.
+            # Only local rank 0 generates the file; other ranks skip.
+            if (
+                not envs.VLLM_SKIP_P2P_CHECK
+                and not current_platform.is_rocm()
+                and self.local_rank == 0
+            ):
+                from vllm.distributed.device_communicators.all_reduce_utils import (
+                    _precompute_p2p_access_cache,
+                )
+
+                _num_dev = current_platform.device_count()
+                _cuda_visible = envs.CUDA_VISIBLE_DEVICES
+                if _cuda_visible is None:
+                    _cuda_visible = ",".join(str(i) for i in range(_num_dev))
+                _p2p_cache_path = os.path.join(
+                    envs.VLLM_CACHE_ROOT,
+                    f"gpu_p2p_access_cache_for_{_cuda_visible}.json",
+                )
+                if not os.path.exists(_p2p_cache_path):
+                    os.makedirs(os.path.dirname(_p2p_cache_path), exist_ok=True)
+
+                    def _run_precompute(path: str) -> None:
+                        try:
+                            _precompute_p2p_access_cache(path)
+                        except Exception as exc:
+                            self._p2p_thread_exc = exc
+
+                    self._p2p_check_thread = threading.Thread(
+                        target=_run_precompute,
+                        args=(_p2p_cache_path,),
+                        daemon=True,
+                        name="p2p-cache-precompute",
+                    )
+                    self._p2p_check_thread.start()
+                    logger.info(
+                        "Started async P2P access cache precomputation in %s",
+                        _p2p_cache_path,
+                    )
+
             # Initialize the distributed environment BEFORE taking
             # memory snapshot
             # This ensures NCCL buffers are allocated before we measure
@@ -363,6 +414,25 @@ class Worker(WorkerBase):
             You may limit the usage of GPU memory
             by adjusting the `gpu_memory_utilization` parameter.
         """
+        # Join the background P2P cache thread on rank 0 before the collective
+        # finalize call below. Non-rank-0 workers have no thread to join.
+        if self._p2p_check_thread is not None:
+            self._p2p_check_thread.join()
+            self._p2p_check_thread = None
+            if self._p2p_thread_exc is not None:
+                raise RuntimeError(
+                    "P2P access cache precomputation failed"
+                ) from self._p2p_thread_exc
+
+        # Finalize the deferred P2P check collectively across all TP ranks.
+        # This does a distributed barrier + reads the cache file, so every
+        # rank must reach this point together. Must happen before the first
+        # allreduce inside profile_run().
+        # device_communicator is None for single-GPU (world_size == 1).
+        tp_comm = get_tp_group().device_communicator
+        if tp_comm is not None:
+            tp_comm.finalize_p2p_check()
+
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
             # still need a profile run which compiles the model for
             # max_num_batched_tokens

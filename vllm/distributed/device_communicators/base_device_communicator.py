@@ -177,6 +177,13 @@ class DeviceCommunicatorBase:
         self.all2all_backend = all2all_backend
         self.all2all_manager: All2AllManagerBase | None = None
 
+    def finalize_p2p_check(self) -> None:
+        """Complete any deferred P2P initialization before the first allreduce.
+
+        The base implementation is a no-op. CudaCommunicator overrides this
+        to resolve the async P2P cache check collectively across TP ranks.
+        """
+
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         dist.all_reduce(input_, group=self.device_group)
         return input_

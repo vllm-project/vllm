@@ -309,6 +309,66 @@ def can_actually_p2p(
 _gpu_p2p_access_cache: dict[str, bool] | None = None
 
 
+def _precompute_p2p_access_cache(path: str) -> None:
+    """Run the P2P subprocess and write the cache file.
+
+    This function contains only local work (subprocess launch + file write).
+    It has no collective operations and is safe to call from a background
+    thread while the main thread is initialising the distributed environment.
+
+    The caller is responsible for ensuring this is only invoked on the local
+    master rank (local_rank == 0) and only when the cache file does not yet
+    exist.
+    """
+    num_dev = current_platform.device_count()
+    logger.info("generating GPU P2P access cache in %s", path)
+    cache: dict[str, bool] = {}
+    ids = list(range(num_dev))
+    # batch of all pairs of GPUs
+    batch_src, batch_tgt = zip(*list(product(ids, ids)))
+    # NOTE: we use `subprocess` rather than `multiprocessing` here
+    # because the caller might not have `if __name__ == "__main__":`,
+    # in that case we cannot use spawn method in multiprocessing.
+    # However, `can_actually_p2p` requires spawn method.
+    # The fix is, we use `subprocess` to call the function,
+    # where we have `if __name__ == "__main__":` in this file.
+
+    # use a temporary file to store the result
+    # we don't use the output of the subprocess directly,
+    # because the subprocess might produce logging output
+    with tempfile.NamedTemporaryFile() as output_file:
+        input_bytes = pickle.dumps((batch_src, batch_tgt, output_file.name))
+        returned = subprocess.run(
+            [sys.executable, __file__], input=input_bytes, capture_output=True
+        )
+        # check if the subprocess is successful
+        try:
+            returned.check_returncode()
+        except Exception as e:
+            # wrap raised exception to provide more information
+            raise RuntimeError(
+                f"Error happened when batch testing "
+                f"peer-to-peer access from {batch_src} to {batch_tgt}:\n"
+                f"{returned.stderr.decode()}"
+            ) from e
+        with open(output_file.name, "rb") as f:
+            result = pickle.load(f)
+    for _i, _j, r in zip(batch_src, batch_tgt, result):
+        cache[f"{_i}->{_j}"] = r
+    # Write atomically: write to a temp file then rename so that a crash
+    # mid-write does not leave a corrupted JSON that causes JSONDecodeError
+    # on the next startup.
+    temp_path = f"{path}.tmp.{os.getpid()}"
+    try:
+        with open(temp_path, "w") as f:
+            json.dump(cache, f, indent=4)
+        os.replace(temp_path, path)
+    except Exception:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        raise
+
+
 def gpu_p2p_access_check(src: int, tgt: int) -> bool:
     """Check if GPU src can access GPU tgt."""
 
@@ -336,42 +396,7 @@ def gpu_p2p_access_check(src: int, tgt: int) -> bool:
     ):
         # only the local master process (with local_rank == 0) can
         #  enter this block to calculate the cache
-        logger.info("generating GPU P2P access cache in %s", path)
-        cache: dict[str, bool] = {}
-        ids = list(range(num_dev))
-        # batch of all pairs of GPUs
-        batch_src, batch_tgt = zip(*list(product(ids, ids)))
-        # NOTE: we use `subprocess` rather than `multiprocessing` here
-        # because the caller might not have `if __name__ == "__main__":`,
-        # in that case we cannot use spawn method in multiprocessing.
-        # However, `can_actually_p2p` requires spawn method.
-        # The fix is, we use `subprocess` to call the function,
-        # where we have `if __name__ == "__main__":` in this file.
-
-        # use a temporary file to store the result
-        # we don't use the output of the subprocess directly,
-        # because the subprocess might produce logging output
-        with tempfile.NamedTemporaryFile() as output_file:
-            input_bytes = pickle.dumps((batch_src, batch_tgt, output_file.name))
-            returned = subprocess.run(
-                [sys.executable, __file__], input=input_bytes, capture_output=True
-            )
-            # check if the subprocess is successful
-            try:
-                returned.check_returncode()
-            except Exception as e:
-                # wrap raised exception to provide more information
-                raise RuntimeError(
-                    f"Error happened when batch testing "
-                    f"peer-to-peer access from {batch_src} to {batch_tgt}:\n"
-                    f"{returned.stderr.decode()}"
-                ) from e
-            with open(output_file.name, "rb") as f:
-                result = pickle.load(f)
-        for _i, _j, r in zip(batch_src, batch_tgt, result):
-            cache[f"{_i}->{_j}"] = r
-        with open(path, "w") as f:
-            json.dump(cache, f, indent=4)
+        _precompute_p2p_access_cache(path)
     if is_distributed:
         get_world_group().barrier()
     logger.info("reading GPU P2P access cache from %s", path)
@@ -381,7 +406,7 @@ def gpu_p2p_access_check(src: int, tgt: int) -> bool:
     return _gpu_p2p_access_cache[f"{src}->{tgt}"]
 
 
-__all__ = ["gpu_p2p_access_check"]
+__all__ = ["gpu_p2p_access_check", "_precompute_p2p_access_cache"]
 
 if __name__ == "__main__":
     batch_src, batch_tgt, output_file = pickle.loads(sys.stdin.buffer.read())

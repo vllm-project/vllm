@@ -171,6 +171,17 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 scope="global",
             )
 
+    def finalize_p2p_check(self) -> None:
+        """Complete deferred P2P initialization on the custom allreduce comm.
+
+        Must be called collectively on all TP ranks before the first allreduce
+        (i.e. before determine_available_memory). Delegates to
+        CustomAllreduce.finalize_p2p(), which is a no-op when custom allreduce
+        was already disabled or already finalized.
+        """
+        if self.ca_comm is not None:
+            self.ca_comm.finalize_p2p()
+
     def all_reduce(self, input_):
         # since currently we perform copy input -> symm_input -> out-of-place AR
         # return symm_output, we don't need to check if input is symmetric

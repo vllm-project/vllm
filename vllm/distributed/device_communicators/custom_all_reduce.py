@@ -70,6 +70,7 @@ class CustomAllreduce:
         """
         self._IS_CAPTURING = False
         self.disabled = True
+        self._p2p_pending = False
 
         if not custom_ar:
             # disable because of missing custom allreduce library
@@ -156,28 +157,38 @@ class CustomAllreduce:
                 "specify disable_custom_all_reduce=True explicitly."
             )
             return
-        # test P2P capability, this checks software/cudaruntime support
-        # this is expensive to compute at the first time
-        # then we cache the result
-        # On AMD GPU, p2p is always enabled between XGMI connected GPUs
-        if not current_platform.is_rocm() and not _can_p2p(rank, world_size):
-            logger.warning(
-                "Custom allreduce is disabled because your platform lacks "
-                "GPU P2P capability or P2P test failed. To silence this "
-                "warning, specify disable_custom_all_reduce=True explicitly."
-            )
-            return
+        # Save state required for deferred buffer allocation.
+        self.world_size = world_size
+        self.fully_connected = fully_connected
+        self._pending_max_size = max_size
 
+        # On AMD (ROCm), P2P is always enabled between XGMI-connected GPUs,
+        # so we can complete initialization immediately without a P2P check.
+        # On CUDA, defer the expensive P2P check to finalize_p2p(), which is
+        # called collectively before determine_available_memory().
+        if current_platform.is_rocm():
+            self._complete_init()
+        else:
+            self._p2p_pending = True
+
+    def _complete_init(self) -> None:
+        """Allocate shared IPC buffers and mark custom allreduce as enabled.
+
+        Must only be called when P2P capability is confirmed (or guaranteed,
+        as on ROCm). All ranks in the group must call this simultaneously
+        because create_shared_buffer() is collective.
+        """
+        max_size = self._pending_max_size
         self.disabled = False
         # Buffers memory are owned by this Python class and passed to C++.
         # Metadata composes of two parts: metadata for synchronization and a
         # temporary buffer for storing intermediate allreduce results.
         self.meta_ptrs = self.create_shared_buffer(
-            ops.meta_size() + max_size, group=group, uncached=True
+            ops.meta_size() + max_size, group=self.group, uncached=True
         )
         # This is a pre-registered IPC buffer. In eager mode, input tensors
         # are first copied into this buffer before allreduce is performed
-        self.buffer_ptrs = self.create_shared_buffer(max_size, group=group)
+        self.buffer_ptrs = self.create_shared_buffer(max_size, group=self.group)
         # This is a buffer for storing the tuples of pointers pointing to
         # IPC buffers from all ranks. Each registered tuple has size of
         # 8*world_size bytes where world_size is at most 8. Allocating 8MB
@@ -187,13 +198,33 @@ class CustomAllreduce:
             8 * 1024 * 1024, dtype=torch.uint8, device=self.device
         )
         self.max_size = max_size
-        self.rank = rank
-        self.world_size = world_size
-        self.fully_connected = fully_connected
         self._ptr = ops.init_custom_ar(
-            self.meta_ptrs, self.rank_data, rank, self.fully_connected
+            self.meta_ptrs, self.rank_data, self.rank, self.fully_connected
         )
         ops.register_buffer(self._ptr, self.buffer_ptrs)
+
+    def finalize_p2p(self) -> None:
+        """Complete initialization after the async P2P cache has been written.
+
+        Must be called collectively on all ranks before the first allreduce
+        (i.e. before determine_available_memory). Internally calls
+        _can_p2p() which calls gpu_p2p_access_check(), which does a
+        distributed barrier + file read — that is why this must be collective.
+
+        No-op if the P2P check was already resolved (ROCm path, disabled due
+        to an earlier check, or already finalized).
+        """
+        if not self._p2p_pending:
+            return
+        self._p2p_pending = False
+        if not _can_p2p(self.rank, self.world_size):
+            logger.warning(
+                "Custom allreduce is disabled because your platform lacks "
+                "GPU P2P capability or P2P test failed. To silence this "
+                "warning, specify disable_custom_all_reduce=True explicitly."
+            )
+            return
+        self._complete_init()
 
     @contextmanager
     def capture(self):
