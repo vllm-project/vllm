@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 from vllm.logger import init_logger
-from vllm.v1.kv_offload.abstract import LoadStoreSpec
+from vllm.v1.kv_offload.base import LoadStoreSpec
 
 # a single transfer spec (src_blocks_spec, dst_blocks_spec)
 TransferSpec = tuple[LoadStoreSpec, LoadStoreSpec]

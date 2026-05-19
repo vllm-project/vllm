@@ -152,8 +152,8 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
                 param,
                 curr_expert_weight,
                 name,
-                shard_id,
-                expert_id,
+                shard_id=shard_id,
+                expert_id=expert_id,
                 return_success=True,
             )
             if success:
@@ -454,7 +454,7 @@ class Qwen3VLMoeForConditionalGeneration(
         if not get_pp_group().is_first_rank and hasattr(
             config.vision_config, "deepstack_visual_indexes"
         ):
-            assert self.language_model.start_layer >= len(
+            assert self.language_model.model.start_layer >= len(
                 config.vision_config.deepstack_visual_indexes
             ), (
                 "start_layer should be greater than or equal to "

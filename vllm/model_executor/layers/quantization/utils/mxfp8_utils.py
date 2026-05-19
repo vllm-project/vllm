@@ -85,7 +85,9 @@ def _mxfp8_e4m3_quantize_torch(
 
 
 def _mxfp8_e4m3_quantize_impl(
-    x: torch.Tensor, is_sf_swizzled_layout: bool = False
+    x: torch.Tensor,
+    is_sf_swizzled_layout: bool = False,
+    alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from vllm.platforms import current_platform
 
@@ -93,7 +95,9 @@ def _mxfp8_e4m3_quantize_impl(
         from flashinfer import mxfp8_quantize as flashinfer_mxfp8_quantize
 
         x_q, x_scales = flashinfer_mxfp8_quantize(
-            x, is_sf_swizzled_layout=is_sf_swizzled_layout
+            x,
+            is_sf_swizzled_layout=is_sf_swizzled_layout,
+            alignment=alignment if alignment > 0 else 32,
         )
         if x_scales.ndim == 1 and x.ndim == 2 and not is_sf_swizzled_layout:
             x_scales = x_scales.view(x.size(0), -1)
@@ -103,9 +107,11 @@ def _mxfp8_e4m3_quantize_impl(
 
 
 def mxfp8_e4m3_quantize(
-    x: torch.Tensor, is_sf_swizzled_layout: bool = False
+    x: torch.Tensor,
+    is_sf_swizzled_layout: bool = False,
+    alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    return torch.ops.vllm.mxfp8_quantize(x, is_sf_swizzled_layout)
+    return torch.ops.vllm.mxfp8_quantize(x, is_sf_swizzled_layout, alignment)
 
 
 def dequant_mxfp8_to_bf16(x: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
@@ -125,7 +131,9 @@ def dequant_mxfp8_to_bf16(x: torch.Tensor, scales: torch.Tensor) -> torch.Tensor
 
 
 def mxfp8_e4m3_quantize_fake(
-    x: torch.Tensor, is_sf_swizzled_layout: bool = False
+    x: torch.Tensor,
+    is_sf_swizzled_layout: bool = False,
+    alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fake implementation for torch.compile tracing."""
     fp_data = torch.empty_like(x, dtype=MXFP8_VALUE_DTYPE)

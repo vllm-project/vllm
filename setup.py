@@ -686,6 +686,7 @@ class precompiled_wheel_utils:
                     "vllm/vllm_flash_attn/_vllm_fa2_C.abi3.so",
                     "vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so",
                     "vllm/cumem_allocator.abi3.so",
+                    "vllm/spinloop.abi3.so",
                     # ROCm-specific libraries
                     "vllm/_rocm_C.abi3.so",
                 ]
@@ -969,6 +970,11 @@ def get_requirements() -> list[str]:
                 # vllm-flash-attn is built only for CUDA 12.x.
                 # Skip for other versions.
                 continue
+            if "nvidia-cutlass-dsl[cu13]" in req and cuda_major == "12":
+                # [cu13] extra is the default; strip it on CUDA 12 builds.
+                req = req.replace("nvidia-cutlass-dsl[cu13]", "nvidia-cutlass-dsl")
+            if "humming-kernels[cu13]" in req and cuda_major == "12":
+                req = req.replace("humming-kernels[cu13]", "humming-kernels[cu12]")
             modified_requirements.append(req)
         requirements = modified_requirements
     elif _is_hip():
@@ -992,6 +998,8 @@ if _is_cuda() or _is_hip():
     # Optional since this doesn't get built (produce an .so file). This is just
     # copying the relevant .py files from the source repository.
     ext_modules.append(CMakeExtension(name="vllm.triton_kernels", optional=True))
+
+ext_modules.append(CMakeExtension(name="vllm.spinloop"))
 
 if _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._rocm_C"))

@@ -3,6 +3,8 @@ depends_on:
   - image-build
 steps:
 - label: Model Executor
+  device: h200_35gb
+  key: model-executor
   timeout_in_minutes: 35
   source_file_dependencies:
   - vllm/engine/arg_utils.py
