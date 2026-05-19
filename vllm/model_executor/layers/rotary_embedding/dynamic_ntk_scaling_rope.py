@@ -55,7 +55,7 @@ class DynamicNTKScalingRotaryEmbedding(RotaryEmbedding):
         # self.max_position_embeddings * self.scaling_factor.
         max_len = self.max_position_embeddings * self.scaling_factor
         base = self.base * (
-            (self.scaling_factor * max_len / self.max_position_embeddings)
+(self.scaling_factor * max_len / self.max_position_embeddings)
             - (self.scaling_factor - 1)
         ) ** (self.rotary_dim / (self.rotary_dim - 2))
         inv_freq = self._compute_inv_freq(base)
