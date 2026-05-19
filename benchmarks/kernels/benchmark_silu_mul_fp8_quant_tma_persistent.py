@@ -7,7 +7,6 @@ Benchmark comparing FP8 SiLU+Mul+FP8Quant kernel variants:
   persistent — TMA warp-specialized persistent (3D TMA descriptors)
 
 Methodology:
-  - CUDA graphs eliminate CPU kernel launch overhead
   - ArgPool rotates through multiple input sets to defeat L2 cache
   - torch.utils.benchmark.Timer with blocked_autorange for statistical rigor
 
@@ -68,14 +67,14 @@ def make_fp8_outputs(N: int, H: int):
     return output, output_scales
 
 
-def bench_cuda_graph(
+def bench_with_argpool(
     fn,
     args_list: list[tuple],
     label: str,
     sub_label: str,
     description: str,
 ) -> TBenchmark.Measurement:
-    """Benchmark using CUDA graphs with ArgPool rotation."""
+    """Benchmark with ArgPool rotation for L2 cache defeat."""
     n_args = len(args_list)
 
     # Warmup
@@ -83,25 +82,21 @@ def bench_cuda_graph(
         fn(*args)
     torch.accelerator.synchronize()
 
-    # Capture CUDA graph cycling through all arg sets
-    stream = torch.cuda.Stream()
-    with torch.cuda.stream(stream):
-        g = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(g):
-            for args in args_list:
-                fn(*args)
+    idx = [0]
 
-    torch.accelerator.synchronize()
+    def run_fn():
+        fn(*args_list[idx[0] % n_args])
+        idx[0] += 1
 
     timer = TBenchmark.Timer(
-        stmt="g.replay()",
-        globals={"g": g},
-        label=f"{label} | cugraph {n_args} ops",
+        stmt="run_fn()",
+        globals={"run_fn": run_fn},
+        label=label,
         sub_label=sub_label,
         description=description,
     ).blocked_autorange(min_run_time=1)
 
-    return timer, n_args
+    return timer
 
 
 def main():
@@ -135,7 +130,7 @@ def main():
 
     print(f"FP8 SiLU+Mul+FP8Quant benchmark: H={H}, nc={nc}, silu={silu_type}")
     print(f"HBM peak: {peak} TB/s")
-    print(f"Methodology: CUDA graphs, ArgPool={pool}, blocked_autorange")
+    print(f"Methodology: ArgPool={pool}, blocked_autorange")
     print()
 
     G = H // GROUP_SIZE
@@ -154,7 +149,6 @@ def main():
     for N in args.tokens:
         total_nbytes = N * 2 * H + 2 * G * N * 4 + N * H + G * N * 4
 
-        # Build arg pools
         baseline_args_list = []
         for _ in range(pool):
             inp, scales = make_fp8_input(N, H)
@@ -169,14 +163,14 @@ def main():
                 inp, scales, out, oscales, n_tok, tanh
             )
 
-        timer, nops = bench_cuda_graph(
+        timer = bench_with_argpool(
             baseline_fn,
             baseline_args_list,
             "fp8-silu-mul-quant",
             f"N={N}",
             "baseline",
         )
-        dt_base = timer.median / nops
+        dt_base = timer.median
         all_timers.append(timer)
 
         results = [("baseline", dt_base)]
@@ -196,14 +190,14 @@ def main():
                     inp, scales, out, oscales, n_tok, nc_, bs_, tanh
                 )
 
-            timer, nops = bench_cuda_graph(
+            timer = bench_with_argpool(
                 persist_fn,
                 persist_args_list,
                 "fp8-silu-mul-quant",
                 f"N={N}",
                 f"persist-nc{nc}-bs{bs}",
             )
-            dt = timer.median / nops
+            dt = timer.median
             all_timers.append(timer)
             results.append((f"persist bs={bs}", dt))
 

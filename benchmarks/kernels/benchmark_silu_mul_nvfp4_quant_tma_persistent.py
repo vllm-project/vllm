@@ -7,7 +7,6 @@ Benchmark comparing NVFP4 SiLU+Mul+Quant kernel variants:
   persistent — TMA warp-specialized persistent (3D TMA descriptors)
 
 Methodology:
-  - CUDA graphs eliminate CPU kernel launch overhead
   - ArgPool rotates through multiple input sets to defeat L2 cache
   - torch.utils.benchmark.Timer with blocked_autorange for statistical rigor
 
@@ -47,14 +46,14 @@ def make_nvfp4_outputs(N: int, H: int):
     return output, output_sf
 
 
-def bench_cuda_graph(
+def bench_with_argpool(
     fn,
     args_list: list[tuple],
     label: str,
     sub_label: str,
     description: str,
 ) -> TBenchmark.Measurement:
-    """Benchmark using CUDA graphs with ArgPool rotation."""
+    """Benchmark with ArgPool rotation for L2 cache defeat."""
     n_args = len(args_list)
 
     # Warmup
@@ -62,25 +61,21 @@ def bench_cuda_graph(
         fn(*args)
     torch.accelerator.synchronize()
 
-    # Capture CUDA graph cycling through all arg sets
-    stream = torch.cuda.Stream()
-    with torch.cuda.stream(stream):
-        g = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(g):
-            for args in args_list:
-                fn(*args)
+    idx = [0]
 
-    torch.accelerator.synchronize()
+    def run_fn():
+        fn(*args_list[idx[0] % n_args])
+        idx[0] += 1
 
     timer = TBenchmark.Timer(
-        stmt="g.replay()",
-        globals={"g": g},
-        label=f"{label} | cugraph {n_args} ops",
+        stmt="run_fn()",
+        globals={"run_fn": run_fn},
+        label=label,
         sub_label=sub_label,
         description=description,
     ).blocked_autorange(min_run_time=1)
 
-    return timer, n_args
+    return timer
 
 
 def main():
@@ -114,7 +109,7 @@ def main():
 
     print(f"NVFP4 SiLU+Mul+Quant benchmark: H={H}, nc={nc}, silu={silu_type}")
     print(f"HBM peak: {peak} TB/s")
-    print(f"Methodology: CUDA graphs, ArgPool={pool}, blocked_autorange")
+    print(f"Methodology: ArgPool={pool}, blocked_autorange")
     print()
 
     hdr = (
@@ -132,7 +127,6 @@ def main():
         sf_bytes = compute_sf_bytes(N, H)
         total_nbytes = N * 2 * H * 2 + N * H // 2 + sf_bytes
 
-        # Baseline
         baseline_args_list = []
         for _ in range(pool):
             inp, gs = make_nvfp4_inputs(N, H)
@@ -143,14 +137,14 @@ def main():
         def baseline_fn(out, sf, inp, gs, mask):
             torch.ops._moe_C.nvfp4_silu_mul_quant(out, sf, inp, gs, mask, 1)
 
-        timer, nops = bench_cuda_graph(
+        timer = bench_with_argpool(
             baseline_fn,
             baseline_args_list,
             "nvfp4-silu-mul-quant",
             f"N={N}",
             "baseline",
         )
-        dt_base = timer.median / nops
+        dt_base = timer.median
         all_timers.append(timer)
 
         results = [("baseline", dt_base)]
@@ -170,14 +164,14 @@ def main():
                     inp, out, sf, gs, n_tok, nc_, bs_, tanh
                 )
 
-            timer, nops = bench_cuda_graph(
+            timer = bench_with_argpool(
                 persist_fn,
                 persist_args_list,
                 "nvfp4-silu-mul-quant",
                 f"N={N}",
                 f"persist-nc{nc}-bs{bs}",
             )
-            dt = timer.median / nops
+            dt = timer.median
             all_timers.append(timer)
             results.append((f"persist bs={bs}", dt))
 
@@ -189,7 +183,7 @@ def main():
             marker = " <--" if dt == best_dt and dt < dt_base else ""
             print(
                 f"{name:<30} {N:>7} {dt * 1e6:>10.1f} "
-                f"{tbps:>7.2f} {pct:>5.1f}% {ratio:>7.2f}x{marker}"
+                f"{tbps:>7.2f} {pct:>5.1f}% {ratio:>7.02f}x{marker}"
             )
         print("-" * len(hdr))
 
