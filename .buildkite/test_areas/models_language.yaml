@@ -92,6 +92,12 @@ steps:
   - tests/models/language/pooling
   commands:
     - pytest -v -s models/language/pooling -m 'not core_model'
+  mirror:
+    amd:
+      device: mi300_1
+      timeout_in_minutes: 100
+      depends_on:
+      - image-build-amd
 
 - label: Language Models Test (MTEB)
   key: language-models-test-mteb

@@ -598,6 +598,7 @@ def fp8_w8a8_moe_quant_config(
     a2_gscale: torch.Tensor | None = None,
     g1_alphas: torch.Tensor | None = None,
     g2_alphas: torch.Tensor | None = None,
+    gemm1_clamp_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for fp8 activations and fp8 weights.
@@ -617,6 +618,7 @@ def fp8_w8a8_moe_quant_config(
         per_act_token_quant=per_act_token_quant,
         per_out_ch_quant=per_out_ch_quant,
         block_shape=block_shape,
+        gemm1_clamp_limit=gemm1_clamp_limit,
     )
 
 
@@ -743,6 +745,7 @@ def mxfp4_w4a8_moe_quant_config(
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
     block_shape: list[int] | None = None,
+    gemm1_clamp_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for fp8 activations and mxfp4 weights.
@@ -752,6 +755,7 @@ def mxfp4_w4a8_moe_quant_config(
         _a2=FusedMoEQuantDesc("fp8", None, a2_scale, None, None, None),
         _w1=FusedMoEQuantDesc("mxfp4", None, w1_scale, None, None, w1_bias),
         _w2=FusedMoEQuantDesc("mxfp4", None, w2_scale, None, None, w2_bias),
+        gemm1_clamp_limit=gemm1_clamp_limit,
     )
 
 
@@ -953,9 +957,14 @@ def awq_marlin_moe_quant_config(
     group_size: int,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
+    a1_gscale: torch.Tensor | None = None,
+    a2_gscale: torch.Tensor | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for awq marlin quantization.
+
+    a1_gscale / a2_gscale are optional global scales applied to activation
+    quantization scales when Marlin runs with 8-bit activations.
     """
     from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 
@@ -973,8 +982,8 @@ def awq_marlin_moe_quant_config(
         raise ValueError(f"Unsupported weight_bits: {weight_bits}")
 
     return FusedMoEQuantConfig(
-        _a1=FusedMoEQuantDesc(dtype=None, shape=a_shape),
-        _a2=FusedMoEQuantDesc(dtype=None, shape=a_shape),
+        _a1=FusedMoEQuantDesc(dtype=None, shape=a_shape, alpha_or_gscale=a1_gscale),
+        _a2=FusedMoEQuantDesc(dtype=None, shape=a_shape, alpha_or_gscale=a2_gscale),
         _w1=FusedMoEQuantDesc(weight_dtype, w_shape, w1_scale, None, w1_zp, w1_bias),
         _w2=FusedMoEQuantDesc(weight_dtype, w_shape, w2_scale, None, w2_zp, w2_bias),
     )

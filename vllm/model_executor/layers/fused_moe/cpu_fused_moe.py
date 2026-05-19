@@ -213,6 +213,10 @@ class SGLFusedMOE:
             None,  # w1_zero
             None,  # w2_zero
             None,  # block_size
+            None,  # w1_bias
+            None,  # w2_bias
+            None,  # alpha
+            None,  # limit
             True,  # is_vnni
         )
 
