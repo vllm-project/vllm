@@ -1203,6 +1203,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
             )
         },
     ),
+    "OpenVLAForActionPrediction": _HfExamplesInfo(
+        "openvla/openvla-7b",
+        trust_remote_code=True,
+    ),
     "Ovis": _HfExamplesInfo(
         "AIDC-AI/Ovis2-1B",
         trust_remote_code=True,

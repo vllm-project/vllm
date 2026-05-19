@@ -416,6 +416,11 @@ def test_processing_correctness(
         pytest.skip("Fix later")
     if model_id == "OpenGVLab/InternVL2-2B":
         pytest.skip("Fix later")
+    if model_id == "openvla/openvla-7b":
+        pytest.skip(
+            "OpenVLA uses a custom vLLM processor because its HF remote "
+            "processor is incompatible with current Transformers."
+        )
     if model_id == "jinaai/jina-reranker-m0":
         pytest.skip("Fix later")
     if model_id in {"Qwen/Qwen-VL", "Qwen/Qwen-VL-Chat"}:
