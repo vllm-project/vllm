@@ -220,18 +220,11 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         self.compress_ratio = mla_spec.compress_ratio
         self.block_size = mla_spec.block_size
 
-        # Handle MTP: adjust decode_threshold like the indexer does
-        self.num_speculative_tokens = (
-            self.vllm_config.speculative_config.num_speculative_tokens
-            if self.vllm_config.speculative_config
-            else 0
-        )
-        # With MTP, decode can have query_len up to 1 + num_speculative_tokens.
-        # Must match the threshold used by the indexer and flashmla_sparse so
-        # that all backends agree on the decode/prefill split.
-        self.decode_threshold = (
-            self.reorder_batch_threshold + self.num_speculative_tokens
-        )
+        # Handle MTP: classify single-token queries plus speculative tokens as
+        # decodes, matching the runner-side batch reorder threshold.
+        self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
+        assert self.reorder_batch_threshold is not None
+        self.decode_threshold = self.reorder_batch_threshold
 
         hf_config = self.vllm_config.model_config.hf_config
         assert hasattr(hf_config, "sliding_window")
