@@ -1,6 +1,6 @@
 #pragma once
 
-#include "torch_utils_check.h"
+#include "torch_utils.h"
 
 // This header is shared between _C (unstable ABI, used by machete) and
 // _C_stable_libtorch (stable ABI, used by W4A8/sparse). TORCH_TARGET_VERSION
