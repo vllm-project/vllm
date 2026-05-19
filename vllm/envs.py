@@ -1455,6 +1455,12 @@ class FlashInferSettings(BaseSettings):
             "latency inference."
         ),
     )
+    flashinfer_autotune_cache_dir: str | None = Field(
+        default=None,
+        description=(
+            "Override the directory for the FlashInfer autotune config cache."
+        ),
+    )
     flashinfer_allreduce_backend: Literal["auto", "trtllm", "mnnvl"] = Field(
         default="auto",
         description="Flashinfer fused allreduce backend.",
@@ -2448,6 +2454,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_LOG_STATS_INTERVAL",
         "VLLM_DEBUG_LOG_API_SERVER_RESPONSE",
         "VLLM_TUNED_CONFIG_FOLDER",
+        "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR",
         "VLLM_ENGINE_ITERATION_TIMEOUT_S",
         "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
         "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
