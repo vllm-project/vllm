@@ -18,7 +18,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="arc-ray-qwen15-moe-a2.7b-chat-server-and-worker-nsys"
+SCRIPT_VERSION="arc-ray-qwen15-moe-a2.7b-chat-nsys-v2"
 
 DEBUG_SLURM_SCRIPT="${DEBUG_SLURM_SCRIPT:-0}"
 slurm_debug() {
@@ -192,6 +192,10 @@ mkdir -p "${TRACE_RUN_DIR}/ray_step_logs"
 mkdir -p "${TRACE_RUN_DIR}/server"
 mkdir -p "${TRACE_RUN_DIR}/slurm_logs"
 
+# Used to ignore stale /tmp/ray sessions and Nsight files left by prior jobs on the same nodes.
+JOB_START_EPOCH="$(date +%s)"
+JOB_SESSION_TS="$(date -d "@${JOB_START_EPOCH}" '+%Y-%m-%d_%H-%M-%S' 2>/dev/null || date -r "${JOB_START_EPOCH}" '+%Y-%m-%d_%H-%M-%S')"
+
 # Mirror all subsequent job stdout/stderr into the trace directory as well.
 # The #SBATCH output/error files still exist, but the self-contained copy lives here.
 if [ "${MIRROR_STDOUT_TO_TRACE:-1}" = "1" ]; then
@@ -319,7 +323,12 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 CPUS_PER_TASK="${CPUS_PER_TASK:-${SLURM_CPUS_PER_TASK:-1}}"
 SERVE_SCRIPT="${REPO_ROOT}/serving_scripts/serve_ShareGPT_multi_node.sh"
 
-HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-900}"
+# Nsight-wrapped Ray workers slow model load substantially (job 7685596 needed ~16m).
+if [ "${NSYS_ENABLE}" = "1" ] && [ "${NSYS_PROFILE_WORKERS}" = "1" ]; then
+  HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-2400}"
+else
+  HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-1200}"
+fi
 RAY_READY_TIMEOUT="${RAY_READY_TIMEOUT:-600}"
 SERVER_SHUTDOWN_TIMEOUT="${SERVER_SHUTDOWN_TIMEOUT:-600}"
 WORKER_REPORT_FLUSH_SLEEP="${WORKER_REPORT_FLUSH_SLEEP:-90}"
@@ -330,6 +339,7 @@ echo "MODEL_ID=${MODEL_ID} HOST=${HOST} PORT=${PORT} TP=${TP} PP=${PP} EP=${EP}"
 echo "GPUS_PER_NODE=${GPUS_PER_NODE} NUM_NODES=${NUM_NODES} CPUS_PER_TASK=${CPUS_PER_TASK}"
 echo "SP=${SP} SD=${SD} NUM_PROMPTS=${NUM_PROMPTS}"
 echo "MAX_MODEL_LEN=${MAX_MODEL_LEN}"
+echo "JOB_START_EPOCH=${JOB_START_EPOCH} JOB_SESSION_TS=${JOB_SESSION_TS}"
 echo "HEALTH_TIMEOUT=${HEALTH_TIMEOUT}"
 echo "RAY_READY_TIMEOUT=${RAY_READY_TIMEOUT}"
 echo "SERVER_SHUTDOWN_TIMEOUT=${SERVER_SHUTDOWN_TIMEOUT}"
@@ -350,9 +360,32 @@ SERVER_STEP_PID=""
 HEAD_RAY_PID=""
 WORKER_RAY_PIDS=""
 
+nsys_rep_belongs_to_current_job() {
+  local path="$1"
+  local base session_ts
+  base="$(basename "${path}")"
+  session_ts="$(
+    printf '%s' "${base}" | sed -n \
+      's/^session_\([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_[0-9][0-9]-[0-9][0-9]-[0-9][0-9]\)_.*/\1/p'
+  )"
+  if [ -z "${session_ts}" ]; then
+    return 1
+  fi
+  # Ray session dir timestamps are lexically sortable in this format.
+  [ "${session_ts}" \> "${JOB_SESSION_TS}" ] || [ "${session_ts}" = "${JOB_SESSION_TS}" ]
+}
+
 count_worker_nsys_reports() {
-  find "${TRACE_RUN_DIR}/ray_worker_nsight" \
-    -type f -name "*.nsys-rep" 2>/dev/null | wc -l | tr -d ' '
+  local path count=0
+  while IFS= read -r -d '' path; do
+    if nsys_rep_belongs_to_current_job "${path}"; then
+      count=$((count + 1))
+    fi
+  done < <(
+    find "${TRACE_RUN_DIR}/ray_worker_nsight" \
+      -type f -name "*.nsys-rep" -print0 2>/dev/null || true
+  )
+  printf '%s' "${count}"
 }
 
 print_copied_worker_reports() {
@@ -367,10 +400,26 @@ print_copied_worker_reports() {
 
 warn_if_worker_reports_missing() {
   local expected="${1:-${NUM_NODES}}"
-  local actual
+  local actual stale
   actual="$(count_worker_nsys_reports)"
+  stale="$(
+    find "${TRACE_RUN_DIR}/ray_worker_nsight" \
+      -type f -name "*.nsys-rep" 2>/dev/null | while IFS= read -r path; do
+      if ! nsys_rep_belongs_to_current_job "${path}"; then
+        printf '%s\n' "${path}"
+      fi
+    done | wc -l | tr -d ' '
+  )"
+  if [ "${stale}" != "0" ]; then
+    echo "WARNING: ignoring ${stale} stale *.nsys-rep file(s) from prior Ray sessions on these nodes." >&2
+    find "${TRACE_RUN_DIR}/ray_worker_nsight" -type f -name "*.nsys-rep" 2>/dev/null | while IFS= read -r path; do
+      if ! nsys_rep_belongs_to_current_job "${path}"; then
+        echo "WARNING: stale trace (not from this job): ${path}" >&2
+      fi
+    done
+  fi
   if [ "${actual}" -lt "${expected}" ]; then
-    echo "WARNING: expected at least ${expected} Ray-worker *.nsys-rep file(s), found ${actual}." >&2
+    echo "WARNING: expected at least ${expected} current-job Ray-worker *.nsys-rep file(s), found ${actual}." >&2
     echo "WARNING: worker traces live on each node under /tmp/ray/session_*/logs/nsight/ until copied." >&2
     echo "WARNING: check ${TRACE_RUN_DIR}/ray_step_logs/ray_{head,worker}_*.out for copy-loop output." >&2
   fi
@@ -493,25 +542,54 @@ configure_socket_ifnames "${node_ip}" 0
 NODE_NAME="${node_name}"
 NODE_NSIGHT_DEST="${TRACE_RUN_DIR}/ray_worker_nsight/${node_name}"
 NODE_COPY_INTERVAL="${NODE_COPY_INTERVAL}"
+JOB_START_EPOCH="${JOB_START_EPOCH}"
+JOB_SESSION_TS="${JOB_SESSION_TS}"
 COPIER_PID=""
 
 mkdir -p "\${NODE_NSIGHT_DEST}"
+
+clean_local_ray_state() {
+  echo "\${NODE_NAME}: stopping local Ray and removing stale /tmp/ray sessions from prior jobs"
+  "${RAY_BIN}" stop --force >/dev/null 2>&1 || true
+  find /tmp/ray -maxdepth 1 -type d -name 'session_*' 2>/dev/null | while IFS= read -r stale_session; do
+    echo "\${NODE_NAME}: rm -rf \${stale_session}"
+    rm -rf "\${stale_session}" 2>/dev/null || true
+  done
+  rm -f /tmp/ray/session_latest 2>/dev/null || true
+}
+
+ray_session_is_current() {
+  local session_dir="\$1"
+  local session_ts session_epoch=""
+  session_ts="\$(basename "\${session_dir}" | sed -n 's/^session_\\([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_[0-9][0-9]-[0-9][0-9]-[0-9][0-9]\\)_.*/\\1/p')"
+  if [ -n "\${session_ts}" ]; then
+    if [ "\${session_ts}" \> "\${JOB_SESSION_TS}" ] || [ "\${session_ts}" = "\${JOB_SESSION_TS}" ]; then
+      return 0
+    fi
+    return 1
+  fi
+  session_epoch="\$(stat -c '%Y' "\${session_dir}" 2>/dev/null || echo 0)"
+  [ "\${session_epoch}" -ge "\${JOB_START_EPOCH}" ]
+}
 
 copy_ray_nsight_once() {
   set +e
   mkdir -p "\${NODE_NSIGHT_DEST}"
 
-  echo "[\$(date -Is 2>/dev/null || date)] \${NODE_NAME}: scanning /tmp/ray for Ray-worker Nsight files"
+  echo "[\$(date -Is 2>/dev/null || date)] \${NODE_NAME}: scanning /tmp/ray for Ray-worker Nsight files (job sessions >= \${JOB_SESSION_TS})"
 
   found=0
   while IFS= read -r -d '' f; do
+    session_dir="\$(echo "\${f}" | sed -n 's#\\(/tmp/ray/session_[^/]*\\)/logs/nsight/.*#\\1#p')"
+    if [ -z "\${session_dir}" ] || ! ray_session_is_current "\${session_dir}"; then
+      echo "\${NODE_NAME}: skip stale Nsight file \${f}"
+      continue
+    fi
+
     found=1
     size=\$(stat -c '%s' "\${f}" 2>/dev/null || echo 0)
     base=\$(basename "\${f}")
-    session=\$(echo "\${f}" | sed -n 's#.*\\(session_[^/]*\\)/logs/nsight/.*#\\1#p')
-    if [ -z "\${session}" ]; then
-      session="session_unknown"
-    fi
+    session=\$(basename "\${session_dir}")
 
     out="\${NODE_NSIGHT_DEST}/\${session}_\${base}"
 
@@ -528,7 +606,7 @@ copy_ray_nsight_once() {
   )
 
   if [ "\${found}" = "0" ]; then
-    echo "\${NODE_NAME}: no Ray-worker Nsight files found under /tmp/ray yet"
+    echo "\${NODE_NAME}: no current-job Ray-worker Nsight files under /tmp/ray yet"
   fi
 
   echo "\${NODE_NAME}: currently copied files:"
@@ -570,6 +648,8 @@ trap ray_step_cleanup EXIT INT TERM
 echo "Ray ${ray_role} host: \$(hostname) node=\${NODE_NAME} VLLM_HOST_IP=\${VLLM_HOST_IP}"
 echo "Ray ${ray_role} will continuously copy /tmp/ray/session_*/logs/nsight to \${NODE_NSIGHT_DEST}"
 echo "Ray ${ray_role} TMPDIR=\${TMPDIR:-<unset>} RAY_TMPDIR=\${RAY_TMPDIR:-<unset>}"
+
+clean_local_ray_state
 
 copy_ray_nsight_loop &
 COPIER_PID="\$!"
@@ -816,6 +896,8 @@ until curl -fsS "http://${HEAD_NODE_IP}:${PORT}/health" >/dev/null 2>&1; do
   now=$(date +%s)
   if [ $((now - _health_start)) -gt "${HEALTH_TIMEOUT}" ]; then
     echo "Timed out waiting for /health after ${HEALTH_TIMEOUT}s" >&2
+    echo "Last lines of ${TRACE_RUN_DIR}/server/vllm_server.log:" >&2
+    tail -n 80 "${TRACE_RUN_DIR}/server/vllm_server.log" 2>/dev/null >&2 || true
     copy_worker_reports_from_shared_dest
     exit 1
   fi
