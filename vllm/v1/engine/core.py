@@ -397,19 +397,12 @@ class EngineCore:
         if not self.vllm_config.observability_config.enable_logging_iteration_details:
             yield
             return
-        # Iterations that scheduled no tokens (e.g. all requests waiting on
-        # remote KVs, or only finished IDs being propagated) are effectively
-        # dummy passes -- the engine entered collectives but did no real work.
-        # Skip the log here so the dummy_batch path in DP mode can emit the
-        # "(dummy)" line without double-logging the iteration index.
+        # 0-token step: let the dummy_batch wrapper log it (avoids double-log).
         if scheduler_output and scheduler_output.total_num_scheduled_tokens == 0:
             yield
             return
         self._iteration_index = getattr(self, "_iteration_index", 0)
-        # In DP mode, an engine without local work still performs a dummy
-        # forward pass so all DP peers participate in collectives. Pass
-        # scheduler_output=None for those iterations so the index stays in
-        # sync across engines and the dummy step is visible in the log.
+        # scheduler_output=None marks a DP dummy iteration.
         if scheduler_output is None:
             iteration_details = IterationDetails(0, 0, 0, 0)
             is_dummy = True
