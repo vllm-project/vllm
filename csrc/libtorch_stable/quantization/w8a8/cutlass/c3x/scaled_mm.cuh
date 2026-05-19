@@ -202,7 +202,7 @@ struct cutlass_3x_gemm_sm120 {
               sizeof(typename CollectiveEpilogue::SharedStorage))>,
           KernelSchedule>::CollectiveOp;
 
-  using GemmKernel = enable_sm120_only<cutlass::gemm::kernel::GemmUniversal<
+  using GemmKernel = enable_sm120_family<cutlass::gemm::kernel::GemmUniversal<
       Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue, void>>;
 };
 

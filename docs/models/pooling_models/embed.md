@@ -12,7 +12,7 @@ Embedding models are a class of machine learning models designed to transform un
     - `LLM.score(...)`
 - Online APIs:
     - [Cohere Embed API](embed.md#cohere-embed-api) (`/v2/embed`)
-    - [Openai-compatible Embeddings API](embed.md#openai-compatible-embeddings-api) (`/v1/embeddings`)
+    - [OpenAI-compatible Embeddings API](embed.md#openai-compatible-embeddings-api) (`/v1/embeddings`)
     - Pooling API (`/pooling`)
 
 The primary distinction between (sequence) embedding and token embedding lies in their output granularity: (sequence) embedding produces a single embedding vector for an entire input sequence, whereas token embedding generates an embedding for each individual token within the sequence.
@@ -120,7 +120,7 @@ The following [pooling parameters][vllm.PoolingParams] are supported.
 
 ### `LLM.embed`
 
-The [embed][vllm.LLM.embed] method outputs an embedding vector for each prompt.
+The [embed][vllm.entrypoints.pooling.offline.PoolingOfflineMixin.embed] method outputs an embedding vector for each prompt.
 
 ```python
 from vllm import LLM
@@ -136,7 +136,7 @@ A code example can be found here: [examples/basic/offline_inference/embed.py](..
 
 ### `LLM.encode`
 
-The [encode][vllm.LLM.encode] method is available to all pooling models in vLLM.
+The [encode][vllm.entrypoints.pooling.offline.PoolingOfflineMixin.encode] method is available to all pooling models in vLLM.
 
 Set `pooling_task="embed"` when using `LLM.encode` for embedding Models:
 
@@ -152,7 +152,7 @@ print(f"Data: {data!r}")
 
 ### `LLM.score`
 
-The [score][vllm.LLM.score] method outputs similarity scores between sentence pairs.
+The [score][vllm.entrypoints.pooling.offline.PoolingOfflineMixin.score] method outputs similarity scores between sentence pairs.
 
 All models that support embedding task also support using the score API to compute similarity scores by calculating the cosine similarity of two input prompt's embeddings.
 
@@ -228,7 +228,7 @@ these extra parameters are supported instead:
 
 #### Examples
 
-If the model has a [chat template](../../serving/openai_compatible_server.md#chat-template), you can replace `inputs` with a list of `messages` (same schema as [Chat API](../../serving/openai_compatible_server.md#chat-api))
+If the model has a [chat template](../../serving/online_serving/README.md#chat-template), you can replace `inputs` with a list of `messages` (same schema as [Chat API](../../serving/online_serving/openai_compatible_server.md#chat-api))
 which will be treated as a single prompt to the model. Here is a convenience function for calling the API while retaining OpenAI's type annotations:
 
 ??? code

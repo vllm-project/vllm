@@ -245,7 +245,7 @@ class FusedMoEQuantConfig:
     _a2: FusedMoEQuantDesc
     _w1: FusedMoEQuantDesc
     _w2: FusedMoEQuantDesc
-    is_nvfp4_scale_swizzled: bool = True
+    is_scale_swizzled: bool = True
 
     # MXFP4-specific TRTLLM parameters for SwiGLU activation clamping.
     # These correspond to gemm1_alpha, gemm1_beta, gemm1_clamp_limit
@@ -502,7 +502,7 @@ class FusedMoEQuantConfig:
         w1_zp: torch.Tensor | None = None,
         w2_zp: torch.Tensor | None = None,
         weight_dtype: torch.dtype | str | None = None,
-        is_nvfp4_scale_swizzled: bool = True,
+        is_scale_swizzled: bool = True,
         gemm1_alpha: float | None = None,
         gemm1_beta: float | None = None,
         gemm1_clamp_limit: float | None = None,
@@ -535,7 +535,9 @@ class FusedMoEQuantConfig:
         - w2_bias: Optional biases for w1 (GPT OSS Triton).
         - w1_zp: Optional w1 zero points for int4/int8 quantization.
         - w2_zp: Optional w2 zero points for int4/int8 quantization.
-        - is_nvfp4_scale_swizzled: Whether to swizzle the nvfp4 scale swizzling.
+        - is_scale_swizzled: Whether the activation scale-factor layout is
+          swizzled. Pass through to the underlying quantization kernel for
+          dtypes that distinguish layouts (nvfp4, mxfp8). Defaults to True.
         - gemm1_alpha: Optional MXFP4 TRTLLM SwiGLU alpha parameter.
         - gemm1_beta: Optional MXFP4 TRTLLM SwiGLU beta parameter.
         - gemm1_clamp_limit: Optional MXFP4 TRTLLM SwiGLU clamp limit.
@@ -571,7 +573,7 @@ class FusedMoEQuantConfig:
             _w2=FusedMoEQuantDesc(
                 weight_dtype, w_shape, w2_scale, g2_alphas, w2_zp, w2_bias
             ),
-            is_nvfp4_scale_swizzled=is_nvfp4_scale_swizzled,
+            is_scale_swizzled=is_scale_swizzled,
             gemm1_alpha=gemm1_alpha,
             gemm1_beta=gemm1_beta,
             gemm1_clamp_limit=gemm1_clamp_limit,
@@ -596,6 +598,7 @@ def fp8_w8a8_moe_quant_config(
     a2_gscale: torch.Tensor | None = None,
     g1_alphas: torch.Tensor | None = None,
     g2_alphas: torch.Tensor | None = None,
+    gemm1_clamp_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for fp8 activations and fp8 weights.
@@ -615,6 +618,7 @@ def fp8_w8a8_moe_quant_config(
         per_act_token_quant=per_act_token_quant,
         per_out_ch_quant=per_out_ch_quant,
         block_shape=block_shape,
+        gemm1_clamp_limit=gemm1_clamp_limit,
     )
 
 
@@ -715,6 +719,7 @@ def mxfp4_mxfp8_moe_quant_config(
     gemm1_beta: float | None = None,
     gemm1_clamp_limit: float | None = None,
     mx_alignment: int = 0,
+    is_scale_swizzled: bool = True,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for mxfp4 activations and mxfp4 weights.
@@ -728,6 +733,7 @@ def mxfp4_mxfp8_moe_quant_config(
         gemm1_beta=gemm1_beta,
         gemm1_clamp_limit=gemm1_clamp_limit,
         mx_alignment=mx_alignment,
+        is_scale_swizzled=is_scale_swizzled,
     )
 
 
@@ -739,6 +745,7 @@ def mxfp4_w4a8_moe_quant_config(
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
     block_shape: list[int] | None = None,
+    gemm1_clamp_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for fp8 activations and mxfp4 weights.
@@ -748,6 +755,7 @@ def mxfp4_w4a8_moe_quant_config(
         _a2=FusedMoEQuantDesc("fp8", None, a2_scale, None, None, None),
         _w1=FusedMoEQuantDesc("mxfp4", None, w1_scale, None, None, w1_bias),
         _w2=FusedMoEQuantDesc("mxfp4", None, w2_scale, None, None, w2_bias),
+        gemm1_clamp_limit=gemm1_clamp_limit,
     )
 
 
@@ -796,7 +804,7 @@ def nvfp4_moe_quant_config(
     w2_scale: torch.Tensor,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
-    is_nvfp4_scale_swizzled: bool = True,
+    is_scale_swizzled: bool = True,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for mxfp4 activations and nvp4 weights.
@@ -814,7 +822,7 @@ def nvfp4_moe_quant_config(
         per_act_token_quant=False,
         per_out_ch_quant=False,
         block_shape=None,
-        is_nvfp4_scale_swizzled=is_nvfp4_scale_swizzled,
+        is_scale_swizzled=is_scale_swizzled,
     )
 
 
@@ -949,9 +957,14 @@ def awq_marlin_moe_quant_config(
     group_size: int,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
+    a1_gscale: torch.Tensor | None = None,
+    a2_gscale: torch.Tensor | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for awq marlin quantization.
+
+    a1_gscale / a2_gscale are optional global scales applied to activation
+    quantization scales when Marlin runs with 8-bit activations.
     """
     from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 
@@ -969,8 +982,8 @@ def awq_marlin_moe_quant_config(
         raise ValueError(f"Unsupported weight_bits: {weight_bits}")
 
     return FusedMoEQuantConfig(
-        _a1=FusedMoEQuantDesc(dtype=None, shape=a_shape),
-        _a2=FusedMoEQuantDesc(dtype=None, shape=a_shape),
+        _a1=FusedMoEQuantDesc(dtype=None, shape=a_shape, alpha_or_gscale=a1_gscale),
+        _a2=FusedMoEQuantDesc(dtype=None, shape=a_shape, alpha_or_gscale=a2_gscale),
         _w1=FusedMoEQuantDesc(weight_dtype, w_shape, w1_scale, None, w1_zp, w1_bias),
         _w2=FusedMoEQuantDesc(weight_dtype, w_shape, w2_scale, None, w2_zp, w2_bias),
     )

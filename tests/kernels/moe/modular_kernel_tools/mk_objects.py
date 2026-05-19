@@ -15,15 +15,15 @@ from vllm.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
     BatchedDeepGemmExperts,
 )
 from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import DeepGemmExperts
-from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
+from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
     BatchedTritonExperts,
     NaiveBatchedExperts,
 )
+from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
+    TritonOrDeepGemmExperts,
+)
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoDPEPModular,
-)
-from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
-    TritonOrDeepGemmExperts,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     cutlass_fp4_supported,
@@ -237,7 +237,7 @@ if has_mori():
     )
 
 if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability(100):
-    from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+    from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (
         FlashInferExperts,
     )
     from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_two_sided import (  # noqa: E501
@@ -298,7 +298,7 @@ if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability
     )
 
 if has_aiter():
-    from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
         AiterExperts,
     )
 
