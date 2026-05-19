@@ -96,11 +96,11 @@ def update_dflash(config_dict: dict, pre_trained_config: dict) -> None:
     if config_dict.get("target_hidden_size") is not None:
         pre_trained_config["target_hidden_size"] = config_dict["target_hidden_size"]
 
-    # TODO: does this need to be shifted by 1 like in gpu_model_runner?
     aux_layer_ids = config_dict["aux_hidden_state_layer_ids"]
     pre_trained_config["eagle_aux_hidden_state_layer_ids"] = aux_layer_ids
 
+    # DFlash configs use different indexing for the target layers, see #40727
     pre_trained_config["dflash_config"] = {
         "mask_token_id": config_dict["mask_token_id"],
-        "target_layer_ids": aux_layer_ids,
+        "target_layer_ids": [i - 1 for i in aux_layer_ids],
     }
