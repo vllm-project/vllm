@@ -311,7 +311,6 @@ set(VLLM_EXT_SRC
   "csrc/attention/paged_attention_v1.cu"
   "csrc/attention/paged_attention_v2.cu"
   "csrc/attention/merge_attn_states.cu"
-  "csrc/attention/vertical_slash_index.cu"
   "csrc/pos_encoding_kernels.cu"
   "csrc/activation_kernels.cu"
   "csrc/layernorm_kernels.cu"
@@ -369,7 +368,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   FetchContent_MakeAvailable(cutlass)
 
   list(APPEND VLLM_EXT_SRC
-    "csrc/quantization/awq/gemm_kernels.cu"
     "csrc/cutlass_extensions/common.cpp")
 
   set_gencode_flags_for_srcs(
@@ -501,46 +499,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
                    " in CUDA target architectures")
   endif()
 
-  # Only build AllSpark kernels if we are building for at least some compatible archs.
-  cuda_archs_loose_intersection(ALLSPARK_ARCHS "8.0;8.6;8.7;8.9" "${CUDA_ARCHS}")
-  if (ALLSPARK_ARCHS)
-    set(ALLSPARK_SRCS
-       "csrc/quantization/gptq_allspark/allspark_repack.cu"
-       "csrc/quantization/gptq_allspark/allspark_qgemm_w8a16.cu")
-    set_gencode_flags_for_srcs(
-      SRCS "${ALLSPARK_SRCS}"
-      CUDA_ARCHS "${ALLSPARK_ARCHS}")
-    list(APPEND VLLM_EXT_SRC "${ALLSPARK_SRCS}")
-    message(STATUS "Building AllSpark kernels for archs: ${ALLSPARK_ARCHS}")
-  else()
-    message(STATUS "Not building AllSpark kernels as no compatible archs found"
-                   " in CUDA target architectures")
-  endif()
-
-  # CUTLASS MLA Archs and flags
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-    cuda_archs_loose_intersection(MLA_ARCHS "10.0f;11.0f;12.0f" "${CUDA_ARCHS}")
-  else()
-    cuda_archs_loose_intersection(MLA_ARCHS "10.0a;10.1a;10.3a;12.0a;12.1a" "${CUDA_ARCHS}")
-  endif()
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND MLA_ARCHS)
-    set(SRCS
-      "csrc/attention/mla/sm100_cutlass_mla_kernel.cu")
-    set_gencode_flags_for_srcs(
-      SRCS "${SRCS}"
-      CUDA_ARCHS "${MLA_ARCHS}")
-    list(APPEND VLLM_EXT_SRC "${SRCS}")
-    list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MLA=1")
-    # Add MLA-specific include directories only to MLA source files
-    set_source_files_properties(${SRCS}
-      PROPERTIES INCLUDE_DIRECTORIES "${CUTLASS_DIR}/examples/77_blackwell_fmha;${CUTLASS_DIR}/examples/common")
-    message(STATUS "Building CUTLASS MLA for archs: ${MLA_ARCHS}")
-  else()
-    message(STATUS "Not building CUTLASS MLA as no compatible archs were found.")
-    # clear MLA_ARCHS
-    set(MLA_ARCHS)
-  endif()
-
   # Expert-specialization MXFP8 blockscaled grouped kernels (SM100+).
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
     cuda_archs_loose_intersection(ES_MXFP8_GROUPED_MM_ARCHS "10.0f;11.0f" "${CUDA_ARCHS}")
@@ -566,24 +524,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       message(STATUS "Not building ES MXFP8 grouped kernels as no compatible archs found "
                      "in CUDA target architectures.")
     endif()
-  endif()
-
-  # DeepSeek V3 fused A GEMM kernel (requires SM 9.0+, Hopper and later)
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-    cuda_archs_loose_intersection(DSV3_FUSED_A_GEMM_ARCHS "9.0a;10.0f;11.0f" "${CUDA_ARCHS}")
-  else()
-    cuda_archs_loose_intersection(DSV3_FUSED_A_GEMM_ARCHS "9.0a;10.0a;10.1a;10.3a" "${CUDA_ARCHS}")
-  endif()
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND DSV3_FUSED_A_GEMM_ARCHS)
-    set(DSV3_FUSED_A_GEMM_SRC "csrc/dsv3_fused_a_gemm.cu")
-    set_gencode_flags_for_srcs(
-      SRCS "${DSV3_FUSED_A_GEMM_SRC}"
-      CUDA_ARCHS "${DSV3_FUSED_A_GEMM_ARCHS}")
-    list(APPEND VLLM_EXT_SRC ${DSV3_FUSED_A_GEMM_SRC})
-    message(STATUS "Building dsv3_fused_a_gemm for archs: ${DSV3_FUSED_A_GEMM_ARCHS}")
-  else()
-    message(STATUS "Not building dsv3_fused_a_gemm as no compatible archs found "
-                   "in CUDA target architectures.")
   endif()
 
   #
@@ -657,16 +597,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   endif()
 
 
-  # Hadacore kernels
-  cuda_archs_loose_intersection(HADACORE_ARCHS "8.0+PTX;9.0+PTX" "${CUDA_ARCHS}")
-  if(HADACORE_ARCHS)
-    set(SRCS "csrc/quantization/hadamard/hadacore/hadamard_transform_cuda.cu")
-    set_gencode_flags_for_srcs(
-      SRCS "${SRCS}"
-      CUDA_ARCHS "${HADACORE_ARCHS}")
-    list(APPEND VLLM_EXT_SRC "${SRCS}")
-    message(STATUS "Building hadacore")
-  endif()
 
 # if CUDA endif
 endif()
@@ -716,13 +646,48 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     list(APPEND VLLM_STABLE_EXT_SRC
       "csrc/libtorch_stable/permute_cols.cu"
       "csrc/libtorch_stable/quantization/w8a8/fp8/per_token_group_quant.cu"
-      "csrc/libtorch_stable/quantization/w8a8/int8/per_token_group_quant.cu")
+      "csrc/libtorch_stable/quantization/w8a8/int8/per_token_group_quant.cu"
+      "csrc/libtorch_stable/quantization/awq/gemm_kernels.cu")
   endif()
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")
     set_gencode_flags_for_srcs(
       SRCS "${VLLM_STABLE_EXT_SRC}"
       CUDA_ARCHS "${CUDA_ARCHS}")
+  endif()
+
+  # DeepSeek V3 fused A GEMM kernel (requires SM 9.0+, Hopper and later)
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    cuda_archs_loose_intersection(DSV3_FUSED_A_GEMM_ARCHS "9.0a;10.0f;11.0f" "${CUDA_ARCHS}")
+  else()
+    cuda_archs_loose_intersection(DSV3_FUSED_A_GEMM_ARCHS "9.0a;10.0a;10.1a;10.3a" "${CUDA_ARCHS}")
+  endif()
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND DSV3_FUSED_A_GEMM_ARCHS)
+    set(SRCS "csrc/libtorch_stable/dsv3_fused_a_gemm.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${DSV3_FUSED_A_GEMM_ARCHS}")
+    list(APPEND VLLM_STABLE_EXT_SRC "${SRCS}")
+    message(STATUS "Building dsv3_fused_a_gemm for archs: ${DSV3_FUSED_A_GEMM_ARCHS}")
+  else()
+    message(STATUS "Not building dsv3_fused_a_gemm as no compatible archs found "
+                   "in CUDA target architectures.")
+  endif()
+
+  # Only build AllSpark kernels if we are building for at least some compatible archs.
+  cuda_archs_loose_intersection(ALLSPARK_ARCHS "8.0;8.6;8.7;8.9" "${CUDA_ARCHS}")
+  if (ALLSPARK_ARCHS)
+    set(SRCS
+       "csrc/libtorch_stable/quantization/gptq_allspark/allspark_repack.cu"
+       "csrc/libtorch_stable/quantization/gptq_allspark/allspark_qgemm_w8a16.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${ALLSPARK_ARCHS}")
+    list(APPEND VLLM_STABLE_EXT_SRC "${SRCS}")
+    message(STATUS "Building AllSpark kernels for archs: ${ALLSPARK_ARCHS}")
+  else()
+    message(STATUS "Not building AllSpark kernels as no compatible archs found"
+                   " in CUDA target architectures")
   endif()
 
   #
@@ -1034,6 +999,41 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     endif()
   endif()
 
+  # CUTLASS MLA Archs and flags
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    cuda_archs_loose_intersection(MLA_ARCHS "10.0f;11.0f;12.0f" "${CUDA_ARCHS}")
+  else()
+    cuda_archs_loose_intersection(MLA_ARCHS "10.0a;10.1a;10.3a;12.0a;12.1a" "${CUDA_ARCHS}")
+  endif()
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND MLA_ARCHS)
+    set(SRCS
+      "csrc/libtorch_stable/attention/mla/sm100_cutlass_mla_kernel.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${MLA_ARCHS}")
+    list(APPEND VLLM_STABLE_EXT_SRC "${SRCS}")
+    list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MLA=1")
+    # Add MLA-specific include directories only to MLA source files
+    set_source_files_properties(${SRCS}
+      PROPERTIES INCLUDE_DIRECTORIES "${CUTLASS_DIR}/examples/77_blackwell_fmha;${CUTLASS_DIR}/examples/common")
+    message(STATUS "Building CUTLASS MLA for archs: ${MLA_ARCHS}")
+  else()
+    message(STATUS "Not building CUTLASS MLA as no compatible archs were found.")
+    # clear MLA_ARCHS
+    set(MLA_ARCHS)
+  endif()
+
+  # Hadacore kernels
+  cuda_archs_loose_intersection(HADACORE_ARCHS "8.0+PTX;9.0+PTX" "${CUDA_ARCHS}")
+  if(HADACORE_ARCHS)
+    set(SRCS "csrc/libtorch_stable/quantization/hadamard/hadacore/hadamard_transform_cuda.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${HADACORE_ARCHS}")
+    list(APPEND VLLM_STABLE_EXT_SRC "${SRCS}")
+    message(STATUS "Building hadacore")
+  endif()
+
   message(STATUS "Enabling C_stable extension.")
   define_extension_target(
     _C_stable_libtorch
@@ -1221,6 +1221,16 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       CUDA_ARCHS "${DSV3_ROUTER_GEMM_ARCHS}")
     list(APPEND VLLM_MOE_EXT_SRC "${DSV3_ROUTER_GEMM_SRC}")
     message(STATUS "Building DSV3 router GEMM kernel for archs: ${DSV3_ROUTER_GEMM_ARCHS}")
+
+    # DeepSeek V4 fused RMSNorm + router GEMV - same arch gating as DSV3.
+    set(DSV4_NORM_ROUTER_GEMM_SRC
+      "csrc/moe/dsv4_norm_router_gemm_entry.cu"
+      "csrc/moe/dsv4_norm_router_gemm_kernel.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${DSV4_NORM_ROUTER_GEMM_SRC}"
+      CUDA_ARCHS "${DSV3_ROUTER_GEMM_ARCHS}")
+    list(APPEND VLLM_MOE_EXT_SRC "${DSV4_NORM_ROUTER_GEMM_SRC}")
+    message(STATUS "Building DSV4 norm+router GEMV kernel for archs: ${DSV3_ROUTER_GEMM_ARCHS}")
   else()
     message(STATUS "Not building DSV3 router GEMM kernel as no compatible archs found"
                    " (requires SM90+ and CUDA >= 12.0)")
