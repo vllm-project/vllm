@@ -9,6 +9,7 @@ INT32-packed UE8M0 on SM100) so fp8_einsum skips transform_sf_into_required_layo
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -242,7 +243,7 @@ def _fused_inv_rope_fp8_quant_kernel_impl(
         (scale_inner * tma_aligned_T, 1, tma_aligned_T),
     )
     grid = (tma_aligned_T, n_groups * heads_per_group)
-    pdl_kwargs = {"launch_pdl": False}
+    pdl_kwargs = {} if current_platform.is_rocm() else {"launch_pdl": False}
     _fused_inv_rope_fp8_quant_per_head[grid](
         o,
         positions,
