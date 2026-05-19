@@ -102,10 +102,17 @@ function Ensure-Venv {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Path) | Out-Null
     $pyLauncher = Get-Command py.exe -ErrorAction SilentlyContinue
     if ($pyLauncher) {
+        & $pyLauncher.Source "-3.12" "-c" "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 12) else 1)" *> $null
+    }
+    if ($pyLauncher -and $LASTEXITCODE -eq 0) {
         Invoke-Native $pyLauncher.Source "-3.12" "-m" "venv" $Path
     }
     else {
         Require-Command "python.exe" "Install Python 3.12, or install the Windows Python launcher."
+        & python.exe -c "import sys; raise SystemExit(0 if (3, 10) <= sys.version_info[:2] < (3, 15) else 1)"
+        if ($LASTEXITCODE -ne 0) {
+            throw "python.exe must be Python >=3.10,<3.15 for this vLLM checkout."
+        }
         Invoke-Native "python.exe" "-m" "venv" $Path
     }
     return $python
