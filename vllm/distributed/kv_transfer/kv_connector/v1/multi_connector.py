@@ -317,6 +317,12 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
 
         return finished_sending or None, finished_recving or None
 
+    def get_request_ids_with_load_errors(self) -> set[str]:
+        result: set[str] = set()
+        for c in self._connectors:
+            result.update(c.get_request_ids_with_load_errors())
+        return result
+
     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
         """Set xPU-specific copy ops for all sub-connectors."""
         for c in self._connectors:
