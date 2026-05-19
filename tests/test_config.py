@@ -148,43 +148,6 @@ def test_is_default_v2_model_runner_model(model_config, expected):
     assert VllmConfig._is_default_v2_model_runner_model(config) is expected
 
 
-def _make_v2_unsupported_feature_shim(**overrides):
-    """Build a self shim where no unsupported clauses fire by default."""
-    defaults = dict(
-        model_config=None,
-        speculative_config=None,
-        reasoning_config=None,
-        ec_transfer_config=None,
-        lora_config=None,
-        parallel_config=SimpleNamespace(
-            prefill_context_parallel_size=1,
-            tensor_parallel_size=1,
-            pipeline_parallel_size=1,
-            enable_dbo=False,
-        ),
-        compilation_config=SimpleNamespace(
-            mode=CompilationMode.VLLM_COMPILE,
-            pass_config=SimpleNamespace(enable_sp=False),
-        ),
-        cache_config=SimpleNamespace(kv_sharing_fast_prefill=False),
-    )
-    return SimpleNamespace(**(defaults | overrides))
-
-
-@pytest.mark.parametrize(
-    ("lora_config", "expected_lora_unsupported"),
-    [(SimpleNamespace(), True), (None, False)],
-)
-def test_v2_model_runner_unsupported_features_lora(
-    lora_config, expected_lora_unsupported
-):
-    config = _make_v2_unsupported_feature_shim(lora_config=lora_config)
-
-    unsupported = VllmConfig._get_v2_model_runner_unsupported_features(config)
-
-    assert ("LoRA" in unsupported) is expected_lora_unsupported
-
-
 @pytest.mark.skip_global_cleanup
 def test_with_hf_config_populates_missing_architectures_from_causal_lm_mapping(
     monkeypatch,

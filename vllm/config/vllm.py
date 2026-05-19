@@ -2004,6 +2004,7 @@ class VllmConfig:
 
         # TODO: V2 ModelCudaGraphManager does not capture LoRA-specialized
         # graphs; capture and execute disagree on BatchDescriptor.has_lora.
+        # Context: https://github.com/vllm-project/vllm/pull/43084
         if self.lora_config is not None:
             unsupported.append("LoRA")
 
