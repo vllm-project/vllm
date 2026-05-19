@@ -4,20 +4,42 @@
 Unit tests for the JSON-based config loader added to selective_state_update.
 
 Tests cover:
-  - Config filename generation
-  - VLLM_TUNED_CONFIG_FOLDER env-var override (per-GPU subfolder structure)
+  - Flat MoE-style filename generation
+  - VLLM_TUNED_CONFIG_FOLDER env-var override
   - Fallback to heuristic when no config file exists
-  - Nearest-batch interpolation
+  - Nearest effective_batch interpolation
+  - Edge cases: non-dict JSON, empty config
 """
 
 import json
 
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
-    _get_ssm_launch_config,
     get_ssm_config_file_name,
     get_ssm_configs,
     get_ssm_device_name,
+    try_get_optimal_ssm_config,
 )
+
+# Common kwargs for try_get_optimal_ssm_config. Tests pick (batch, nheads) so
+# their product (effective_batch) matches the value being probed.
+_HEADDIM = 64
+_CACHE_DTYPE = "float32"
+
+
+def _clear_caches() -> None:
+    get_ssm_configs.cache_clear()
+    try_get_optimal_ssm_config.cache_clear()
+
+
+def _write_config(tmp_path, dstate: int, payload: dict) -> None:
+    """Write payload as the bundled config for (headdim, dstate, cache_dtype)."""
+    device_name = get_ssm_device_name()
+    config_path = tmp_path / get_ssm_config_file_name(
+        _HEADDIM, dstate, _CACHE_DTYPE, device_name
+    )
+    with open(config_path, "w") as f:
+        json.dump(payload, f)
+
 
 # ---------------------------------------------------------------------------
 # Config filename generation
@@ -25,34 +47,37 @@ from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
 
 
 def test_config_file_name_format():
-    name = get_ssm_config_file_name(128)
-    assert name == "dstate=128.json"
+    name = get_ssm_config_file_name(
+        headdim=64, dstate=128, cache_dtype="float32", device_name="NVIDIA_B200"
+    )
+    assert name == (
+        "headdim=64,dstate=128,device_name=NVIDIA_B200,cache_dtype=float32.json"
+    )
 
 
 # ---------------------------------------------------------------------------
-# VLLM_TUNED_CONFIG_FOLDER override (configs live in <folder>/<device>/dstate=N.json)
+# VLLM_TUNED_CONFIG_FOLDER override
 # ---------------------------------------------------------------------------
 
 
 def test_env_override_loads_custom_config(monkeypatch, tmp_path):
     """VLLM_TUNED_CONFIG_FOLDER should take precedence over the bundled dir."""
-    device_name = get_ssm_device_name()
-    gpu_dir = tmp_path / device_name
-    gpu_dir.mkdir()
-
-    config_path = gpu_dir / get_ssm_config_file_name(16)
-    payload = {"1": {"BLOCK_SIZE_M": 4, "num_warps": 1}}
-    with open(config_path, "w") as f:
-        json.dump(payload, f)
+    _write_config(
+        tmp_path,
+        dstate=16,
+        payload={
+            "1": {"BLOCK_SIZE_M": 4, "num_warps": 1},
+        },
+    )
 
     monkeypatch.setenv("VLLM_TUNED_CONFIG_FOLDER", str(tmp_path))
-    get_ssm_configs.cache_clear()
+    _clear_caches()
 
-    cfg = get_ssm_configs(16)
+    cfg = get_ssm_configs(_HEADDIM, 16, _CACHE_DTYPE)
     assert cfg is not None
     assert cfg[1] == {"BLOCK_SIZE_M": 4, "num_warps": 1}
 
-    get_ssm_configs.cache_clear()
+    _clear_caches()
 
 
 # ---------------------------------------------------------------------------
@@ -61,60 +86,85 @@ def test_env_override_loads_custom_config(monkeypatch, tmp_path):
 
 
 def test_fallback_when_no_config(monkeypatch, tmp_path):
-    """_get_ssm_launch_config must fall back to the hard-coded heuristic
+    """try_get_optimal_ssm_config must fall back to the hard-coded heuristic
     when no JSON file is found for the current device."""
     monkeypatch.setenv("VLLM_TUNED_CONFIG_FOLDER", str(tmp_path))
     monkeypatch.setattr(
         "vllm.model_executor.layers.mamba.ops.mamba_ssm._CONFIGS_DIR",
         str(tmp_path),
     )
-    get_ssm_configs.cache_clear()
+    _clear_caches()
 
     # dstate=64 heuristic: BLOCK_SIZE_M=8, num_warps=4
-    block_m, warps = _get_ssm_launch_config(dstate=64, batch=1, is_blackwell=False)
+    block_m, warps = try_get_optimal_ssm_config(
+        headdim=_HEADDIM,
+        dstate=64,
+        batch=1,
+        nheads=1,
+        cache_dtype=_CACHE_DTYPE,
+        is_blackwell=False,
+    )
     assert block_m == 8
     assert warps == 4
 
     # dstate=16 heuristic: BLOCK_SIZE_M=32, num_warps=4
-    block_m, warps = _get_ssm_launch_config(dstate=16, batch=1, is_blackwell=False)
+    block_m, warps = try_get_optimal_ssm_config(
+        headdim=_HEADDIM,
+        dstate=16,
+        batch=1,
+        nheads=1,
+        cache_dtype=_CACHE_DTYPE,
+        is_blackwell=False,
+    )
     assert block_m == 32
     assert warps == 4
 
-    get_ssm_configs.cache_clear()
+    _clear_caches()
 
 
 # ---------------------------------------------------------------------------
-# Nearest-batch interpolation
+# Nearest effective_batch interpolation
 # ---------------------------------------------------------------------------
 
 
-def test_nearest_batch_interpolation(monkeypatch, tmp_path):
-    """When the exact batch size is not in the config, the closest key
-    should be selected."""
-    device_name = get_ssm_device_name()
-    gpu_dir = tmp_path / device_name
-    gpu_dir.mkdir()
-
-    config_path = gpu_dir / get_ssm_config_file_name(32)
-    payload = {
-        "1": {"BLOCK_SIZE_M": 8, "num_warps": 1},
-        "64": {"BLOCK_SIZE_M": 32, "num_warps": 4},
-    }
-    with open(config_path, "w") as f:
-        json.dump(payload, f)
+def test_nearest_effective_batch_interpolation(monkeypatch, tmp_path):
+    """When effective_batch = batch*nheads is not an exact key, the closest
+    key should be selected."""
+    _write_config(
+        tmp_path,
+        dstate=32,
+        payload={
+            "64": {"BLOCK_SIZE_M": 8, "num_warps": 1},
+            "4096": {"BLOCK_SIZE_M": 32, "num_warps": 4},
+        },
+    )
 
     monkeypatch.setenv("VLLM_TUNED_CONFIG_FOLDER", str(tmp_path))
-    get_ssm_configs.cache_clear()
+    _clear_caches()
 
-    # batch=5 is closer to 1 than to 64 — expects M=8, w=1
-    block_m, warps = _get_ssm_launch_config(dstate=32, batch=5, is_blackwell=False)
+    # effective_batch = 1*128 = 128 -> closer to 64 than to 4096
+    block_m, warps = try_get_optimal_ssm_config(
+        headdim=_HEADDIM,
+        dstate=32,
+        batch=1,
+        nheads=128,
+        cache_dtype=_CACHE_DTYPE,
+        is_blackwell=False,
+    )
     assert block_m == 8 and warps == 1
 
-    # batch=40 is closer to 64 — expects M=32, w=4
-    block_m, warps = _get_ssm_launch_config(dstate=32, batch=40, is_blackwell=False)
+    # effective_batch = 4*1024 = 4096 -> exact match on 4096
+    block_m, warps = try_get_optimal_ssm_config(
+        headdim=_HEADDIM,
+        dstate=32,
+        batch=4,
+        nheads=1024,
+        cache_dtype=_CACHE_DTYPE,
+        is_blackwell=False,
+    )
     assert block_m == 32 and warps == 4
 
-    get_ssm_configs.cache_clear()
+    _clear_caches()
 
 
 # ---------------------------------------------------------------------------
@@ -126,10 +176,9 @@ def test_non_dict_json_returns_none(monkeypatch, tmp_path):
     """A valid JSON file that is not a dict (e.g. a list) must be ignored
     and return None rather than raising AttributeError."""
     device_name = get_ssm_device_name()
-    gpu_dir = tmp_path / device_name
-    gpu_dir.mkdir()
-
-    config_path = gpu_dir / get_ssm_config_file_name(16)
+    config_path = tmp_path / get_ssm_config_file_name(
+        _HEADDIM, 16, _CACHE_DTYPE, device_name
+    )
     with open(config_path, "w") as f:
         json.dump([1, 2, 3], f)
 
@@ -138,30 +187,31 @@ def test_non_dict_json_returns_none(monkeypatch, tmp_path):
         "vllm.model_executor.layers.mamba.ops.mamba_ssm._CONFIGS_DIR",
         str(tmp_path),
     )
-    get_ssm_configs.cache_clear()
+    _clear_caches()
 
-    assert get_ssm_configs(16) is None
+    assert get_ssm_configs(_HEADDIM, 16, _CACHE_DTYPE) is None
 
-    get_ssm_configs.cache_clear()
+    _clear_caches()
 
 
 def test_empty_config_falls_back_to_heuristic(monkeypatch, tmp_path):
     """An empty JSON object {} must not crash min() — should fall back
     to the hard-coded heuristic."""
-    device_name = get_ssm_device_name()
-    gpu_dir = tmp_path / device_name
-    gpu_dir.mkdir()
-
-    config_path = gpu_dir / get_ssm_config_file_name(64)
-    with open(config_path, "w") as f:
-        json.dump({}, f)
+    _write_config(tmp_path, dstate=64, payload={})
 
     monkeypatch.setenv("VLLM_TUNED_CONFIG_FOLDER", str(tmp_path))
-    get_ssm_configs.cache_clear()
+    _clear_caches()
 
     # dstate=64 heuristic: BLOCK_SIZE_M=8, num_warps=4
-    block_m, warps = _get_ssm_launch_config(dstate=64, batch=1, is_blackwell=False)
+    block_m, warps = try_get_optimal_ssm_config(
+        headdim=_HEADDIM,
+        dstate=64,
+        batch=1,
+        nheads=64,
+        cache_dtype=_CACHE_DTYPE,
+        is_blackwell=False,
+    )
     assert block_m == 8
     assert warps == 4
 
-    get_ssm_configs.cache_clear()
+    _clear_caches()

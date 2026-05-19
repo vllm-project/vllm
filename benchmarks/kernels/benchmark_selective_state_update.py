@@ -4,22 +4,14 @@
 """
 Benchmark and tuning script for the Mamba selective_state_update kernel.
 
-This script mirrors the fused MoE tuning workflow in vLLM:
-  - Sweeps BLOCK_SIZE_M x num_warps across all batch sizes for a given dstate
-  - Finds the best launch config per (batch, dstate) combination
-  - Optionally saves configs to JSON in vllm/model_executor/layers/mamba/configs/
-  - Optionally compares tuned configs against the existing heuristic baseline
-  - Always saves a human-readable results file alongside this script
+Mirrors the fused MoE tuning workflow: sweeps (BLOCK_SIZE_M, num_warps) across
+an effective_batch grid for a given (headdim, dstate, ngroups, cache_dtype) and
+saves the best config per effective_batch to JSON. Generated configs are picked
+up by selective_state_update at runtime.
 
-Usage (tune all dstates, save configs + compare vs heuristic):
-    python benchmarks/kernels/benchmark_selective_state_update.py \\
+Usage:
+    python benchmarks/kernels/benchmark_selective_state_update.py \
         --all-dstates --save-configs --compare
-
-Usage (single dstate, show results only):
-    python benchmarks/kernels/benchmark_selective_state_update.py --dstate 128
-
-Generated JSON configs are loaded automatically by selective_state_update
-at runtime when a matching device config file is found.
 """
 
 import argparse
@@ -28,6 +20,7 @@ import os
 import sys
 from io import StringIO
 from itertools import product
+from typing import Any
 from unittest.mock import patch
 
 import torch
@@ -37,6 +30,13 @@ from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
     selective_state_update,
 )
 from vllm.platforms import current_platform
+from vllm.triton_utils import triton
+
+# MambaDType subset: bf16 is excluded (not commonly used)
+_SSM_CACHE_DTYPE_MAP: dict[str, torch.dtype] = {
+    "float32": torch.float32,
+    "float16": torch.float16,
+}
 
 _RESULTS_DIR = os.path.dirname(os.path.realpath(__file__))
 
@@ -44,21 +44,71 @@ _RESULTS_DIR = os.path.dirname(os.path.realpath(__file__))
 # Tuning search space
 # ---------------------------------------------------------------------------
 
-BLOCK_SIZE_M_CHOICES = [4, 8, 16, 32, 64]
+_BSM_CHOICES_ALL = [4, 8, 16, 32, 64, 128, 256]
+
 NUM_WARPS_CHOICES = [1, 2, 4, 8]
 
-BATCH_SIZES = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
+
+def _block_size_m_choices(headdim: int) -> list[int]:
+    """BLOCK_SIZE_M candidates worth sweeping for a given headdim.
+
+    BLOCK_SIZE_M > next_pow2(headdim) wastes >=50% of each tile via masking
+    (offs_m >= dim rows are zeroed out), so we cap the sweep there.
+    """
+    ceiling = 1
+    while ceiling < headdim:
+        ceiling <<= 1
+    return [b for b in _BSM_CHOICES_ALL if b <= ceiling]
+
+
+# effective_batch = batch * nheads_per_rank — the kernel grid scales with
+# the product, so configs transfer across (model, TP) combos sharing
+# (headdim, dstate, cache_dtype).
+# Ceiling 262144 covers 256-head at TP1, max BS=1024 (256 * 1024).
+EFFECTIVE_BATCH_SIZES = [
+    8,
+    16,
+    24,
+    32,
+    48,
+    64,
+    96,
+    128,
+    192,
+    256,
+    384,
+    512,
+    768,
+    1024,
+    1536,
+    2048,
+    3072,
+    4096,
+    6144,
+    8192,
+    12288,
+    16384,
+    24576,
+    32768,
+    49152,
+    65536,
+    98304,
+    131072,
+    196608,
+    262144,
+]
 
 ALL_DSTATES = [16, 32, 64, 128, 256]
+
+# Default tuning shape — matches Nemotron-3-Super and Nemotron-3-Nano Mamba layers.
+# Override with CLI flags for other architectures.
+DEFAULT_HEADDIM = 64
+DEFAULT_NGROUPS = 8
 
 
 # ---------------------------------------------------------------------------
 # Config file naming (mirrors fused_moe pattern)
 # ---------------------------------------------------------------------------
-
-
-def get_ssm_config_file_name(dstate: int) -> str:
-    return f"dstate={dstate}.json"
 
 
 def get_device_name() -> str:
@@ -86,9 +136,12 @@ def _make_inputs(
     dstate: int,
     ngroups: int,
     dtype: torch.dtype,
+    state_dtype: torch.dtype | None = None,
     device: str = "cuda",
 ):
-    state = torch.randn(batch, nheads, dim, dstate, dtype=dtype, device=device)
+    if state_dtype is None:
+        state_dtype = dtype
+    state = torch.randn(batch, nheads, dim, dstate, dtype=state_dtype, device=device)
     x = torch.randn(batch, nheads, dim, dtype=dtype, device=device)
     dt = torch.randn(batch, nheads, dim, dtype=dtype, device=device)
     A = -torch.rand(nheads, dim, dstate, dtype=torch.float32, device=device)
@@ -109,6 +162,7 @@ def benchmark_config(
     block_size_m: int,
     num_warps_val: int,
     dtype: torch.dtype,
+    state_dtype: torch.dtype | None = None,
     num_iters: int = 100,
     num_warmup: int = 20,
 ) -> float | None:
@@ -117,17 +171,17 @@ def benchmark_config(
     Returns elapsed time in microseconds, or None on error.
     """
     state, x, dt, A, B, C, D, dt_bias, out = _make_inputs(
-        batch, nheads, dim, dstate, ngroups, dtype
+        batch, nheads, dim, dstate, ngroups, dtype, state_dtype=state_dtype
     )
 
-    # Monkeypatch _get_ssm_launch_config to return the specific config
+    # Monkeypatch try_get_optimal_ssm_config to return the specific config
     # without affecting the lru_cache on get_ssm_configs.
-    def _fixed_launch_config(dstate_, batch_, is_blackwell_):
+    def _fixed_launch_config(*_args, **_kwargs):
         return block_size_m, num_warps_val
 
     try:
         with patch.object(
-            mamba_ssm_module, "_get_ssm_launch_config", _fixed_launch_config
+            mamba_ssm_module, "try_get_optimal_ssm_config", _fixed_launch_config
         ):
             # Warmup
             for _ in range(num_warmup):
@@ -180,45 +234,111 @@ def benchmark_config(
 # ---------------------------------------------------------------------------
 
 
+# CUDA grid Y/Z dim limit — both `batch` and `nheads` must fit individually,
+# so effective_batch > 65535 has to be split across the two.
+_CUDA_MAX_GRID_DIM = 65535
+
+
+def _factor_effective_batch(
+    effective_batch: int, ngroups: int
+) -> tuple[int, int] | None:
+    """Return (batch, nheads) with batch*nheads == effective_batch such that
+    both fit the CUDA grid Y/Z dim limit and nheads is a positive multiple of
+    ngroups. Prefers batch=1 (the cheapest split) when it fits.
+
+    Returns None if no valid factorization exists.
+    """
+    for batch in range(1, _CUDA_MAX_GRID_DIM + 1):
+        if batch > effective_batch or effective_batch % batch != 0:
+            continue
+        nheads = effective_batch // batch
+        if nheads > _CUDA_MAX_GRID_DIM:
+            continue
+        if nheads % ngroups != 0:
+            continue
+        return batch, nheads
+    return None
+
+
+def _resolve_effective_batches(
+    user_supplied: list[int] | None,
+    ngroups: int,
+) -> list[tuple[int, int, int]]:
+    """Return [(effective_batch, batch, nheads)] for each valid sweep point.
+
+    Drops any effective_batch with no valid (batch, nheads) factorization
+    that satisfies both the CUDA grid dim limit and nheads % ngroups == 0.
+    """
+    candidates = user_supplied if user_supplied is not None else EFFECTIVE_BATCH_SIZES
+    valid: list[tuple[int, int, int]] = []
+    skipped: list[int] = []
+    for eb in candidates:
+        if eb <= 0:
+            skipped.append(eb)
+            continue
+        factored = _factor_effective_batch(eb, ngroups)
+        if factored is None:
+            skipped.append(eb)
+            continue
+        batch, nheads = factored
+        valid.append((eb, batch, nheads))
+    if skipped:
+        print(
+            f"  Note: skipping effective_batch values with no valid "
+            f"(batch, nheads) factorization for ngroups={ngroups} "
+            f"under CUDA grid dim {_CUDA_MAX_GRID_DIM}: {skipped}"
+        )
+    return valid
+
+
 def tune_dstate(
     dstate: int,
+    headdim: int,
+    ngroups: int,
     dtype: torch.dtype,
     num_iters: int,
     verbose: bool,
-    batch_sizes: list[int] | None = None,
+    effective_batches: list[int] | None = None,
+    state_dtype: torch.dtype | None = None,
 ) -> dict[int, dict]:
+    """For each effective_batch, sweep (BLOCK_SIZE_M, num_warps) and return
+    {effective_batch: best_config}. effective_batch is factored into
+    (batch, nheads) by `_factor_effective_batch`.
     """
-    For each batch size, sweep all (BLOCK_SIZE_M, num_warps) combos and
-    return a dict mapping batch_size -> best_config.
-    """
-    # Use a representative shape for tuning (Mamba-2 style, common case).
-    nheads, dim, ngroups = 64, 64, 1
-    active_batches = batch_sizes if batch_sizes is not None else BATCH_SIZES
+    active = _resolve_effective_batches(effective_batches, ngroups)
 
-    best_per_batch: dict[int, dict] = {}
+    best_per_eb: dict[int, dict] = {}
 
     print(f"\n{'=' * 74}")
-    print(f"Tuning  dstate={dstate}  nheads={nheads}  dim={dim}  dtype={dtype}")
+    effective_state_dtype = state_dtype if state_dtype is not None else dtype
+    print(
+        f"Tuning  headdim={headdim}  dstate={dstate}  ngroups={ngroups}  "
+        f"dtype={dtype}  ssm_cache_dtype={effective_state_dtype}"
+    )
     print(f"{'=' * 74}")
 
-    hdr = f"{'Batch':>7} | {'BLOCK_M':>7} | {'warps':>5} | {'us':>10} | note"
-    print(hdr)
-    print("-" * 50)
+    bsm_choices = _block_size_m_choices(headdim)
+    print(f"BSM candidates (capped at next_pow2(headdim={headdim})): {bsm_choices}")
 
-    for batch in active_batches:
+    hdr = f"{'EffBatch':>8} | {'BLOCK_M':>7} | {'warps':>5} | {'us':>10} | note"
+    print(hdr)
+    print("-" * 52)
+
+    for eb, batch, nheads in active:
         best_time = float("inf")
         best_cfg: dict = {}
 
-        for bsm, nw in product(BLOCK_SIZE_M_CHOICES, NUM_WARPS_CHOICES):
+        for bsm, nw in product(bsm_choices, NUM_WARPS_CHOICES):
             t = benchmark_config(
                 batch=batch,
                 nheads=nheads,
-                dim=dim,
+                dim=headdim,
                 dstate=dstate,
                 ngroups=ngroups,
                 block_size_m=bsm,
                 num_warps_val=nw,
                 dtype=dtype,
+                state_dtype=state_dtype,
                 num_iters=num_iters,
             )
             if t is None:
@@ -229,17 +349,24 @@ def tune_dstate(
                 best_cfg = {"BLOCK_SIZE_M": bsm, "num_warps": nw}
             if verbose:
                 marker = " <-- best" if is_best else ""
-                print(f"{batch:>7} | {bsm:>7} | {nw:>5} | {t:>10.2f} |{marker}")
+                print(f"{eb:>8} | {bsm:>7} | {nw:>5} | {t:>10.2f} |{marker}")
 
-        if not verbose and best_cfg:
+        if not best_cfg:
             print(
-                f"{batch:>7} | {best_cfg['BLOCK_SIZE_M']:>7} | "
+                f"{eb:>8} | {'-':>7} | {'-':>5} | {'-':>10} | "
+                f"no working config (skipped)"
+            )
+            continue
+
+        if not verbose:
+            print(
+                f"{eb:>8} | {best_cfg['BLOCK_SIZE_M']:>7} | "
                 f"{best_cfg['num_warps']:>5} | {best_time:>10.2f} | best"
             )
 
-        best_per_batch[batch] = best_cfg
+        best_per_eb[eb] = best_cfg
 
-    return best_per_batch
+    return best_per_eb
 
 
 # ---------------------------------------------------------------------------
@@ -299,37 +426,52 @@ def _selective_state_update_ref(
 
 def validate_configs(
     dstate: int,
+    headdim: int,
+    ngroups: int,
     tuned: dict[int, dict],
     dtype: torch.dtype,
     atol: float = 1e-2,
     rtol: float = 1e-2,
+    state_dtype: torch.dtype | None = None,
 ) -> dict[int, bool]:
     """
-    For every batch size in *tuned*, run the kernel with the tuned config and
-    compare against the CPU reference.  Returns {batch: passed}.
+    For every effective_batch in *tuned*, run the kernel with the tuned config
+    and compare against the CPU reference. Returns {effective_batch: passed}.
     """
-    nheads, dim, ngroups = 64, 64, 1
-
     print(f"\n{'=' * 74}")
-    print(f"Validation  dstate={dstate}  dtype={dtype}  atol={atol}")
+    effective_state_dtype = state_dtype if state_dtype is not None else dtype
+    print(
+        f"Validation  headdim={headdim}  dstate={dstate}  ngroups={ngroups}  "
+        f"dtype={dtype}  ssm_cache_dtype={effective_state_dtype}  atol={atol}"
+    )
     print(f"{'=' * 74}")
-    print(f"{'Batch':>7} | {'MaxAbsErr':>12} | {'Status':>8}")
+    print(f"{'EffBatch':>8} | {'MaxAbsErr':>12} | {'Status':>8}")
     print("-" * 36)
 
     results: dict[int, bool] = {}
 
-    for batch, cfg in sorted(tuned.items()):
+    for eb, cfg in sorted(tuned.items()):
+        factored = _factor_effective_batch(eb, ngroups)
+        if factored is None:
+            continue
+        batch, nheads = factored
         state, x, dt, A, B, C, D, dt_bias, out = _make_inputs(
-            batch, nheads, dim, dstate, ngroups, dtype
+            batch=batch,
+            nheads=nheads,
+            dim=headdim,
+            dstate=dstate,
+            ngroups=ngroups,
+            dtype=dtype,
+            state_dtype=state_dtype,
         )
         # Clone state before GPU kernel modifies it in-place
         state_ref = state.clone()
 
         # GPU kernel output
-        def _fixed(dstate_, batch_, is_blackwell_, _cfg=cfg):
+        def _fixed(*_args, _cfg=cfg, **_kwargs):
             return _cfg["BLOCK_SIZE_M"], _cfg["num_warps"]
 
-        with patch.object(mamba_ssm_module, "_get_ssm_launch_config", _fixed):
+        with patch.object(mamba_ssm_module, "try_get_optimal_ssm_config", _fixed):
             selective_state_update(
                 state,
                 x,
@@ -352,8 +494,8 @@ def validate_configs(
         passed = torch.allclose(gpu_out.float(), ref_out.float(), atol=atol, rtol=rtol)
         max_err = (gpu_out.float() - ref_out.float()).abs().max().item()
         status = "PASS" if passed else "FAIL"
-        results[batch] = passed
-        print(f"{batch:>7} | {max_err:>12.6f} | {status:>8}")
+        results[eb] = passed
+        print(f"{eb:>8} | {max_err:>12.6f} | {status:>8}")
 
     n_pass = sum(results.values())
     n_total = len(results)
@@ -367,14 +509,25 @@ def validate_configs(
 
 
 def save_configs(
-    dstate: int, configs: dict[int, dict], save_dir: str | None = None
+    headdim: int,
+    dstate: int,
+    cache_dtype: str,
+    configs: dict[int, dict],
+    save_dir: str | None = None,
 ) -> str:
     base_dir = save_dir if save_dir else get_ssm_configs_dir()
-    # Place configs in a per-GPU subfolder for easy multi-GPU organisation.
-    configs_dir = os.path.join(base_dir, get_device_name())
-    os.makedirs(configs_dir, exist_ok=True)
-    file_path = os.path.join(configs_dir, get_ssm_config_file_name(dstate))
-    payload = {str(k): v for k, v in sorted(configs.items())}
+    os.makedirs(base_dir, exist_ok=True)
+    file_path = os.path.join(
+        base_dir,
+        mamba_ssm_module.get_ssm_config_file_name(
+            headdim, dstate, cache_dtype, get_device_name()
+        ),
+    )
+    # triton_version is informational only, the loader ignores it
+    payload: dict[str, Any] = {
+        "triton_version": triton.__version__,
+        **{str(k): v for k, v in sorted(configs.items())},
+    }
     with open(file_path, "w") as f:
         json.dump(payload, f, indent=4)
     return file_path
@@ -404,59 +557,70 @@ def current_heuristic(dstate: int, is_blackwell: bool = False) -> dict:
 
 def compare_heuristic_vs_tuned(
     dstate: int,
+    headdim: int,
+    ngroups: int,
     tuned: dict[int, dict],
     dtype: torch.dtype,
     num_iters: int,
     is_blackwell: bool,
+    effective_batches: list[int] | None = None,
+    state_dtype: torch.dtype | None = None,
 ):
-    nheads, dim, ngroups = 64, 64, 1
+    active = _resolve_effective_batches(effective_batches, ngroups)
     heur_cfg = current_heuristic(dstate, is_blackwell)
 
     print(f"\n{'=' * 74}")
-    print(f"Comparison  dstate={dstate}  —  heuristic vs tuned")
+    print(
+        f"Comparison  headdim={headdim}  dstate={dstate}  "
+        f"ngroups={ngroups}  —  heuristic vs tuned"
+    )
     print(
         f"Heuristic: BLOCK_SIZE_M={heur_cfg['BLOCK_SIZE_M']}, "
         f"num_warps={heur_cfg['num_warps']}"
     )
     print(f"{'=' * 74}")
     hdr = (
-        f"{'Batch':>7} | {'Heur(us)':>10} | {'Tuned(us)':>10} | "
+        f"{'EffBatch':>8} | {'Heur(us)':>10} | {'Tuned(us)':>10} | "
         f"{'Speedup':>8} | Best config"
     )
     print(hdr)
     print("-" * len(hdr))
 
-    for batch in BATCH_SIZES:
+    for eb, batch, nheads in active:
         t_h = benchmark_config(
-            batch,
-            nheads,
-            dim,
-            dstate,
-            ngroups,
-            heur_cfg["BLOCK_SIZE_M"],
-            heur_cfg["num_warps"],
-            dtype,
-            num_iters,
+            batch=batch,
+            nheads=nheads,
+            dim=headdim,
+            dstate=dstate,
+            ngroups=ngroups,
+            block_size_m=heur_cfg["BLOCK_SIZE_M"],
+            num_warps_val=heur_cfg["num_warps"],
+            dtype=dtype,
+            state_dtype=state_dtype,
+            num_iters=num_iters,
         )
-        best = tuned.get(batch, heur_cfg)
+        # `tuned[eb]` may be missing if all configs failed in tune_dstate;
+        # in that case fall back to the heuristic so the table still prints.
+        best = tuned.get(eb) or heur_cfg
         t_t = benchmark_config(
-            batch,
-            nheads,
-            dim,
-            dstate,
-            ngroups,
-            best["BLOCK_SIZE_M"],
-            best["num_warps"],
-            dtype,
-            num_iters,
+            batch=batch,
+            nheads=nheads,
+            dim=headdim,
+            dstate=dstate,
+            ngroups=ngroups,
+            block_size_m=best["BLOCK_SIZE_M"],
+            num_warps_val=best["num_warps"],
+            dtype=dtype,
+            state_dtype=state_dtype,
+            num_iters=num_iters,
         )
         if t_h is None or t_t is None:
-            print(f"{batch:>7} | {'N/A':>10} | {'N/A':>10} | {'N/A':>8} |")
+            print(f"{eb:>8} | {'N/A':>10} | {'N/A':>10} | {'N/A':>8} |")
             continue
         speedup = t_h / t_t
         marker = " <--" if speedup > 1.05 else ""
         print(
-            f"{batch:>7} | {t_h:>10.2f} | {t_t:>10.2f} | "
+            f"{eb:>8} | {t_h:>10.2f} | {t_t:>10.2f} | "
             f"{speedup:>7.2f}x | "
             f"M={best['BLOCK_SIZE_M']},w={best['num_warps']}{marker}"
         )
@@ -499,7 +663,14 @@ def main():
         type=str,
         default="bfloat16",
         choices=["float16", "bfloat16"],
-        help="Data type (default: bfloat16)",
+        help="Activation / input data type (default: bfloat16)",
+    )
+    parser.add_argument(
+        "--mamba-ssm-cache-dtype",
+        type=str,
+        default="float32",
+        choices=list(_SSM_CACHE_DTYPE_MAP.keys()),
+        help="SSM state cache dtype (default: float32)",
     )
     parser.add_argument(
         "--num-iters",
@@ -533,18 +704,28 @@ def main():
         "--save-dir",
         type=str,
         default=None,
-        help="Base directory to save JSON configs. Configs are placed in a "
-        "per-GPU subfolder: <save-dir>/<device_name>/. "
+        help="Directory to save JSON configs. "
         "(default: vllm/model_executor/layers/mamba/configs/)",
     )
     parser.add_argument(
-        "--batches",
+        "--headdim",
+        type=int,
+        default=DEFAULT_HEADDIM,
+        help=f"Per-head feature dim (default: {DEFAULT_HEADDIM})",
+    )
+    parser.add_argument(
+        "--ngroups",
+        type=int,
+        default=DEFAULT_NGROUPS,
+        help=f"Number of B/C groups (default: {DEFAULT_NGROUPS})",
+    )
+    parser.add_argument(
+        "--effective-batches",
         type=int,
         nargs="+",
         default=None,
-        metavar="B",
-        help="Only tune these specific batch sizes, e.g. --batches 2 16 256. "
-        "Useful for stability re-checks on flagged configs.",
+        metavar="EB",
+        help="Tune only these effective_batch values (default: full sweep)",
     )
     parser.add_argument(
         "--validate",
@@ -561,6 +742,7 @@ def main():
     args = parser.parse_args()
 
     dtype = torch.bfloat16 if args.dtype == "bfloat16" else torch.float16
+    state_dtype = _SSM_CACHE_DTYPE_MAP[args.mamba_ssm_cache_dtype]
     device_name = current_platform.get_device_name()
     cap = torch.cuda.get_device_capability()
     is_blackwell = cap[0] >= 10
@@ -581,43 +763,76 @@ def main():
     sys.stdout = _Tee()  # type: ignore[assignment]
 
     try:
-        print(f"Device : {device_name}  (sm_{cap[0]}{cap[1]:02d})")
+        print(f"Device : {device_name}  (sm_{cap[0]}{cap[1]})")
         print(f"Blackwell: {is_blackwell}")
         print(f"dtype  : {args.dtype}")
+        print(f"ssm_cache_dtype: {args.mamba_ssm_cache_dtype}")
+        print(f"headdim: {args.headdim}")
+        print(f"ngroups: {args.ngroups}")
+        print(f"triton : {triton.__version__}")
 
         dstates = ALL_DSTATES if args.all_dstates else [args.dstate]
 
         for dstate in dstates:
             tuned = tune_dstate(
-                dstate, dtype, args.num_iters, args.verbose, args.batches
+                dstate=dstate,
+                headdim=args.headdim,
+                ngroups=args.ngroups,
+                dtype=dtype,
+                num_iters=args.num_iters,
+                verbose=args.verbose,
+                effective_batches=args.effective_batches,
+                state_dtype=state_dtype,
             )
 
             if args.compare:
                 compare_heuristic_vs_tuned(
-                    dstate, tuned, dtype, args.num_iters, is_blackwell
+                    dstate=dstate,
+                    headdim=args.headdim,
+                    ngroups=args.ngroups,
+                    tuned=tuned,
+                    dtype=dtype,
+                    num_iters=args.num_iters,
+                    is_blackwell=is_blackwell,
+                    effective_batches=args.effective_batches,
+                    state_dtype=state_dtype,
                 )
 
             if args.validate:
-                validity = validate_configs(dstate, tuned, dtype, args.atol)
+                validity = validate_configs(
+                    dstate=dstate,
+                    headdim=args.headdim,
+                    ngroups=args.ngroups,
+                    tuned=tuned,
+                    dtype=dtype,
+                    atol=args.atol,
+                    state_dtype=state_dtype,
+                )
                 # Filter out any configs that failed correctness check
-                failed = [b for b, ok in validity.items() if not ok]
+                failed = [eb for eb, ok in validity.items() if not ok]
                 if failed:
                     print(
-                        f"\n  WARNING: {len(failed)} config(s) failed "
-                        f"validation for dstate={dstate}: batches {failed}"
+                        f"\n  WARNING: {len(failed)} config(s) failed validation "
+                        f"for dstate={dstate}: effective_batches {failed}"
                     )
                     print("  These will NOT be saved even with --save-configs.")
                     tuned = {
-                        b: cfg for b, cfg in tuned.items() if validity.get(b, True)
+                        eb: cfg for eb, cfg in tuned.items() if validity.get(eb, True)
                     }
 
             if args.save_configs:
-                path = save_configs(dstate, tuned, args.save_dir)
+                path = save_configs(
+                    headdim=args.headdim,
+                    dstate=dstate,
+                    cache_dtype=args.mamba_ssm_cache_dtype,
+                    configs=tuned,
+                    save_dir=args.save_dir,
+                )
                 print(f"\nSaved: {path}")
             else:
                 print(f"\nBest configs for dstate={dstate}:")
-                for batch, cfg in sorted(tuned.items()):
-                    print(f"  batch={batch:>5}: {cfg}")
+                for eb, cfg in sorted(tuned.items()):
+                    print(f"  effective_batch={eb:>6}: {cfg}")
                 print("\n(Re-run with --save-configs to persist to JSON)")
     finally:
         sys.stdout = sys.__stdout__

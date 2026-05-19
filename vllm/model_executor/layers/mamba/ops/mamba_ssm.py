@@ -12,6 +12,7 @@ from typing import Any
 import torch
 from packaging import version
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
@@ -33,13 +34,17 @@ _CONFIGS_DIR = os.path.join(
 )
 
 
-def get_ssm_config_file_name(dstate: int) -> str:
-    """Return the JSON filename for the given dstate.
+def get_ssm_config_file_name(
+    headdim: int, dstate: int, cache_dtype: str, device_name: str
+) -> str:
+    """Return the JSON filename for the given kernel shape.
 
-    Config files are organised per GPU:
-        configs/<device_name>/dstate=<N>.json
+    Layout: ``configs/headdim=<H>,dstate=<D>,device_name=<dev>,cache_dtype=<dt>.json``.
     """
-    return f"dstate={dstate}.json"
+    return (
+        f"headdim={headdim},dstate={dstate},"
+        f"device_name={device_name},cache_dtype={cache_dtype}.json"
+    )
 
 
 def get_ssm_device_name() -> str:
@@ -47,29 +52,31 @@ def get_ssm_device_name() -> str:
 
 
 @functools.lru_cache
-def get_ssm_configs(dstate: int) -> dict[int, Any] | None:
+def get_ssm_configs(
+    headdim: int, dstate: int, cache_dtype: str
+) -> dict[int, Any] | None:
     """
     Return tuned (BLOCK_SIZE_M, num_warps) configs for *selective_state_update*
-    keyed by batch size, or ``None`` if no config file is found.
-
-    Config files live in a per-GPU subfolder:
-        vllm/model_executor/layers/mamba/configs/<device_name>/dstate=<N>.json
+    keyed by ``effective_batch = batch * nheads``, or ``None`` if no config
+    file is found for the (headdim, dstate, cache_dtype, device) combination.
 
     They can be generated with:
         benchmarks/kernels/benchmark_selective_state_update.py --save-configs
     """
     device_name = get_ssm_device_name()
-    json_file_name = get_ssm_config_file_name(dstate)
+    json_file_name = get_ssm_config_file_name(headdim, dstate, cache_dtype, device_name)
 
     config_file_paths: list[str] = []
 
     # User-supplied override (same env-var as fused_moe)
-    user_dir = os.environ.get("VLLM_TUNED_CONFIG_FOLDER")
-    if user_dir is not None:
-        config_file_paths.append(os.path.join(user_dir, device_name, json_file_name))
+    user_defined_config_folder = envs.VLLM_TUNED_CONFIG_FOLDER
+    if user_defined_config_folder is not None:
+        config_file_paths.append(
+            os.path.join(user_defined_config_folder, json_file_name)
+        )
 
     # Bundled default
-    config_file_paths.append(os.path.join(_CONFIGS_DIR, device_name, json_file_name))
+    config_file_paths.append(os.path.join(_CONFIGS_DIR, json_file_name))
 
     for path in config_file_paths:
         if os.path.exists(path):
@@ -81,31 +88,23 @@ def get_ssm_configs(dstate: int) -> dict[int, Any] | None:
                 )
                 raw = json.load(f)
                 if isinstance(raw, dict):
+                    # triton_version included in the config file only for reference
+                    raw.pop("triton_version", None)
                     return {int(k): v for k, v in raw.items()}
 
+    logger.warning_once(
+        "Using default Mamba SSU config. Performance might be sub-optimal! "
+        "Config file not found at %s",
+        ", ".join(config_file_paths),
+    )
     return None
 
 
-def _get_ssm_launch_config(
+def _get_default_ssm_launch_config(
     dstate: int,
-    batch: int,
     is_blackwell: bool,
 ) -> tuple[int, int]:
-    """
-    Return (BLOCK_SIZE_M, num_warps) for a given dstate and batch size.
-
-    Tries the JSON config first; falls back to the original hard-coded
-    heuristic so existing behaviour is fully preserved when no config file
-    is present.
-    """
-    configs = get_ssm_configs(dstate)
-    if configs:
-        # Pick the closest batch size in the tuned grid (same strategy as MoE)
-        closest = min(configs.keys(), key=lambda x: abs(x - batch))
-        cfg = configs[closest]
-        return cfg["BLOCK_SIZE_M"], cfg["num_warps"]
-
-    # ---- original hard-coded heuristic (unchanged) ----
+    """Hard-coded fallback heuristic used when no tuned config is available."""
     BLOCK_SIZE_M, num_warps = 4, 8
     if dstate <= 16:
         BLOCK_SIZE_M, num_warps = 32, 4
@@ -119,6 +118,32 @@ def _get_ssm_launch_config(
         elif dstate <= 128:
             BLOCK_SIZE_M, num_warps = 4, 4
     return BLOCK_SIZE_M, num_warps
+
+
+@functools.lru_cache
+def try_get_optimal_ssm_config(
+    headdim: int,
+    dstate: int,
+    batch: int,
+    nheads: int,
+    cache_dtype: str,
+    is_blackwell: bool,
+) -> tuple[int, int]:
+    """Return (BLOCK_SIZE_M, num_warps) for the given kernel shape.
+
+    Tuning is keyed on ``effective_batch = batch * nheads`` (the kernel grid
+    scales with the product), so configs transfer across (model, TP) combos
+    sharing ``(headdim, dstate, cache_dtype)``.
+    """
+    effective_batch = batch * nheads
+    configs = get_ssm_configs(headdim, dstate, cache_dtype)
+    if configs:
+        # Pick the closest effective_batch in the tuned grid (MoE strategy).
+        closest = min(configs.keys(), key=lambda x: abs(x - effective_batch))
+        cfg = configs[closest]
+        return cfg["BLOCK_SIZE_M"], cfg["num_warps"]
+
+    return _get_default_ssm_launch_config(dstate, is_blackwell)
 
 
 if TRITON3:
@@ -548,7 +573,10 @@ def selective_state_update(
     )
     # We don't want autotune since it will overwrite the state.
     # Load from JSON config if available, otherwise fall back to heuristic.
-    BLOCK_SIZE_M, num_warps = _get_ssm_launch_config(dstate, N, is_blackwell)
+    cache_dtype = str(state.dtype).removeprefix("torch.")
+    BLOCK_SIZE_M, num_warps = try_get_optimal_ssm_config(
+        dim, dstate, N, nheads, cache_dtype, is_blackwell
+    )
 
     tie_hdim = (
         A.stride(-1) == 0
