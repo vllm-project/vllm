@@ -9,14 +9,14 @@ from tests.utils import RemoteOpenAIServer
 
 from .conftest import validate_streaming_event_stack
 
-MODEL_NAME = "Qwen/Qwen3-1.7B"
+MODEL_NAME = "Qwen/Qwen3-8B"
 
 
 @pytest.fixture(scope="module")
 def server():
     from .conftest import BASE_TEST_ENV
 
-    args = ["--reasoning-parser", "qwen3", "--max_model_len", "8192"]
+    args = ["--reasoning-parser", "qwen3", "--max_model_len", "5000"]
     env_dict = {
         **BASE_TEST_ENV,
         "VLLM_ENABLE_RESPONSES_API_STORE": "1",
