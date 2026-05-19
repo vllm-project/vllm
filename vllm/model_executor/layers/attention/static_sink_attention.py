@@ -538,27 +538,22 @@ class StaticSinkMLAAttention(MLAAttention):
                 self._k_scale,
             )
 
-            if self.attn_backend.accept_output_buffer:
-                output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
-                self.impl.forward(
-                    self,
-                    q,
-                    kv_c_normed,
-                    k_pe,
-                    impl_kv_cache,
-                    attn_metadata,
-                    output=output,
-                )
-                return output
-            else:
-                return self.impl.forward(
-                    self, q, kv_c_normed, k_pe, impl_kv_cache, attn_metadata
-                )
+            output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
+            self.forward_impl(
+                q,
+                kv_c_normed,
+                k_pe,
+                self_kv_cache,
+                attn_metadata,
+                output=output,
+            )
+            return output
         else:
             if isinstance(self_kv_cache, (list, tuple)):
                 raise NotImplementedError(
                     "Composite DSA MLA KV cache requires direct attention calls."
                 )
+            encoded = _encode_layer_name(self.layer_name)
             kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
                 kv_c_normed,
                 k_pe,
@@ -566,24 +561,16 @@ class StaticSinkMLAAttention(MLAAttention):
                 self.kv_cache_dtype,
                 self._k_scale,
             )
-            if self.attn_backend.accept_output_buffer:
-                output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
-                torch.ops.vllm.unified_mla_attention_with_output(
-                    q,
-                    kv_c_normed,
-                    k_pe,
-                    output,
-                    self.layer_name,
-                    kv_cache_dummy_dep=kv_cache_dummy_dep,
-                )
-                return output
-            else:
-                return torch.ops.vllm.unified_mla_attention(
-                    q,
-                    kv_c_normed,
-                    k_pe,
-                    self.layer_name,
-                )
+            output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
+            torch.ops.vllm.unified_mla_attention_with_output(
+                q,
+                kv_c_normed,
+                k_pe,
+                output,
+                encoded,
+                kv_cache_dummy_dep=kv_cache_dummy_dep,
+            )
+            return output
 
     def populate_sink_kv(self, self_kv_cache: torch.Tensor):
         sink_kv_slot_mapping = torch.arange(
