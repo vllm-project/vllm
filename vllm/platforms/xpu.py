@@ -409,3 +409,7 @@ class XPUPlatform(Platform):
     @classmethod
     def num_compute_units(cls, device_id: int = 0) -> int:
         return torch.xpu.get_device_properties(device_id).max_compute_units
+
+    @classmethod
+    def use_custom_op_collectives(cls) -> bool:
+        return True
