@@ -187,7 +187,8 @@ The following endpoints **do not require authentication** even when `--api-key` 
 
 - `/tokenize` - Tokenize text
 - `/detokenize` - Detokenize tokens
-- `/health` - Health check
+- `/health` - Liveness check
+- `/health/ready` - Readiness check
 - `/ping` - SageMaker health check
 - `/version` - Version information
 - `/load` - Server load metrics

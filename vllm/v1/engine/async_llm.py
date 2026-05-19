@@ -930,7 +930,8 @@ class AsyncLLM(EngineClient):
         if last_progress_at == 0.0:
             if now - self._last_request_at > envs.VLLM_READY_CHECK_IDLE_TIMEOUT_S:
                 raise EngineUnhealthyError(
-                    "Engine has unfinished requests but has not produced initial progress."
+                    "Engine has unfinished requests but has not produced "
+                    "initial progress."
                 )
             return
 

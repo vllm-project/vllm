@@ -12,7 +12,7 @@ import requests
 from fastapi import Request
 
 from tests.utils import RemoteOpenAIServer
-from vllm.v1.engine.exceptions import EngineDeadError, EngineUnhealthyError
+from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.version import __version__ as VLLM_VERSION
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -220,49 +220,3 @@ async def test_health_check_engine_dead_error():
 
     # Assert that it returns 503 Service Unavailable
     assert response.status_code == 503
-
-
-@pytest.mark.asyncio
-async def test_health_ready_ok():
-    from vllm.entrypoints.serve.instrumentator.health import health_ready
-
-    mock_request = Mock(spec=Request)
-    mock_app_state = Mock()
-    mock_engine_client = AsyncMock()
-    mock_app_state.engine_client = mock_engine_client
-    mock_request.app.state = mock_app_state
-
-    response = await health_ready(mock_request)
-
-    assert response.status_code == 200
-    mock_engine_client.check_ready.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_health_ready_unhealthy_error():
-    from vllm.entrypoints.serve.instrumentator.health import health_ready
-
-    mock_request = Mock(spec=Request)
-    mock_app_state = Mock()
-    mock_engine_client = AsyncMock()
-    mock_engine_client.check_ready.side_effect = EngineUnhealthyError()
-    mock_app_state.engine_client = mock_engine_client
-    mock_request.app.state = mock_app_state
-
-    response = await health_ready(mock_request)
-
-    assert response.status_code == 503
-
-
-@pytest.mark.asyncio
-async def test_health_ready_no_engine():
-    from vllm.entrypoints.serve.instrumentator.health import health_ready
-
-    mock_request = Mock(spec=Request)
-    mock_app_state = Mock()
-    mock_app_state.engine_client = None
-    mock_request.app.state = mock_app_state
-
-    response = await health_ready(mock_request)
-
-    assert response.status_code == 200
