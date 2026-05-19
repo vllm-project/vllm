@@ -64,6 +64,7 @@ from vllm.models.deepseek_v4.nvidia.ops.attention import (
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import tl, triton
+from vllm.utils import deep_gemm
 from vllm.utils.torch_utils import direct_register_custom_op
 
 
@@ -445,8 +446,6 @@ class DeepseekV4MegaMoEExperts(nn.Module):
             return
 
         self._check_runtime_supported()
-        import vllm.third_party.deep_gemm as deep_gemm
-
         w13_scale = deep_gemm.transform_sf_into_required_layout(
             self._ue8m0_uint8_to_float(self.w13_weight_scale.data).contiguous(),
             2 * self.intermediate_size,
@@ -479,8 +478,6 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         self.w2_weight_scale = None
 
     def get_symm_buffer(self):
-        import vllm.third_party.deep_gemm as deep_gemm
-
         group = get_ep_group().device_group
         device = torch.accelerator.current_device_index()
         key = (
@@ -540,8 +537,6 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         activation_clamp: float | None,
         fast_math: bool,
     ) -> None:
-        import vllm.third_party.deep_gemm as deep_gemm
-
         symm_buffer = self.get_symm_buffer()
         num_tokens = hidden_states.shape[0]
         _stage_deepseek_v4_mega_moe_inputs(

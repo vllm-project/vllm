@@ -267,11 +267,7 @@ def test_mtp_propose_random_sampling_records_draft_probs():
     vocab_size = 4
 
     proposer = _create_mtp_proposer(num_speculative_tokens=1)
-    # Mirror upstream's f51f6844f gating: probabilities are only collected
-    # when the speculative config explicitly opts into the probabilistic
-    # draft-model rejection path. We force the flag here so the test
-    # exercises ``_sample_draft_tokens``'s probabilistic branch.
-    proposer._enable_probabilistic_draft_probs = True
+    assert proposer._enable_probabilistic_draft_probs
     hidden_size = proposer.hidden_size
 
     model_mock = mock.MagicMock()
@@ -431,9 +427,7 @@ def test_mtp_parallel_drafting_random_sampling_records_draft_probs():
         num_speculative_tokens=num_spec_tokens,
         parallel_drafting=True,
     )
-    # Mirror upstream's f51f6844f gating: see the matching comment in
-    # ``test_mtp_propose_random_sampling_records_draft_probs``.
-    proposer._enable_probabilistic_draft_probs = True
+    assert proposer._enable_probabilistic_draft_probs
     proposer.block_size = 16
     hidden_size = proposer.hidden_size
 
@@ -507,13 +501,3 @@ def test_mtp_parallel_drafting_random_sampling_records_draft_probs():
     assert torch.equal(
         proposer.take_last_draft_probs(), proposer._last_draft_probs
     )
-
-
-# Tests for ``_get_draft_probs_for_rejection`` and the
-# positional ``runner_stub._draft_probs`` packing path were removed when
-# our MTP scheduling commit dropped that branch in favor of upstream's
-# req-id-indexed ``_get_spec_decode_draft_probs`` (added by
-# vllm-project/vllm#40269 / f51f6844f). The remaining
-# ``_get_draft_probs_for_rejection`` tests that follow have been deleted
-# along with the function; equivalent coverage for the new code lives
-# under ``tests/v1/worker/test_gpu_model_runner.py``.

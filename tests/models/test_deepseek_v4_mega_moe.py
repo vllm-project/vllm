@@ -12,12 +12,7 @@ from vllm.models.deepseek_v4.nvidia.model import (
     _stage_deepseek_v4_mega_moe_inputs,
     make_deepseek_v4_expert_params_mapping,
 )
-from vllm.platforms import current_platform
-
-pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="DeepSeek V4 MegaMoE requires CUDA",
-)
+from vllm.utils import deep_gemm as deep_gemm_utils
 
 
 def test_deepseek_v4_mega_moe_expert_mapping():
@@ -106,6 +101,69 @@ def test_deepseek_v4_mega_moe_weight_loader_uses_ep_expert_ownership():
     assert torch.equal(experts.w13_weight[0, 128:], w3)
     assert torch.equal(experts.w2_weight[0], w2)
     assert torch.count_nonzero(experts.w13_weight[1]) == 0
+
+
+def test_deepseek_v4_mega_moe_finalize_uses_deep_gemm_wrapper(monkeypatch):
+    vllm_config = SimpleNamespace(
+        compilation_config=CompilationConfig(),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=4),
+    )
+    experts = DeepseekV4MegaMoEExperts(
+        vllm_config,
+        num_experts=4,
+        num_local_experts=2,
+        experts_start_idx=0,
+        top_k=2,
+        hidden_size=128,
+        intermediate_size=128,
+    )
+
+    transformed = (object(), object())
+    calls = []
+
+    def fake_runtime_check(self):
+        calls.append("runtime_check")
+
+    def fake_transform_sf_into_required_layout(
+        scale, rows, cols, block_shape, num_local_experts
+    ):
+        calls.append((rows, cols, block_shape, num_local_experts))
+        return scale
+
+    def fake_transform_weights_for_mega_moe(w13_weight, w2_weight):
+        calls.append((w13_weight[0].shape, w2_weight[0].shape))
+        return transformed
+
+    monkeypatch.setattr(
+        DeepseekV4MegaMoEExperts,
+        "_check_runtime_supported",
+        fake_runtime_check,
+    )
+    monkeypatch.setattr(
+        deep_gemm_utils,
+        "transform_sf_into_required_layout",
+        fake_transform_sf_into_required_layout,
+    )
+    monkeypatch.setattr(
+        deep_gemm_utils,
+        "transform_weights_for_mega_moe",
+        fake_transform_weights_for_mega_moe,
+    )
+
+    experts.finalize_weights()
+
+    assert experts._transformed_l1_weights is transformed[0]
+    assert experts._transformed_l2_weights is transformed[1]
+    assert experts.w13_weight is None
+    assert experts.w13_weight_scale is None
+    assert experts.w2_weight is None
+    assert experts.w2_weight_scale is None
+    assert calls == [
+        "runtime_check",
+        (256, 128, (1, 32), 2),
+        (128, 128, (1, 32), 2),
+        (torch.Size([2, 256, 64]), torch.Size([2, 128, 64])),
+    ]
 
 
 @pytest.mark.skipif(
