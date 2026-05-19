@@ -13,6 +13,7 @@ from xgrammar.structural_tag import (
     AnyTextFormat,
     ConstStringFormat,
     JSONSchemaFormat,
+    RegexFormat,
     SequenceFormat,
     TagFormat,
     TagsWithSeparatorFormat,
@@ -22,6 +23,9 @@ from xgrammar.structural_tag import (
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionToolsParam,
+)
+from vllm.v1.structured_output.backend_xgrammar import (
+    has_xgrammar_unsupported_json_features,
 )
 
 SimplifiedToolChoice = Literal["auto", "required", "forced"]
@@ -107,6 +111,19 @@ def _get_function_parameters(function: Any) -> dict[str, Any] | bool:
     if function.parameters is None:
         return True
     return function.parameters
+
+
+def _get_xgrammar_supported_function_parameters(function: Any) -> dict[str, Any] | bool:
+    """Return function parameters after applying xgrammar compatibility checks."""
+
+    parameters = _get_function_parameters(function)
+    if isinstance(parameters, dict) and has_xgrammar_unsupported_json_features(
+        parameters
+    ):
+        raise ValueError(
+            "The provided JSON schema contains features not supported by xgrammar."
+        )
+    return parameters
 
 
 _enable_structured_outputs_in_reasoning: bool = False
@@ -235,6 +252,111 @@ def get_deepseek_v4_structural_tag(
                 ConstStringFormat(value=function_calls_end),
             ]
         )
+
+    if not reasoning:
+        return StructuralTag(format=suffix_tag)
+
+    prefix_tag = TagFormat(begin="", content=AnyTextFormat(), end=think_tag_end)
+    return StructuralTag(format=SequenceFormat(elements=[prefix_tag, suffix_tag]))
+
+
+@register_model_structural_tag("kimi_k2")
+def get_kimi_k2_structural_tag(
+    tools: list[ChatCompletionToolsParam],
+    tool_choice: SimplifiedToolChoice,
+    reasoning: bool,
+) -> StructuralTag:
+    """Build Kimi K2 native tool-call structural tags."""
+
+    section_begin = "<|tool_calls_section_begin|>"
+    section_end = "<|tool_calls_section_end|>"
+    tool_call_begin = "<|tool_call_begin|>"
+    argument_begin = "<|tool_call_argument_begin|>"
+    tool_call_end = "<|tool_call_end|>"
+    think_tag_end = "</think>"
+    think_exclude_tokens = ["<think>", "</think>"]
+    whitespace = RegexFormat(pattern=r"\s*")
+
+    tags = []
+    for tool in tools:
+        function = tool.function
+        tags.append(
+            TagFormat(
+                begin=tool_call_begin,
+                content=SequenceFormat(
+                    elements=[
+                        whitespace,
+                        ConstStringFormat(value=f"functions.{function.name}:"),
+                        RegexFormat(pattern=r"\d+"),
+                        whitespace,
+                        ConstStringFormat(value=argument_begin),
+                        whitespace,
+                        JSONSchemaFormat(
+                            json_schema=_get_xgrammar_supported_function_parameters(
+                                function
+                            ),
+                        ),
+                        whitespace,
+                    ]
+                ),
+                end=tool_call_end,
+            )
+        )
+
+    if tool_choice == "auto":
+        suffix_tag = TriggeredTagsFormat(
+            triggers=[section_begin],
+            tags=[
+                TagFormat(
+                    begin=section_begin,
+                    content=SequenceFormat(
+                        elements=[
+                            whitespace,
+                            TagsWithSeparatorFormat(
+                                tags=tags,
+                                separator="",
+                                at_least_one=True,
+                            ),
+                            whitespace,
+                        ]
+                    ),
+                    end=section_end,
+                )
+            ],
+            excludes=think_exclude_tokens,
+        )
+
+    elif tool_choice == "forced":
+        if len(tags) != 1:
+            raise ValueError("Forced tool choice must resolve to exactly one tool.")
+        suffix_tag = SequenceFormat(
+            elements=[
+                ConstStringFormat(value=section_begin),
+                whitespace,
+                tags[0],
+                whitespace,
+                ConstStringFormat(value=section_end),
+            ]
+        )
+
+    elif tool_choice == "required":
+        if not tags:
+            raise ValueError("Required tool choice must resolve to at least one tool.")
+        suffix_tag = SequenceFormat(
+            elements=[
+                ConstStringFormat(value=section_begin),
+                whitespace,
+                TagsWithSeparatorFormat(
+                    tags=tags,
+                    separator="",
+                    at_least_one=True,
+                ),
+                whitespace,
+                ConstStringFormat(value=section_end),
+            ]
+        )
+    else:
+        raise ValueError(f"Unsupported Kimi K2 tool choice: {tool_choice}")
 
     if not reasoning:
         return StructuralTag(format=suffix_tag)

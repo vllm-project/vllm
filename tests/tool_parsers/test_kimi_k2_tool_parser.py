@@ -14,8 +14,10 @@ from tests.tool_parsers.utils import (
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
+from vllm.sampling_params import StructuredOutputsParams
 from vllm.tokenizers import get_tokenizer
 from vllm.tool_parsers.kimi_k2_tool_parser import KimiK2ToolParser
+from vllm.tool_parsers.structural_tag_registry import get_kimi_k2_structural_tag
 
 MODEL = "moonshotai/Kimi-K2-Instruct"
 
@@ -43,6 +45,39 @@ def _tool(tool_id: str, args: str) -> str:
 
 def _wrap(*tool_strs: str) -> str:
     return SECTION_BEGIN + "".join(tool_strs) + SECTION_END
+
+
+def _calculator_tool():
+    return {
+        "type": "function",
+        "function": {
+            "name": "calculate",
+            "description": "Evaluate a mathematical expression",
+            "parameters": {
+                "type": "object",
+                "properties": {"expression": {"type": "string"}},
+                "required": ["expression"],
+            },
+        },
+    }
+
+
+def _structural_tag_format(request: ChatCompletionRequest) -> dict:
+    assert request.structured_outputs is not None
+    assert request.structured_outputs.structural_tag is not None
+    return json.loads(request.structured_outputs.structural_tag)["format"]
+
+
+def _has_reasoning_prefix(format_: dict) -> bool:
+    elements = format_.get("elements", [])
+    if not elements:
+        return False
+    first = elements[0]
+    return (
+        first.get("type") == "tag"
+        and first.get("begin") == ""
+        and first.get("end") == "</think>"
+    )
 
 
 class TestExtractToolCalls:
@@ -459,6 +494,206 @@ class TestStreamingEdgeCases:
 
 
 class TestAdjustRequest:
+    @pytest.mark.parametrize(
+        "tool_choice",
+        [
+            "required",
+            {"type": "function", "function": {"name": "calculate"}},
+        ],
+    )
+    def test_forced_choices_use_kimi_structural_tag(self, parser, tool_choice):
+        request = ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "What is 2 + 2?"}],
+            tools=[_calculator_tool()],
+            tool_choice=tool_choice,
+        )
+
+        result = parser.adjust_request(request)
+
+        assert KimiK2ToolParser.supports_required_and_named is False
+        assert result.response_format is None
+        assert result.skip_special_tokens is False
+        assert result.structured_outputs is not None
+
+        structural_tag = json.loads(result.structured_outputs.structural_tag)
+        structural_tag_json = json.dumps(structural_tag)
+        assert SECTION_BEGIN in structural_tag_json
+        assert "functions.calculate" in structural_tag_json
+        assert ARG_BEGIN in structural_tag_json
+
+    def test_forced_choice_replaces_existing_structured_output_constraint(self, parser):
+        request = ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "What is 2 + 2?"}],
+            tools=[_calculator_tool()],
+            tool_choice="required",
+        )
+        request.structured_outputs = StructuredOutputsParams(
+            json={"type": "object"},
+            disable_additional_properties=True,
+            whitespace_pattern=r"\s*",
+        )
+
+        result = parser.adjust_request(request)
+
+        assert result.structured_outputs is not None
+        assert result.structured_outputs.json is None
+        assert result.structured_outputs.structural_tag is not None
+        assert result.structured_outputs.disable_additional_properties is True
+        assert result.structured_outputs.whitespace_pattern == r"\s*"
+
+    def test_auto_strict_tool_calling_uses_kimi_structural_tag(
+        self, monkeypatch, parser
+    ):
+        monkeypatch.setattr(
+            "vllm.tool_parsers.abstract_tool_parser.VLLM_ENFORCE_STRICT_TOOL_CALLING",
+            True,
+        )
+        request = ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "What is 2 + 2?"}],
+            tools=[_calculator_tool()],
+            tool_choice="auto",
+        )
+
+        result = parser.adjust_request(request)
+
+        assert result.skip_special_tokens is False
+        assert result.structured_outputs is not None
+        assert result.structured_outputs.structural_tag is not None
+        structural_tag_json = result.structured_outputs.structural_tag
+        assert SECTION_BEGIN in structural_tag_json
+        assert "functions.calculate" in structural_tag_json
+
+    @pytest.mark.parametrize(
+        "enable_in_reasoning,thinking,expected_reasoning_prefix",
+        [
+            (False, True, False),
+            (True, True, True),
+            (True, False, False),
+        ],
+    )
+    def test_structural_tag_reasoning_prefix_follows_bitmask_phase(
+        self,
+        monkeypatch,
+        parser,
+        enable_in_reasoning,
+        thinking,
+        expected_reasoning_prefix,
+    ):
+        monkeypatch.setattr(
+            "vllm.tool_parsers.kimi_k2_tool_parser."
+            "get_enable_structured_outputs_in_reasoning",
+            lambda: enable_in_reasoning,
+        )
+        request = ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "What is 2 + 2?"}],
+            tools=[_calculator_tool()],
+            tool_choice="required",
+            chat_template_kwargs={"thinking": thinking},
+        )
+
+        result = parser.adjust_request(request)
+
+        assert _has_reasoning_prefix(_structural_tag_format(result)) is (
+            expected_reasoning_prefix
+        )
+
+    def test_structural_tag_reasoning_prefix_ignores_include_reasoning_visibility(
+        self, monkeypatch, parser
+    ):
+        monkeypatch.setattr(
+            "vllm.tool_parsers.kimi_k2_tool_parser."
+            "get_enable_structured_outputs_in_reasoning",
+            lambda: True,
+        )
+        formats = []
+        for include_reasoning in (True, False):
+            request = ChatCompletionRequest(
+                model="test-model",
+                messages=[{"role": "user", "content": "What is 2 + 2?"}],
+                tools=[_calculator_tool()],
+                tool_choice="required",
+                include_reasoning=include_reasoning,
+                chat_template_kwargs={"thinking": True},
+            )
+
+            result = parser.adjust_request(request)
+            format_ = _structural_tag_format(result)
+
+            assert _has_reasoning_prefix(format_) is True
+            formats.append(format_)
+
+        assert formats[0] == formats[1]
+
+    def test_structural_tag_accepts_native_whitespace(self):
+        request = ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "What is 2 + 2?"}],
+            tools=[_calculator_tool()],
+            tool_choice="required",
+        )
+        assert request.tools is not None
+
+        tag = get_kimi_k2_structural_tag(request.tools, "required", False)
+        structural_tag_json = json.dumps(tag.model_dump())
+
+        assert TOOL_BEGIN in structural_tag_json
+        assert r"\\s*" in structural_tag_json
+        assert "functions.calculate:" in structural_tag_json
+        assert ARG_BEGIN in structural_tag_json
+
+    def test_structural_tag_strict_false_disables_argument_guidance(self):
+        tool = _calculator_tool()
+        tool["function"]["strict"] = False
+        request = ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "What is 2 + 2?"}],
+            tools=[tool],
+            tool_choice="required",
+        )
+        assert request.tools is not None
+
+        tag = get_kimi_k2_structural_tag(request.tools, "required", False)
+        structural_tag_json = json.dumps(tag.model_dump())
+
+        assert '"json_schema": true' in structural_tag_json
+
+    def test_structural_tag_rejects_xgrammar_unsupported_schema(self):
+        tool = _calculator_tool()
+        tool["function"]["parameters"] = {
+            "type": "object",
+            "patternProperties": {"^x-": {"type": "string"}},
+        }
+        request = ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "Call the tool"}],
+            tools=[tool],
+            tool_choice="required",
+        )
+        assert request.tools is not None
+
+        with pytest.raises(ValueError, match="not supported by xgrammar"):
+            get_kimi_k2_structural_tag(request.tools, "required", False)
+
+    def test_required_structural_tag_requires_tools(self):
+        with pytest.raises(ValueError, match="at least one tool"):
+            get_kimi_k2_structural_tag([], "required", False)
+
+    def test_structural_tag_rejects_unknown_tool_choice(self):
+        request = ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "What is 2 + 2?"}],
+            tools=[_calculator_tool()],
+            tool_choice="required",
+        )
+        assert request.tools is not None
+
+        with pytest.raises(ValueError, match="Unsupported Kimi K2 tool choice"):
+            get_kimi_k2_structural_tag(request.tools, "invalid", False)  # type: ignore[arg-type]
+
     def test_sets_skip_special_tokens_false(self, parser):
         request = MagicMock(spec=ChatCompletionRequest)
         request.tools = [{"type": "function", "function": {"name": "test"}}]
