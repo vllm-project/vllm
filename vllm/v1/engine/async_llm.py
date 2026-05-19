@@ -42,7 +42,6 @@ from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import (
     EngineDeadError,
     EngineGenerateError,
-    EngineUnhealthyError,
 )
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
@@ -931,13 +930,13 @@ class AsyncLLM(EngineClient):
         last_progress_at = self._last_progress_at_ref[0]
         if last_progress_at == 0.0:
             if now - self._last_request_at > envs.VLLM_READY_CHECK_IDLE_TIMEOUT_S:
-                raise EngineUnhealthyError(
+                raise EngineDeadError(
                     "Engine has unfinished requests but has not produced initial progress."
                 )
             return
 
         if now - last_progress_at > envs.VLLM_READY_CHECK_PROGRESS_TIMEOUT_S:
-            raise EngineUnhealthyError(
+            raise EngineDeadError(
                 "Engine has unfinished requests but has not made recent progress."
             )
 
