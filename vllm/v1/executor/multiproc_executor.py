@@ -730,7 +730,6 @@ class WorkerProc:
         while pipes:
             ready = multiprocessing.connection.wait(pipes.keys())
             for pipe in ready:
-                assert isinstance(pipe, Connection)
                 try:
                     # Wait until the WorkerProc is ready.
                     unready_proc_handle = pipes.pop(pipe)
