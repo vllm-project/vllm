@@ -15,6 +15,27 @@ from vllm.v1.kv_cache_interface import kv_cache_uses_per_token_head_scales
 logger = init_logger(__name__)
 
 
+class KVCacheScaleParameter(torch.nn.Parameter):
+    """Scalar parameter for KV-cache scales.
+
+    Initialized to -1.0 (an invalid sentinel) so call sites just write
+    `KVCacheScaleParameter()`. Provides a `weight_loader` that tolerates
+    checkpoint tensors of shape `()`, `(1,)`, or `(N,)` by collapsing to the
+    first element before copying. Per-instance overrides (e.g. compressed-
+    tensors' TP-aware loader) still work — instance attribute assignment
+    shadows this class-level loader.
+    """
+
+    def __new__(cls) -> "KVCacheScaleParameter":
+        return super().__new__(cls, torch.tensor(-1.0), requires_grad=False)
+
+    @staticmethod
+    def weight_loader(param: torch.nn.Parameter, loaded_weight: torch.Tensor) -> None:
+        if loaded_weight.dim() != 0:
+            loaded_weight = loaded_weight.flatten()[0]
+        param.data.copy_(loaded_weight)
+
+
 class BaseKVCacheMethod(QuantizeMethodBase):
     """
     Quant method that adds `_k_scale` and `_v_scale` attributes to the
@@ -37,11 +58,11 @@ class BaseKVCacheMethod(QuantizeMethodBase):
         # Initialize the Q and KV cache scales to -1.0, an invalid value.
         # If the q and k/v_scales appear in the checkpoint, it will be
         # overwritten when loading weights.
-        layer.q_scale = torch.nn.Parameter(torch.tensor(-1.0), requires_grad=False)
-        layer.k_scale = torch.nn.Parameter(torch.tensor(-1.0), requires_grad=False)
-        layer.v_scale = torch.nn.Parameter(torch.tensor(-1.0), requires_grad=False)
+        layer.q_scale = KVCacheScaleParameter()
+        layer.k_scale = KVCacheScaleParameter()
+        layer.v_scale = KVCacheScaleParameter()
         # Initialize P = softmax(QK^T) scales
-        layer.prob_scale = torch.nn.Parameter(torch.tensor(-1.0), requires_grad=False)
+        layer.prob_scale = KVCacheScaleParameter()
 
     def apply(self, layer: torch.nn.Module) -> torch.Tensor:
         raise RuntimeError(f"{self.__class__.__name__}.apply should not be called.")
