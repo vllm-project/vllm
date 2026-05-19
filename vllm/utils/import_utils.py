@@ -471,6 +471,20 @@ def has_fbgemm_gpu() -> bool:
     return _has_module("fbgemm_gpu")
 
 
+@cache
 def has_cutedsl() -> bool:
-    """Whether the optional `cutelass` package is available."""
-    return _has_module("cutlass")
+    """Whether the optional CuteDSL packages (cutlass + quack) are available
+    and mutually compatible.
+
+    Uses a real import attempt rather than a spec lookup so that version
+    incompatibilities between ``cutlass`` and ``quack`` (e.g. a missing
+    ``Arch`` symbol in ``cutlass.base_dsl``) are caught here and the caller
+    can fall back to the Triton path gracefully.
+    """
+    try:
+        import cutlass  # noqa: F401
+        import quack.compile_utils  # noqa: F401
+
+        return True
+    except Exception:
+        return False
