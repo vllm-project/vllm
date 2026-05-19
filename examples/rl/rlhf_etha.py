@@ -54,13 +54,14 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferUpdateRequest,
 )
 from vllm.distributed.weight_transfer.etha_engine import (
-    MOE_HANDLERS,
-    TRAINER_HANDLER_PLACEMENTS,
+    EthaTrainerWeightTransferEngine,
     EthaWeightTransferInitInfo,
     EthaWeightTransferUpdateInfo,
+)
+from vllm.distributed.weight_transfer.etha_sharding import (
+    MOE_HANDLERS,
+    TRAINER_HANDLER_PLACEMENTS,
     get_handler_name,
-    send_weights_etha,
-    trainer_init_etha,
 )
 from vllm.utils.network_utils import get_ip, get_open_port
 from vllm.v1.executor import Executor
@@ -197,7 +198,7 @@ class EthaTrainerActor:
         )
 
         self.state: dict[str, torch.Tensor] | None = None
-        self.handle = None
+        self.engine: EthaTrainerWeightTransferEngine | None = None
 
     def get_ip_port(self) -> tuple[str, int]:
         """Called only on rank 0."""
@@ -235,39 +236,46 @@ class EthaTrainerActor:
             storage_reader=HuggingFaceStorageReader(str(model_dir)),
             planner=GroupedMoEPlanner(),
         )
-        # Keep DTensors as the original; trainer_init_etha will work
+        # Keep DTensors as the original; the trainer engine works
         # against `.to_local()` views.
         self.state = state
         return len(state)
 
     def init_transfer(self, master_address: str, master_port: int) -> None:
         # Convert DTensors → local shards. We deliberately keep the
-        # grouped `experts.gate_up_proj` name here; `trainer_init_etha`
-        # mirrors the engine-side split into `gate_proj`/`up_proj`
-        # views and groups them under the same handler.
+        # grouped `experts.gate_up_proj` name here; the trainer-side
+        # sharding strategy mirrors the engine-side split into
+        # `gate_proj`/`up_proj` views and groups them under the same handler.
         assert self.state is not None
         local_state: dict[str, torch.Tensor] = {
             name: (dt.to_local() if isinstance(dt, DTensor) else dt)
             for name, dt in self.state.items()
         }
 
-        self.handle = trainer_init_etha(
+        init_info = EthaWeightTransferInitInfo(
             master_address=master_address,
             master_port=master_port,
-            rank=self.rank,
+            rank_offset=0,
             world_size=TRANSFER_WORLD_SIZE,
+            trainer_attn_dp_replicate=TRAINER_ATTN_DP_REPLICATE,
+            trainer_attn_dp_shard=TRAINER_ATTN_DP_SHARD,
+            trainer_moe_dp_replicate=TRAINER_MOE_DP_REPLICATE,
+            trainer_moe_dp_shard=TRAINER_MOE_DP_SHARD,
+            trainer_ep_size=TRAINER_EP_SIZE,
+            vllm_dp_size=VLLM_DP_SIZE,
+            vllm_tp_size=VLLM_TP_SIZE,
+            vllm_ep_size=VLLM_TP_SIZE * VLLM_DP_SIZE,
+        )
+        self.engine = EthaTrainerWeightTransferEngine.trainer_init(
+            init_info,
+            rank=self.rank,
             device_index=0,
-            trainer_state_dict=local_state,
-            trainer_att_mesh=torch.tensor(self.att_mesh.mesh.tolist()),
-            trainer_moe_mesh=torch.tensor(self.moe_mesh.mesh.tolist()),
-            vllm_dptp_mesh_shape=(VLLM_DP_SIZE, VLLM_TP_SIZE),
-            vllm_ep_mesh_shape=(VLLM_TP_SIZE * VLLM_DP_SIZE,),
-            trainer_world_size=TRAINER_WORLD_SIZE,
+            state_dict=local_state,
         )
 
     def send_weights(self) -> None:
-        assert self.handle is not None
-        send_weights_etha(self.handle)
+        assert self.engine is not None
+        self.engine.send_weights()
 
 
 # ============================================================================
@@ -393,6 +401,9 @@ async def main():
                     trainer_moe_dp_replicate=TRAINER_MOE_DP_REPLICATE,
                     trainer_moe_dp_shard=TRAINER_MOE_DP_SHARD,
                     trainer_ep_size=TRAINER_EP_SIZE,
+                    vllm_dp_size=VLLM_DP_SIZE,
+                    vllm_tp_size=VLLM_TP_SIZE,
+                    vllm_ep_size=VLLM_TP_SIZE * VLLM_DP_SIZE,
                 )
             )
         )
