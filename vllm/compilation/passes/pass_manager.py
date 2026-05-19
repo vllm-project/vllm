@@ -7,7 +7,7 @@ from typing import Any, ParamSpec, TypeVar
 from torch import fx as fx
 
 from vllm import envs
-from vllm._aiter_ops import rocm_aiter_ops
+from vllm._aiter_ops import check_aiter_fused_qk_rmsnorm, rocm_aiter_ops
 from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
@@ -143,6 +143,11 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                 if self.pass_config.fuse_gemm_comms:
                     self.passes += [AsyncTPPass(config)]
 
+            if self.pass_config.fuse_act_padding and rocm_aiter_ops.is_enabled():
+                # Run the more specific RMSNorm+router-pad fusion before
+                # AR+RMS, since both consume fused_add_rms_norm.
+                self.passes += [RocmAiterTritonAddRMSNormPadFusionPass(config)]
+
             if self.pass_config.fuse_allreduce_rms:
                 if rocm_aiter_ops.is_enabled():
                     self.passes += [RocmAiterAllReduceFusionPass(config)]
@@ -164,10 +169,11 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                 if rocm_aiter_ops.is_enabled():
                     self.passes += [RocmAiterSiluMulFp8GroupQuantFusionPass(config)]
 
-            if self.pass_config.fuse_act_padding and rocm_aiter_ops.is_enabled():
-                self.passes += [RocmAiterTritonAddRMSNormPadFusionPass(config)]
-
-            if self.pass_config.fuse_mla_dual_rms_norm and rocm_aiter_ops.is_enabled():
+            if (
+                self.pass_config.fuse_mla_dual_rms_norm
+                and rocm_aiter_ops.is_enabled()
+                and check_aiter_fused_qk_rmsnorm()
+            ):
                 self.passes += [MLADualRMSNormFusionPass(config)]
 
             if self.pass_config.fuse_rope_kvcache:

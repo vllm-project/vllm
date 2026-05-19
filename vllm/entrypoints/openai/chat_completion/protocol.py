@@ -92,16 +92,12 @@ class ChatCompletionResponseChoice(OpenAIBaseModel):
     # not part of the OpenAI spec but is useful for tracing the tokens
     # in agent scenarios
     token_ids: list[int] | None = None
-    routed_experts: list[list[list[int]]] | None = None  # [gen_len, num_layers, top_k]
 
 
 class ChatCompletionResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"chatcmpl-{random_uuid()}")
     object: Literal["chat.completion"] = "chat.completion"
     created: int = Field(default_factory=lambda: int(time.time()))
-    prompt_routed_experts: list[list[list[int]]] | None = (
-        None  # [prompt_len, num_layers, top_k]
-    )
     model: str
     choices: list[ChatCompletionResponseChoice]
     service_tier: Literal["auto", "default", "flex", "scale", "priority"] | None = None

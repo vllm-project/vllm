@@ -23,7 +23,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -39,13 +39,12 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     WNA16_SUPPORTED_BITS,
-    CompressedTensors24,
     CompressedTensorsScheme,
     CompressedTensorsW4A4Fp4,
+    CompressedTensorsW4A4Mxfp4,
     CompressedTensorsW4A8Fp8,
     CompressedTensorsW4A8Int,
     CompressedTensorsW4A16Fp4,
-    CompressedTensorsW4A16Mxfp4,
     CompressedTensorsW8A8Fp8,
     CompressedTensorsW8A8Int8,
     CompressedTensorsW8A8Mxfp8,
@@ -191,7 +190,7 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         if isinstance(layer, Attention):
             return CompressedTensorsKVCacheMethod(self)
-        if isinstance(layer, FusedMoE):
+        if isinstance(layer, RoutedExperts):
             return CompressedTensorsMoEMethod.get_moe_method(
                 self, layer, layer_name=prefix
             )
@@ -202,7 +201,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         Helper function to update target_scheme_map
         since linear layers get fused into FusedMoE
         targeting 'Linear' needs to also match
-        FusedMoE modules.
+        RoutedExperts modules.
         """
         if (
             "Linear" not in self.target_scheme_map
@@ -625,7 +624,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             return CompressedTensorsW4A16Fp4()
 
         if self._is_mxfp4(weight_quant):
-            return CompressedTensorsW4A16Mxfp4()
+            return CompressedTensorsW4A4Mxfp4()
 
         if self._is_mxfp8(weight_quant):
             return CompressedTensorsW8A8Mxfp8()
@@ -760,19 +759,8 @@ class CompressedTensorsConfig(QuantizationConfig):
             input_quant=input_quant,
             sparsity_scheme=sparsity_scheme,
         ):
-            # Have a valid sparsity scheme
-            # Validate layer is supported by Cutlass 2:4 Kernel
-            model_compression_config = (
-                None
-                if sparsity_scheme is None or sparsity_scheme.format == "dense"
-                else self.config
-            )
-
-            scheme = CompressedTensors24(
-                quantized=weight_quant is not None or input_quant is not None,
-                weight_quant=weight_quant,
-                input_quant=input_quant,
-                model_compression_config=model_compression_config,
+            raise NotImplementedError(
+                "Sparse24 models are no longer supported by vLLM."
             )
         elif weight_quant is None:
             # Falling back to UnquantizedLinearMethod

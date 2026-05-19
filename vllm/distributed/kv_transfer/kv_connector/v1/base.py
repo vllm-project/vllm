@@ -62,6 +62,7 @@ if TYPE_CHECKING:
         PromMetricT,
     )
     from vllm.forward_context import ForwardContext
+    from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
@@ -438,6 +439,16 @@ class KVConnectorBase_V1(ABC):
     # ==============================
     # Scheduler-side methods
     # ==============================
+
+    def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
+        """
+        Bind the GPU block pool to the connector for per-GPU block status tracking.
+        For example, inc/dec ref counts, or iterate over the prefix cache blocks.
+
+        Args:
+            gpu_block_pool: the GPU block pool.
+        """
+        return
 
     @abstractmethod
     def get_num_new_matched_tokens(
