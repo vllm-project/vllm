@@ -3,6 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: V1 Spec Decode
+  device: h200_35gb
   key: v1-spec-decode
   timeout_in_minutes: 30
   source_file_dependencies:
@@ -165,6 +166,7 @@ steps:
   working_dir: "/vllm-workspace/tests" # optional
 
 - label: Examples
+  device: h200_35gb
   key: examples
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/examples"
@@ -235,6 +237,7 @@ steps:
   - bash standalone_tests/python_only_compile.sh
 
 - label: Async Engine, Inputs, Utils, Worker
+  device: h200_35gb
   key: async-engine-inputs-utils-worker
   timeout_in_minutes: 50
   source_file_dependencies:
@@ -366,6 +369,7 @@ steps:
     - pytest -v -s v1/determinism/test_nvfp4_batch_invariant.py
   
 - label: Acceptance Length Test (Large Models) # optional
+  device: h200_35gb
   key: acceptance-length-test-large-models
   timeout_in_minutes: 25
   gpu: h100

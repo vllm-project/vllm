@@ -3,6 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: Samplers Test
+  device: h200_35gb
   key: samplers-test
   timeout_in_minutes: 75
   source_file_dependencies:
