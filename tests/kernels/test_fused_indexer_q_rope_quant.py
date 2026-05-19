@@ -23,9 +23,7 @@ from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
-from vllm.models.deepseek_v4.common.ops.fused_indexer_q import (
-    fused_indexer_q_rope_quant,
-)
+from vllm.models.deepseek_v4.common.ops import fused_indexer_q_rope_quant
 from vllm.utils.import_utils import has_cutedsl
 
 HEAD_DIM = 128
