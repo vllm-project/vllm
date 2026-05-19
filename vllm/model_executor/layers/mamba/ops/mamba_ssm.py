@@ -120,7 +120,7 @@ def _get_default_ssm_launch_config(
     return BLOCK_SIZE_M, num_warps
 
 
-@functools.lru_cache
+@functools.cache
 def try_get_optimal_ssm_config(
     headdim: int,
     dstate: int,
