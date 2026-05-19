@@ -51,9 +51,8 @@ void silu_mul_fp8_quant_tma_ws_persistent(
 
   vllm::launch_silu_mul_fp8_quant_tma_ws_persistent(
       input.data_ptr(), input_scales.data_ptr<float>(), output.data_ptr(),
-      output_scales.data_ptr<float>(), n_tokens.item<int32_t>(), H,
-      scale_stride, n_compute, batch_size, use_tanh_silu, input.size(0),
-      stream);
+      output_scales.data_ptr<float>(), static_cast<int32_t>(N), H, scale_stride,
+      n_compute, batch_size, use_tanh_silu, N, stream);
 }
 
 void nvfp4_silu_mul_quant(at::Tensor& output, at::Tensor& output_scale,
@@ -91,8 +90,9 @@ void silu_mul_nvfp4_quant_tma_ws_persistent_bf16(
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
+  int64_t N = input.size(0);
   vllm::launch_silu_mul_nvfp4_quant_tma_ws_persistent_bf16(
       input.data_ptr(), output.data_ptr(), output_sf.data_ptr(),
-      global_scale.data_ptr<float>(), n_tokens.item<int32_t>(), H,
-      input.size(0), n_compute, batch_size, use_tanh_silu, stream);
+      global_scale.data_ptr<float>(), static_cast<int32_t>(N), H, N, n_compute,
+      batch_size, use_tanh_silu, stream);
 }
