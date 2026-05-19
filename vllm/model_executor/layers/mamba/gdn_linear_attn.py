@@ -110,32 +110,20 @@ def _should_use_flashinfer_gdn_prefill(backend: str, head_k_dim: int | None) -> 
 def _log_gdn_backend_decision(
     backend: str, head_k_dim: int | None, use_flashinfer: bool
 ) -> None:
-    """Dump the inputs to the backend decision and the final choice."""
-    is_cuda = current_platform.is_cuda()
-    platform = "cuda" if is_cuda else current_platform.device_name
-    cuda_runtime = torch.version.cuda or "n/a"
-    device_cap = str(current_platform.get_device_capability()) if is_cuda else "n/a"
+    """Log the GDN prefill backend choice in the attention-selector style."""
+    chosen = "FlashInfer" if use_flashinfer else "Triton/FLA"
     logger.info_once(
-        "GDN prefill backend inputs:\n"
-        "  requested=%s\n"
-        "  platform=%s, cuda_runtime=%s, device_capability=%s\n"
-        "  head_k_dim=%s",
+        "Using %s GDN prefill kernel (requested=%s, head_k_dim=%s).",
+        chosen,
         backend,
-        platform,
-        cuda_runtime,
-        device_cap,
         head_k_dim,
-        scope="local",
     )
-    if use_flashinfer:
-        logger.info_once("Using FlashInfer GDN prefill kernel")
-        logger.info_once(
-            "FlashInfer GDN prefill kernel is JIT-compiled; first run may "
-            "take a while to compile. Set `--gdn-prefill-backend triton` to "
-            "avoid JIT compile time.",
+    # JIT-compiled cutlass path is only used on SM90 (Hopper).
+    if use_flashinfer and current_platform.is_device_capability(90):
+        logger.warning_once(
+            "FlashInfer GDN prefill is JIT-compiled; first run may take a "
+            "while. Set --gdn-prefill-backend triton to skip JIT.",
         )
-    else:
-        logger.info_once("Using Triton/FLA GDN prefill kernel")
 
 
 def fi_chunk_gated_delta_rule(
