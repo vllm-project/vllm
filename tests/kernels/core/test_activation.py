@@ -27,6 +27,7 @@ NUM_TOKENS = [7, 83, 2048]  # Arbitrary values for testing
 D = [512, 13824]  # Arbitrary values for testing
 SEEDS = [0]
 CUDA_DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
+INT32_MAX = torch.iinfo(torch.int32).max
 
 
 @pytest.mark.parametrize(
@@ -112,6 +113,52 @@ def test_act_and_mul(
         opcheck(fn, (out, x, layer.alpha, layer.limit))
     elif activation != "swiglustep_and_mul":
         opcheck(fn, (out, x))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+@torch.inference_mode()
+def test_silu_and_mul_large_row_offset_over_int32(default_vllm_config) -> None:
+    num_tokens = 149910
+    d = 14336
+    input_cols = 2 * d
+    dtype = torch.float16
+    device = torch.device("cuda:0")
+
+    assert num_tokens * input_cols == 4_298_219_520
+    assert num_tokens * input_cols > INT32_MAX
+
+    element_size = torch.empty((), dtype=dtype).element_size()
+    required_bytes = num_tokens * (input_cols + d) * element_size
+    reserve_bytes = 1 << 30
+
+    torch.cuda.set_device(device)
+    torch.cuda.empty_cache()
+    free_bytes, _ = torch.cuda.mem_get_info()
+    if free_bytes < required_bytes + reserve_bytes:
+        pytest.skip(
+            "Not enough free CUDA memory for large activation overflow test: "
+            f"need {(required_bytes + reserve_bytes) / 2**30:.1f} GiB, "
+            f"have {free_bytes / 2**30:.1f} GiB"
+        )
+
+    x = torch.empty((num_tokens, input_cols), dtype=dtype, device=device)
+    out = torch.empty((num_tokens, d), dtype=dtype, device=device)
+
+    idx = torch.arange(d, dtype=torch.float32, device=device)
+    gate = ((idx % 251) - 125) / 32
+    up = ((idx % 127) - 63) / 16
+    x[-1, :d].copy_(gate.to(dtype))
+    x[-1, d:].copy_(up.to(dtype))
+
+    # The old 32-bit row offset for the final token wrapped into this window.
+    wrapped_offset = ((num_tokens - 1) * input_cols) & 0xFFFFFFFF
+    assert wrapped_offset != (num_tokens - 1) * input_cols
+    x.flatten()[wrapped_offset : wrapped_offset + 2 * d].fill_(0.25)
+
+    torch.ops._C.silu_and_mul(out, x)
+
+    ref_out = torch.nn.functional.silu(x[-1, :d]) * x[-1, d:]
+    torch.testing.assert_close(out[-1], ref_out, atol=0.0, rtol=0.0)
 
 
 @pytest.mark.parametrize(
