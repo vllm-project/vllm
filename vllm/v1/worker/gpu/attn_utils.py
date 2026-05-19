@@ -22,7 +22,11 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
-from vllm.v1.worker.utils import AttentionGroup, bind_kv_cache
+from vllm.v1.worker.utils import (
+    AttentionGroup,
+    bind_kv_cache,
+    prepare_kernel_block_sizes,
+)
 
 
 @dataclass(frozen=True)
@@ -51,13 +55,12 @@ def init_attn_backend(
     dict[str, type[AttentionBackend]],
     list[list[AttentionGroup]],
     AttentionCGSupportInfo,
+    list[int],
 ]:
     attn_backends: dict[str, type[AttentionBackend]] = {}
     attn_groups: list[list[AttentionGroup]] = []
-    attn_backend_workspace: torch.Tensor | None = None
-    # Find minimum cudagraph support across all attention backends
-    min_cg_support = AttentionCGSupport.ALWAYS
-    min_cg_attn_backend = None
+
+    # Phase 1: discover attention groups for each kv cache group.
     for kv_cache_group_id, kv_cache_group_spec in enumerate(
         kv_cache_config.kv_cache_groups
     ):
@@ -91,12 +94,26 @@ def init_attn_backend(
             else:
                 group_map[key].layer_names.append(layer_name)
 
-        groups = [group_map[key] for key in group_order]
+        attn_groups.append([group_map[key] for key in group_order])
+
+    # Phase 2: pick a kernel block size per kv cache group that is supported
+    # by all backends within that group.
+    kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, attn_groups)
+
+    # Phase 3: create metadata builders and determine cudagraph support.
+    attn_backend_workspace: torch.Tensor | None = None
+    min_cg_support = AttentionCGSupport.ALWAYS
+    min_cg_attn_backend = None
+    for kv_cache_group_id, groups in enumerate(attn_groups):
+        kv_cache_group_spec = kv_cache_config.kv_cache_groups[kv_cache_group_id]
+        kernel_block_size = None
+        if kv_cache_group_id < len(kernel_block_sizes):
+            kernel_block_size = kernel_block_sizes[kv_cache_group_id]
         for group in groups:
             group.create_metadata_builders(
                 vllm_config=vllm_config,
                 device=device,
-                kernel_block_size=None,
+                kernel_block_size=kernel_block_size,
                 num_metadata_builders=1,
             )
             builder = group.get_metadata_builder(0)
@@ -113,8 +130,7 @@ def init_attn_backend(
             )
             if cg_support.value < min_cg_support.value:
                 min_cg_support = cg_support
-                min_cg_attn_backend = attn_backend.__name__
-        attn_groups.append(groups)
+                min_cg_attn_backend = group.backend.__name__
 
     return (
         attn_backends,
@@ -123,6 +139,7 @@ def init_attn_backend(
             min_cg_support=min_cg_support,
             min_cg_attn_backend=min_cg_attn_backend,
         ),
+        kernel_block_sizes,
     )
 
 
@@ -148,10 +165,13 @@ def _reshape_kv_cache(
     kv_cache_raw_tensors: dict[str, torch.Tensor],
     attn_backends: dict[str, type[AttentionBackend]],
     cache_dtype: str,
+    kernel_block_sizes: list[int],
 ) -> dict[str, Any]:
     kv_caches: dict[str, Any] = {}
     has_attn, has_mamba = False, False
-    for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
+    for kv_cache_group_id, kv_cache_group_spec in enumerate(
+        kv_cache_config.kv_cache_groups
+    ):
         for layer_name in kv_cache_group_spec.layer_names:
             kv_cache_spec = kv_cache_group_spec.kv_cache_spec
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
@@ -164,9 +184,21 @@ def _reshape_kv_cache(
             if isinstance(kv_cache_spec, AttentionSpec):
                 has_attn = True
                 attn_backend = attn_backends[layer_name]
+
+                if kv_cache_group_id < len(kernel_block_sizes):
+                    kernel_block_size = kernel_block_sizes[kv_cache_group_id]
+                    num_blocks *= kv_cache_spec.block_size // kernel_block_size
+                else:
+                    kernel_block_size = kv_cache_spec.block_size
+
+                if kv_cache_spec.storage_block_size != kv_cache_spec.block_size:
+                    shape_block_size = kv_cache_spec.storage_block_size
+                else:
+                    shape_block_size = kernel_block_size
+
                 kv_cache_shape = attn_backend.get_kv_cache_shape(
                     num_blocks,
-                    kv_cache_spec.storage_block_size,
+                    shape_block_size,
                     kv_cache_spec.num_kv_heads,
                     kv_cache_spec.head_size,
                     cache_dtype_str=cache_dtype,
@@ -275,10 +307,15 @@ def init_kv_cache(
     attn_backends: dict[str, type[AttentionBackend]],
     device: torch.device,
     cache_dtype: str,
+    kernel_block_sizes: list[int],
 ) -> dict[str, Any]:
     kv_cache_raw_tensors = _allocate_kv_cache(kv_cache_config, device)
     kv_caches = _reshape_kv_cache(
-        kv_cache_config, kv_cache_raw_tensors, attn_backends, cache_dtype
+        kv_cache_config,
+        kv_cache_raw_tensors,
+        attn_backends,
+        cache_dtype,
+        kernel_block_sizes,
     )
     bind_kv_cache(kv_caches, forward_context, runner_kv_caches)
     return kv_caches

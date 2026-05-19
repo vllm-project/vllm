@@ -494,10 +494,6 @@ class VllmConfig:
         if use_v2_model_runner is not None:
             return use_v2_model_runner
 
-        # KVCache layout changes are breaking, let's stick with v1 for now (see #42846)
-        if self.kv_transfer_config is not None:
-            return False
-
         if not self._is_default_v2_model_runner_model():
             return False
 
