@@ -377,10 +377,14 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
 
     @classmethod
     def is_supported(cls, compute_capability=None):
+        if (
+            rocm_aiter_ops.is_linear_enabled()
+            or rocm_aiter_ops.is_triton_linear_enabled()
+        ):
+            return True, None
         return (
-            rocm_aiter_ops.is_linear_enabled(),
-            "Only supported on ROCm platform \
-                with aiter package installed.",
+            False,
+            "Only supported on ROCm platform with aiter package installed.",
         )
 
     @classmethod
@@ -396,6 +400,21 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 "Supports only dynamic per token group activation "
                 "quantization with group_shape=(1,128).",
             )
+
+        # On arches without an aiter CK build (gfx12 today), the only
+        # backend that works is the aiter Triton path, which requires a
+        # per-(N,K) tune.
+        if (
+            not rocm_aiter_ops.is_linear_enabled()
+            and rocm_aiter_ops.is_triton_linear_enabled()
+        ):
+            n, k = config.weight_shape
+            if not rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k):
+                return (
+                    False,
+                    f"(N={n}, K={k}) is not in the aiter Triton "
+                    "blockscale tuned list.",
+                )
         return True, None
 
     def apply_block_scaled_mm(
