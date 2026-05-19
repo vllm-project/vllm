@@ -15,6 +15,7 @@ from vllm.v1.attention.backends.turboquant_attn import (
     TurboQuantAttentionImpl,
     TurboQuantMetadata,
 )
+from vllm.v1.worker.workspace import is_workspace_manager_initialized
 
 logger = init_logger(__name__)
 
@@ -133,6 +134,42 @@ def _warmup_turboquant_decode_layer(
         centroids=layer._tq_centroids,
         PiT=layer._tq_PiT,
         layer=layer,
+    )
+
+    if not is_workspace_manager_initialized():
+        return
+
+    # Warm the continuation-prefill path too. That path bulk-dequants cached
+    # TQ KV through `_tq_full_dequant_kv`, then runs a small attention over the
+    # cached prefix plus the current chunk. Use one request and one chunk token;
+    # the cached prefix points at block 1, matching the decode warmup cache.
+    continuation_query = torch.zeros(
+        (1, impl.num_heads, impl.head_size),
+        dtype=model_dtype,
+        device=device,
+    )
+    key_chunk = torch.zeros(
+        (1, impl.num_kv_heads, impl.head_size),
+        dtype=model_dtype,
+        device=device,
+    )
+    value_chunk = torch.zeros_like(key_chunk)
+    continuation_block_table = torch.zeros(
+        (1, block_table_stride), dtype=torch.int32, device=device
+    )
+    continuation_block_table[0, 0] = 1
+
+    impl._continuation_prefill(
+        layer=layer,
+        query=continuation_query,
+        key_chunk=key_chunk,
+        val_chunk=value_chunk,
+        kv_cache=kv_cache,
+        block_table=continuation_block_table,
+        cached_len=block_size,
+        seq_len=block_size + 1,
+        Pi=layer._tq_Pi,
+        centroids=layer._tq_centroids,
     )
 
 

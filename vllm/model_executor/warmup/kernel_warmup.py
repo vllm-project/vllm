@@ -28,6 +28,34 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _get_runtime_block_table_shape(worker: "Worker") -> tuple[int, int]:
+    """Return attention-kernel block size and block-table row stride.
+
+    V1 and V2 model runners keep block-table state in different attributes.
+    Warmup only needs the launch-time constants that real attention will use.
+    """
+    block_size = worker.cache_config.block_size
+    block_table_stride = 1
+    runner = worker.model_runner
+
+    v1_input_batch = getattr(runner, "input_batch", None)
+    if v1_input_batch is not None:
+        block_table_mgr = getattr(v1_input_batch, "block_table", None)
+        block_tables = getattr(block_table_mgr, "block_tables", None)
+        if block_tables:
+            block_table = block_tables[0]
+            return block_table.block_size, block_table.max_num_blocks_per_req
+
+    v2_block_tables = getattr(runner, "block_tables", None)
+    if v2_block_tables is not None:
+        kernel_block_sizes = getattr(v2_block_tables, "kernel_block_sizes", None)
+        input_block_tables = getattr(v2_block_tables, "input_block_tables", None)
+        if kernel_block_sizes and input_block_tables:
+            return kernel_block_sizes[0], input_block_tables[0].shape[1]
+
+    return block_size, block_table_stride
+
+
 def _flashinfer_autotune_cache_hash(runner: "GPUModelRunner") -> str:
     factors = aot_compile_hash_factors(runner.vllm_config)
     return hashlib.sha256(str(factors).encode()).hexdigest()
@@ -66,16 +94,11 @@ def kernel_warmup(worker: "Worker"):
         max_tokens = worker.scheduler_config.max_num_batched_tokens
         deep_gemm_warmup(model, max_tokens)
 
-    block_size = worker.cache_config.block_size
-    block_table_stride = 1
-    block_tables = worker.model_runner.input_batch.block_table.block_tables
-    if block_tables:
-        block_table = block_tables[0]
-        # V1 may split KV manager blocks into smaller attention-kernel blocks.
-        # Warmup must use the runtime BlockTable constants or Triton will
-        # compile a different BLOCK_SIZE/stride variant from real decode.
-        block_size = block_table.block_size
-        block_table_stride = block_table.max_num_blocks_per_req
+    # V1 can split KV-manager blocks into attention-kernel blocks, and V2 keeps
+    # block tables on a different runner attribute. Warmup must use the runtime
+    # kernel block size and block-table stride or Triton may compile a different
+    # variant from real decode.
+    block_size, block_table_stride = _get_runtime_block_table_shape(worker)
     max_num_decode_tokens = min(
         worker.scheduler_config.max_num_seqs,
         worker.scheduler_config.max_num_batched_tokens,
