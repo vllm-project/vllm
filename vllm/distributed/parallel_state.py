@@ -481,8 +481,9 @@ class GroupCoordinator:
         )
 
         if self.device_communicator is not None:
-            assert isinstance(self.device_communicator, CudaCommunicator) or isinstance(
-                self.device_communicator, XpuCommunicator
+            assert isinstance(
+                self.device_communicator,
+                (CudaCommunicator, XpuCommunicator),
             )
             ca_comm = self.device_communicator.ca_comm
             if ca_comm is not None:
