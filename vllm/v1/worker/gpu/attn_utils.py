@@ -148,20 +148,23 @@ def _allocate_and_reshape_kv_cache(
     kv_cache_config: KVCacheConfig,
     device: torch.device,
     layout: KVCacheLayout | None = None,
+    kernel_block_sizes: list[int] | None = None,
 ) -> dict[str, Any]:
     if layout is None:
         layout = resolve_kv_cache_layout()
     num_blocks = kv_cache_config.num_blocks
 
-    # Build layer_name -> spec lookup.
+    # Build layer_name -> (spec, group_id) lookup.
     spec_for_layer: dict[str, KVCacheSpec] = {}
-    for group in kv_cache_config.kv_cache_groups:
+    group_for_layer: dict[str, int] = {}
+    for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
         spec = group.kv_cache_spec
         for layer_name in group.layer_names:
             if isinstance(spec, UniformTypeKVCacheSpecs):
                 spec_for_layer[layer_name] = spec.kv_cache_specs[layer_name]
             else:
                 spec_for_layer[layer_name] = spec
+            group_for_layer[layer_name] = group_id
 
     # Allocate, reshape by unique spec, and distribute views.
     kv_caches: dict[str, Any] = {}
@@ -177,12 +180,24 @@ def _allocate_and_reshape_kv_cache(
                 spec = spec_for_layer[layer_name]
                 key = id(spec)
                 if key not in seen_specs:
+                    block_size = None
+                    reshape_num_blocks = num_blocks
+                    if kernel_block_sizes is not None and isinstance(
+                        spec, AttentionSpec
+                    ):
+                        gid = group_for_layer[layer_name]
+                        if gid < len(kernel_block_sizes):
+                            kernel_block_size = kernel_block_sizes[gid]
+                            reshape_num_blocks = (
+                                num_blocks * spec.block_size // kernel_block_size
+                            )
                     seen_specs[key] = reshape_kv_cache(
                         buf,
                         spec,
-                        num_blocks,
+                        reshape_num_blocks,
                         num_layer_slots=num_layer_slots,
                         layout=layout,
+                        block_size=block_size,
                     )
                 kv_caches[layer_name] = seen_specs[key][slot_idx]
 
@@ -196,9 +211,15 @@ def init_kv_cache(
     attn_backends: dict[str, type[AttentionBackend]],
     device: torch.device,
     cache_dtype: str,
+    kernel_block_sizes: list[int] | None = None,
     layout: KVCacheLayout | None = None,
 ) -> dict[str, Any]:
-    kv_caches = _allocate_and_reshape_kv_cache(kv_cache_config, device, layout=layout)
+    kv_caches = _allocate_and_reshape_kv_cache(
+        kv_cache_config,
+        device,
+        layout=layout,
+        kernel_block_sizes=kernel_block_sizes,
+    )
     bind_kv_cache(kv_caches, forward_context, runner_kv_caches)
     return kv_caches
 
