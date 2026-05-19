@@ -239,9 +239,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         trust_remote_code=True,
     ),
     "Cohere2MoeForCausalLM": _HfExamplesInfo(
-        "/host/engines/cohere-moe",
+        "CohereLabs/command-a-plus-05-2026",
         trust_remote_code=True,
-        is_available_online=False,
     ),
     "CwmForCausalLM": _HfExamplesInfo("facebook/cwm", min_transformers_version="4.58"),
     # FIXME: databricks/dbrx-instruct has been deleted
