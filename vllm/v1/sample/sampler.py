@@ -207,6 +207,10 @@ class Sampler(nn.Module):
         # Compute ranks for the sampled token. log_softmax is monotonic w.r.t.
         # the original logits, so ranks computed from logprobs are equivalent.
         sampled_logprobs = logprobs.gather(-1, sampled.unsqueeze(-1))
+        # Avoid 0/1 specialization recompile on the batch dimension of the
+        # compiled batched_count_greater_than. See gather_logprobs for context.
+        torch._dynamo.decorators.mark_unbacked(logprobs, 0)
+        torch._dynamo.decorators.mark_unbacked(sampled_logprobs, 0)
         token_ranks = batched_count_greater_than(logprobs, sampled_logprobs)
 
         return LogprobsTensors(
@@ -251,7 +255,10 @@ class Sampler(nn.Module):
             greedy_sampled = self.greedy_sample(logits)
             if sampling_metadata.all_greedy:
                 processed_logprobs = None
-                if sampling_metadata.max_num_logprobs is not None:
+                if (
+                    sampling_metadata.max_num_logprobs is not None
+                    or sampling_metadata.logprob_token_ids
+                ):
                     if logprobs_mode == "processed_logits":
                         processed_logprobs = logits
                     elif logprobs_mode == "processed_logprobs":
