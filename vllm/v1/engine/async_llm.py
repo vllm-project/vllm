@@ -39,7 +39,11 @@ from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
 from vllm.v1.engine import EngineCoreRequest, PauseMode
 from vllm.v1.engine.core_client import EngineCoreClient
-from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
+from vllm.v1.engine.exceptions import (
+    EngineDeadError,
+    EngineGenerateError,
+    EngineUnhealthyError,
+)
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
 from vllm.v1.engine.parallel_sampling import ParentRequest
@@ -166,6 +170,8 @@ class AsyncLLM(EngineClient):
             self.logger_manager.log_engine_initialized()
 
         self._client_count = client_count
+        self._last_request_at = 0.0
+        self._last_progress_at_ref = [0.0]
 
         self.output_handler: asyncio.Task | None = None
         try:
@@ -407,6 +413,7 @@ class AsyncLLM(EngineClient):
     ):
         # Add the request to OutputProcessor (this process).
         self.output_processor.add_request(request, prompt, parent_req, index, queue)
+        self._last_request_at = time.monotonic()
 
         # Add the EngineCoreRequest to EngineCore (separate process).
         await self.engine_core.add_request_async(request)
@@ -652,6 +659,7 @@ class AsyncLLM(EngineClient):
         logger_ref = self._logger_ref
         renderer = self.renderer
         chunk_size = envs.VLLM_V1_OUTPUT_PROC_CHUNK_SIZE
+        last_progress_at_ref = self._last_progress_at_ref
 
         async def output_handler():
             try:
@@ -659,6 +667,13 @@ class AsyncLLM(EngineClient):
                     # 1) Pull EngineCoreOutputs from the EngineCore.
                     outputs = await engine_core.get_output_async()
                     num_outputs = len(outputs.outputs)
+
+                    if (
+                        num_outputs
+                        or outputs.scheduler_stats is not None
+                        or outputs.finished_requests
+                    ):
+                        last_progress_at_ref[0] = time.monotonic()
 
                     iteration_stats = (
                         IterationStats() if (log_stats and num_outputs) else None
@@ -901,6 +916,29 @@ class AsyncLLM(EngineClient):
         logger.debug("Called check_health.")
         if self.errored:
             raise self.dead_error
+        await self.engine_core.check_health_async()
+
+    async def check_ready(self) -> None:
+        logger.debug("Called check_ready.")
+        if self.errored:
+            raise self.dead_error
+
+        if not self.output_processor.has_unfinished_requests():
+            return
+
+        now = time.monotonic()
+        last_progress_at = self._last_progress_at_ref[0]
+        if last_progress_at == 0.0:
+            if now - self._last_request_at > envs.VLLM_READY_CHECK_IDLE_TIMEOUT_S:
+                raise EngineUnhealthyError(
+                    "Engine has unfinished requests but has not produced initial progress."
+                )
+            return
+
+        if now - last_progress_at > envs.VLLM_READY_CHECK_PROGRESS_TIMEOUT_S:
+            raise EngineUnhealthyError(
+                "Engine has unfinished requests but has not made recent progress."
+            )
 
     async def start_profile(self, profile_prefix: str | None = None) -> None:
         coros = [self.engine_core.profile_async(True, profile_prefix)]
