@@ -9,7 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PretrainedConfig
 
-from vllm.config import ModelConfig, get_current_vllm_config
+from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
@@ -23,11 +23,15 @@ def get_act_fn(
     # get classification act_fn
     # Implement alignment with transformers ForSequenceClassificationLoss
     # https://github.com/huggingface/transformers/blob/57bb6db6ee4cfaccc45b8d474dfad5a17811ca60/src/transformers/loss/loss_utils.py#L92
+    num_labels: int | None = None
+    if static_num_labels:
+        num_labels = getattr(config, "num_labels", 0)
+
     problem_type = getattr(config, "problem_type", "")
     if problem_type == "regression":
         return PoolerIdentity()
     if problem_type == "single_label_classification":
-        return PoolerClassify(static_num_labels=static_num_labels)
+        return PoolerClassify(num_labels=num_labels)
     if problem_type == "multi_label_classification":
         return PoolerMultiLabelClassify()
 
@@ -52,7 +56,7 @@ def get_act_fn(
         fn = resolve_obj_by_qualname(function_name)()
         return PoolerActivation.wraps(fn)
 
-    return PoolerClassify(static_num_labels=static_num_labels)
+    return PoolerClassify(num_labels=num_labels)
 
 
 def resolve_classifier_act_fn(
@@ -110,15 +114,8 @@ class PoolerMultiLabelClassify(PoolerActivation):
 
 
 class PoolerClassify(PoolerActivation):
-    def __init__(self, *, static_num_labels: bool = True) -> None:
+    def __init__(self, *, num_labels: int | None = None) -> None:
         super().__init__()
-
-        if static_num_labels:
-            vllm_config = get_current_vllm_config()
-            model_config = vllm_config.model_config
-            num_labels = getattr(model_config.hf_config, "num_labels", 0)
-        else:
-            num_labels = None
 
         if num_labels == 0:
             logger.warning(
