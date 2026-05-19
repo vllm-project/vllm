@@ -9,6 +9,7 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.kv_offload.base import (
@@ -65,29 +66,34 @@ def compute_sub_block_ptrs(
     assert skip_count < block_size_factor
 
     num_sub_blocks = len(output)
-    base_ptr = tensor.data_ptr()
-    row_stride = tensor.stride(0)
+    # Use uint64 to avoid overflow on XPU where pointers exceed int64 range
+    base_ptr = np.uint64(tensor.data_ptr())
+    row_stride = np.uint64(tensor.stride(0))
 
     if block_size_factor == 1:
         # Fast path: 1:1 mapping, no sub-block expansion needed.
-        output[:] = base_ptr + block_ids[:num_sub_blocks] * row_stride
+        output[:] = (base_ptr + block_ids[:num_sub_blocks].astype(np.uint64) * row_stride).view(np.int64)
         return
 
     # Vectorized expansion for block_size_factor > 1.
     assert tensor.shape[1] % block_size_factor == 0
     sub_block_size = tensor.shape[1] // block_size_factor
-    sub_offsets = np.arange(block_size_factor, dtype=np.int64) * sub_block_size
+    sub_offsets = (np.arange(block_size_factor, dtype=np.uint64) * np.uint64(sub_block_size))
     # (num_blocks, 1) + (1, block_size_factor) -> (num_blocks, block_size_factor)
     all_ptrs = (
-        base_ptr + block_ids.astype(np.int64)[:, np.newaxis] * row_stride
+        base_ptr + block_ids.astype(np.uint64)[:, np.newaxis] * row_stride
     ) + sub_offsets[np.newaxis, :]
     # Flatten and apply skip_count / truncation
     flat = all_ptrs.ravel()
-    output[:] = flat[skip_count : skip_count + num_sub_blocks]
+    output[:] = flat[skip_count : skip_count + num_sub_blocks].view(np.int64)
 
 
 def pin_mmap_region(region: SharedOffloadRegion) -> None:
     """Register the entire mmap as CUDA pinned memory via cudaHostRegister."""
+    if current_platform.is_xpu():
+        logger.warning("XPU: skipping cudaHostRegister (not supported)")
+        return
+
     rank = region.rank
 
     base_ptr = region._base.data_ptr()
@@ -106,6 +112,52 @@ def pin_mmap_region(region: SharedOffloadRegion) -> None:
             region.total_size_bytes / 1e9,
         )
         region.is_pinned = True
+
+
+def swap_blocks_batch_xpu(all_src, all_dst, all_sizes, src_tensors, dst_tensors):
+    """
+    Pure PyTorch fallback for swap_blocks_batch on XPU.
+    Resolves raw pointers back to (tensor, row) pairs and uses .copy_().
+    """
+    n = len(all_sizes)
+    if n == 0:
+        return
+
+    # Pre-compute base pointers and strides for reverse lookup
+    src_bases = [(np.uint64(t.data_ptr()), t.stride(0), t.shape[1], t)
+                 for t in src_tensors]
+    dst_bases = [(np.uint64(t.data_ptr()), t.stride(0), t.shape[1], t)
+                 for t in dst_tensors]
+
+    for i in range(n):
+        src_ptr = np.uint64(all_src[i])
+        dst_ptr = np.uint64(all_dst[i])
+        nbytes = int(all_sizes[i])
+
+        # Find source tensor and row
+        src_t = None
+        src_row = 0
+        for base, stride, page_sz, tensor in src_bases:
+            if nbytes == page_sz:
+                offset = int(src_ptr - base)
+                if 0 <= offset < tensor.shape[0] * stride:
+                    src_row = offset // stride
+                    src_t = tensor
+                    break
+
+        # Find destination tensor and row
+        dst_t = None
+        dst_row = 0
+        for base, stride, page_sz, tensor in dst_bases:
+            if nbytes == page_sz:
+                offset = int(dst_ptr - base)
+                if 0 <= offset < tensor.shape[0] * stride:
+                    dst_row = offset // stride
+                    dst_t = tensor
+                    break
+
+        if src_t is not None and dst_t is not None:
+            dst_t[dst_row, :nbytes].copy_(src_t[src_row, :nbytes], non_blocking=True)
 
 
 class SingleDirectionOffloadingHandler(OffloadingHandler):
@@ -145,7 +197,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         for gpu_tensor, cpu_tensor in zip(gpu_tensors, cpu_tensors):
             assert gpu_tensor.dtype == torch.int8
             assert gpu_tensor.ndim == 2
-            assert gpu_tensor.is_cuda
+            assert gpu_tensor.is_cuda or gpu_tensor.is_xpu
             assert cpu_tensor.dtype == torch.int8
             assert cpu_tensor.ndim == 2
             assert cpu_tensor.device.type == "cpu"
@@ -296,7 +348,10 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         batch_dst = torch.from_numpy(all_dst)
         batch_sizes = torch.from_numpy(all_sizes)
 
-        stream = self._stream_pool.pop() if self._stream_pool else torch.cuda.Stream()
+        if current_platform.is_xpu():
+            stream = self._stream_pool.pop() if self._stream_pool else torch.xpu.Stream()
+        else:
+            stream = self._stream_pool.pop() if self._stream_pool else torch.cuda.Stream()
         start_event = (
             self._event_pool.pop()
             if self._event_pool
@@ -310,12 +365,21 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
 
         if self.gpu_to_cpu:
             # wait for model computation to finish before offloading
-            stream.wait_stream(torch.cuda.current_stream())
+            if current_platform.is_xpu():
+                stream.wait_stream(torch.xpu.current_stream())
+            else:
+                stream.wait_stream(torch.cuda.current_stream())
         if self._transfers:
             last_transfer: Transfer = self._transfers[-1]
             last_event = last_transfer.end_event
             # assure job will start only after the previous one completes
             stream.wait_event(last_event)
+
+        if current_platform.is_xpu():
+            stream_ctx = torch.xpu.stream(stream)
+        else:
+            stream_ctx = torch.cuda.stream(stream)
+
         # CPU->GPU reads from host pinned memory, which is never written
         # by a concurrent GPU stream, so CU_MEMCPY_SRC_ACCESS_ORDER_ANY is
         # safe and lets the driver pipeline source reads. GPU->CPU reads
@@ -323,15 +387,20 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         # writing; we must keep STREAM ordering so source reads are gated
         # by the transfer stream's wait_stream(compute) barrier.
         is_src_access_order_any = not self.gpu_to_cpu
-        with torch.cuda.stream(stream):
+        with stream_ctx:
             start_event.record(stream)
             if num_copy_ops > 0:
-                ops.swap_blocks_batch(
-                    batch_src,
-                    batch_dst,
-                    batch_sizes,
-                    is_src_access_order_any=is_src_access_order_any,
-                )
+                if current_platform.is_xpu():
+                    swap_blocks_batch_xpu(
+                        all_src, all_dst, all_sizes,
+                        self.src_tensors, self.dst_tensors)
+                else:
+                   ops.swap_blocks_batch(
+                       batch_src,
+                       batch_dst,
+                       batch_sizes,
+                       is_src_access_order_any=is_src_access_order_any,
+                   )
             end_event.record(stream)
 
         self._transfer_events[job_id] = end_event
@@ -398,7 +467,9 @@ class CpuGpuOffloadingHandlers:
         num_cpu_blocks: int,
         mmap_region: SharedOffloadRegion | None = None,
     ):
-        pin_memory = is_pin_memory_available()
+        pin_memory = is_pin_memory_available() and not current_platform.is_xpu()
+        if current_platform.is_xpu():
+            mmap_region = None
         logger.info("Allocating %d CPU tensors...", len(kv_caches.tensors))
         self._mmap_region = mmap_region
         if mmap_region is not None and pin_memory:
@@ -450,3 +521,4 @@ class CpuGpuOffloadingHandlers:
             kv_cache_groups_data_refs=kv_caches.group_data_refs,
             gpu_to_cpu=False,
         )
+
