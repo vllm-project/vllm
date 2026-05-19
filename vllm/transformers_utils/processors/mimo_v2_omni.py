@@ -229,23 +229,20 @@ def _transform_single(
 
 
 def _fetch_image(src: Any) -> Image.Image:
+    # Route string sources through MediaConnector so this surface inherits
+    # the URL-scheme allowlist (allowed_media_domains) and the
+    # allowed_local_media_path policy that already harden the OpenAI chat
+    # path via vllm/entrypoints/chat_utils.py. Direct requests.get and
+    # Image.open on caller-supplied strings would otherwise reach cloud
+    # metadata endpoints and arbitrary local files.
+    from vllm.multimodal.media.connector import MediaConnector
+
     if isinstance(src, Image.Image):
         return _to_rgb(src)
     if isinstance(src, bytes):
         return _to_rgb(copy.deepcopy(Image.open(BytesIO(src))))
     if isinstance(src, str):
-        if src.startswith(("http://", "https://")):
-            r = requests.get(src, timeout=30)
-            r.raise_for_status()
-            return _to_rgb(copy.deepcopy(Image.open(BytesIO(r.content))))
-        if src.startswith("file://"):
-            return _to_rgb(Image.open(src[7:]))
-        if src.startswith("data:image"):
-            import pybase64 as _b64
-
-            _, b64 = src.split("base64,", 1)
-            return _to_rgb(copy.deepcopy(Image.open(BytesIO(_b64.b64decode(b64)))))
-        return _to_rgb(Image.open(src))
+        return _to_rgb(MediaConnector().fetch_image(src))
     raise ValueError(f"Unrecognized image source: {type(src)}")
 
 
@@ -462,22 +459,27 @@ class MiMoVLProcessor:
                 )
             if isinstance(audio, bytes):
                 file_obj: Any = io.BytesIO(audio)
+                samples = AudioDecoder(file_obj).get_all_samples()
+                waveform = samples.data
+                original_sr = samples.sample_rate
             elif isinstance(audio, str):
                 if audio.startswith("data:"):
                     import pybase64 as _b64
 
                     file_obj = io.BytesIO(_b64.b64decode(audio.split(",")[1]))
-                elif audio.startswith(("http://", "https://")):
-                    r = requests.get(audio, timeout=30)
-                    r.raise_for_status()
-                    file_obj = io.BytesIO(r.content)
+                    samples = AudioDecoder(file_obj).get_all_samples()
+                    waveform = samples.data
+                    original_sr = samples.sample_rate
                 else:
-                    file_obj = audio
+                    # URL or local-path strings go through MediaConnector for
+                    # the same SSRF allowlist + allowed_local_media_path policy
+                    # that hardens the OpenAI chat path (see _fetch_image).
+                    from vllm.multimodal.media.connector import MediaConnector
+
+                    waveform_np, original_sr = MediaConnector().fetch_audio(audio)
+                    waveform = torch.from_numpy(waveform_np)
             else:
                 raise ValueError(f"Unsupported audio source type: {type(audio)}")
-            samples = AudioDecoder(file_obj).get_all_samples()
-            waveform = samples.data
-            original_sr = samples.sample_rate
 
         if original_sr != self.audio_sampling_rate:
             if original_sr not in self._resamplers:
