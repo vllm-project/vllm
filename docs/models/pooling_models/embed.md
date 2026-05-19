@@ -12,7 +12,7 @@ Embedding models are a class of machine learning models designed to transform un
     - `LLM.score(...)`
 - Online APIs:
     - [Cohere Embed API](embed.md#cohere-embed-api) (`/v2/embed`)
-    - [Openai-compatible Embeddings API](embed.md#openai-compatible-embeddings-api) (`/v1/embeddings`)
+    - [OpenAI-compatible Embeddings API](embed.md#openai-compatible-embeddings-api) (`/v1/embeddings`)
     - Pooling API (`/pooling`)
 
 The primary distinction between (sequence) embedding and token embedding lies in their output granularity: (sequence) embedding produces a single embedding vector for an entire input sequence, whereas token embedding generates an embedding for each individual token within the sequence.
@@ -228,7 +228,7 @@ these extra parameters are supported instead:
 
 #### Examples
 
-If the model has a [chat template](../../serving/openai_compatible_server.md#chat-template), you can replace `inputs` with a list of `messages` (same schema as [Chat API](../../serving/openai_compatible_server.md#chat-api))
+If the model has a [chat template](../../serving/online_serving/README.md#chat-template), you can replace `inputs` with a list of `messages` (same schema as [Chat API](../../serving/online_serving/openai_compatible_server.md#chat-api))
 which will be treated as a single prompt to the model. Here is a convenience function for calling the API while retaining OpenAI's type annotations:
 
 ??? code
