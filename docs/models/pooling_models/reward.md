@@ -133,7 +133,7 @@ print(f"Data: {data!r}")
 
 ## Online Serving
 
-Please refer to the [pooling API](README.md#pooling-api). Pooling task corresponding to reward model types refer to the [table above](#summary).
+Please refer to the [Pooling API](README.md#pooling-api). Pooling task corresponding to reward model types refer to the [table above](#summary).
 
 ## More examples
 
