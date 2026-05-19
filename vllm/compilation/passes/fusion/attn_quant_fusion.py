@@ -28,7 +28,7 @@ logger = init_logger(__name__)
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
 
-ATTN_OP = torch.ops.vllm.unified_attention_with_output.default
+ATTN_OP = torch.ops.vllm.unified_attention.default
 RESHAPE_OP = torch.ops.aten.reshape.default
 
 

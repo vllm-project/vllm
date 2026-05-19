@@ -234,14 +234,12 @@ def test_splitting_ops_dynamic():
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             use_inductor_graph_partition=True,
-            splitting_ops=["vllm::unified_attention_with_output"],
+            splitting_ops=["vllm::unified_attention"],
         )
     )
     # with inductor partition we use splitting_ops directly for
     # partition rules
-    assert config.compilation_config.splitting_ops == [
-        "vllm::unified_attention_with_output"
-    ]
+    assert config.compilation_config.splitting_ops == ["vllm::unified_attention"]
 
     # When attn_fusion pass enabled.
     config = VllmConfig(
@@ -301,7 +299,7 @@ def test_moe_splitting_ops_deepep_ht_inductor_partition():
             mode=CompilationMode.VLLM_COMPILE,
             use_inductor_graph_partition=True,
             splitting_ops=[
-                "vllm::unified_attention_with_output",
+                "vllm::unified_attention",
                 "vllm::moe_forward",
                 "vllm::moe_forward_shared",
             ],
@@ -309,7 +307,7 @@ def test_moe_splitting_ops_deepep_ht_inductor_partition():
     )
     splitting_ops = config.compilation_config.splitting_ops
     assert splitting_ops == [
-        "vllm::unified_attention_with_output",
+        "vllm::unified_attention",
         "vllm::moe_forward",
         "vllm::moe_forward_shared",
     ]
