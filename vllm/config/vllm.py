@@ -2023,9 +2023,9 @@ class VllmConfig:
         if (
             model_config is not None
             and model_config.enable_prompt_embeds
-            and model_config.is_encoder_decoder
+            and (model_config.is_encoder_decoder or model_config.is_multimodal_model)
         ):
-            unsupported.append("prompt embeds for encoder-decoder models")
+            unsupported.append("prompt embeds for encoder-decoder or multimodal models")
 
         if (
             model_config is not None
