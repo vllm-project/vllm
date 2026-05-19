@@ -1,8 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Compatibility wrapper for FlashInfer API changes.
+"""FlashInfer compatibility and utility layer — the **single entry point**
+for all FlashInfer-related imports across vLLM.
 
-Users of vLLM should always import **only** these wrappers.
+This module provides:
+
+1. **Availability checks** — ``has_flashinfer()``, ``has_flashinfer_moe()``,
+   ``has_flashinfer_comm()``, ``has_flashinfer_cutedsl()``, etc.
+2. **Lazy function wrappers** — ``flashinfer_trtllm_bf16_moe()``,
+   ``flashinfer_scaled_fp4_mm()``, ``flashinfer_scaled_fp8_mm()``, etc.
+3. **Custom PyTorch ops** — ``flashinfer_mm_fp4``, ``bmm_fp8``,
+   ``flashinfer_nvfp4_quantize``, ``flashinfer_mxfp4_quantize``,
+   ``mm_mxfp8``, etc.
+4. **TRTLLM attention helpers** — ``supports_trtllm_attention()``,
+   ``can_use_trtllm_attention()``, ``use_trtllm_attention()``.
+5. **Re-exports from sub-modules** — ``FlashinferMoeBackend`` and
+   ``get_flashinfer_moe_backend()`` are imported from
+   ``vllm.model_executor.layers.quantization.utils.flashinfer_utils``
+   for convenience so most callers only need this module.
+
+For MoE-specific weight-shuffling/alignment helpers, see the companion
+module ``vllm.model_executor.layers.quantization.utils.flashinfer_utils``.
 """
 
 import contextlib
@@ -916,7 +934,16 @@ def is_flashinfer_cudnn_fp8_prefill_attn_supported() -> bool:
     return True
 
 
+# Re-export MoE backend enum and helper from the quantization utils module
+# so most callers only need to import from this single module.
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    FlashinferMoeBackend,
+    get_flashinfer_moe_backend,
+)
+
 __all__ = [
+    "FlashinferMoeBackend",
+    "get_flashinfer_moe_backend",
     "has_flashinfer",
     "flashinfer_trtllm_fp8_block_scale_moe",
     "flashinfer_cutlass_fused_moe",

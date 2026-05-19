@@ -1,5 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""FlashInfer MoE-specific utilities — weight shuffling, alignment, and
+layout conversion helpers for FlashInfer's fused MoE kernels.
+
+This module focuses on **quantization-aware MoE weight preprocessing**:
+activation mapping, W13/W2 swapping, block-layout conversion, intermediate-size
+padding, and backend selection.
+
+.. note::
+   For general FlashInfer availability checks, lazy function wrappers,
+   custom PyTorch ops, and TRTLLM attention helpers, import from
+   ``vllm.utils.flashinfer`` — that module is the primary entry point
+   and also re-exports ``FlashinferMoeBackend`` and
+   ``get_flashinfer_moe_backend`` from here for convenience.
+"""
 from enum import Enum
 from typing import TYPE_CHECKING
 
