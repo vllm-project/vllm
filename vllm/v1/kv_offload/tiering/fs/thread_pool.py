@@ -7,11 +7,10 @@ Thread pool:
       - Store-priority threads: drain the store queue first, then the load queue.
     Load jobs are enqueued to the load queue; store jobs to the store queue.
 """
-import functools
 from collections import deque
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Iterable
 import threading
-from vllm.v1.kv_offload.base import OffloadKey
+from typing import Any, Callable
 from vllm.v1.kv_offload.tiering.base import JobId
 from vllm.logger import init_logger
 
@@ -57,7 +56,6 @@ class DualQueueThreadPool:
         self,
         n_read_threads: int,
         n_write_threads: int,
-        file_mapper,
         thread_name_prefix: str = "fs_secondary_tier",
     ) -> None:
         self._load_q: deque = deque()
@@ -66,7 +64,6 @@ class DualQueueThreadPool:
         self._stop = False
         self._threads: list[threading.Thread] = []
         self._finished_q: deque[tuple[JobId, bool]] = deque()
-        self._file_mapper = file_mapper
 
         for i in range(n_read_threads):
             t = threading.Thread(
@@ -91,48 +88,28 @@ class DualQueueThreadPool:
     def enqueue_load(
         self,
         job_id: JobId,
-        keys: Collection[OffloadKey],
-        block_ids: Collection[int],
-        primary_view: memoryview,
-        block_size: int,
-        io_fn: Callable,
+        n_tasks: int,
+        tasks: Iterable[Callable],
     ) -> None:
         """Enqueue load tasks for a job (high-priority for load-priority threads)."""
-        state = JobState(job_id, len(keys))
+        state = JobState(job_id, n_tasks)
         with self._condition:
-            for key, bid in zip(keys, block_ids):
-                fn = functools.partial(
-                    io_fn,
-                    self._file_mapper.get_file_name(key),
-                    primary_view,
-                    int(bid) * block_size,
-                    block_size,
-                )
+            for fn in tasks:
                 self._load_q.append((fn, state))
-            self._condition.notify(len(keys))
+            self._condition.notify(n_tasks)
 
     def enqueue_store(
         self,
         job_id: JobId,
-        keys: Collection[OffloadKey],
-        block_ids: Collection[int],
-        primary_view: memoryview,
-        block_size: int,
-        io_fn: Callable,
+        n_tasks: int,
+        tasks: Iterable[Callable],
     ) -> None:
         """Enqueue store tasks for a job (high-priority for store-priority threads)."""
-        state = JobState(job_id, len(keys))
+        state = JobState(job_id, n_tasks)
         with self._condition:
-            for key, bid in zip(keys, block_ids):
-                fn = functools.partial(
-                    io_fn,
-                    self._file_mapper.get_file_name(key),
-                    primary_view,
-                    int(bid) * block_size,
-                    block_size,
-                )
+            for fn in tasks:
                 self._store_q.append((fn, state))
-            self._condition.notify(len(keys))
+            self._condition.notify(n_tasks)
 
     def get_finished(self) -> list[tuple[JobId, bool]]:
         jobs = []

@@ -40,9 +40,8 @@ class FileMapper:
     ):
         """
         Initialize the file mapper. Each worker constructs its own, but
-        `config.json` (written by `write_run_config`) that is shared across
-        workers since rank lives outside the hash. When
-        `parallel_agnostic=True`, tp/pp/pcp/dcp are forced to 1 and rank
+        `config.json` is shared across workers since rank lives outside the hash.
+        When `parallel_agnostic=True`, tp/pp/pcp/dcp are forced to 1 and rank
         to 0 so multiple parallelism layouts collapse into the same folder.
         """
         if parallel_agnostic:
@@ -107,15 +106,11 @@ class FileMapper:
             f"/{subfolder1}/{subfolder2}_g{group_idx}/{hash_hex}.bin"
         )
 
-    def write_run_config(self) -> None:
-        """Write self.fields as JSON to <base_path>/config.json (no-op if it exists)."""
-        run_config = dict(self.fields)
-        os.makedirs(self.base_path, exist_ok=True)
-        target = os.path.join(self.base_path, _CONFIG_FILENAME)
-        if os.path.exists(target):
-            return
-        with open(target, "w") as f:
-            json.dump(run_config, f, indent=2, sort_keys=True)
+    def get_run_config(self) -> dict:
+        return dict(self.fields)
+    
+    def get_config_file_path(self) -> str:
+        return f"{self.base_path}/{_CONFIG_FILENAME}"
 
     @staticmethod
     def _compute_base_path(root_dir: str, fields: dict) -> str:
