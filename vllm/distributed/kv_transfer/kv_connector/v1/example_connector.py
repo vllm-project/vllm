@@ -106,6 +106,10 @@ class ExampleConnector(KVConnectorBase_V1):
         # backends use [2, num_blocks, block_size, num_kv_heads, head_size]
         # or 4D layouts and go through the standard reshape branch.
         self._uses_cpu_kv_layout = current_platform.is_cpu()
+        # MLA layout (3D KV buffer) is fixed by the model config and is the
+        # same at every layer; cache it so we can route correctly when
+        # attn_metadata is None (kv_connector_no_forward path).
+        self._uses_mla_kv_layout = bool(vllm_config.model_config.use_mla)
         self._requests_need_load: dict[str, Request] = {}
         self._storage_path = self._kv_transfer_config.get_from_extra_config(
             "shared_storage_path", "/tmp"
@@ -152,7 +156,13 @@ class ExampleConnector(KVConnectorBase_V1):
                     layout in that case.
             """
             dst_kv_cache_layer_shape = dst_kv_cache_layer.shape
-            if isinstance(attn_metadata, MLACommonMetadata):
+            # When attn_metadata is None (kv_connector_no_forward path), fall
+            # back to the model-config flag so MLA buffers (3D) aren't routed
+            # through the 4D / 5D branches.
+            is_mla = isinstance(attn_metadata, MLACommonMetadata) or (
+                attn_metadata is None and self._uses_mla_kv_layout
+            )
+            if is_mla:
                 num_pages = dst_kv_cache_layer_shape[0]
                 page_size = dst_kv_cache_layer_shape[1]
                 dst_kv_cache_layer = dst_kv_cache_layer.reshape(
@@ -273,7 +283,12 @@ class ExampleConnector(KVConnectorBase_V1):
             Assume the shape of the layer is (2, num_pages, page_size, xxx)
             if MLA is not used, and (num_pages, page_size, xxx) otherwise.
             """
-            if isinstance(attn_metadata, MLACommonMetadata):
+            # When attn_metadata is None, fall back to the cached MLA flag
+            # so MLA buffers aren't routed through the non-MLA branches.
+            is_mla = isinstance(attn_metadata, MLACommonMetadata) or (
+                attn_metadata is None and self._uses_mla_kv_layout
+            )
+            if is_mla:
                 num_pages, page_size = layer.shape[0], layer.shape[1]
                 return layer.reshape(num_pages * page_size, -1)[slot_mapping, ...]
             elif isinstance(attn_metadata, TritonAttentionMetadata):
