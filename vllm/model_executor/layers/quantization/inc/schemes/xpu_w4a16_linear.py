@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 from torch.nn.parameter import Parameter
 
+from vllm.logger import init_logger
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     PackedvLLMParameter,
@@ -15,15 +16,20 @@ from vllm.model_executor.parameter import (
 
 from .base import INCLinearScheme
 
+logger = init_logger(__name__)
+
 if TYPE_CHECKING:
     from ..resolver import INCLayerConfig
 
 
 @lru_cache(maxsize=1)
 def get_ark_state() -> tuple[bool, str | None, Any | None, Any | None]:
+    """Return ARK availability, error details, cached instance, and QuantLinear."""
     try:
         import auto_round_kernel
         from auto_round_kernel.qlinear import QuantLinear
+
+        logger.info("Successfully imported auto_round_kernel.")
     except ImportError as error:
         return False, str(error), None, None
 
