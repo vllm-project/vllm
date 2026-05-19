@@ -668,11 +668,10 @@ class SimpleCPUOffloadScheduler:
         transfer = self._store_event_to_blocks.pop(event_idx, None)
         if transfer is None:
             return  # guard stale events from before a reset() call
-      
-        transfer = self._store_event_to_blocks.pop(event_idx)
+
         if not self._lazy_mode:
             self._in_flight_store_gpu_blocks.difference_update(transfer.gpu_block_ids)
-            
+
         self._process_store_completion(transfer.gpu_block_ids, transfer.cpu_block_ids)
         logger.debug(
             "Store event %d completed: cached %d blocks to CPU",
@@ -833,6 +832,7 @@ class SimpleCPUOffloadScheduler:
                 self.cpu_block_pool.blocks[bid] for bid in transfer.cpu_block_ids
             )
         self._store_event_to_blocks.clear()
+        self._in_flight_store_gpu_blocks.clear()
 
         # Release GPU/CPU refs held by pending load transfers
         for req_id in list(self._reqs_to_load):
