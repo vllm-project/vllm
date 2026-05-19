@@ -226,7 +226,7 @@ $pythonExe = Ensure-Venv -Path $VenvPath
 Set-BootstrapEnvironment -PythonExe $pythonExe
 
 Write-Step "Upgrading pip build tools"
-Invoke-Native $pythonExe "-m" "pip" "install" "-U" "pip" "setuptools" "wheel" "ninja" "cmake"
+Invoke-Native $pythonExe "-m" "pip" "install" "-U" "pip" "setuptools" "setuptools-scm>=8.0" "wheel" "ninja" "cmake"
 
 if (-not $SkipDependencyInstall) {
     Write-Step "Installing PyTorch CUDA packages"
