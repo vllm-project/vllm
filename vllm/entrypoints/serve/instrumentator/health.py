@@ -7,7 +7,7 @@ from fastapi.responses import Response
 
 from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
-from vllm.v1.engine.exceptions import EngineDeadError
+from vllm.v1.engine.exceptions import EngineDeadError, EngineUnhealthyError
 
 logger = init_logger(__name__)
 
@@ -43,5 +43,5 @@ async def health_ready(raw_request: Request) -> Response:
     try:
         await client.check_ready()
         return Response(status_code=200)
-    except EngineDeadError:
+    except (EngineDeadError, EngineUnhealthyError):
         return Response(status_code=503)

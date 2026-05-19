@@ -12,7 +12,7 @@ import requests
 from fastapi import Request
 
 from tests.utils import RemoteOpenAIServer
-from vllm.v1.engine.exceptions import EngineDeadError
+from vllm.v1.engine.exceptions import EngineDeadError, EngineUnhealthyError
 from vllm.version import __version__ as VLLM_VERSION
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -245,7 +245,7 @@ async def test_health_ready_unhealthy_error():
     mock_request = Mock(spec=Request)
     mock_app_state = Mock()
     mock_engine_client = AsyncMock()
-    mock_engine_client.check_ready.side_effect = EngineDeadError()
+    mock_engine_client.check_ready.side_effect = EngineUnhealthyError()
     mock_app_state.engine_client = mock_engine_client
     mock_request.app.state = mock_app_state
 
