@@ -1992,6 +1992,10 @@ class VllmConfig:
             elif speculative_config.method not in ("eagle", "eagle3", "mtp"):
                 unsupported.append(f"speculative method '{speculative_config.method}'")
 
+            # V2 EagleSpeculator does not support parallel_drafting (required by PEagle)
+            if speculative_config.parallel_drafting:
+                unsupported.append("parallel drafting for speculative decoding")
+
             if (
                 speculative_config.method == "eagle3"
                 and self.parallel_config.pipeline_parallel_size > 1
