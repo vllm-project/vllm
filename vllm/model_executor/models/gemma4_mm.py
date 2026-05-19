@@ -124,12 +124,12 @@ class Gemma4ImagePixelInputs(TensorSchema):
 
     type: Literal["pixel_values"] = "pixel_values"
     pixel_values: Annotated[
-        torch.Tensor,
-        TensorShape("bn", "np", "pp"),
+        torch.Tensor | list[torch.Tensor],
+        TensorShape("bn", "np", "pp", dynamic_dims={"np"}),
     ]
     pixel_position_ids: Annotated[
-        torch.Tensor,
-        TensorShape("bn", "np", 2),
+        torch.Tensor | list[torch.Tensor],
+        TensorShape("bn", "np", 2, dynamic_dims={"np"}),
     ]
 
 
@@ -1128,15 +1128,20 @@ class Gemma4ForConditionalGeneration(
         # metadata, and validating numerical equivalence with the
         # current per-image path.
         #
+        # Concurrent requests with different image resolutions may
+        # arrive as a list of per-image tensors, while same-resolution
+        # batches may arrive as a stacked tensor. Both forms are
+        # iterable over the per-image dimension.
+
         # Process each image individually through the vision tower.
         # The vision tower's forward() strips padding and returns a
         # flat tensor of valid tokens. We process per-image to get
         # variable-length outputs matching the dynamic token count
         # from get_image_repl.
         per_image_features = []
-        for i in range(pixel_values.shape[0]):
-            pv = pixel_values[i].unsqueeze(0)  # (1, max_patches, patch_pixels)
-            pp = pixel_position_ids[i].unsqueeze(0)  # (1, max_patches, 2)
+        for pv, pp in zip(pixel_values, pixel_position_ids, strict=True):
+            pv = pv.unsqueeze(0)  # (1, max_patches, patch_pixels)
+            pp = pp.unsqueeze(0)  # (1, max_patches, 2)
 
             # Derive the pooler's output_length from the total patch
             # count (including padding).  The vision tower encoder

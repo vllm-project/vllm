@@ -2545,6 +2545,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.finished_req_ids_dict = None
     scheduler.vllm_config = Mock()
     scheduler.vllm_config.model_config.enable_return_routed_experts = False
+    scheduler.enable_return_routed_experts = False
     scheduler.recompute_kv_load_failures = False
     scheduler.make_stats = Mock(return_value=None)
     scheduler.max_model_len = 128

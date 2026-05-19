@@ -289,6 +289,11 @@ class TopKTopPSampler(nn.Module):
         torch.ops.vllm.xpu_topk_topp_sampler(
             random_sampled, logits_to_return, logits, k, p, self.logprobs_mode, seeds
         )
+        # The custom XPU sampler kernel consumes RNG values internally, so advance
+        # the default generator's offset to keep future draws deterministic.
+        offset += logits.numel()
+        state.view(torch.int64)[1] = offset
+        generator.set_state(state)
         return random_sampled, logits_to_return
 
 
@@ -307,6 +312,10 @@ def apply_top_k_top_p(
 ) -> torch.Tensor:
     if p is None and k is None:
         return logits
+
+    # Keep CPU logits on the PyTorch path to avoid invoking Triton kernels.
+    if current_platform.is_cpu():
+        return apply_top_k_top_p_pytorch(logits, k, p, allow_cpu_sync=True)
 
     if HAS_TRITON and logits.shape[0] >= 8:
         return apply_top_k_top_p_triton(logits, k, p)
