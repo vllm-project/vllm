@@ -295,6 +295,15 @@ impl UtilityRegistry {
         self.utility_calls.remove(call_id)
     }
 
+    /// Drop a batch of registered utility calls without delivering a result.
+    /// Used to roll back allocations when the dispatch fan-out fails before
+    /// every engine could accept the request.
+    pub fn unregister_many(&mut self, call_ids: impl IntoIterator<Item = i64>) {
+        for call_id in call_ids {
+            self.utility_calls.remove(&call_id);
+        }
+    }
+
     /// Mark the registry as closed, detach and return all tracked senders.
     pub fn close(&mut self) -> Vec<UtilitySender> {
         if self.closed {
@@ -626,5 +635,36 @@ mod tests {
         assert!(!registry.contains(1));
         assert!(!registry.contains(2));
         assert!(registry.is_closed());
+    }
+
+    #[test]
+    fn utility_registry_unregister_many_drops_pending_calls() {
+        use tokio::sync::oneshot::error::TryRecvError;
+
+        let mut registry = UtilityRegistry::default();
+        let (call_id_1, mut rx_1) = registry.allocate_and_register();
+        let (call_id_2, mut rx_2) = registry.allocate_and_register();
+        let (call_id_3, _rx_3) = registry.allocate_and_register();
+
+        // Drop two of the three allocated calls; the third stays pending.
+        registry.unregister_many([call_id_1, call_id_2]);
+
+        assert!(!registry.contains(call_id_1));
+        assert!(!registry.contains(call_id_2));
+        assert!(registry.contains(call_id_3));
+        // The receivers must observe the sender being dropped (channel closed).
+        assert!(matches!(rx_1.try_recv(), Err(TryRecvError::Closed)));
+        assert!(matches!(rx_2.try_recv(), Err(TryRecvError::Closed)));
+    }
+
+    #[test]
+    fn utility_registry_unregister_many_ignores_unknown_call_ids() {
+        let mut registry = UtilityRegistry::default();
+        let (call_id, _rx) = registry.allocate_and_register();
+
+        // Unknown call ids are silently ignored — caller doesn't care which were live.
+        registry.unregister_many([call_id, 42, 9999]);
+
+        assert!(!registry.contains(call_id));
     }
 }
