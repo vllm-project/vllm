@@ -183,11 +183,11 @@ class LlamaModel(nn.Module):
             target_hidden_size = getattr(
                 self.config, "target_hidden_size", self.config.hidden_size
             )
-            fc_input_size = target_hidden_size * self.num_aux_hidden_states
+            self.fc_input_size = target_hidden_size * self.num_aux_hidden_states
 
             if self.norm_before_fc:
                 self.input_norm = RMSNorm(
-                    fc_input_size,
+                    self.fc_input_size,
                     eps=self.config.rms_norm_eps,
                 )
             else:
@@ -205,7 +205,7 @@ class LlamaModel(nn.Module):
                 self.fc_norm = None
 
             self.fc = ReplicatedLinear(
-                input_size=fc_input_size,
+                input_size=self.fc_input_size,
                 output_size=self.config.hidden_size,
                 bias=False,
                 params_dtype=vllm_config.model_config.dtype,
@@ -337,17 +337,9 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         self.use_parallel_drafting = vllm_config.speculative_config.parallel_drafting
 
         if self.use_parallel_drafting:
-            aux_count = (
-                self.model.num_aux_hidden_states
-                if self.model.use_aux_hidden_state
-                else 1
-            )
-            target_hidden_size = getattr(
-                self.config, "target_hidden_size", self.config.hidden_size
-            )
             self.register_buffer(
                 "mask_hidden",
-                torch.zeros(1, aux_count * target_hidden_size),
+                torch.zeros(1, self.model.fc_input_size),
                 persistent=False,
             )
 
@@ -403,6 +395,8 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         if self.model.norm_before_fc:
             hidden_states = self.model.input_norm(hidden_states)
 
+        # `norm_before_fc` adds a single RMSNorm before the FC layer, whereas `fc_norm`
+        # applies separate RMSNorms to each chunk of the hidden states.
         if self.model.fc_norm is not None:
             chunks = hidden_states.chunk(self.model.num_aux_hidden_states, dim=-1)
             hidden_states = torch.cat(
