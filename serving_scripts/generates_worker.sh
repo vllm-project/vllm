@@ -41,11 +41,14 @@ nsight_copy_msg() {
   echo "[nsight-copy] $*"
 }
 
-nsight_peek_on_node() {
+# Audit Nsight artifacts on a compute node: hunt beyond session_latest so we can
+# tell "file exists elsewhere" vs "never written" vs "copy path wrong".
+nsight_audit_on_node() {
   local node="$1"
-  local label="${2:-peek}"
+  local label="${2:-audit}"
+  local job_id="${SLURM_JOB_ID:-unknown}"
 
-  nsight_copy_msg "${label}: scanning ${node} (hostname via srun)..."
+  nsight_copy_msg "${label}: full Nsight hunt on ${node} (job ${job_id})..."
   srun \
     --overlap \
     --nodelist "${node}" \
@@ -53,28 +56,96 @@ nsight_peek_on_node() {
     --ntasks=1 \
     --ntasks-per-node=1 \
     --cpus-per-task=1 \
-    --mem=1G \
+    --mem=4G \
     bash -lc "
-      echo '[nsight-copy] ${label} host='\$(hostname)' node=${node}'
-      echo '[nsight-copy] session_latest ->' \$(readlink -f /tmp/ray/session_latest 2>/dev/null || echo MISSING)
-      if [ -d /tmp/ray/session_latest/logs/nsight ]; then
-        echo '[nsight-copy] session_latest/logs/nsight:'
-        ls -la /tmp/ray/session_latest/logs/nsight/ 2>/dev/null || true
-        for f in /tmp/ray/session_latest/logs/nsight/*; do
-          [ -f \"\$f\" ] && stat -c '[nsight-copy]   %n %s bytes' \"\$f\" 2>/dev/null || true
+      set +e
+      COPY_GLOB='/tmp/ray/session_latest/logs/nsight/*.nsys-rep'
+      COPY_DIR='/tmp/ray/session_latest/logs/nsight'
+
+      echo '[nsight-copy] === ${label} audit host='\$(hostname)' expected_node=${node} job=${job_id} ==='
+      echo '[nsight-copy] copy script ONLY reads: '\${COPY_GLOB}
+
+      echo '[nsight-copy] session_latest symlink:'
+      ls -la /tmp/ray/session_latest 2>/dev/null || echo '  MISSING /tmp/ray/session_latest'
+      echo '[nsight-copy] session_latest resolved ->' \$(readlink -f /tmp/ray/session_latest 2>/dev/null || echo MISSING)
+
+      if [ -d \"\${COPY_DIR}\" ]; then
+        echo '[nsight-copy] COPY_DIR listing (what cp uses):'
+        ls -la \"\${COPY_DIR}/\" 2>/dev/null || true
+        for f in \"\${COPY_DIR}\"/*; do
+          [ -f \"\$f\" ] && stat -c '[nsight-copy]   copy-target %n %s bytes' \"\$f\" 2>/dev/null || true
         done
       else
-        echo '[nsight-copy] no /tmp/ray/session_latest/logs/nsight on '\$(hostname)
+        echo '[nsight-copy] COPY_DIR missing: '\${COPY_DIR}
       fi
+
+      echo '[nsight-copy] --- HUNT: every *.nsys-rep under /tmp/ray ---'
+      ray_rep_count=\$(find /tmp/ray -type f -name '*.nsys-rep' 2>/dev/null | wc -l | tr -d ' ')
+      echo '[nsight-copy] count='\${ray_rep_count}
+      find /tmp/ray -type f -name '*.nsys-rep' -printf '[nsight-copy]   %p %s bytes\n' 2>/dev/null | sort || true
+
+      echo '[nsight-copy] --- HUNT: every *.qdstrm (unfinished reports) under /tmp/ray ---'
+      find /tmp/ray -type f -name '*.qdstrm' -printf '[nsight-copy]   %p %s bytes\n' 2>/dev/null | sort || true
+
+      echo '[nsight-copy] --- HUNT: worker_process_* under /tmp (any path) ---'
+      find /tmp -maxdepth 8 -type f -name 'worker_process*.nsys-rep' \
+        -printf '[nsight-copy]   %p %s bytes\n' 2>/dev/null | sort || true
+
+      echo '[nsight-copy] --- HUNT: /tmp/vray-${job_id}* (custom Ray temp dirs) ---'
+      for vroot in /tmp/vray-${job_id}-* /tmp/vray-${job_id}; do
+        [ -e \"\${vroot}\" ] || continue
+        echo '[nsight-copy]   scanning '\${vroot}
+        find \"\${vroot}\" -type f \\( -name '*.nsys-rep' -o -name '*.qdstrm' \\) \
+          -printf '[nsight-copy]     %p %s bytes\n' 2>/dev/null | sort || true
+      done
+
+      echo '[nsight-copy] --- HUNT: shared TRACE dir on this node (if visible) ---'
+      find '${TRACE_RUN_DIR}' -maxdepth 4 -type f \\( -name '*.nsys-rep' -o -name '*.qdstrm' \\) \
+        -printf '[nsight-copy]   %p %s bytes\n' 2>/dev/null | sort || true
+
+      echo '[nsight-copy] --- HUNT: API-server nsys under ${NSYS_DIR} (head only) ---'
+      find '${NSYS_DIR}' -maxdepth 2 -type f -name '*.nsys-rep' \
+        -printf '[nsight-copy]   %p %s bytes\n' 2>/dev/null | sort || true
+
+      copy_n=\$(find \"\${COPY_DIR}\" -type f -name '*.nsys-rep' 2>/dev/null | wc -l | tr -d ' ')
+      ray_n=\$(find /tmp/ray -type f -name '*.nsys-rep' 2>/dev/null | wc -l | tr -d ' ')
+      tmp_n=\$(find /tmp -maxdepth 8 -type f -name '*.nsys-rep' 2>/dev/null | wc -l | tr -d ' ')
+      echo '[nsight-copy] SUMMARY on '\$(hostname)': copy_dir='\${copy_n}' /tmp/ray='\${ray_n}' /tmp(all)='\${tmp_n}'
+
+      if [ \"\${ray_n}\" -gt \"\${copy_n}\" ]; then
+        echo '[nsight-copy] WARNING: .nsys-rep exist under /tmp/ray OUTSIDE copy_dir — cp may miss them:'
+        find /tmp/ray -type f -name '*.nsys-rep' ! -path \"\${COPY_DIR}/*\" \
+          -printf '[nsight-copy]   MISSED %p %s bytes\n' 2>/dev/null | sort || true
+      fi
+      if [ \"\${copy_n}\" -eq 0 ] && [ \"\${ray_n}\" -gt 0 ]; then
+        echo '[nsight-copy] WARNING: copy_dir empty but other /tmp/ray reports exist (wrong session_latest?)'
+      fi
+      if [ \"\${copy_n}\" -eq 0 ] && [ \"\${tmp_n}\" -eq 0 ]; then
+        echo '[nsight-copy] WARNING: no .nsys-rep anywhere under /tmp on this node (not written or already deleted)'
+      fi
+      zero_n=\$(find /tmp/ray -type f -name '*.nsys-rep' -size 0 2>/dev/null | wc -l | tr -d ' ')
+      if [ \"\${zero_n}\" -gt 0 ]; then
+        echo '[nsight-copy] WARNING: zero-byte .nsys-rep present (finalize failed):'
+        find /tmp/ray -type f -name '*.nsys-rep' -size 0 \
+          -printf '[nsight-copy]   ZERO %p\n' 2>/dev/null || true
+      fi
+
       if [ \"${NSYS_COPY_DEBUG}\" = \"1\" ] || [ \"${DEBUG_SLURM_SCRIPT}\" = \"1\" ]; then
-        echo '[nsight-debug] recent /tmp/ray sessions on '\$(hostname)':'
-        ls -lt /tmp/ray 2>/dev/null | head -8 || true
-        echo '[nsight-debug] all *.nsys-rep under /tmp/ray (last 20):'
-        find /tmp/ray -path '*/logs/nsight/*.nsys-rep' -printf '%p %s\n' 2>/dev/null | tail -20 || true
-        echo '[nsight-debug] all *.qdstrm under /tmp/ray (last 10):'
-        find /tmp/ray -path '*/logs/nsight/*.qdstrm' -printf '%p %s\n' 2>/dev/null | tail -10 || true
+        echo '[nsight-debug] all Ray sessions by mtime on '\$(hostname)':'
+        ls -lt /tmp/ray 2>/dev/null | head -12 || true
+        echo '[nsight-debug] nsight dirs under every session:'
+        find /tmp/ray -type d -path '*/logs/nsight' 2>/dev/null | while read -r d; do
+          echo \"[nsight-debug]   \${d}:\"
+          ls -la \"\${d}\" 2>/dev/null | sed 's/^/[nsight-debug]     /' || true
+        done
       fi
-    " || nsight_copy_msg "${label}: srun peek failed on ${node} (exit $?)"
+    " || nsight_copy_msg "${label}: srun audit failed on ${node} (exit $?)"
+}
+
+nsight_peek_on_node() {
+  local node="$1"
+  local label="${2:-peek}"
+  nsight_audit_on_node "${node}" "${label}"
 }
 
 nsight_summarize_dest() {
@@ -665,10 +736,16 @@ copy_ray_nsight_from_node() {
         echo '[nsight-copy] No /tmp/ray/session_latest/logs/nsight on '\$(hostname)' (slurm node ${NODE})'
         echo '[nsight-copy] /tmp/ray top-level:'
         ls -la /tmp/ray/ 2>/dev/null | head -10 || true
+        echo '[nsight-copy] HUNT after failed copy path (may be elsewhere on disk):'
+        find /tmp/ray -type f -name '*.nsys-rep' -printf '[nsight-copy]   found %p %s bytes\n' 2>/dev/null | sort || true
+        find /tmp -maxdepth 8 -type f -name 'worker_process*.nsys-rep' \
+          -printf '[nsight-copy]   found %p %s bytes\n' 2>/dev/null | sort || true
+        find /tmp -type f -name '*.qdstrm' -printf '[nsight-copy]   partial %p %s bytes\n' 2>/dev/null | sort || true
       fi
     "
   local srun_status=$?
   nsight_copy_msg "=== copy end: ${NODE} (srun exit ${srun_status}) ==="
+  nsight_audit_on_node "${NODE}" "after-copy"
   nsight_summarize_dest "${NODE}"
 }
 
