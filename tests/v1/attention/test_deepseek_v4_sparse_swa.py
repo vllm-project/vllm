@@ -11,7 +11,7 @@ from vllm.v1.attention.backends.mla.sparse_swa import (
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 
-def test_sparse_swa_reorder_threshold_matches_mtp_decode_threshold():
+def test_sparse_swa_reorder_threshold_matches_spec_decode_threshold():
     vllm_config = create_vllm_config(
         block_size=256,
         hf_config_override={
