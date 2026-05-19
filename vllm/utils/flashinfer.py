@@ -8,6 +8,7 @@ Users of vLLM should always import **only** these wrappers.
 import contextlib
 import functools
 import importlib
+import importlib.metadata
 import importlib.util
 import os
 import shutil
@@ -16,6 +17,7 @@ from typing import Any, NoReturn
 
 import requests
 import torch
+from packaging.version import Version
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -60,6 +62,43 @@ def has_flashinfer() -> bool:
             "and not using pre-downloaded cubins"
         )
         return False
+    return True
+
+
+@functools.cache
+def get_flashinfer_version() -> Version | None:
+    if not has_flashinfer():
+        return None
+
+    return Version(importlib.metadata.version("flashinfer-python"))
+
+
+@functools.cache
+def flashinfer_trtllm_fp4_8x4_is_safe() -> bool:
+    """Return whether FlashInfer TRTLLM FP4 8x4 is safe to use.
+
+    FlashInfer documents TRTLLM FP4 as allowing 8x4 only for the activation
+    (A) scale layout while keeping the weight (B) path in 128x4. However,
+    released FlashInfer versions up to and including 0.6.11.* are known to
+    have correctness bugs on this path; see flashinfer-ai/flashinfer#2861.
+    """
+    version = get_flashinfer_version()
+    if version is None:
+        logger.warning_once(
+            "Disabling FlashInfer TRTLLM FP4 8x4 path because the installed "
+            "FlashInfer version could not be determined."
+        )
+        return False
+
+    if Version(version.base_version) <= Version("0.6.11"):
+        logger.warning_once(
+            "Disabling FlashInfer TRTLLM FP4 8x4 path for flashinfer==%s due "
+            "to known upstream correctness bugs in released versions up to "
+            "0.6.11.* (see flashinfer-ai/flashinfer#2861).",
+            version,
+        )
+        return False
+
     return True
 
 
@@ -706,7 +745,9 @@ def flashinfer_scaled_fp4_mm(
         block_scale_a = block_scale_a.view(torch.uint8)
         block_scale_b = block_scale_b.view(torch.uint8)
 
-    use_8x4_sf_layout = True if backend == "trtllm" and a.shape[0] <= 32 else False  # noqa: SIM210
+    use_8x4_sf_layout = (
+        backend == "trtllm" and a.shape[0] <= 32 and flashinfer_trtllm_fp4_8x4_is_safe()
+    )
 
     return flashinfer_mm_fp4(
         a,
@@ -918,6 +959,7 @@ def is_flashinfer_cudnn_fp8_prefill_attn_supported() -> bool:
 
 __all__ = [
     "has_flashinfer",
+    "get_flashinfer_version",
     "flashinfer_trtllm_fp8_block_scale_moe",
     "flashinfer_cutlass_fused_moe",
     "flashinfer_cutedsl_grouped_gemm_nt_masked",
@@ -943,6 +985,7 @@ __all__ = [
     "use_trtllm_attention",
     "flashinfer_mxfp4_quantize",
     "flashinfer_scaled_fp4_mm",
+    "flashinfer_trtllm_fp4_8x4_is_safe",
     "flashinfer_scaled_fp4_mm_out",
     "flashinfer_scaled_fp8_mm",
     "flashinfer_scaled_fp8_mm_out",
