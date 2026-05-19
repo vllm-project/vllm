@@ -101,7 +101,7 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
                 },
                 {
                     "kv_connector": "MooncakeStoreConnector",
-                    "kv_role": "kv_producer"
+                    "kv_role": "kv_both"
                 }
             ]
         }
@@ -196,9 +196,9 @@ the vLLM JSON config.
 
 ### KV Role Options
 
-- **kv_producer**: For prefiller instances that store KV caches to the pool.
-- **kv_consumer**: For decoder instances that load KV caches from the pool.
-- **kv_both**: The instance both stores and loads KV caches. Use this for single-node CPU offloading.
+- **kv_producer**: For instances that store KV caches to the pool.
+- **kv_consumer**: For instances that load KV caches from the pool.
+- **kv_both**: The instance both stores and loads KV caches. Use this for single-node CPU offloading or prefiller instances.
 
 ### kv_connector_extra_config
 
@@ -209,12 +209,12 @@ the vLLM JSON config.
 
 ## Notes
 
-### Cross-DP Prefix Cache Hits
+### Reproducible Block Hashes Across Processes
 
-When running with data parallelism, set a fixed `PYTHONHASHSEED` so that block hashes are consistent across DP ranks:
+The `MooncakeStoreConnector` relies on consistent block hashes across all vLLM processes sharing the distributed store. Because Python randomizes its hash seed per process by default, identical prompts can produce different block hashes on different processes — preventing cross-process prefix cache hits.
+
+Set a fixed `PYTHONHASHSEED` on every instance that shares the store (DP ranks, separate prefiller/decoder nodes, and any other vLLM process pointed at the same Mooncake store):
 
 ```bash
 PYTHONHASHSEED=0 vllm serve ...
 ```
-
-Without this, identical prompts may produce different block hashes on different DP ranks, preventing cross-instance prefix cache hits.
