@@ -27,7 +27,20 @@ param(
     [int]$NvccThreads = 1,
     [string]$TorchIndexUrl = "https://download.pytorch.org/whl/cu130",
     [string[]]$TorchPackages = @("torch==2.11.0", "torchvision==0.26.0", "torchaudio==2.11.0"),
-    [string[]]$ExtraPackages = @("triton-windows==3.6.0.post26", "flashinfer-python==0.6.8.post1", "huggingface_hub>=1.0.0"),
+    [string]$FlashInferPackage = "flashinfer-python==0.6.8.post1",
+    [string[]]$ExtraPackages = @(
+        "triton-windows==3.6.0.post26",
+        "huggingface_hub>=1.0.0",
+        "apache-tvm-ffi>=0.1.6,<0.2,!=0.1.8,!=0.1.8.post0",
+        "cuda-tile",
+        "click",
+        "einops",
+        "nvidia-cudnn-frontend>=1.13.0,<1.19.0",
+        "nvidia-ml-py",
+        "requests",
+        "tabulate",
+        "tqdm"
+    ),
     [switch]$SkipDependencyInstall,
     [switch]$SkipBuild,
     [switch]$SkipSmoke,
@@ -228,17 +241,25 @@ if (-not $SkipDependencyInstall) {
         Write-Step "Installing Windows runtime helper packages"
         Invoke-Native $pythonExe "-m" "pip" "install" @ExtraPackages
     }
+
+    Write-Step "Installing FlashInfer without unavailable Windows CUTLASS DSL dependency"
+    Invoke-Native $pythonExe "-m" "pip" "install" "--no-deps" $FlashInferPackage
 }
 
 Push-Location $RepoPath
 try {
+    if (-not $SkipDependencyInstall) {
+        Write-Step "Installing vLLM common Python requirements"
+        Invoke-Native $pythonExe "-m" "pip" "install" "-r" "requirements\common.txt"
+    }
+
     if (-not $SkipBuild) {
         Write-Step "Building vLLM CUDA extensions in-place"
         Invoke-Native $pythonExe "setup.py" "build_ext" "--inplace"
     }
 
     Write-Step "Installing vLLM editable"
-    Invoke-Native $pythonExe "-m" "pip" "install" "-e" "." "--no-build-isolation"
+    Invoke-Native $pythonExe "-m" "pip" "install" "-e" "." "--no-build-isolation" "--no-deps"
 
     if (-not $SkipSmoke) {
         Write-Step "Running Windows CUDA smoke test"
