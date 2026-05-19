@@ -2002,6 +2002,11 @@ class VllmConfig:
             # TODO: add reasoning budget enforcement to ModelRunnerV2.
             unsupported.append("reasoning budget enforcement")
 
+        # TODO: V2 ModelCudaGraphManager does not capture LoRA-specialized
+        # graphs; capture and execute disagree on BatchDescriptor.has_lora.
+        if self.lora_config is not None:
+            unsupported.append("LoRA")
+
         if self.parallel_config.enable_dbo:
             unsupported.append("dual batch overlap")
 
