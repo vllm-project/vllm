@@ -131,10 +131,8 @@ class SeedOssToolParser(ToolParser):
             if param_value.endswith("\n"):
                 param_value = param_value[:-1]
 
-            param_dict[param_name] = coerce_to_schema_type(
-                param_value,
-                extract_types_from_schema(tool_properties.get(param_name, {})),
-            )
+            param_types = extract_types_from_schema(tool_properties.get(param_name, {}))
+            param_dict[param_name] = coerce_to_schema_type(param_value, param_types)
         return ToolCall(
             type="function",
             function=FunctionCall(
