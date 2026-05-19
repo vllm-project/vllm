@@ -195,23 +195,6 @@ class XPUPlatform(Platform):
                 "XPU Graph is disabled by environment variable, "
                 "please set VLLM_XPU_ENABLE_XPU_GRAPH=1 to enable it."
             )
-        elif parallel_config.world_size_across_dp > 1:
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-            logger.warning(
-                "XPU Graph doesn't support capture communication ops, "
-                "disabling cudagraph_mode."
-            )
-        else:
-            if (
-                attention_config.backend == AttentionBackendEnum.FLASH_ATTN
-                and compilation_config.cudagraph_mode
-                not in {CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE}
-            ):
-                compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
-                logger.warning(
-                    "FMHA sycl-tla kernels cannot be captured with XPU graphs, "
-                    "falling back to PIECEWISE graph mode on XPU platform."
-                )
 
         # Disable fusion passes not yet supported on XPU.
         pass_config = compilation_config.pass_config
@@ -409,3 +392,7 @@ class XPUPlatform(Platform):
     @classmethod
     def num_compute_units(cls, device_id: int = 0) -> int:
         return torch.xpu.get_device_properties(device_id).max_compute_units
+
+    @classmethod
+    def use_custom_op_collectives(cls) -> bool:
+        return True

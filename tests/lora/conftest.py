@@ -313,6 +313,16 @@ def qwen35_vl_lora_files():
     return snapshot_download(repo_id="jeeejeee/qwen35-4b-all-linear-pokemon-lora")
 
 
+@pytest.fixture(scope="session")
+def qwen36_moe_2d_lora_files():
+    return snapshot_download(repo_id="jeeejeee/qwen36-35ba3b-2d-weights-poken-lora")
+
+
+@pytest.fixture(scope="session")
+def qwen36_moe_3d_lora_files():
+    return snapshot_download(repo_id="jeeejeee/qwen36-35ba3b-moe-all-linear-poken-lora")
+
+
 @pytest.fixture
 def reset_default_device():
     """
