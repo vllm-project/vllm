@@ -7,7 +7,6 @@ from collections.abc import AsyncGenerator
 from http import HTTPStatus
 
 from fastapi import Request
-from pydantic import ValidationError
 
 from vllm.entrypoints.chat_utils import ConversationMessage
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -82,24 +81,21 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         all_engine_prompts: list[EngineInput] = []
 
         for messages in request.messages:
-            try:
-                single_request = request.to_chat_completion_request(messages)
-                if render.use_harmony:
-                    conversation, engine_prompts = render._make_request_with_harmony(
-                        single_request, should_include_tools=tool_dicts is not None
-                    )
-                else:
-                    conversation, engine_prompts = await render.preprocess_chat(
-                        single_request,
-                        messages,
-                        default_template=render.chat_template,
-                        default_template_content_format=render.chat_template_content_format,
-                        default_template_kwargs=render.default_chat_template_kwargs,
-                        tool_dicts=tool_dicts,
-                        tool_parser=tool_parser,
-                    )
-            except (ValidationError, ValueError) as e:
-                return self.create_error_response(e)
+            single_request = request.to_chat_completion_request(messages)
+            if render.use_harmony:
+                conversation, engine_prompts = render._make_request_with_harmony(
+                    single_request, should_include_tools=tool_dicts is not None
+                )
+            else:
+                conversation, engine_prompts = await render.preprocess_chat(
+                    single_request,
+                    messages,
+                    default_template=render.chat_template,
+                    default_template_content_format=render.chat_template_content_format,
+                    default_template_kwargs=render.default_chat_template_kwargs,
+                    tool_dicts=tool_dicts,
+                    tool_parser=tool_parser,
+                )
             all_conversations.append(conversation)
             all_engine_prompts.append(engine_prompts[0])
 
@@ -118,13 +114,10 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         """
         tokenizer = self.renderer.tokenizer
         assert tokenizer is not None
-        try:
-            single_requests = [
-                request.to_chat_completion_request(messages)
-                for messages in request.messages
-            ]
-        except (ValidationError, ValueError) as e:
-            return self.create_error_response(e)
+        single_requests = [
+            request.to_chat_completion_request(messages)
+            for messages in request.messages
+        ]
 
         reasoning_parser: ReasoningParser | None = None
         if self.reasoning_parser_cls:
@@ -156,22 +149,19 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         for i, engine_prompt in enumerate(engine_prompts):
             sub_request_id = f"{request_id}_{i}"
-            try:
-                max_tokens = get_max_tokens(
-                    max_model_len,
-                    request.max_completion_tokens
-                    if request.max_completion_tokens is not None
-                    else request.max_tokens,
-                    self._extract_prompt_len(engine_prompt),
-                    self.default_sampling_params,
-                    self.override_max_tokens,
-                )
-                single_request = single_requests[i]
-                sampling_params = single_request.to_sampling_params(
-                    max_tokens, self.default_sampling_params
-                )
-            except ValueError as e:
-                return self.create_error_response(e)
+            max_tokens = get_max_tokens(
+                max_model_len,
+                request.max_completion_tokens
+                if request.max_completion_tokens is not None
+                else request.max_tokens,
+                self._extract_prompt_len(engine_prompt),
+                self.default_sampling_params,
+                self.override_max_tokens,
+            )
+            single_request = single_requests[i]
+            sampling_params = single_request.to_sampling_params(
+                max_tokens, self.default_sampling_params
+            )
             self._log_inputs(
                 sub_request_id,
                 engine_prompt,
@@ -234,8 +224,6 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                 final_results[prompt_idx] = res
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
-        except ValueError as e:
-            return self.create_error_response(e)
 
         choices: list[ChatCompletionResponseChoice] = []
         total_prompt_tokens = 0

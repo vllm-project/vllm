@@ -163,17 +163,12 @@ class ServingTokens(OpenAIServing):
                 cache_salt=request.cache_salt,
             )
         else:
-            try:
-                (
-                    engine_input,
-                ) = await self.openai_serving_render.preprocess_completion(
-                    request,
-                    prompt_input=request.token_ids,
-                    prompt_embeds=None,
-                    skip_mm_cache=True,
-                )
-            except ValueError as e:
-                return self.create_error_response(e)
+            (engine_input,) = await self.openai_serving_render.preprocess_completion(
+                request,
+                prompt_input=request.token_ids,
+                prompt_embeds=None,
+                skip_mm_cache=True,
+            )
 
         # Schedule the request and get the result generator.
         result_generator: AsyncGenerator[RequestOutput, None] | None = None
