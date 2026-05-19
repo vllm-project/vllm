@@ -7,7 +7,7 @@ import inspect
 import os
 import traceback
 from collections.abc import Mapping
-from contextlib import contextmanager, asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from time import time_ns
 from typing import Any
 
@@ -33,6 +33,7 @@ try:
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
     from opentelemetry.trace import (
+        Link,
         NonRecordingSpan,
         SpanKind,  # noqa: F401
         Status,
@@ -304,6 +305,13 @@ def get_span_context(span):
     return trace.set_span_in_context(NonRecordingSpan(span.get_span_context()))
 
 
+def maybe_get_links(span=None):
+    if span is None:
+        return None
+
+    return [Link(span.get_span_context())]
+
+
 def get_status_error():
     return Status(StatusCode.ERROR)
 
@@ -311,11 +319,11 @@ def get_status_error():
 @contextmanager
 def maybe_start_span(tracer: Tracer | None, *args, **kwargs):
     if tracer is None:
-        yield
+        yield None
     else:
         start_time = time_ns()
         span = tracer.start_span(*args, start_time=start_time, **kwargs)
-        yield
+        yield span
         end_time = time_ns()
         span.end(end_time)
 
@@ -323,10 +331,10 @@ def maybe_start_span(tracer: Tracer | None, *args, **kwargs):
 @asynccontextmanager
 async def maybe_start_span_async(tracer: Tracer | None, *args, **kwargs):
     if tracer is None:
-        yield
+        yield None
     else:
         start_time = time_ns()
         span = tracer.start_span(*args, start_time=start_time, **kwargs)
-        yield
+        yield span
         end_time = time_ns()
         span.end(end_time)

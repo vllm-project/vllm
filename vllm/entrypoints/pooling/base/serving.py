@@ -36,7 +36,9 @@ from vllm.tracing.otel import (
     get_span_context,
     get_status_error,
     init_otel_trace_provider,
-    maybe_start_span, maybe_start_span_async,
+    maybe_get_links,
+    maybe_start_span,
+    maybe_start_span_async,
 )
 from vllm.utils import random_uuid
 from vllm.utils.async_utils import make_async, merge_async_iterators
@@ -135,7 +137,7 @@ class PoolingServingBase(ABC):
         trace_headers = {}
         self.propagator.inject(trace_headers, context=request_span_context)
 
-        ctx.trace_headers = trace_headers
+        ctx.trace_headers = raw_trace_headers
         ctx.entrypoint_tracer = entrypoint_tracer
         ctx.request_span_context = request_span_context
 
@@ -182,7 +184,6 @@ class PoolingServingBase(ABC):
             await self._preprocessing_async(io_processor, ctx)
 
             if self.is_tracing_enabled:
-
                 ctx.preprocessing_finished = time_ns()
 
             await self._engine_call(ctx)
@@ -209,7 +210,10 @@ class PoolingServingBase(ABC):
             ctx.entrypoint_tracer,
             "vllm.entrypoint.preprocessing",
             context=ctx.request_span_context,
-        ):
+            links=ctx.entrypoint_span_links,
+        ) as span:
+            ctx.entrypoint_span_links = maybe_get_links(span)
+
             return io_processor.pre_process_online(ctx)
 
     @torch.inference_mode()
@@ -220,7 +224,9 @@ class PoolingServingBase(ABC):
             ctx.entrypoint_tracer,
             "vllm.entrypoint.postprocessing",
             context=ctx.request_span_context,
-        ):
+            links=ctx.entrypoint_span_links,
+        ) as span:
+            ctx.entrypoint_span_links = maybe_get_links(span)
             io_processor.post_process_online(ctx)
             return self._build_response(ctx)
 
@@ -229,7 +235,10 @@ class PoolingServingBase(ABC):
             ctx.entrypoint_tracer,
             "vllm.entrypoint.engine_call",
             context=ctx.request_span_context,
-        ):
+            links=ctx.entrypoint_span_links,
+        ) as span:
+            ctx.entrypoint_span_links = maybe_get_links(span)
+
             await self._prepare_generators(ctx)
             await self._collect_batch(ctx)
 
