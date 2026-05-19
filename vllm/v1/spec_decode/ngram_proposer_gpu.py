@@ -200,6 +200,18 @@ class NgramGPUKernel(nn.Module):
 
         draft_tokens = torch.where(combined_mask.unsqueeze(1), results, -1)
 
+        # Do not propose draft tokens beyond the target model context budget.
+        remaining_model_len = (self.max_model_len - num_tokens_no_spec).clamp(
+            min=0, max=self.k
+        )
+        draft_positions = torch.arange(self.k, device=device).unsqueeze(0)
+        within_model_len = draft_positions < remaining_model_len.unsqueeze(1)
+        draft_tokens = torch.where(
+            within_model_len,
+            draft_tokens,
+            torch.full_like(draft_tokens, -1),
+        )
+
         # Count leading contiguous valid (non -1) tokens per request.
         is_valid = draft_tokens != -1  # [batch, k]
         cum_valid = is_valid.int().cumsum(dim=1)  # [batch, k]
