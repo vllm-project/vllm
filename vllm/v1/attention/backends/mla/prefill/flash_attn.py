@@ -8,6 +8,9 @@ from typing import TYPE_CHECKING
 import torch
 
 import vllm.envs as envs
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8StaticTensorSym,
+)
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.fa_utils import (
     get_flash_attn_version,
@@ -17,6 +20,7 @@ from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 if is_flash_attn_varlen_func_available():
     from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
@@ -87,6 +91,22 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
         # Track whether we're using vllm's FA or upstream (for ROCm)
         self._is_vllm_fa = current_platform.is_cuda() or current_platform.is_xpu()
 
+    def supports_quant_output(self, quant_key: "QuantKey") -> bool:
+        # FA4 can write native fused FP8 (e4m3fn) output on Blackwell
+        # SM100/SM110 only (see flash-attention#135); FA4 natively handles
+        # MLA's mismatched qk/v head dims so no V padding is involved.
+        # Only static per-tensor FP8 is wired today; per-group FP8 / NVFP4
+        # still go through the post-quant path. get_device_capability() is
+        # @cache'd, so this stays cheap on the hot path.
+        device_capability = current_platform.get_device_capability()
+        return (
+            self.vllm_flash_attn_version == 4
+            and self._is_vllm_fa
+            and device_capability is not None
+            and device_capability[0] in (10, 11)
+            and quant_key == kFp8StaticTensorSym
+        )
+
     def _flash_attn_varlen_diff_headdims(
         self,
         q: torch.Tensor,
@@ -140,6 +160,8 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
         k: torch.Tensor,
         v: torch.Tensor,
         return_softmax_lse: bool,
+        out: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         return self._flash_attn_varlen_diff_headdims(
             q=q,
@@ -152,6 +174,8 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
             softmax_scale=self.scale,
             causal=True,
             return_softmax_lse=return_softmax_lse,
+            out=out,
+            output_scale=output_scale,
         )
 
     def run_prefill_context_chunk(

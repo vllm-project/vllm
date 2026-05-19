@@ -39,7 +39,10 @@ else()
   FetchContent_Declare(
           vllm-flash-attn
           GIT_REPOSITORY https://github.com/vllm-project/flash-attention.git
-          GIT_TAG dd62dac706b1cf7895bd99b18c6cb7e7e117ee25
+          # TODO: revert to a vllm-project/flash-attention main commit once
+          # https://github.com/vllm-project/flash-attention/pull/135
+          # (FA4 fused FP8 output) is merged. Currently pinned to the PR head.
+          GIT_TAG 91fb3092e16c91fba3af9d2bed5f8d487fffaec6
           GIT_PROGRESS TRUE
           # Don't share the vllm-flash-attn build between build types
           BINARY_DIR ${CMAKE_BINARY_DIR}/vllm-flash-attn
