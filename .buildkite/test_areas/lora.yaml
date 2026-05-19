@@ -3,6 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: LoRA %N
+  device: h200_35gb
   key: lora
   timeout_in_minutes: 30
   source_file_dependencies:
