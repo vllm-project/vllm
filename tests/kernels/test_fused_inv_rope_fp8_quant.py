@@ -21,7 +21,7 @@ Usage:
 import pytest
 import torch
 
-from vllm.v1.attention.ops.deepseek_v4_ops import fused_inv_rope_fp8_quant
+from vllm.models.deepseek_v4.common.ops import fused_inv_rope_fp8_quant
 
 # -- Default dimensions matching DeepSeek V3/V4 --------------------------
 HEAD_DIM = 512
