@@ -236,6 +236,7 @@ def test_dplb_non_late_interaction_still_uses_lb():
     assert chosen_engine == client.core_engines[1]
     assert client.lb_engines[1][0] == 1
 
+
 def loop_until_done(client: EngineCoreClient, outputs: dict):
     while True:
         engine_core_outputs = client.get_output().outputs

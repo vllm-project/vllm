@@ -87,10 +87,10 @@ The following table describes configurable parameters of the chart in `values.ya
 | livenessProbe.initialDelaySeconds | int | 15 | Number of seconds after the container has started before liveness probe is initiated |
 | livenessProbe.periodSeconds | int | 10 | How often (in seconds) to perform the liveness probe |
 | maxUnavailablePodDisruptionBudget | string | "" | Disruption Budget Configuration |
-| readinessProbe | object | {"failureThreshold":3,"httpGet":{"path":"/health","port":8000},"initialDelaySeconds":5,"periodSeconds":5} | Readiness probe configuration |
+| readinessProbe | object | {"failureThreshold":3,"httpGet":{"path":"/health/ready","port":8000},"initialDelaySeconds":5,"periodSeconds":5} | Readiness probe configuration |
 | readinessProbe.failureThreshold | int | 3 | Number of times after which if a probe fails in a row, Kubernetes considers that the overall check has failed: the container is not ready |
-| readinessProbe.httpGet | object | {"path":"/health","port":8000} | Configuration of the kubelet http request on the server |
-| readinessProbe.httpGet.path | string | "/health" | Path to access on the HTTP server |
+| readinessProbe.httpGet | object | {"path":"/health/ready","port":8000} | Configuration of the kubelet http request on the server |
+| readinessProbe.httpGet.path | string | "/health/ready" | Path to access on the HTTP server |
 | readinessProbe.httpGet.port | int | 8000 | Name or number of the port to access on the container, on which the server is listening |
 | readinessProbe.initialDelaySeconds | int | 5 | Number of seconds after the container has started before readiness probe is initiated |
 | readinessProbe.periodSeconds | int | 5 | How often (in seconds) to perform the readiness probe |

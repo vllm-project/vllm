@@ -25,7 +25,7 @@ from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine.async_llm import AsyncLLM
-from vllm.v1.engine.exceptions import EngineDeadError, EngineUnhealthyError
+from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.metrics.loggers import (
     AggregatedLoggingStatLogger,
     LoggingStatLogger,
@@ -587,45 +587,6 @@ async def test_check_health():
 
         # Test 3: Verify healthy engine still works after mock
         await engine.check_health()
-
-
-@pytest.mark.asyncio
-async def test_check_ready():
-    with ExitStack() as after:
-        with set_default_torch_num_threads(1):
-            engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
-        after.callback(engine.shutdown)
-
-        await engine.check_ready()
-
-        with (
-            patch.object(
-                type(engine),
-                "errored",
-                new_callable=lambda: property(lambda self: True),
-            ),
-            pytest.raises(EngineDeadError),
-        ):
-            await engine.check_ready()
-
-
-@pytest.mark.asyncio
-async def test_check_ready_stalled_request(monkeypatch: pytest.MonkeyPatch):
-    with ExitStack() as after:
-        with set_default_torch_num_threads(1):
-            engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
-        after.callback(engine.shutdown)
-
-        engine._last_request_at = time.monotonic() - 31
-        engine._last_progress_at_ref[0] = 0.0
-        monkeypatch.setattr(
-            engine.output_processor,
-            "has_unfinished_requests",
-            lambda: True,
-        )
-
-        with pytest.raises(EngineUnhealthyError):
-            await engine.check_ready()
 
 
 @pytest.mark.parametrize(

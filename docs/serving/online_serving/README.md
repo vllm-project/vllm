@@ -95,7 +95,8 @@ For further details on renderer APIs, please refer to [this page](renderer.md).
 
 - `/tokenize` - Tokenize text
 - `/detokenize` - Detokenize tokens
-- `/health` - Health check
+- `/health` - Liveness check
+- `/health/ready` - Readiness check
 - `/ping` - SageMaker health check
 - `/version` - Version information
 - `/load` - Server load metrics
