@@ -322,8 +322,6 @@ class CPUAttentionBackendImpl(AttentionImpl):
                 self.attn_type,
             )
 
-        # (B, H, N, C) -> (B, N, H, C) for kernel compatibility.
-        kv_cache = kv_cache.transpose(1, 2)
         hs = self.head_size
         key_cache, value_cache = kv_cache.split(hs, dim=-1)
 
