@@ -407,7 +407,7 @@ class DeepSeekV4MTP(nn.Module):
                     ):
                         loaded_weight = loaded_weight.view(torch.uint8)
                     for mapping in expert_mapping:
-                        param_name, weight_name, expert_id, shard_id = mapping  # type: ignore[assignment]
+                        param_name, weight_name, expert_id, expert_shard_id = mapping
                         if weight_name not in name:
                             continue
                         name_mapped = name.replace(weight_name, param_name)
@@ -422,7 +422,7 @@ class DeepSeekV4MTP(nn.Module):
                             param,
                             loaded_weight,
                             name_mapped,
-                            shard_id=shard_id,
+                            shard_id=expert_shard_id,
                             expert_id=expert_id,
                             return_success=True,
                         )
