@@ -30,19 +30,42 @@ void launch_tma_ws_fp8_persistent_dispatch(void* input, void* input_scales,
   int const G = H / GROUP_SIZE;
   int const gridX = (G + N_COMPUTE - 1) / N_COMPUTE;
 
-  int device{-1};
-  cudaGetDevice(&device);
-  int numSms = 0;
-  cudaDeviceGetAttribute(&numSms, cudaDevAttrMultiProcessorCount, device);
-
   constexpr int MBAR_REGION =
       ((2 * FP8_PERSISTENT_STAGES * 8 + sizeof(int32_t)) + 127) & ~127;
   constexpr int TOKEN_BYTES = 2 * N_COMPUTE * 128;
   constexpr int STAGE_DATA = BATCH_SIZE * TOKEN_BYTES;
   constexpr int SCALE_SMEM =
       FP8_PERSISTENT_STAGES * BATCH_SIZE * N_COMPUTE * 2 * sizeof(float);
-  int smem = MBAR_REGION + FP8_PERSISTENT_STAGES * STAGE_DATA + SCALE_SMEM;
+  constexpr int smem =
+      MBAR_REGION + FP8_PERSISTENT_STAGES * STAGE_DATA + SCALE_SMEM;
   constexpr int blockThreads = (N_COMPUTE + 1) * 32;
+
+  // Static one-time init — these CUDA runtime calls are not safe during
+  // CUDA graph stream capture. Caching them here makes the hot path
+  // graph-capturable.
+  struct StaticState {
+    int numSms;
+    int smemPerSM;
+    int32_t* d_counters;
+  };
+  static StaticState state = []() {
+    StaticState s{};
+    int device;
+    cudaGetDevice(&device);
+    cudaDeviceGetAttribute(&s.numSms, cudaDevAttrMultiProcessorCount, device);
+    cudaDeviceGetAttribute(&s.smemPerSM,
+                           cudaDevAttrMaxSharedMemoryPerMultiprocessor, device);
+    cudaGetSymbolAddress((void**)&s.d_counters, g_fp8_persistent_counters);
+    cudaFuncSetAttribute(
+        tma_v5::silu_mul_fp8_quant_tma_ws_persistent_kernel<
+            N_COMPUTE, FP8_PERSISTENT_STAGES, BATCH_SIZE, false>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
+    cudaFuncSetAttribute(
+        tma_v5::silu_mul_fp8_quant_tma_ws_persistent_kernel<
+            N_COMPUTE, FP8_PERSISTENT_STAGES, BATCH_SIZE, true>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
+    return s;
+  }();
 
   auto kernel_fn = tma_v5::silu_mul_fp8_quant_tma_ws_persistent_kernel<
       N_COMPUTE, FP8_PERSISTENT_STAGES, BATCH_SIZE, false>;
@@ -51,23 +74,15 @@ void launch_tma_ws_fp8_persistent_dispatch(void* input, void* input_scales,
         N_COMPUTE, FP8_PERSISTENT_STAGES, BATCH_SIZE, true>;
   }
 
-  cudaFuncSetAttribute(kernel_fn, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                       smem);
-
-  int smemPerSM = 0;
-  cudaDeviceGetAttribute(&smemPerSM,
-                         cudaDevAttrMaxSharedMemoryPerMultiprocessor, device);
-  int maxBySmem = smem > 0 ? smemPerSM / smem : 1;
+  int maxBySmem = smem > 0 ? state.smemPerSM / smem : 1;
   int maxByThreads = 2048 / blockThreads;
   int maxCTAsPerSM = maxBySmem < maxByThreads ? maxBySmem : maxByThreads;
   if (maxCTAsPerSM < 1) maxCTAsPerSM = 1;
-  int totalDesiredCTAs = maxCTAsPerSM * numSms;
+  int totalDesiredCTAs = maxCTAsPerSM * state.numSms;
   int gridY = (totalDesiredCTAs + gridX - 1) / gridX;
-  if (gridY < numSms) gridY = numSms;
+  if (gridY < state.numSms) gridY = state.numSms;
 
-  int32_t* d_counters;
-  cudaGetSymbolAddress((void**)&d_counters, g_fp8_persistent_counters);
-  cudaMemsetAsync(d_counters, 0, gridX * sizeof(int32_t), stream);
+  cudaMemsetAsync(state.d_counters, 0, gridX * sizeof(int32_t), stream);
 
   CUtensorMap tensorMap;
   cuuint64_t globalDim[3] = {128, static_cast<cuuint64_t>(2 * H / 128),
@@ -89,7 +104,7 @@ void launch_tma_ws_fp8_persistent_dispatch(void* input, void* input_scales,
       reinterpret_cast<float*>(input_scales),
       reinterpret_cast<__nv_fp8_e4m3*>(output),
       reinterpret_cast<float*>(output_scales), n_tokens, H, scale_stride,
-      d_counters, tensorMap);
+      state.d_counters, tensorMap);
 }
 
 template <int N_COMPUTE>

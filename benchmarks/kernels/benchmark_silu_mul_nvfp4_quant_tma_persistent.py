@@ -7,7 +7,7 @@ Benchmark comparing NVFP4 SiLU+Mul+Quant kernel variants:
   persistent — TMA warp-specialized persistent (3D TMA descriptors)
 
 Methodology:
-  - ArgPool rotates through multiple input sets to defeat L2 cache
+  - CUDA graphs with ArgPool rotation to defeat L2 cache
   - torch.utils.benchmark.Timer with blocked_autorange for statistical rigor
 
 Usage:
@@ -46,17 +46,49 @@ def make_nvfp4_outputs(N: int, H: int):
     return output, output_sf
 
 
-def bench_with_argpool(
+def bench_cuda_graph(
     fn,
     args_list: list[tuple],
     label: str,
     sub_label: str,
     description: str,
-) -> TBenchmark.Measurement:
-    """Benchmark with ArgPool rotation for L2 cache defeat."""
+) -> tuple[TBenchmark.Measurement, int]:
+    """Benchmark with CUDA graph capture + ArgPool rotation."""
+    n_pool = len(args_list)
+
+    for args in args_list:
+        fn(*args)
+    torch.accelerator.synchronize()
+
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g):
+            for args in args_list:
+                fn(*args)
+
+    timer = TBenchmark.Timer(
+        stmt="g.replay()",
+        globals={"g": g},
+        label=label,
+        sub_label=sub_label,
+        description=description,
+    ).blocked_autorange(min_run_time=1)
+
+    del g
+    return timer, n_pool
+
+
+def bench_eager(
+    fn,
+    args_list: list[tuple],
+    label: str,
+    sub_label: str,
+    description: str,
+) -> tuple[TBenchmark.Measurement, int]:
+    """Benchmark with eager ArgPool rotation (fallback)."""
     n_args = len(args_list)
 
-    # Warmup
     for args in args_list:
         fn(*args)
     torch.accelerator.synchronize()
@@ -75,7 +107,7 @@ def bench_with_argpool(
         description=description,
     ).blocked_autorange(min_run_time=1)
 
-    return timer
+    return timer, 1
 
 
 def main():
@@ -97,6 +129,11 @@ def main():
         default=8,
         help="Number of input sets for L2 cache rotation",
     )
+    parser.add_argument(
+        "--no-cuda-graph",
+        action="store_true",
+        help="Use eager timing instead of CUDA graphs",
+    )
     args = parser.parse_args()
 
     set_random_seed(42)
@@ -106,10 +143,12 @@ def main():
     pool = args.arg_pool_size
     silu_type = "tanh" if args.tanh_silu else "real"
     peak = args.hbm_peak
+    bench_fn = bench_eager if args.no_cuda_graph else bench_cuda_graph
+    mode = "eager" if args.no_cuda_graph else "CUDA graphs"
 
     print(f"NVFP4 SiLU+Mul+Quant benchmark: H={H}, nc={nc}, silu={silu_type}")
     print(f"HBM peak: {peak} TB/s")
-    print(f"Methodology: ArgPool={pool}, blocked_autorange")
+    print(f"Methodology: {mode}, ArgPool={pool}, blocked_autorange")
     print()
 
     hdr = (
@@ -137,14 +176,14 @@ def main():
         def baseline_fn(out, sf, inp, gs, mask):
             torch.ops._moe_C.nvfp4_silu_mul_quant(out, sf, inp, gs, mask, 1)
 
-        timer = bench_with_argpool(
+        timer, n_ops = bench_fn(
             baseline_fn,
             baseline_args_list,
             "nvfp4-silu-mul-quant",
             f"N={N}",
             "baseline",
         )
-        dt_base = timer.median
+        dt_base = timer.median / n_ops
         all_timers.append(timer)
 
         results = [("baseline", dt_base)]
@@ -164,14 +203,14 @@ def main():
                     inp, out, sf, gs, n_tok, nc_, bs_, tanh
                 )
 
-            timer = bench_with_argpool(
+            timer, n_ops = bench_fn(
                 persist_fn,
                 persist_args_list,
                 "nvfp4-silu-mul-quant",
                 f"N={N}",
                 f"persist-nc{nc}-bs{bs}",
             )
-            dt = timer.median
+            dt = timer.median / n_ops
             all_timers.append(timer)
             results.append((f"persist bs={bs}", dt))
 
