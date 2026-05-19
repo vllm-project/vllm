@@ -75,8 +75,13 @@ function Invoke-Native {
 }
 
 function Import-VisualStudioDevShell {
-    if (Get-Command cl.exe -ErrorAction SilentlyContinue) {
-        Write-Host "MSVC compiler already available on PATH."
+    $hasMsvcToolchain = (
+        (Get-Command cl.exe -ErrorAction SilentlyContinue) -and
+        (Get-Command rc.exe -ErrorAction SilentlyContinue) -and
+        (Get-Command mt.exe -ErrorAction SilentlyContinue)
+    )
+    if ($hasMsvcToolchain) {
+        Write-Host "MSVC compiler and Windows SDK tools already available on PATH."
         return
     }
 
@@ -102,15 +107,20 @@ function Import-VisualStudioDevShell {
             Set-Item -Path "Env:$($matches[1])" -Value $matches[2]
         }
     }
+    foreach ($tool in @("cl.exe", "rc.exe", "mt.exe")) {
+        if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
+            throw "$tool was not found after importing the Visual Studio developer environment. Install the Windows SDK component."
+        }
+    }
 }
 
 function Resolve-CudaToolkitPath {
     param([string]$PreferredPath)
     $candidates = @(
         $PreferredPath,
+        "C:\tmp\cuda13_system",
         $env:CUDA_PATH,
         $env:CUDA_HOME,
-        "C:\tmp\cuda13_system",
         "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0"
     ) | Where-Object { $_ } | Select-Object -Unique
 
