@@ -1103,11 +1103,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if (
             self.supports_mm_inputs or self.model_config.enable_prompt_embeds
         ) and self.is_first_pp_rank:
-            # Run MM encoder (if needed) and get input embeddings.
-            # Only first PP rank prepares multimodal embeddings.
-            # NOTE(woosuk): We must call get_mm_embeddings even during dummy runs
-            # to obtain inputs_embeds, because the compiled model expects this input.
-            inputs_embeds = self.model_state.get_mm_embeddings(
+            # Prepare inputs_embeds (MM encoder outputs and/or prompt_embeds
+            # overlay). Only first PP rank prepares them.
+            # NOTE(woosuk): We must call prepare_inputs_embeds even during dummy
+            # runs because the compiled model expects this input.
+            inputs_embeds = self.model_state.prepare_inputs_embeds(
                 scheduler_output.scheduled_encoder_inputs,
                 input_batch,
                 self.req_states,

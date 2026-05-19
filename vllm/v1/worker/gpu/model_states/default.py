@@ -60,6 +60,7 @@ class DefaultModelState(ModelState):
                 dtype=self.dtype,
                 device=self.device,
             )
+        if self.supports_prompt_embeds:
             self.prompt_embeds: dict[int, torch.Tensor] = {}
             self.prompt_is_token_ids: dict[int, torch.Tensor | None] = {}
 
@@ -125,7 +126,7 @@ class DefaultModelState(ModelState):
         if self.rope_state is not None:
             self.rope_state.apply_staged_writes()
 
-    def get_mm_embeddings(
+    def prepare_inputs_embeds(
         self,
         scheduled_encoder_inputs: dict[str, list[int]],
         input_batch: InputBatch,

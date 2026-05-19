@@ -83,7 +83,7 @@ class WhisperModelState(ModelState):
     def get_supported_generation_tasks(self):
         return ("transcription",)
 
-    def get_mm_embeddings(
+    def prepare_inputs_embeds(
         self,
         scheduled_encoder_inputs: dict[str, list[int]],
         input_batch: InputBatch,
