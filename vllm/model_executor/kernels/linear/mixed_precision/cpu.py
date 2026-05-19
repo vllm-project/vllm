@@ -5,33 +5,16 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm import envs
-from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_quantized_values_into_int32,
     unpack_quantized_values_into_int32,
 )
-from vllm.model_executor.layers.quantization.utils.zentorch import has_zentorch_op
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
-logger = init_logger(__name__)
-
 _CPUWNA16_SUPPORTED_QUANT_TYPES = (scalar_types.uint4, scalar_types.uint4b8)
-
-
-def _import_unpack_from_int32():
-    """Import compressed-tensors' ``unpack_from_int32`` across versions."""
-    try:
-        from compressed_tensors.compressors.pack_quantized.helpers import (
-            unpack_from_int32,
-        )
-    except ImportError:
-        from compressed_tensors.compressors.quantized_compressors.pack_quantized import (  # type: ignore[import-not-found]  # noqa: E501
-            unpack_from_int32,
-        )
-    return unpack_from_int32
 
 
 class CPUWNA16LinearKernel(MPLinearKernel):
@@ -157,144 +140,7 @@ class CPUWNA16LinearKernel(MPLinearKernel):
         scales.data = blocked_s
         packed_zp.data = blocked_zp
 
-    def _zentorch_woq_eligible(self, layer: torch.nn.Module) -> bool:
-        """Eligibility predicate for the zentorch W4A16 GPTQ fast path.
-
-        Constraints (any failure -> legacy ``ops.cpu_gemm_wna16`` path with
-        ``layer`` untouched).
-        """
-        if not has_zentorch_op("zentorch_woq_repack_weight", "zentorch_woq_linear"):
-            return False
-        if (
-            self.w_gidx_name is not None
-            and getattr(layer, self.w_gidx_name, None) is not None
-        ) or (getattr(self.config, "has_g_idx", False)):
-            return False
-
-        weight_packed = getattr(layer, self.w_q_name, None)
-        weight_scale = getattr(layer, self.w_s_name, None)
-        if weight_packed is None or weight_scale is None:
-            return False
-
-        bits = self.config.weight_type.mantissa
-        pack_factor = torch.iinfo(weight_packed.dtype).bits // bits
-        # 4-bit -> 8 values per int32;
-        if pack_factor != 8:
-            return False
-
-        # GPTQ-only. AWQ packs along the output dim instead.
-        in_dim = getattr(weight_packed, "input_dim", None)
-        pk_dim = getattr(weight_packed, "packed_dim", None)
-        if in_dim is None or pk_dim is None or in_dim != pk_dim:
-            return False
-
-        is_ct_format = in_dim == pk_dim == 1
-        if not is_ct_format:
-            return False
-
-        if weight_packed.dim() != 2 or weight_scale.dim() != 2:
-            return False
-
-        # 4-bit -> 8 values per int32; in_features must be divisible by num_groups.
-        in_features = weight_packed.shape[1] * 8
-        num_groups = weight_scale.shape[1]
-        return num_groups > 0 and in_features % num_groups == 0
-
-
-    def _process_weights_for_zentorch_woq(self, layer: torch.nn.Module) -> None:
-        """Repack compressed-tensors GPTQ weights into zentorch's WOQ layout
-        and cache them on dedicated attributes.
-
-        On success ``layer._zentorch_processed_weights`` is set to ``True``;
-        original ``weight_packed`` / ``weight_scale`` (and optional zero-point)
-        storages are released. The original ``Parameter`` objects are kept
-        with empty storage so any downstream consumer that still inspects
-        them via attribute access does not crash with ``AttributeError``.
-        """
-        unpack_from_int32 = _import_unpack_from_int32()
-        repack_op = torch.ops.zentorch.zentorch_woq_repack_weight.default
-
-        weight_q = getattr(layer, self.w_q_name)
-        weight_s = getattr(layer, self.w_s_name)
-        # (out, in/8) compressed-tensors
-        weight_packed = weight_q.data if hasattr(weight_q, "data") else weight_q
-        # (out, num_groups)
-        weight_scale = weight_s.data if hasattr(weight_s, "data") else weight_s
-        out_features, num_groups = weight_scale.shape[0], weight_scale.shape[1]
-        bits = self.config.weight_type.mantissa
-        pack_factor = torch.iinfo(weight_packed.dtype).bits // bits
-        in_features = weight_packed.shape[1] * pack_factor
-        original_shape = torch.Size([out_features, in_features])
-
-        # Unpack with compressed_tensors behavior: (out, in/8) -> (out, in) int8
-        weight_unpacked = unpack_from_int32(
-            weight_packed,
-            bits,  # 4 for int4 or uint4
-            original_shape,
-            packed_dim=weight_q.packed_dim,  # 1 for CT format
-        )
-
-        zp_param = (
-            getattr(layer, self.w_zp_name, None) if self.w_zp_name is not None else None
-        )
-        # zentorch_woq_repack_weight expects unsigned-nibble [0, 15] storage.
-        needs_unsigned_offset = self.config.weight_type == scalar_types.uint4
-
-        if needs_unsigned_offset:
-            weight_unpacked = (weight_unpacked.to(torch.int32) + 8).clamp(0, 15)
-        repacked = repack_op(weight_unpacked.to(torch.int8).contiguous())
-
-        if zp_param is None:
-            zp_tc = None
-        else:
-            # (out/8, num_groups)
-            zp_tensor = zp_param.data if hasattr(zp_param, "data") else zp_param
-            zp = unpack_from_int32(
-                zp_tensor,
-                bits,  # 4 for int4 or uint4
-                (out_features, num_groups),
-                packed_dim=zp_param.packed_dim,  # 0 for CT format
-            )
-            if needs_unsigned_offset:
-                zp = (zp.to(torch.int32) + 8).clamp(0, 15)
-            zp_tc = zp.to(torch.int8).t().contiguous()
-
-        # Cache zentorch-ready tensors on dedicated attributes.
-        layer._zentorch_woq_packed = repacked.t()
-        layer._zentorch_woq_scale = weight_scale.t().contiguous()
-        layer._zentorch_woq_zero_point = zp_tc
-
-        # Free the underlying storage of the original buffers.
-        for param_name in (self.w_q_name, self.w_s_name, self.w_zp_name):
-            if param_name is None:
-                continue
-            param = getattr(layer, param_name, None)
-            if param is None:
-                continue
-            if hasattr(param, "data"):
-                param.data = torch.empty(0)
-            else:
-                setattr(layer, param_name, torch.empty(0))
-
-        layer._zentorch_kind = "compressed_tensors_w4a16_gptq"
-        layer._zentorch_processed_weights = True
-        logger.info_once(
-            "[zen_cpu] Using zentorch_woq_linear for W4A16 GPTQ "
-            "(weight_type=%s, has_zp=%s)",
-            self.config.weight_type,
-            zp_tc is not None,
-        )
-
-
     def process_weights_after_loading(self, layer: torch.nn.Module):
-        # Idempotency: a previous call already set up the zentorch fast path.
-        if getattr(layer, "_zentorch_processed_weights", False):
-            return
-
-        if self._zentorch_woq_eligible(layer):
-            self._process_weights_for_zentorch_woq(layer)
-            return
-
         if (not self.config.zero_points) and (self.w_zp_name is not None):
             setattr(layer, self.w_zp_name, None)
 
@@ -342,14 +188,6 @@ class CPUWNA16LinearKernel(MPLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if getattr(layer, "_zentorch_processed_weights", False):
-            return torch.ops.zentorch.zentorch_woq_linear.default(
-                x,
-                layer._zentorch_woq_packed,
-                layer._zentorch_woq_scale,
-                layer._zentorch_woq_zero_point,
-                bias,
-            )
         w_q, w_s, w_zp, w_gidx = self._get_weight_params(layer)
         if layer.use_w4a8:
             x = ops.int4_scaled_mm_cpu(
