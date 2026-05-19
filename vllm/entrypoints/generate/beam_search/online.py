@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import asyncio
 from abc import ABC
 from collections.abc import AsyncGenerator, Mapping
