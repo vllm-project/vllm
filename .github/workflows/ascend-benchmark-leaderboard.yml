@@ -111,6 +111,7 @@ jobs:
       BENCH_MAX_CONCURRENCY: ${{ github.event_name == 'workflow_dispatch' && inputs.max_concurrency || '4' }}
       BENCH_INPUT_LEN: ${{ github.event_name == 'workflow_dispatch' && inputs.input_length || '' }}
       BENCH_OUTPUT_LEN: ${{ github.event_name == 'workflow_dispatch' && inputs.output_length || '' }}
+      SOC_VERSION: ascend910b3
       HARDWARE_VENDOR: Huawei
       HARDWARE_CHIP_MODEL: 910B3
       CHIP_COUNT: "1"
