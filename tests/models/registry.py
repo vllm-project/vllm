@@ -329,6 +329,14 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "hpcai-tech/grok-1", trust_remote_code=True
     ),
     "Grok1ForCausalLM": _HfExamplesInfo("xai-org/grok-2", trust_remote_code=True),
+    "HrmTextForCausalLM": _HfExamplesInfo(
+        "sapientinc/HRM-Text-1B",
+        # HrmText was merged to transformers main on 2026-05-18 but no
+        # release containing it has been cut yet. Best-effort guess:
+        # main is currently tagged 5.8.0.dev0, so the next release is
+        # likely 5.9.0. Update once it actually ships.
+        min_transformers_version="5.9.0",
+    ),
     "HunYuanDenseV1ForCausalLM": _HfExamplesInfo("tencent/Hunyuan-7B-Instruct"),
     "HunYuanMoEV1ForCausalLM": _HfExamplesInfo(
         "tencent/Hunyuan-A13B-Instruct", trust_remote_code=True
