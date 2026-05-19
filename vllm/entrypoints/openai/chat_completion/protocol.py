@@ -14,7 +14,6 @@ from openai.types.chat.chat_completion_message import Annotation as OpenAIAnnota
 from pydantic import Field, PrivateAttr, model_serializer, model_validator
 
 from vllm.config import ModelConfig
-from vllm.config.utils import replace
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -31,6 +30,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     ToolCall,
     UsageInfo,
 )
+from vllm.entrypoints.openai.structured_outputs import merge_structured_outputs
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
@@ -542,6 +542,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if prompt_logprobs is None and self.echo:
             prompt_logprobs = self.top_logprobs
 
+        structured_outputs = self.structured_outputs
         response_format = self.response_format
         if response_format is not None:
             structured_outputs_kwargs = dict[str, Any]()
@@ -557,10 +558,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 structural_tag = response_format
                 assert structural_tag is not None and isinstance(
                     structural_tag,
-                    (
-                        LegacyStructuralTagResponseFormat,
-                        StructuralTagResponseFormat,
-                    ),
+                    LegacyStructuralTagResponseFormat | StructuralTagResponseFormat,
                 )
                 s_tag_obj = structural_tag.model_dump(by_alias=True)
                 structured_outputs_kwargs["structural_tag"] = json.dumps(s_tag_obj)
@@ -568,10 +566,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
             # If structured outputs wasn't already enabled,
             # we must enable it for these features to work
             if len(structured_outputs_kwargs) > 0:
-                self.structured_outputs = (
-                    StructuredOutputsParams(**structured_outputs_kwargs)
-                    if self.structured_outputs is None
-                    else replace(self.structured_outputs, **structured_outputs_kwargs)
+                structured_outputs = merge_structured_outputs(
+                    structured_outputs, structured_outputs_kwargs
                 )
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
@@ -601,7 +597,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             output_kind=RequestOutputKind.DELTA
             if self.stream
             else RequestOutputKind.FINAL_ONLY,
-            structured_outputs=self.structured_outputs,
+            structured_outputs=structured_outputs,
             logit_bias=self.logit_bias,
             bad_words=self.bad_words,
             thinking_token_budget=self.thinking_token_budget,

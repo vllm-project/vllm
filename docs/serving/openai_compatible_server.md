@@ -253,6 +253,28 @@ you can use the [official OpenAI Python client](https://github.com/openai/openai
 
 Code example: [examples/tool_calling/openai_responses_client_with_tools.py](../../examples/tool_calling/openai_responses_client_with_tools.py)
 
+#### File search handler (gpt-oss)
+
+For gpt-oss, `file_search` tool calls can be routed to a custom handler via
+vLLM's plugin system. Install a package that provides a file search plugin and
+register it as an entry point:
+
+```toml
+# In the plugin package's pyproject.toml:
+[project.entry-points."vllm.file_search_plugins"]
+my_handler = "your_pkg.file_search:create_handler"
+```
+
+The handler must subclass `vllm.plugins.file_search.FileSearchHandler` and
+implement the `search` method, which should return an OpenAI-compatible payload
+(e.g., `{"results": [...]}`).
+
+Results are only included in Responses output when the request includes
+`include=["file_search_call.results"]`.
+
+See [OGX integration](../deployment/integrations/ogx.md) for an
+example handler.
+
 #### Extra parameters
 
 The following extra parameters in the request object are supported:

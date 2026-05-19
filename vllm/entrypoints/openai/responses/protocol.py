@@ -14,6 +14,9 @@ from openai.types.responses import (
     ResponseCodeInterpreterCallInterpretingEvent,
     ResponseContentPartAddedEvent,
     ResponseContentPartDoneEvent,
+    ResponseFileSearchCallCompletedEvent,
+    ResponseFileSearchCallInProgressEvent,
+    ResponseFileSearchCallSearchingEvent,
     ResponseFunctionToolCall,
     ResponseInputItemParam,
     ResponseMcpCallArgumentsDeltaEvent,
@@ -42,6 +45,9 @@ from openai.types.responses import (
     ResponseInProgressEvent as OpenAIResponseInProgressEvent,
 )
 from openai.types.responses.response import IncompleteDetails, ToolChoice
+from openai.types.responses.response_file_search_tool_call import (
+    ResponseFileSearchToolCall,
+)
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
@@ -75,6 +81,10 @@ logger = init_logger(__name__)
 
 _INT64_MIN = -(2**63)
 _INT64_MAX = 2**63 - 1
+
+__all__ = [
+    "ResponseFileSearchToolCall",
+]
 
 
 class InputTokensDetails(OpenAIBaseModel):
@@ -378,10 +388,11 @@ class ResponsesRequest(OpenAIBaseModel):
                 response_format.type == "json_schema"
                 and response_format.schema_ is not None
             ):
+                structured_outputs_kwargs: dict[str, Any] = {
+                    "json": response_format.schema_
+                }
                 structured_outputs = StructuredOutputsParams(
-                    json=response_format.schema_  # type: ignore[call-arg]
-                    # --follow-imports skip hides the class definition but also hides
-                    # multiple third party conflicts, so best of both evils
+                    **structured_outputs_kwargs
                 )
 
         stop = self.stop if self.stop else []
@@ -475,7 +486,7 @@ class ResponsesRequest(OpenAIBaseModel):
         input_data = data.get("input")
 
         # Early return for None, strings, or bytes
-        if input_data is None or isinstance(input_data, (str, bytes)):
+        if input_data is None or isinstance(input_data, str | bytes):
             return data
 
         # Convert iterators (like ValidatorIterator) to list
@@ -798,6 +809,9 @@ StreamingResponsesResponse: TypeAlias = (
     | ResponseReasoningTextDoneEvent
     | ResponseReasoningPartAddedEvent
     | ResponseReasoningPartDoneEvent
+    | ResponseFileSearchCallInProgressEvent
+    | ResponseFileSearchCallSearchingEvent
+    | ResponseFileSearchCallCompletedEvent
     | ResponseCodeInterpreterCallInProgressEvent
     | ResponseCodeInterpreterCallCodeDeltaEvent
     | ResponseWebSearchCallInProgressEvent

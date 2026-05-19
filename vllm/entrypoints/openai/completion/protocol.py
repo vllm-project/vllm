@@ -10,7 +10,6 @@ from typing import Annotated, Any, Literal
 from pydantic import Field, model_validator
 
 from vllm.config import ModelConfig
-from vllm.config.utils import replace
 from vllm.entrypoints.openai.engine.protocol import (
     AnyResponseFormat,
     LegacyStructuralTagResponseFormat,
@@ -19,6 +18,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     StructuralTagResponseFormat,
     UsageInfo,
 )
+from vllm.entrypoints.openai.structured_outputs import merge_structured_outputs
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
@@ -265,6 +265,7 @@ class CompletionRequest(OpenAIBaseModel):
 
         echo_without_generation = self.echo and self.max_tokens == 0
 
+        structured_outputs = self.structured_outputs
         response_format = self.response_format
         if response_format is not None:
             structured_outputs_kwargs = dict[str, Any]()
@@ -280,10 +281,7 @@ class CompletionRequest(OpenAIBaseModel):
                 structural_tag = response_format
                 assert isinstance(
                     structural_tag,
-                    (
-                        LegacyStructuralTagResponseFormat,
-                        StructuralTagResponseFormat,
-                    ),
+                    LegacyStructuralTagResponseFormat | StructuralTagResponseFormat,
                 )
                 s_tag_obj = structural_tag.model_dump(by_alias=True)
                 structured_outputs_kwargs["structural_tag"] = json.dumps(s_tag_obj)
@@ -291,10 +289,8 @@ class CompletionRequest(OpenAIBaseModel):
             # If structured outputs wasn't already enabled,
             # we must enable it for these features to work
             if len(structured_outputs_kwargs) > 0:
-                self.structured_outputs = (
-                    StructuredOutputsParams(**structured_outputs_kwargs)
-                    if self.structured_outputs is None
-                    else replace(self.structured_outputs, **structured_outputs_kwargs)
+                structured_outputs = merge_structured_outputs(
+                    structured_outputs, structured_outputs_kwargs
                 )
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
@@ -324,7 +320,7 @@ class CompletionRequest(OpenAIBaseModel):
             output_kind=RequestOutputKind.DELTA
             if self.stream
             else RequestOutputKind.FINAL_ONLY,
-            structured_outputs=self.structured_outputs,
+            structured_outputs=structured_outputs,
             logit_bias=self.logit_bias,
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,

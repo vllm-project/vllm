@@ -14,6 +14,7 @@ from openai.types.responses.response_function_tool_call_output_item import (
     ResponseFunctionToolCallOutputItem,
 )
 from openai.types.responses.tool import Mcp
+from openai.types.responses.tool import Tool as ResponseTool
 from openai_harmony import Author, Message, Role, StreamState, TextContent
 
 from vllm import envs
@@ -69,6 +70,73 @@ def _map_tool_name_to_tool_type(tool_name: str) -> str:
             f"Available tools: {available_tools}"
         )
     return _TOOL_NAME_TO_TYPE_MAP[tool_name]
+
+
+def _file_search_placeholder_payload() -> dict:
+    return {"results": []}
+
+
+async def _run_file_search_handler(args: dict) -> dict:
+    from vllm.plugins.file_search import get_file_search_handler
+
+    handler = get_file_search_handler()
+    if handler is None:
+        return _file_search_placeholder_payload()
+    try:
+        result = await handler.search(
+            query=args.get("query", ""),
+            vector_store_ids=args.get("vector_store_ids"),
+            filters=args.get("filters"),
+            max_num_results=args.get("max_num_results"),
+            ranking_options=args.get("ranking_options"),
+        )
+    except Exception:
+        logger.exception("file_search handler raised an exception")
+        return _file_search_placeholder_payload()
+    if not isinstance(result, dict):
+        logger.error("file_search handler returned non-dict: %s", type(result))
+        return _file_search_placeholder_payload()
+    if "results" not in result:
+        result = {**result, "results": []}
+    results = result.get("results")
+    if isinstance(results, list):
+        logger.warning(
+            "file_search handler results: query=%s vector_store_ids=%s count=%d",
+            args.get("query"),
+            args.get("vector_store_ids"),
+            len(results),
+        )
+    else:
+        logger.warning(
+            "file_search handler results: query=%s vector_store_ids=%s count=0",
+            args.get("query"),
+            args.get("vector_store_ids"),
+        )
+    return result
+
+
+def _merge_file_search_defaults(
+    args: dict,
+    tools: list[ResponseTool] | None,
+) -> dict:
+    if not tools:
+        return args
+    merged = dict(args)
+    for tool in tools:
+        if getattr(tool, "type", None) != "file_search":
+            continue
+        for key in (
+            "vector_store_ids",
+            "filters",
+            "max_num_results",
+            "ranking_options",
+        ):
+            if merged.get(key) in (None, [], {}):
+                value = getattr(tool, key, None)
+                if value is not None:
+                    merged[key] = value
+        break
+    return merged
 
 
 class TurnMetrics:
@@ -524,11 +592,13 @@ class HarmonyContext(ConversationContext):
         self,
         messages: list,
         available_tools: list[str],
+        tools: list[ResponseTool] | None = None,
         function_tool_names: frozenset[str] | None = None,
     ):
         self._messages = messages
         self.finish_reason: str | None = None
         self.available_tools = available_tools
+        self.tools = tools or []
         self.function_tool_names = function_tool_names
         self._tool_sessions: dict[str, ClientSession | Tool] = {}
         self.called_tools: set[str] = set()
@@ -689,7 +759,7 @@ class HarmonyContext(ConversationContext):
             return "python" in self.available_tools
         if recipient.startswith("container."):
             return "container" in self.available_tools
-        return False
+        return bool(recipient.startswith("functions.file_search"))
 
     async def call_tool(self) -> list[Message]:
         if not self.messages:
@@ -709,6 +779,23 @@ class HarmonyContext(ConversationContext):
                 return await self.call_container_tool(
                     self._tool_sessions["container"], last_msg
                 )
+            elif recipient.startswith("functions.file_search"):
+                try:
+                    args = json.loads(last_msg.content[0].text)
+                except json.JSONDecodeError:
+                    args = {}
+                if not isinstance(args, dict):
+                    args = {}
+                args = _merge_file_search_defaults(args, self.tools)
+                payload = await _run_file_search_handler(args)
+                return [
+                    Message(
+                        author=Author(role=Role.TOOL, name="functions.file_search"),
+                        content=[TextContent(text=json.dumps(payload))],
+                        recipient=Role.ASSISTANT,
+                        channel=last_msg.channel,
+                    )
+                ]
         raise ValueError("No tool call found")
 
     def render_for_completion(self) -> list[int]:

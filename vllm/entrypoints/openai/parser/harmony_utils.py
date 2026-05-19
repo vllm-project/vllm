@@ -2,8 +2,29 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import datetime
+import json
 from collections.abc import Iterable, Sequence
 
+from openai.types.responses import (
+    ResponseFunctionToolCall,
+    ResponseOutputItem,
+    ResponseOutputMessage,
+    ResponseOutputText,
+    ResponseReasoningItem,
+)
+from openai.types.responses.response_file_search_tool_call import (
+    ResponseFileSearchToolCall,
+)
+from openai.types.responses.response_function_web_search import (
+    ActionFind,
+    ActionOpenPage,
+    ActionSearch,
+    ResponseFunctionWebSearch,
+)
+from openai.types.responses.response_output_item import McpCall
+from openai.types.responses.response_reasoning_item import (
+    Content as ResponseReasoningTextContent,
+)
 from openai.types.responses.tool import Tool
 from openai_harmony import (
     Author,
@@ -23,6 +44,7 @@ from openai_harmony import (
 from vllm import envs
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
 from vllm.logger import init_logger
+from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
@@ -79,6 +101,9 @@ BUILTIN_TOOL_TO_MCP_SERVER_LABEL: dict[str, str] = {
     "browser": "web_search_preview",
     "container": "container",
 }
+
+# Backward-compat alias used by parsing helpers.
+_BUILTIN_TOOL_TO_MCP_SERVER_LABEL = BUILTIN_TOOL_TO_MCP_SERVER_LABEL
 
 # Derive MCP_BUILTIN_TOOLS from the canonical mapping
 MCP_BUILTIN_TOOLS: set[str] = set(BUILTIN_TOOL_TO_MCP_SERVER_LABEL.values())
@@ -159,6 +184,40 @@ def create_tool_definition(tool: ChatCompletionToolsParam | Tool):
     )
 
 
+def _create_file_search_tool_definition(tool: Tool) -> ToolDescription:
+    """Create a Harmony tool description for file_search."""
+    name = getattr(tool, "name", None) or "file_search"
+    description = getattr(tool, "description", None) or "Search the knowledge base."
+
+    parameters = {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Search query."},
+            "vector_store_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Vector store IDs to search.",
+            },
+            "filters": {"type": "object", "description": "Search filters."},
+            "max_num_results": {
+                "type": "integer",
+                "description": "Maximum number of results.",
+            },
+            "ranking_options": {
+                "type": "object",
+                "description": "Ranking options.",
+            },
+        },
+        "required": ["query"],
+    }
+
+    return ToolDescription.new(
+        name=name,
+        description=description,
+        parameters=parameters,
+    )
+
+
 def get_developer_message(
     instructions: str | None = None,
     tools: list[Tool | ChatCompletionToolsParam] | None = None,
@@ -167,7 +226,7 @@ def get_developer_message(
     if instructions is not None and not envs.VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS:
         dev_msg_content = dev_msg_content.with_instructions(instructions)
     if tools is not None:
-        function_tools: list[Tool | ChatCompletionToolsParam] = []
+        function_tools: list[ToolDescription] = []
         for tool in tools:
             if tool.type in (
                 "web_search_preview",
@@ -177,16 +236,13 @@ def get_developer_message(
                 pass
 
             elif tool.type == "function":
-                function_tools.append(tool)
+                function_tools.append(create_tool_definition(tool))
+            elif tool.type == "file_search":
+                function_tools.append(_create_file_search_tool_definition(tool))
             else:
                 raise ValueError(f"tool type {tool.type} not supported")
         if function_tools:
-            function_tool_descriptions = [
-                create_tool_definition(tool) for tool in function_tools
-            ]
-            dev_msg_content = dev_msg_content.with_function_tools(
-                function_tool_descriptions
-            )
+            dev_msg_content = dev_msg_content.with_function_tools(function_tools)
     dev_msg = Message.from_role_and_content(Role.DEVELOPER, dev_msg_content)
     return dev_msg
 
@@ -363,6 +419,346 @@ def render_for_completion(messages: list[Message]) -> list[int]:
         conversation, Role.ASSISTANT
     )
     return token_ids
+
+
+def _parse_browser_tool_call(message: Message, recipient: str) -> ResponseOutputItem:
+    """Parse browser tool calls (search, open, find) into web search items."""
+    if len(message.content) != 1:
+        raise ValueError("Invalid number of contents in browser message")
+    content = message.content[0]
+
+    # Parse JSON args (with retry detection)
+    try:
+        browser_call = json.loads(content.text)
+    except json.JSONDecodeError:
+        json_retry_output_message = (
+            f"Invalid JSON args, caught and retried: {content.text}"
+        )
+        browser_call = {
+            "query": json_retry_output_message,
+            "url": json_retry_output_message,
+            "pattern": json_retry_output_message,
+        }
+
+    # Create appropriate action based on recipient
+    if recipient == "browser.search":
+        action = ActionSearch(
+            query=f"cursor:{browser_call.get('query', '')}", type="search"
+        )
+    elif recipient == "browser.open":
+        action = ActionOpenPage(
+            url=f"cursor:{browser_call.get('url', '')}", type="open_page"
+        )
+    elif recipient == "browser.find":
+        action = ActionFind(
+            pattern=browser_call.get("pattern", ""),
+            url=f"cursor:{browser_call.get('url', '')}",
+            type="find",
+        )
+    else:
+        raise ValueError(f"Unknown browser action: {recipient}")
+
+    return ResponseFunctionWebSearch(
+        id=f"ws_{random_uuid()}",
+        action=action,
+        status="completed",
+        type="web_search_call",
+    )
+
+
+def _parse_function_call(message: Message, recipient: str) -> list[ResponseOutputItem]:
+    """Parse function calls into function tool call items."""
+    function_name = recipient.split(".")[-1]
+    output_items = []
+    for content in message.content:
+        random_id = random_uuid()
+        response_item = ResponseFunctionToolCall(
+            arguments=content.text,
+            call_id=f"call_{random_id}",
+            type="function_call",
+            name=function_name,
+            id=f"fc_{random_id}",
+        )
+        output_items.append(response_item)
+    return output_items
+
+
+def _parse_file_search_call(message: Message) -> list[ResponseOutputItem]:
+    """Parse file_search function calls into file_search tool call items."""
+    output_items: list[ResponseOutputItem] = []
+    for content in message.content:
+        queries = _parse_file_search_queries(content.text)
+        output_items.append(
+            ResponseFileSearchToolCall(
+                type="file_search_call",
+                id=f"fs_{random_uuid()}",
+                queries=queries,
+                results=None,
+                status="completed",
+            )
+        )
+    return output_items
+
+
+def _parse_file_search_queries(text: str) -> list[str]:
+    try:
+        args = json.loads(text)
+    except json.JSONDecodeError:
+        args = {}
+    if not isinstance(args, dict):
+        return []
+    if isinstance(args.get("queries"), list):
+        return args["queries"]
+    if "query" in args:
+        return [args["query"]]
+    return []
+
+
+def _parse_reasoning(message: Message) -> list[ResponseOutputItem]:
+    """Parse reasoning/analysis content into reasoning items."""
+    output_items = []
+    for content in message.content:
+        reasoning_item = ResponseReasoningItem(
+            id=f"rs_{random_uuid()}",
+            summary=[],
+            type="reasoning",
+            content=[
+                ResponseReasoningTextContent(text=content.text, type="reasoning_text")
+            ],
+            status=None,
+        )
+        output_items.append(reasoning_item)
+    return output_items
+
+
+def _parse_final_message(message: Message) -> ResponseOutputItem:
+    """Parse final channel messages into output message items."""
+    contents = []
+    for content in message.content:
+        output_text = ResponseOutputText(
+            text=content.text,
+            annotations=[],  # TODO
+            type="output_text",
+            logprobs=None,  # TODO
+        )
+        contents.append(output_text)
+    return ResponseOutputMessage(
+        id=f"msg_{random_uuid()}",
+        content=contents,
+        role=message.author.role,
+        status="completed",
+        type="message",
+    )
+
+
+def _parse_mcp_recipient(recipient: str) -> tuple[str, str]:
+    """
+    Parse MCP recipient into (server_label, tool_name).
+
+    For dotted recipients like "repo_browser.list":
+        - server_label: "repo_browser" (namespace/server)
+        - tool_name: "list" (specific tool)
+
+    For simple recipients like "filesystem":
+        - server_label: "filesystem"
+        - tool_name: "filesystem"
+    """
+    if "." in recipient:
+        server_label = recipient.split(".")[0]
+        tool_name = recipient.split(".")[-1]
+    else:
+        server_label = recipient
+        tool_name = recipient
+    return server_label, tool_name
+
+
+def _parse_mcp_call(message: Message, recipient: str) -> list[ResponseOutputItem]:
+    """Parse MCP calls into MCP call items."""
+    # Handle built-in tools that need server_label mapping
+    if recipient in _BUILTIN_TOOL_TO_MCP_SERVER_LABEL:
+        server_label = _BUILTIN_TOOL_TO_MCP_SERVER_LABEL[recipient]
+        tool_name = recipient
+    else:
+        server_label, tool_name = _parse_mcp_recipient(recipient)
+
+    output_items = []
+    for content in message.content:
+        response_item = McpCall(
+            arguments=content.text,
+            type="mcp_call",
+            name=tool_name,
+            server_label=server_label,
+            id=f"mcp_{random_uuid()}",
+            status="completed",
+        )
+        output_items.append(response_item)
+    return output_items
+
+
+def parse_output_message(message: Message) -> list[ResponseOutputItem]:
+    """
+    Parse a Harmony message into a list of output response items.
+    """
+    if message.author.role != "assistant":
+        # This is a message from a tool to the assistant (e.g., search result).
+        # Don't include it in the final output for now. This aligns with
+        # OpenAI's behavior on models like o4-mini.
+        return []
+
+    output_items: list[ResponseOutputItem] = []
+    recipient = message.recipient
+
+    if recipient is not None:
+        # Browser tool calls (browser.search, browser.open, browser.find)
+        if recipient.startswith("browser."):
+            output_items.append(_parse_browser_tool_call(message, recipient))
+
+        # Function calls (should only happen on commentary channel)
+        elif message.channel == "commentary" and recipient.startswith("functions."):
+            if recipient == "functions.file_search":
+                output_items.extend(_parse_file_search_call(message))
+            else:
+                output_items.extend(_parse_function_call(message, recipient))
+
+        # Built-in MCP tools (python, browser, container)
+        elif recipient in _BUILTIN_TOOL_TO_MCP_SERVER_LABEL:
+            output_items.extend(_parse_reasoning(message))
+
+        # All other recipients are MCP calls
+        else:
+            output_items.extend(_parse_mcp_call(message, recipient))
+
+    # No recipient - handle based on channel for non-tool messages
+    elif message.channel == "analysis":
+        output_items.extend(_parse_reasoning(message))
+
+    elif message.channel == "commentary":
+        # Per Harmony format, commentary channel can contain preambles to calling
+        # multiple functions - explanatory text with no recipient
+        output_items.extend(_parse_reasoning(message))
+
+    elif message.channel == "final":
+        output_items.append(_parse_final_message(message))
+
+    else:
+        raise ValueError(f"Unknown channel: {message.channel}")
+
+    return output_items
+
+
+def parse_remaining_state(parser: StreamableParser) -> list[ResponseOutputItem]:
+    if not parser.current_content:
+        return []
+    if parser.current_role != Role.ASSISTANT:
+        return []
+    current_recipient = parser.current_recipient
+    if current_recipient is not None and current_recipient.startswith("browser."):
+        return []
+
+    if current_recipient and parser.current_channel in ("commentary", "analysis"):
+        if current_recipient == "functions.file_search":
+            rid = random_uuid()
+            queries = _parse_file_search_queries(parser.current_content)
+            return [
+                ResponseFileSearchToolCall(
+                    type="file_search_call",
+                    id=f"fs_{rid}",
+                    queries=queries,
+                    results=None,
+                    status="in_progress",
+                )
+            ]
+        if current_recipient.startswith("functions."):
+            rid = random_uuid()
+            return [
+                ResponseFunctionToolCall(
+                    arguments=parser.current_content,
+                    call_id=f"call_{rid}",
+                    type="function_call",
+                    name=current_recipient.split(".")[-1],
+                    id=f"fc_{rid}",
+                    status="in_progress",
+                )
+            ]
+        # Built-in MCP tools (python, browser, container)
+        elif current_recipient in _BUILTIN_TOOL_TO_MCP_SERVER_LABEL:
+            return [
+                ResponseReasoningItem(
+                    id=f"rs_{random_uuid()}",
+                    summary=[],
+                    type="reasoning",
+                    content=[
+                        ResponseReasoningTextContent(
+                            text=parser.current_content, type="reasoning_text"
+                        )
+                    ],
+                    status=None,
+                )
+            ]
+        # All other recipients are MCP calls
+        else:
+            rid = random_uuid()
+            server_label, tool_name = _parse_mcp_recipient(current_recipient)
+            return [
+                McpCall(
+                    arguments=parser.current_content,
+                    type="mcp_call",
+                    name=tool_name,
+                    server_label=server_label,
+                    id=f"mcp_{rid}",
+                    status="in_progress",
+                )
+            ]
+
+    if parser.current_channel == "commentary":
+        return [
+            ResponseReasoningItem(
+                id=f"rs_{random_uuid()}",
+                summary=[],
+                type="reasoning",
+                content=[
+                    ResponseReasoningTextContent(
+                        text=parser.current_content, type="reasoning_text"
+                    )
+                ],
+                status=None,
+            )
+        ]
+
+    if parser.current_channel == "analysis":
+        return [
+            ResponseReasoningItem(
+                id=f"rs_{random_uuid()}",
+                summary=[],
+                type="reasoning",
+                content=[
+                    ResponseReasoningTextContent(
+                        text=parser.current_content, type="reasoning_text"
+                    )
+                ],
+                status=None,
+            )
+        ]
+
+    if parser.current_channel == "final":
+        output_text = ResponseOutputText(
+            text=parser.current_content,
+            annotations=[],  # TODO
+            type="output_text",
+            logprobs=None,  # TODO
+        )
+        text_item = ResponseOutputMessage(
+            id=f"msg_{random_uuid()}",
+            content=[output_text],
+            role="assistant",
+            # if the parser still has messages (ie if the generator got cut
+            # abruptly), this should be incomplete
+            status="incomplete",
+            type="message",
+        )
+        return [text_item]
+
+    return []
 
 
 def get_stop_tokens_for_assistant_actions() -> list[int]:
