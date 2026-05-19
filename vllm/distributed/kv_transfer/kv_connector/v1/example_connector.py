@@ -170,8 +170,11 @@ class ExampleConnector(KVConnectorBase_V1):
                 # src from [2, N, ...] to [N, 2, ...] before assigning.
                 block_idxs = slot_mapping // self._block_size
                 offsets = slot_mapping % self._block_size
+                # Reshape src to [2, N, num_kv_heads, head_size] to match CPU layout
+                src = src_kv_cache.view(2, -1, dst_kv_cache_layer.shape[2], 
+                                        dst_kv_cache_layer.shape[4])
                 dst_kv_cache_layer[:, block_idxs, :, offsets, :] = (
-                    src_kv_cache.transpose(0, 1)
+                    src.transpose(0, 1)
                 )
             else:
                 num_pages = dst_kv_cache_layer_shape[1]
