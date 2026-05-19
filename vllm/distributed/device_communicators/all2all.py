@@ -670,7 +670,6 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
         )
 
         self.gpus_per_node = gpus_per_node
-        self.hidden_size = hidden_size
         self.initialized = True
 
         logger.info(
