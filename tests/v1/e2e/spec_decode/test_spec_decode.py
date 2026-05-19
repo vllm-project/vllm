@@ -1356,10 +1356,10 @@ def test_dflash_acceptance_rates(dflash_config):
             f" (expected at least {expected_len:.2f})"
         )
 
-        # assert mean_acceptance_length >= expected_len, (
-        #     f"DFlash acceptance_len for {dataset_name} is below expected threshold:"
-        #     f"{mean_acceptance_length:.2f} < {expected_len:.2f}"
-        # )
+        assert mean_acceptance_length >= expected_len, (
+            f"DFlash acceptance_len for {dataset_name} is below expected threshold:"
+            f"{mean_acceptance_length:.2f} < {expected_len:.2f}"
+        )
 
     del spec_llm
     torch.accelerator.empty_cache()
