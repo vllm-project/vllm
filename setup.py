@@ -973,9 +973,19 @@ def _list_reachable_release_tags(
 
 def _count_commits_since(commit_id: str) -> int:
     count = _git_maybe_output("rev-list", "--count", f"{commit_id}..HEAD")
-    if count is None:
+    if count is not None:
+        return int(count)
+
+    fallback_count = _git_maybe_output("rev-list", "--count", "HEAD")
+    if fallback_count is None:
         raise RuntimeError(f"Unable to count commits from {commit_id} to HEAD")
-    return int(count)
+
+    logger.warning(
+        "Upstream commit %s is not reachable from HEAD; falling back to total "
+        "repository commit count for development distance.",
+        commit_id,
+    )
+    return int(fallback_count)
 
 
 def parse_vllm_scm_version(root: str, *, config) -> ScmVersion:
