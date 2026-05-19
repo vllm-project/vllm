@@ -34,16 +34,16 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.deepseek_mtp import SharedHead
+from vllm.model_executor.models.deepseek_v2 import get_spec_layer_idx_from_weight_name
+from vllm.model_executor.models.utils import maybe_prefix
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from .deepseek_mtp import SharedHead
-from .deepseek_v2 import get_spec_layer_idx_from_weight_name
 from .deepseek_v4 import (
     DeepseekV4DecoderLayer,
     make_deepseek_v4_expert_params_mapping,
 )
-from .utils import maybe_prefix
 
 logger = init_logger(__name__)
 
@@ -68,6 +68,7 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
     ) -> None:
         super().__init__()
 
+        assert vllm_config.speculative_config is not None
         config = vllm_config.speculative_config.draft_model_config.hf_config
         self.config = config
         quant_config = vllm_config.quant_config
@@ -146,9 +147,10 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         hidden_states, residual, post_mix, res_mix = self.mtp_block(
             positions=positions, x=hidden_states, input_ids=None
         )
-        hidden_states = self.mtp_block.hc_post(
-            hidden_states, residual, post_mix, res_mix
-        )
+        if current_platform.is_cuda():
+            hidden_states = self.mtp_block.hc_post(
+                hidden_states, residual, post_mix, res_mix
+            )
         # Return the flat pre-hc_head residual so it can be re-fed as the
         # next spec step's `previous_hidden_states` when
         # num_speculative_tokens > 1. hc_head is deferred to compute_logits.
@@ -235,7 +237,7 @@ class DeepSeekV4MultiTokenPredictor(nn.Module):
         hidden_states = hidden_states.view(
             -1, mtp_layer.hc_mult, mtp_layer.config.hidden_size
         )
-        hidden_states = self.hc_head_op(
+        hidden_states = mtp_layer.hc_head_op(
             hidden_states,
             mtp_layer.hc_head_fn,
             mtp_layer.hc_head_scale,
@@ -290,6 +292,11 @@ class DeepSeekV4MTP(nn.Module):
             ".emb.tok_emb.weight": ".embed_tokens.weight",
             ".head.weight": ".shared_head.head.weight",
             ".norm.weight": ".shared_head.norm.weight",
+            # Pre-MoE norm + gate are now owned by
+            # ``DeepseekV4MoE.norm_gate`` (see NormGatedLinear).
+            ".ffn_norm.weight": ".ffn.norm_gate.norm.weight",
+            ".ffn.gate.weight": ".ffn.norm_gate.gate.weight",
+            ".ffn.gate.tid2eid": ".ffn.norm_gate.tid2eid",
         }
 
         def _remap_weight_name(name: str) -> str:
@@ -401,7 +408,7 @@ class DeepSeekV4MTP(nn.Module):
                     ):
                         loaded_weight = loaded_weight.view(torch.uint8)
                     for mapping in expert_mapping:
-                        param_name, weight_name, expert_id, shard_id = mapping
+                        param_name, weight_name, expert_id, expert_shard_id = mapping
                         if weight_name not in name:
                             continue
                         name_mapped = name.replace(weight_name, param_name)
@@ -416,7 +423,7 @@ class DeepSeekV4MTP(nn.Module):
                             param,
                             loaded_weight,
                             name_mapped,
-                            shard_id=shard_id,
+                            shard_id=expert_shard_id,
                             expert_id=expert_id,
                             return_success=True,
                         )
@@ -437,7 +444,12 @@ class DeepSeekV4MTP(nn.Module):
                             ".shared_experts.w2", ".shared_experts.down_proj"
                         )
                     if name.endswith(".ffn.gate.bias"):
-                        name = name.replace(".bias", ".e_score_correction_bias")
+                        # ``e_score_correction_bias`` lives on
+                        # ``norm_gate`` directly (not on the inner gate).
+                        name = name.replace(
+                            ".ffn.gate.bias",
+                            ".ffn.norm_gate.e_score_correction_bias",
+                        )
                     param = params_dict[name]
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader

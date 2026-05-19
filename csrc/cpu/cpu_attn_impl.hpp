@@ -12,7 +12,7 @@
 #include "cpu/utils.hpp"
 
 namespace cpu_attention {
-enum class ISA { AMX, VEC, VEC16, NEON, VXE, VSX };
+enum class ISA { AMX, VEC, VEC16, NEON, VXE, RVV, VSX };
 
 // Mirrors csrc/attention/dtype_fp8.cuh Fp8KVCacheDataType exactly.
 enum class Fp8KVCacheDataType {
@@ -163,6 +163,9 @@ struct AttentionMetadata {
         break;
       case ISA::VXE:
         ss << "VXE, ";
+        break;
+      case ISA::RVV:
+        ss << "RVV, ";
         break;
       case ISA::VSX:
         ss << "VSX, ";
@@ -456,7 +459,7 @@ class AttentionScheduler {
     const int64_t kv_len_per_thread =
         (((total_kv_len / thread_num) + kv_len_alignment - 1) /
          kv_len_alignment) *
-        kv_len_alignment * (use_gqa ? input.num_heads_kv : input.num_heads_q);
+        kv_len_alignment;
     std::vector<AttentionWorkItemGroup> workitems;
     std::vector<ReductionWorkItemGroup> reduce_workitems;
     workitems.reserve(1024);
