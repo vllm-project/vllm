@@ -4,16 +4,13 @@
 from typing import Any
 
 import pytest
+import torch
 
 from ...utils import EmbedModelInfo
 
 MODELS = [
     EmbedModelInfo(
         "nomic-ai/nomic-embed-text-v1",
-        # Fixme:
-        #  Update nomic-embed code to support the latest
-        #  HF version and remove revision set.
-        revision="720244025c1a7e15661a174c63cce63c8218e52b",
     ),
     # EmbedModelInfo("nomic-ai/nomic-embed-text-v1.5"),
     # EmbedModelInfo("nomic-ai/CodeRankEmbed"),
@@ -81,18 +78,18 @@ def test_set_max_model_len_legal(model_info, vllm_runner):
 
 @pytest.mark.parametrize("model_info", MODELS)
 def test_set_max_model_len_illegal(model_info, vllm_runner):
-    # set max_model_len > 2048
+    # set max_model_len > 8192
     with pytest.raises(ValueError):
         with vllm_runner(
             model_info.name,
             revision=model_info.revision,
             runner="pooling",
-            max_model_len=4096,
+            max_model_len=max_model_len + 1,
         ):
             pass
 
-    # set max_model_len > 2048 by hf_overrides
-    hf_overrides = {"max_model_len": 4096}
+    # set max_model_len > 8192 by hf_overrides
+    hf_overrides = {"max_model_len": max_model_len + 1}
     with pytest.raises(ValueError):
         with vllm_runner(
             model_info.name,
@@ -122,8 +119,18 @@ def test_use_rope_scaling_legal(model_info, vllm_runner):
         runner="pooling",
         max_model_len=None,
         hf_overrides=hf_overrides,
-    ):
-        pass
+    ) as vllm_model:
+        model_config = vllm_model.llm.llm_engine.model_config
+        assert model_config.max_model_len == max_model_len
+
+        long_prompt = "The chef prepared a delicious meal. " * 1000
+        vllm_outputs = vllm_model.embed(
+            [long_prompt],
+            tokenization_kwargs=dict(truncate_prompt_tokens=-1),
+        )
+        outputs_tensor = torch.tensor(vllm_outputs)
+        assert not torch.any(torch.isnan(outputs_tensor))
+        assert outputs_tensor.shape[-1] == model_config.embedding_size
 
 
 @pytest.mark.parametrize("model_info", MODELS)

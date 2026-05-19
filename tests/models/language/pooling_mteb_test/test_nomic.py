@@ -12,11 +12,7 @@ MODELS = [
     EmbedModelInfo(
         "nomic-ai/nomic-embed-text-v1",
         architecture="NomicBertModel",
-        # Fixme:
-        #  Update nomic-embed code to support the latest
-        #  HF version and remove revision set.
-        revision="720244025c1a7e15661a174c63cce63c8218e52b",
-        mteb_score=0.737568559,
+        mteb_score=0.736373001,
         enable_test=True,
         seq_pooling_type="MEAN",
         attn_type="encoder_only",
