@@ -269,36 +269,21 @@ class TestMLAPrefillBackendParsing:
             )
 
 
-class TestDeprecatedFlagMigration:
-    """Tests for _migrate_deprecated_mla_prefill_flags in AttentionConfig."""
+class TestMLAPrefillBackendConfig:
+    """Tests for mla_prefill_backend configuration in AttentionConfig."""
 
-    def test_no_deprecated_flags_leaves_backend_none(self):
+    def test_default_backend_is_none(self):
         config = AttentionConfig()
         assert config.mla_prefill_backend is None
 
-    def test_use_trtllm_ragged_migrates_to_trtllm_ragged(self):
-        config = AttentionConfig(use_trtllm_ragged_deepseek_prefill=True)
-        assert config.mla_prefill_backend == MLAPrefillBackendEnum.TRTLLM_RAGGED
-
-    def test_disable_flashinfer_prefill_migrates_to_flash_attn(self):
-        config = AttentionConfig(disable_flashinfer_prefill=True)
-        assert config.mla_prefill_backend == MLAPrefillBackendEnum.FLASH_ATTN
-
-    def test_explicit_backend_ignores_deprecated_flags(self):
+    def test_explicit_flash_attn_backend(self):
         config = AttentionConfig(
             mla_prefill_backend=MLAPrefillBackendEnum.FLASH_ATTN,
-            use_cudnn_prefill=True,
         )
         assert config.mla_prefill_backend == MLAPrefillBackendEnum.FLASH_ATTN
 
-    def test_cudnn_raises_error(self):
-        match = "cuDNN MLA prefill backend has been removed"
-        with pytest.raises(ValueError, match=match):
-            AttentionConfig(use_cudnn_prefill=True)
-
-    def test_trtllm_takes_priority_over_disable_flashinfer(self):
+    def test_explicit_trtllm_ragged_backend(self):
         config = AttentionConfig(
-            use_trtllm_ragged_deepseek_prefill=True,
-            disable_flashinfer_prefill=True,
+            mla_prefill_backend=MLAPrefillBackendEnum.TRTLLM_RAGGED,
         )
         assert config.mla_prefill_backend == MLAPrefillBackendEnum.TRTLLM_RAGGED

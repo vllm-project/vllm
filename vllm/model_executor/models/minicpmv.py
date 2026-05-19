@@ -546,8 +546,9 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         # NumPy arrays are considered as Iterable but not Sequence in
         # https://github.com/huggingface/transformers/blob/main/src/transformers/image_transforms.py#L428
         image_processor = hf_processor.image_processor  # type: ignore
-        for attr in ("mean", "std"):
-            val = getattr(image_processor, attr)
+        # transformers v5+ renamed `mean`/`std` -> `image_mean`/`image_std`
+        for attr in ("mean", "std", "image_mean", "image_std"):
+            val = getattr(image_processor, attr, None)
             if isinstance(val, np.ndarray):
                 setattr(image_processor, attr, val.tolist())
 
@@ -585,6 +586,50 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         if version == (2, 0) or version == (2, 5):
             return image_processor.get_slice_image_placeholder(image_size)
 
+        if version == (4, 6):
+            if max_slice_nums is None:
+                max_slice_nums = image_processor.max_slice_nums
+            grids = image_processor.get_sliced_grid(
+                image_size,
+                max_slice_nums=max_slice_nums,
+            )
+            patch_size = image_processor.patch_size
+            scale_resolution = image_processor.scale_resolution
+
+            allow_upscale = grids is None
+            best_size = image_processor.find_best_resize(
+                image_size,
+                scale_resolution,
+                patch_size,
+                allow_upscale=allow_upscale,
+            )
+            h_patches = best_size[1] // patch_size
+            w_patches = best_size[0] // patch_size
+            source_image_visual_tokens = (h_patches // 4) * (w_patches // 4)
+
+            if grids is not None:
+                refine_size = image_processor.get_refine_size(
+                    image_size,
+                    grids,
+                    scale_resolution,
+                    patch_size,
+                    allow_upscale=True,
+                )
+                pw = refine_size[0] // grids[0]
+                ph = refine_size[1] // grids[1]
+                patch_visual_tokens = (ph // patch_size // 4) * (pw // patch_size // 4)
+            else:
+                patch_visual_tokens = source_image_visual_tokens
+
+            return image_processor.get_slice_image_placeholder(
+                grids if grids is not None else [0, 0],
+                image_idx=image_idx,
+                max_slice_nums=max_slice_nums,
+                use_image_id=use_image_id,
+                source_image_visual_tokens=source_image_visual_tokens,
+                patch_visual_tokens=patch_visual_tokens,
+            )
+
         return image_processor.get_slice_image_placeholder(
             image_size,
             image_idx=image_idx,
@@ -618,11 +663,44 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         max_slice_nums: int | None = None,
     ) -> int:
         image_processor = self.get_image_processor()
+        version = self.get_model_version()
 
         grid = self.get_sliced_grid(
             image_size,
             max_slice_nums=max_slice_nums,
         )
+
+        if version == (4, 6):
+            patch_size = image_processor.patch_size
+            scale_resolution = image_processor.scale_resolution
+
+            allow_upscale = grid is None
+            best_size = image_processor.find_best_resize(
+                image_size,
+                scale_resolution,
+                patch_size,
+                allow_upscale=allow_upscale,
+            )
+            h_p = best_size[1] // patch_size
+            w_p = best_size[0] // patch_size
+            source_tokens = (h_p // 4) * (w_p // 4)
+
+            if grid is None:
+                return source_tokens
+
+            refine_size = image_processor.get_refine_size(
+                image_size,
+                grid,
+                scale_resolution,
+                patch_size,
+                allow_upscale=True,
+            )
+            pw = refine_size[0] // grid[0]
+            ph = refine_size[1] // grid[1]
+            patch_tokens = (ph // patch_size // 4) * (pw // patch_size // 4)
+            ncols, nrows = grid
+            return source_tokens + ncols * nrows * patch_tokens
+
         if grid is None:
             ncols = nrows = 0
         else:
@@ -839,7 +917,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         out_keys: set[str],
     ) -> dict[str, NestedTensors]:
         # This processor supports zipping prompt and mm_data together
-        if self.info.get_model_version() in {(2, 6), (4, 0), (4, 5)}:
+        if self.info.get_model_version() in {(2, 6), (4, 0), (4, 5), (4, 6)}:
             inputs = super()._call_hf_processor(
                 prompt=prompts,  # type: ignore
                 mm_data=mm_data,
@@ -971,10 +1049,15 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
             if version == (2, 0) or version == (2, 5):
                 im_start = image_processor.im_start_token
                 im_end = image_processor.im_end_token
-            else:
+            elif hasattr(image_processor, "im_id_start"):
                 im_start = image_processor.im_id_start
                 im_end = image_processor.im_id_end
+            else:
+                # transformers v5.7+ keeps im_id tokens on the tokenizer.
+                im_start = getattr(tokenizer, "image_id_start_token", "<image_id>")
+                im_end = getattr(tokenizer, "image_id_end_token", "</image_id>")
 
+            embed_text = getattr(tokenizer, "image_token", "<unk>")
             new_update = new_update.with_content(
                 PromptUpdateDetails.select_text(
                     text.replace(
@@ -982,7 +1065,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
                         f"{im_start}{new_item_idx}{im_end}",
                         1,
                     ),
-                    "<unk>",
+                    embed_text,
                 )
             )
 
