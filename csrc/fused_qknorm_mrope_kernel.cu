@@ -361,7 +361,12 @@ void fused_qk_norm_mrope(
   int64_t half_rd = cos.size(2);
   int64_t rotary_dim = half_rd * 2;
   TORCH_CHECK(rotary_dim % 2 == 0, "rotary_dim must be even");
-  TORCH_CHECK(rotary_dim <= head_dim, "rotary_dim must be <= head_dim");
+  // The kernel processes all rotary lanes inside a single warp; requiring
+  // rotary_dim == head_dim guarantees all 32 threads participate in the NeoX
+  // __shfl_xor_sync / __syncwarp calls and avoids warp divergence issues.
+  TORCH_CHECK(rotary_dim == head_dim,
+              "fused_qk_norm_mrope requires rotary_dim == head_dim; "
+              "partial rotary is not supported by this kernel");
   TORCH_CHECK(mrope_section_t + mrope_section_h <= half_rd,
               "mrope_section_t + mrope_section_h must be <= rotary_dim/2");
 
@@ -380,6 +385,18 @@ void fused_qk_norm_mrope(
 
   auto device_id = qkv.get_device();
   auto stream = at::cuda::getCurrentCUDAStream(device_id);
+
+  // BFloat16 requires SM80+. Check here to give a clear error rather than
+  // silently returning early inside the kernel (same constraint as
+  // fused_qk_norm_rope).
+  if (qkv.scalar_type() == at::kBFloat16 ||
+      cos.scalar_type() == at::kBFloat16) {
+    auto* dev_prop = at::cuda::getDeviceProperties(device_id);
+    TORCH_CHECK(dev_prop->major >= 8,
+                "fused_qk_norm_mrope with BFloat16 requires SM80 (Ampere) "
+                "or newer; device SM is ",
+                dev_prop->major, ".", dev_prop->minor);
+  }
 
   VLLM_DISPATCH_HALF_TYPES(qkv.scalar_type(), "fused_qk_norm_mrope", [&] {
     using qkv_scalar_t = scalar_t;
