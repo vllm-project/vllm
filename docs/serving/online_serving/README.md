@@ -43,14 +43,14 @@ We currently support the following OpenAI APIs:
 
 For further details on pooling models, please refer to [this page](../../models/pooling_models/README.md).
 
-- Classification Usages
-    - [Classification API](../../models/pooling_models/classify.md#online-serving)(`/classify`)
+- [Classification Usages](../../models/pooling_models/classify.md)
+    - [Classification API](../../models/pooling_models/classify.md#online-serving) (`/classify`)
     - Only applicable to [classification models](../../models/pooling_models/classify.md).
-- Embedding Usages
+- [Embedding Usages](../../models/pooling_models/embed.md)
     - [Cohere Embed API](../../models/pooling_models/embed.md#cohere-embed-api) (`/v2/embed`)
     - [OpenAI-compatible Embeddings API](../../models/pooling_models/embed.md#openai-compatible-embeddings-api) (`/v1/embeddings`)
     - Only applicable to [embedding models](../../models/pooling_models/embed.md).
-- Scoring Usages
+- [Scoring Usages](../../models/pooling_models/scoring.md)
     - [Score API](../../models/pooling_models/scoring.md#score-api) (`/score`)
     - [Cohere Rerank API](../../models/pooling_models/scoring.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
     - Applicable to [score models](../../models/pooling_models/scoring.md) (cross-encoder, bi-encoder, late-interaction).
