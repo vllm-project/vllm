@@ -110,6 +110,7 @@ plugins:
       redirect_maps:
         features/spec_decode/README.md: features/speculative_decoding/README.md
         features/spec_decode/speculators.md: features/speculative_decoding/speculators.md
+        serving/openai_compatible_server.md: serving/online_serving/README.md
 
 markdown_extensions:
   - attr_list
