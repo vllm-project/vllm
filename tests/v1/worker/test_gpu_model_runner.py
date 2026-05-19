@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 import torch
 
+import vllm.v1.worker.gpu.warmup as gpu_warmup
 import vllm.v1.worker.gpu_model_runner as gpu_model_runner_module
 from vllm.config import (
     AttentionConfig,
@@ -48,6 +49,113 @@ from vllm.v1.worker.utils import select_common_block_size
 BLOCK_SIZE = 16
 NUM_BLOCKS = 10
 DEVICE_TYPE = current_platform.device_type
+
+
+class _FakeV2WarmupKVConnector:
+    def __init__(self):
+        self.calls = []
+
+    def set_disabled(self, disabled: bool):
+        self.calls.append(disabled)
+
+
+def _make_v2_warmup_runner_stub(max_num_seqs=2, max_num_batched_tokens=32):
+    kv_connector = _FakeV2WarmupKVConnector()
+    return SimpleNamespace(
+        num_speculative_steps=0,
+        kv_cache_config=SimpleNamespace(
+            num_blocks=16,
+            kv_cache_groups=[
+                SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=BLOCK_SIZE))
+            ],
+        ),
+        scheduler_config=SimpleNamespace(
+            max_num_seqs=max_num_seqs,
+            max_num_batched_tokens=max_num_batched_tokens,
+        ),
+        is_pooling_model=False,
+        is_last_pp_rank=True,
+        model_config=SimpleNamespace(get_vocab_size=lambda: 64),
+        kv_connector=kv_connector,
+    )
+
+
+def _capture_v2_warmup_call(output: SchedulerOutput, calls: list[tuple]):
+    if output.scheduled_new_reqs:
+        calls.append(("prefill", len(output.scheduled_new_reqs)))
+    elif output.scheduled_cached_reqs.req_ids:
+        calls.append(("decode", len(output.scheduled_cached_reqs.req_ids)))
+    elif output.finished_req_ids:
+        calls.append(("cleanup", len(output.finished_req_ids)))
+    else:
+        calls.append(("empty", 0))
+
+
+def test_v2_warmup_also_runs_single_request_path(monkeypatch):
+    monkeypatch.setattr(gpu_warmup.torch.accelerator, "synchronize", lambda: None)
+
+    runner = _make_v2_warmup_runner_stub(max_num_seqs=2)
+    execute_calls: list[tuple[str, int]] = []
+    sample_calls: list[int | None] = []
+
+    gpu_warmup.warmup_kernels(
+        runner,
+        lambda output: _capture_v2_warmup_call(output, execute_calls),
+        lambda grammar_output: sample_calls.append(
+            None
+            if grammar_output is None
+            else len(grammar_output.structured_output_request_ids)
+        ),
+    )
+
+    assert execute_calls == [
+        ("prefill", 2),
+        ("decode", 2),
+        ("cleanup", 2),
+        ("prefill", 1),
+        ("decode", 1),
+        ("cleanup", 1),
+    ]
+    assert sample_calls == [2, None, 1, None]
+    assert runner.kv_connector.calls == [True, False]
+
+
+def test_v2_warmup_does_not_duplicate_single_request_path(monkeypatch):
+    monkeypatch.setattr(gpu_warmup.torch.accelerator, "synchronize", lambda: None)
+
+    runner = _make_v2_warmup_runner_stub(max_num_seqs=1)
+    execute_calls: list[tuple[str, int]] = []
+
+    gpu_warmup.warmup_kernels(
+        runner,
+        lambda output: _capture_v2_warmup_call(output, execute_calls),
+        lambda grammar_output: None,
+    )
+
+    assert execute_calls == [
+        ("prefill", 1),
+        ("decode", 1),
+        ("cleanup", 1),
+    ]
+    assert runner.kv_connector.calls == [True, False]
+
+
+def test_v2_warmup_restores_kv_connector_on_error(monkeypatch):
+    monkeypatch.setattr(gpu_warmup.torch.accelerator, "synchronize", lambda: None)
+
+    runner = _make_v2_warmup_runner_stub(max_num_seqs=2)
+
+    def raise_on_execute_model(output):
+        raise RuntimeError("warmup error")
+
+    with pytest.raises(RuntimeError, match="warmup error"):
+        gpu_warmup.warmup_kernels(
+            runner,
+            raise_on_execute_model,
+            lambda grammar_output: None,
+        )
+
+    assert runner.kv_connector.calls == [True, False]
 
 
 def initialize_kv_cache(runner: GPUModelRunner):
