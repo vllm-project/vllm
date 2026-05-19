@@ -14,7 +14,11 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
-from vllm.v1.attention.ops.deepseek_v4_ops import fused_q_kv_rmsnorm
+from vllm.utils.import_utils import has_tilelang
+from vllm.v1.attention.ops.deepseek_v4_ops import (
+    fused_q_kv_rmsnorm,
+    fused_qkv_rmsnorm_tilelang,
+)
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_cuda_alike(),
@@ -49,6 +53,38 @@ def test_fused_q_kv_rmsnorm_correctness(num_tokens: int, dtype: torch.dtype):
     tol = dict(rtol=1e-2, atol=1e-2)
     torch.testing.assert_close(qr_out, qr_ref, **tol)
     torch.testing.assert_close(kv_out, kv_ref, **tol)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not has_tilelang(),
+    reason="TileLang fused_qkv_rmsnorm requires TileLang on CUDA",
+)
+@pytest.mark.parametrize(
+    ("q_size", "kv_size"),
+    [
+        (1024, 512),  # DeepSeek-V4-Flash
+        (1536, 512),  # DeepSeek-V4-Pro
+    ],
+)
+@pytest.mark.parametrize("num_tokens", [1, 17, 256, 1024, 8192])
+def test_fused_qkv_rmsnorm_tilelang_deepseek_v4_correctness(
+    num_tokens: int,
+    q_size: int,
+    kv_size: int,
+):
+    torch.manual_seed(0)
+    device = "cuda"
+    dtype = torch.bfloat16
+    qkv = torch.randn(num_tokens, q_size + kv_size, dtype=dtype, device=device)
+    qw = torch.randn(q_size, dtype=dtype, device=device)
+    kvw = torch.randn(kv_size, dtype=dtype, device=device)
+    eps = 1e-6
+
+    qr_out, kv_out = fused_qkv_rmsnorm_tilelang(qkv, qw, kvw, eps)
+
+    tol = dict(rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(qr_out, _ref_rmsnorm(qkv[:, :q_size], qw, eps), **tol)
+    torch.testing.assert_close(kv_out, _ref_rmsnorm(qkv[:, q_size:], kvw, eps), **tol)
 
 
 @pytest.mark.parametrize("num_tokens", [65535, 65536, 131072])

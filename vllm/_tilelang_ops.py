@@ -44,6 +44,70 @@ def compute_num_split(block_k: int, k: int | None, grid_size: int) -> int:
         tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL: 10,
     },
 )
+def fused_qkv_rmsnorm_tilelang_kernel(
+    qkv,
+    q_out,
+    q_weight,
+    kv_out,
+    kv_weight,
+    eps: float,
+    q_size: int,
+    kv_size: int,
+    qkv_cols: int,
+    block_size: int,
+    dtype: str,
+    n_thr: int = 32,
+):
+    """Fused DeepSeek-V4 q/kv RMSNorm over the compact GEMM output.
+
+    This TileLang variant consumes the pre-split
+    ``[num_tokens, q_lora_rank + head_dim]`` GEMM output directly so the
+    kernel sees the same compact row layout produced by fused_wqa_wkv.
+    """
+    num_tokens = T.dynamic("num_tokens")
+
+    qkv: T.Tensor[[num_tokens, qkv_cols], dtype]  # type: ignore[no-redef, valid-type]
+    q_out: T.Tensor[[num_tokens, q_size], dtype]  # type: ignore[no-redef, valid-type]
+    q_weight: T.Tensor[[q_size], dtype]  # type: ignore[no-redef, valid-type]
+    kv_out: T.Tensor[[num_tokens, kv_size], dtype]  # type: ignore[no-redef, valid-type]
+    kv_weight: T.Tensor[[kv_size], dtype]  # type: ignore[no-redef, valid-type]
+
+    with T.Kernel(num_tokens, 2, threads=n_thr) as (token_idx, task_idx):
+        vals = T.alloc_fragment(block_size, T.float32)
+        squares = T.alloc_fragment(block_size, T.float32)
+        sq_sum = T.alloc_fragment(1, T.float32)
+
+        if task_idx == 0:
+            for j in T.Parallel(block_size):
+                vals[j] = T.if_then_else(j < q_size, qkv[token_idx, j], 0.0)
+                squares[j] = vals[j] * vals[j]
+            T.reduce_sum(squares, sq_sum, dim=0)
+            rrms_q = T.rsqrt(sq_sum[0] / q_size + eps)
+            for j in T.Parallel(block_size):
+                if j < q_size:
+                    q_out[token_idx, j] = vals[j] * rrms_q * q_weight[j]
+        else:
+            for j in T.Parallel(block_size):
+                vals[j] = T.if_then_else(
+                    j < kv_size,
+                    qkv[token_idx, q_size + j],
+                    0.0,
+                )
+                squares[j] = vals[j] * vals[j]
+            T.reduce_sum(squares, sq_sum, dim=0)
+            rrms_kv = T.rsqrt(sq_sum[0] / kv_size + eps)
+            for j in T.Parallel(block_size):
+                if j < kv_size:
+                    kv_out[token_idx, j] = vals[j] * rrms_kv * kv_weight[j]
+
+
+@tilelang.jit(
+    pass_configs={
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+        tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL: 10,
+    },
+)
 def mhc_pre_big_fuse_tilelang(
     gemm_out_mul,
     gemm_out_sqrsum,
@@ -160,7 +224,7 @@ def mhc_pre_big_fuse_tilelang(
             ###################################################################
             # _pre_apply_mix_fwd
             for i0_h in T.Pipelined(hidden_size // hidden_block, num_stages=2):
-                xs = T.alloc_shared((hc_mult, hidden_block), T.float32)
+                xs = T.alloc_shared((hc_mult, hidden_block), T.bfloat16)
                 xl = T.alloc_fragment((hc_mult, hidden_block), T.float32)
                 T.copy(residual[i, 0, i0_h * hidden_block], xs)
                 T.copy(xs, xl)
