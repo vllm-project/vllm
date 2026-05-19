@@ -177,10 +177,6 @@ class KVCacheLayout(Enum):
     BLHNC = (1, 0, 2, 3, 4)  # [B, L, H, N, C]
     BHLNC = (1, 2, 0, 3, 4)  # [B, H, L, N, C]
 
-    # Aliases — kept for env-var compat and brevity.
-    HNC = LBHNC
-    NHC = LBNHC
-
     @property
     def stride_order(self) -> tuple[int, ...]:
         return self.value
