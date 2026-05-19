@@ -266,6 +266,39 @@ class TestCudagraphDispatcher:
 
         assert dispatcher.get_capture_descs() == []
 
+    def test_deepseek_v4_mtp_spec_decode_keeps_full_and_piecewise_graphs(self):
+        comp_config = CompilationConfig(
+            cudagraph_mode="FULL_AND_PIECEWISE",
+            mode=CompilationMode.VLLM_COMPILE,
+            cudagraph_capture_sizes=[3, 6, 12, 18],
+        )
+        config = _create_vllm_config(comp_config, max_num_seqs=8)
+        config.speculative_config = MagicMock()
+        config.speculative_config.method = "mtp"
+        config.speculative_config.num_speculative_tokens = 2
+        config.model_config = MagicMock()
+        config.model_config.hf_config = MagicMock()
+        config.model_config.hf_config.model_type = "deepseek_v4"
+        config.model_config.hf_config.architectures = ["DeepseekV4ForCausalLM"]
+
+        dispatcher = CudagraphDispatcher(config)
+        dispatcher.initialize_cudagraph_keys(
+            cudagraph_mode=comp_config.cudagraph_mode,
+            uniform_decode_query_len=3,
+        )
+
+        assert len(dispatcher.cudagraph_keys[CUDAGraphMode.FULL]) > 0
+        assert len(dispatcher.cudagraph_keys[CUDAGraphMode.PIECEWISE]) > 0
+
+        rt_mode, key = dispatcher.dispatch(
+            num_tokens=12,
+            uniform_decode=True,
+            has_lora=False,
+        )
+
+        assert rt_mode == CUDAGraphMode.FULL
+        assert key == BatchDescriptor(num_tokens=12, num_reqs=4, uniform=True)
+
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
 class TestCUDAGraphWrapper:

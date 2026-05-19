@@ -46,12 +46,12 @@ _DEEPSEEK_V4_SPARSE_MLA_MIXED_WARMUP_TOKENS = 16
 # value via _clamp_warmup_tokens at the call site, smaller caps clamp
 # down naturally.
 _DEEPSEEK_V4_SPARSE_MLA_PREFILL_WARMUP_TOKENS = 8192
-# Steady-state MTP decode shapes to warm. We always include 1 and 2; the
-# scheduler's `max_num_seqs` is appended dynamically at the call site so
-# kernels selected per-shape (e.g. `_fp8_paged_mqa_logits_kernel`'s
-# adaptive BLOCK_M) are covered for the largest in-flight batch the
-# server will ever issue.
-_DEEPSEEK_V4_MTP_UNIFORM_DECODE_WARMUP_REQUESTS = (1, 2)
+# Steady-state MTP decode shapes to warm. Keep this bounded to the edge
+# deployment range we expect to optimize; warming the scheduler's raw
+# max_num_seqs (often 1024) can consume multiple GiB of temporary workspace
+# on long-context SM12x serves before the first request.
+_DEEPSEEK_V4_MTP_UNIFORM_DECODE_WARMUP_REQUESTS = (1, 2, 4, 8, 16, 24, 32)
+_DEEPSEEK_V4_MTP_UNIFORM_DECODE_MAX_WARMUP_REQUESTS = 32
 _DEEPSEEK_V4_SLOT_MAPPING_WARMUP_TOKENS = tuple(range(1, 17)) + (
     32,
     64,
@@ -108,8 +108,15 @@ def _deepseek_v4_mtp_uniform_decode_warmup_requests(
     if query_len <= 0:
         return ()
 
-    max_warmup_reqs = min(max_reqs, max_tokens // query_len)
-    candidates = sorted(set(_DEEPSEEK_V4_MTP_UNIFORM_DECODE_WARMUP_REQUESTS) | {max_reqs})
+    max_warmup_reqs = min(
+        max_reqs,
+        max_tokens // query_len,
+        _DEEPSEEK_V4_MTP_UNIFORM_DECODE_MAX_WARMUP_REQUESTS,
+    )
+    candidates = sorted(
+        set(_DEEPSEEK_V4_MTP_UNIFORM_DECODE_WARMUP_REQUESTS)
+        | {max_warmup_reqs}
+    )
     return tuple(reqs for reqs in candidates if reqs <= max_warmup_reqs)
 
 
