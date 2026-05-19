@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.model_executor.models.deepseek_v4 import (
+from vllm.models.deepseek_v4.nvidia.model import (
     DeepseekV4MegaMoEExperts,
     _stage_deepseek_v4_mega_moe_inputs,
     make_deepseek_v4_expert_params_mapping,
