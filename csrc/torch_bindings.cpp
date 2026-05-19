@@ -523,7 +523,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "                     Tensor slot_mapping,"
       "                     Tensor! kv_cache,"
       "                     str kv_cache_dtype,"
-      "                     Tensor kv_cache_scale) -> ()");
+      "                     Tensor kv_cache_scale,"
+      "                     Tensor! k_pe_out) -> ()");
   cache_ops.impl("concat_and_cache_mla_rope_fused", torch::kCUDA,
                  &concat_and_cache_mla_rope_fused);
 
