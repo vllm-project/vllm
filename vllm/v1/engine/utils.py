@@ -1165,13 +1165,24 @@ def wait_for_engine_startup(
         and not parallel_config.data_parallel_external_lb
     )
 
-    if proc_manager is not None:
+    can_poll_process_sentinels = os.name != "nt"
+    if proc_manager is not None and can_poll_process_sentinels:
         for sentinel in proc_manager.sentinels():
             poller.register(sentinel, zmq.POLLIN)
-    if coord_process is not None:
+    if coord_process is not None and can_poll_process_sentinels:
         poller.register(coord_process.sentinel, zmq.POLLIN)
     while any(conn_pending) or any(start_pending):
         events = poller.poll(STARTUP_POLL_PERIOD_MS)
+        if not can_poll_process_sentinels:
+            finished = proc_manager.finished_procs() if proc_manager else {}
+            if coord_process is not None and coord_process.exitcode is not None:
+                finished[coord_process.name] = coord_process.exitcode
+            if finished:
+                raise RuntimeError(
+                    "Engine core initialization failed. "
+                    "See root cause above. "
+                    f"Failed core proc(s): {finished}"
+                )
         if not events:
             if any(conn_pending):
                 logger.debug(

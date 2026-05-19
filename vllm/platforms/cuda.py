@@ -414,6 +414,14 @@ class CudaPlatformBase(Platform):
             if vit_attn_backend == AttentionBackendEnum.TORCH_SDPA:
                 return vit_attn_backend
             try:
+                if vit_attn_backend == AttentionBackendEnum.FLASH_ATTN:
+                    from vllm.v1.attention.backends.fa_utils import (
+                        is_flash_attn_varlen_func_available,
+                    )
+
+                    if not is_flash_attn_varlen_func_available():
+                        continue
+
                 backend_class = vit_attn_backend.get_class()
                 is_backend_supported = backend_class.supports_head_size(
                     head_size

@@ -683,11 +683,11 @@ __global__ void grouped_topk_fused_small_expert_count_kernel(
 #endif
   // declare shared memory structure
   // number of experts is bounded by number of threads
-  __shared__ float __attribute((aligned(128))) smemScoreSigmoid[MaxNumExperts];
-  __shared__ float __attribute((aligned(128))) smemScoreBias[MaxNumExperts];
+  __shared__ __align__(128) float smemScoreSigmoid[MaxNumExperts];
+  __shared__ __align__(128) float smemScoreBias[MaxNumExperts];
   // number of expert groups is bounded by number of warps
   int constexpr NumWarps = MaxNumExperts / WARP_SIZE;
-  __shared__ float __attribute((aligned(128))) smemGroupScores[NumWarps];
+  __shared__ __align__(128) float smemGroupScores[NumWarps];
 
   // needed for warp reduce
   auto block = cg::this_thread_block();
@@ -794,10 +794,8 @@ __global__ void grouped_topk_fused_small_expert_count_kernel(
 
     int constexpr NumExpertWarps = (MaxNumExperts - 1) / MaxNumExpertsUnit + 1;
     int constexpr NumInterTopK = NumExpertWarps * MaxNumTopExperts;
-    __shared__ float
-        __attribute((aligned(128))) smemInterTopScores[NumInterTopK];
-    __shared__ int32_t
-        __attribute((aligned(128))) smemInterTopExperts[NumInterTopK];
+    __shared__ __align__(128) float smemInterTopScores[NumInterTopK];
+    __shared__ __align__(128) int32_t smemInterTopExperts[NumInterTopK];
     if (warpIdx < NumExpertWarps) {
       int offset = warpIdx * WARP_SIZE * MaxNumTopGroups;
 #pragma unroll

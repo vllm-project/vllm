@@ -19,6 +19,19 @@ For events, please visit [vllm.ai/events](https://vllm.ai/events) to join us.
 
 ---
 
+## What's new
+
+- [2026/05/19] Windows source builds are now documented and validated on the
+  `windows-compat` branch. See [WINDOWS_COMPAT.md](WINDOWS_COMPAT.md) for a
+  start-from-scratch CUDA 13 + Python virtual environment setup, runtime
+  environment variables, and smoke-test commands.
+- [2026/05/19] Added Windows CUDA compatibility fixes across build setup,
+  networking, uvloop fallback behavior, CUDA kernels, FlashAttention fallback
+  handling, and Blackwell-safe multimodal attention backend selection.
+- [2026/05/19] Added `scripts/windows_cuda_smoke.py` so Windows builders can
+  quickly verify the built wheel can import vLLM, see CUDA, and load the
+  expected runtime libraries before moving on to larger model tests.
+
 ## About
 
 vLLM is a fast and easy-to-use library for LLM inference and serving.

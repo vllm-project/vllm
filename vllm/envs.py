@@ -741,12 +741,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Useful for debugging
     "VLLM_TRACE_FUNCTION": lambda: int(os.getenv("VLLM_TRACE_FUNCTION", "0")),
     # Whether to use the FlashInfer top-k / top-p sampler on CUDA. Enabled
-    # by default when the hardware supports it — set to 0 to opt out
-    # explicitly, which forces the PyTorch-native (Triton for bs>=8) path.
+    # by default when the hardware supports it except on Windows, where the
+    # FlashInfer JIT sampler can generate Ninja files with unescaped paths.
+    # Set to 0 to opt out explicitly, which forces the PyTorch-native path.
     "VLLM_USE_FLASHINFER_SAMPLER": lambda: (
         bool(int(os.environ["VLLM_USE_FLASHINFER_SAMPLER"]))
         if "VLLM_USE_FLASHINFER_SAMPLER" in os.environ
-        else True
+        else sys.platform != "win32"
     ),
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION": lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
@@ -807,9 +808,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_USE_RAY_V2_EXECUTOR_BACKEND", "1"))
     ),
     # Use dedicated multiprocess context for workers.
-    # Both spawn and fork work
+    # Windows does not support fork, so native Windows builds default to spawn.
     "VLLM_WORKER_MULTIPROC_METHOD": env_with_choices(
-        "VLLM_WORKER_MULTIPROC_METHOD", "fork", ["spawn", "fork"]
+        "VLLM_WORKER_MULTIPROC_METHOD",
+        "spawn" if sys.platform == "win32" else "fork",
+        ["spawn", "fork"],
     ),
     # Path to the cache for storing downloaded assets
     "VLLM_ASSETS_CACHE": lambda: os.path.expanduser(

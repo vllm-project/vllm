@@ -11,7 +11,6 @@ import warnings
 from typing import Any
 
 import torch
-import uvloop
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, PreTrainedTokenizerBase
 
@@ -33,6 +32,7 @@ from vllm.benchmarks.datasets import (
     add_random_dataset_base_args,
     add_random_multimodal_dataset_args,
 )
+from vllm.utils import uvloop_compat as uvloop
 from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write_to_json
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.inputs import TextPrompt, TokensPrompt

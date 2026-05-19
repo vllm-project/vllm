@@ -5,6 +5,28 @@ extern "C" {
 #include <stdbool.h>
 #include <time.h>
 
+#ifdef _WIN32
+  #define WIN32_LEAN_AND_MEAN
+  #include <windows.h>
+  #ifndef CLOCK_MONOTONIC
+    #define CLOCK_MONOTONIC 1
+  #endif
+
+static int clock_gettime(int, struct timespec* ts) {
+  LARGE_INTEGER frequency;
+  LARGE_INTEGER counter;
+  if (!QueryPerformanceFrequency(&frequency) ||
+      !QueryPerformanceCounter(&counter)) {
+    return -1;
+  }
+  ts->tv_sec = (time_t)(counter.QuadPart / frequency.QuadPart);
+  ts->tv_nsec = (long)(((counter.QuadPart % frequency.QuadPart) *
+                        1000000000LL) /
+                       frequency.QuadPart);
+  return 0;
+}
+#endif
+
 #if defined(__i386__) || defined(__x86_64__)
   #include <cpuid.h>
   #include <mwaitxintrin.h>

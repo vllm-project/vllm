@@ -18,6 +18,10 @@
 #include <cooperative_groups.h>
 #include <cuda_runtime.h>
 
+#ifdef small
+  #undef small
+#endif
+
 #include <torch/cuda.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>

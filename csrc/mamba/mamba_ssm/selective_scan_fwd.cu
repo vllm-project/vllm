@@ -399,6 +399,21 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     }
 }
 
+template <typename Kernel>
+void set_max_dynamic_shared_memory(Kernel kernel, int smem_size) {
+#ifdef USE_ROCM
+    C10_HIP_CHECK(hipFuncSetAttribute(
+        reinterpret_cast<const void*>(kernel),
+        hipFuncAttributeMaxDynamicSharedMemorySize,
+        smem_size));
+#else
+    C10_CUDA_CHECK(cudaFuncSetAttribute(
+        kernel,
+        cudaFuncAttributeMaxDynamicSharedMemorySize,
+        smem_size));
+#endif
+}
+
 template<int kNThreads, int kNItems, typename input_t, typename weight_t, typename state_t>
 void selective_scan_fwd_launch(SSMParamsBase &params, cudaStream_t stream) {
     // Only kNRows == 1 is tested for now, which ofc doesn't differ from previously when we had each block
@@ -415,13 +430,7 @@ void selective_scan_fwd_launch(SSMParamsBase &params, cudaStream_t stream) {
                 dim3 grid(params.batch, params.dim / kNRows);
                 auto kernel = &selective_scan_fwd_kernel<Ktraits>;
                 if (kSmemSize >= 48 * 1024) {
-#ifdef USE_ROCM
-                    C10_HIP_CHECK(hipFuncSetAttribute(
-                        reinterpret_cast<const void*>(kernel), hipFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
-#else
-                    C10_CUDA_CHECK(cudaFuncSetAttribute(
-                        kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
-#endif
+                    set_max_dynamic_shared_memory(kernel, kSmemSize);
                 }
                 kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
                 C10_CUDA_KERNEL_LAUNCH_CHECK();

@@ -80,7 +80,7 @@ __device__ void compute_dynamic_per_token_scales(
     scalar_t const* __restrict__ residual = nullptr,
     int32_t const group_size = 0, int64_t outer_scale_stride = 1) {
   float block_absmax_val_maybe = 0.0f;
-  constexpr scalar_out_t qmax{quant_type_max_v<scalar_out_t>};
+  constexpr scalar_out_t qmax{quant_type_max_val<scalar_out_t>()};
   __syncthreads();
 
   int64_t const input_token_offset =
@@ -303,7 +303,7 @@ __device__ void compute_dynamic_per_token_scales(
     int32_t const hidden_size, int32_t const input_stride,
     scalar_t const* __restrict__ residual = nullptr,
     int64_t outer_scale_stride = 1) {
-  constexpr scalar_out_t qmax{quant_type_max_v<scalar_out_t>};
+  constexpr scalar_out_t qmax{quant_type_max_val<scalar_out_t>()};
 
   const int VEC_SIZE = 4;
   float block_absmax_val_maybe = 0.0f;

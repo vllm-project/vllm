@@ -54,6 +54,11 @@ extern "C" {
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 
+#ifdef _WIN32
+  #include <BaseTsd.h>
+typedef SSIZE_T ssize_t;
+#endif
+
 #include <sys/types.h>
 
 char error_msg[10240];  // 10KB buffer to store error messages

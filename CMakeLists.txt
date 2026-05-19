@@ -68,7 +68,7 @@ set(TORCH_SUPPORTED_VERSION_ROCM "2.11.0")
 # `VLLM_PYTHON_EXECUTABLE` and is one of the supported versions.
 #
 if (VLLM_PYTHON_EXECUTABLE)
-  find_python_from_executable(${VLLM_PYTHON_EXECUTABLE} "${PYTHON_SUPPORTED_VERSIONS}")
+  find_python_from_executable("${VLLM_PYTHON_EXECUTABLE}" "${PYTHON_SUPPORTED_VERSIONS}")
 else()
   message(FATAL_ERROR
     "Please set VLLM_PYTHON_EXECUTABLE to the path of the desired python version"
@@ -115,7 +115,7 @@ endif()
 #
 set(VLLM_SPINLOOP_EXT_SRC "csrc/spinloop.cpp")
 set(SPINLOOP_COMPILE_FLAGS "")
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64" AND NOT MSVC)
   list(APPEND SPINLOOP_COMPILE_FLAGS "-mmwaitx")
 endif()
 define_extension_target(
@@ -227,6 +227,13 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   if(CUDA_VERSION VERSION_GREATER_EQUAL 13.0)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -I${CUDA_TOOLKIT_ROOT_DIR}/include/cccl")
   endif()
+endif()
+
+if(MSVC)
+  add_compile_options(
+    $<$<COMPILE_LANGUAGE:CXX>:/wd4251>
+    $<$<COMPILE_LANGUAGE:CXX>:/wd4275>
+    $<$<COMPILE_LANGUAGE:CXX>:/wd4819>)
 endif()
 
 #
@@ -392,7 +399,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # marlin arches for other files
   cuda_archs_loose_intersection(MARLIN_OTHER_ARCHS "7.5;8.0+PTX" "${CUDA_ARCHS}")
 
-  if (MARLIN_OTHER_ARCHS)
+  if (MARLIN_OTHER_ARCHS AND NOT MSVC)
 
     #
     # For the Marlin kernels we automatically generate sources for various
@@ -619,6 +626,7 @@ define_extension_target(
   ARCHITECTURES ${VLLM_GPU_ARCHES}
   INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
   INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
+  LIBRARIES CUDA::cublas
   USE_SABI 3
   WITH_SOABI)
 
@@ -646,8 +654,13 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     list(APPEND VLLM_STABLE_EXT_SRC
       "csrc/libtorch_stable/permute_cols.cu"
       "csrc/libtorch_stable/quantization/w8a8/fp8/per_token_group_quant.cu"
-      "csrc/libtorch_stable/quantization/w8a8/int8/per_token_group_quant.cu"
+      "csrc/libtorch_stable/quantization/w8a8/int8/per_token_group_quant.cu")
+    if(NOT MSVC)
+      list(APPEND VLLM_STABLE_EXT_SRC
       "csrc/libtorch_stable/quantization/awq/gemm_kernels.cu")
+    else()
+      message(STATUS "Not building AWQ GEMM kernels on MSVC.")
+    endif()
   endif()
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")
@@ -697,7 +710,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # The cutlass_scaled_mm kernels for Hopper (c3x, i.e. CUTLASS 3.x) require
   # CUDA 12.0 or later
   cuda_archs_loose_intersection(SCALED_MM_ARCHS "9.0a;" "${CUDA_ARCHS}")
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND SCALED_MM_ARCHS)
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND SCALED_MM_ARCHS AND NOT MSVC)
     set(SRCS
        "csrc/libtorch_stable/quantization/w8a8/cutlass/scaled_mm_c3x_sm90.cu"
        "csrc/libtorch_stable/quantization/w8a8/cutlass/c3x/scaled_mm_sm90_fp8.cu"
@@ -732,7 +745,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   else()
     cuda_archs_loose_intersection(SCALED_MM_ARCHS "12.0a;12.1a" "${CUDA_ARCHS}")
   endif()
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND SCALED_MM_ARCHS)
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND SCALED_MM_ARCHS AND NOT MSVC)
     set(SRCS
       "csrc/libtorch_stable/quantization/w8a8/cutlass/scaled_mm_c3x_sm120.cu"
       "csrc/libtorch_stable/quantization/w8a8/cutlass/c3x/scaled_mm_sm120_fp8.cu"
@@ -766,7 +779,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   else()
     cuda_archs_loose_intersection(SCALED_MM_ARCHS "10.0a;10.1a;10.3a" "${CUDA_ARCHS}")
   endif()
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND SCALED_MM_ARCHS)
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND SCALED_MM_ARCHS AND NOT MSVC)
     set(SRCS
       "csrc/libtorch_stable/quantization/w8a8/cutlass/scaled_mm_c3x_sm100.cu"
       "csrc/libtorch_stable/quantization/w8a8/cutlass/c3x/scaled_mm_sm100_fp8.cu"
@@ -800,7 +813,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "7.5;8.0;8.7;8.9+PTX" "${CUDA_ARCHS}")
   # subtract out the archs that are already built for 3x
   list(REMOVE_ITEM SCALED_MM_2X_ARCHS ${SCALED_MM_3X_ARCHS})
-  if (SCALED_MM_2X_ARCHS)
+  if (SCALED_MM_2X_ARCHS AND NOT MSVC)
     set(SRCS "csrc/libtorch_stable/quantization/w8a8/cutlass/scaled_mm_c2x.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
@@ -826,7 +839,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # on Hopper). get_cutlass_(batched_)moe_mm_data should only be compiled
   # if it's possible to compile MoE kernels that use its output.
   cuda_archs_loose_intersection(SCALED_MM_ARCHS "9.0a" "${CUDA_ARCHS}")
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3 AND SCALED_MM_ARCHS)
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3 AND SCALED_MM_ARCHS AND NOT MSVC)
     set(SRCS "csrc/libtorch_stable/quantization/w8a8/cutlass/moe/grouped_mm_c3x_sm90.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
@@ -850,7 +863,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   else()
     cuda_archs_loose_intersection(SCALED_MM_ARCHS "10.0a;10.1a;10.3a" "${CUDA_ARCHS}")
   endif()
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND SCALED_MM_ARCHS)
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND SCALED_MM_ARCHS AND NOT MSVC)
     set(SRCS "csrc/libtorch_stable/quantization/w8a8/cutlass/moe/grouped_mm_c3x_sm100.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
@@ -875,7 +888,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   else()
     cuda_archs_loose_intersection(CUTLASS_MOE_DATA_ARCHS "9.0a;10.0a;10.1a;10.3a;12.0a;12.1a" "${CUDA_ARCHS}")
   endif()
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3 AND CUTLASS_MOE_DATA_ARCHS)
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3 AND CUTLASS_MOE_DATA_ARCHS AND NOT MSVC)
     set(SRCS "csrc/libtorch_stable/quantization/w8a8/cutlass/moe/moe_data.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
@@ -904,7 +917,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   else()
     cuda_archs_loose_intersection(FP4_ARCHS "12.0a;12.1a" "${CUDA_ARCHS}")
   endif()
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND FP4_ARCHS)
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND FP4_ARCHS AND NOT MSVC)
     set(SRCS
       "csrc/libtorch_stable/quantization/fp4/nvfp4_quant_kernels.cu"
       "csrc/libtorch_stable/quantization/fp4/activation_nvfp4_quant_fusion_kernels.cu"
@@ -938,7 +951,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   else()
     cuda_archs_loose_intersection(FP4_ARCHS "10.0a;10.1a;10.3a" "${CUDA_ARCHS}")
   endif()
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND FP4_ARCHS)
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND FP4_ARCHS AND NOT MSVC)
     set(SRCS
       "csrc/libtorch_stable/quantization/fp4/nvfp4_quant_kernels.cu"
       "csrc/libtorch_stable/quantization/fp4/activation_nvfp4_quant_fusion_kernels.cu"
@@ -1005,7 +1018,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   else()
     cuda_archs_loose_intersection(MLA_ARCHS "10.0a;10.1a;10.3a;12.0a;12.1a" "${CUDA_ARCHS}")
   endif()
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND MLA_ARCHS)
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND MLA_ARCHS AND NOT MSVC)
     set(SRCS
       "csrc/libtorch_stable/attention/mla/sm100_cutlass_mla_kernel.cu")
     set_gencode_flags_for_srcs(
@@ -1112,7 +1125,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   cuda_archs_loose_intersection(MARLIN_MOE_FP8_ARCHS "8.9;12.0;12.1" "${CUDA_ARCHS}")
   # moe marlin arches for other files
   cuda_archs_loose_intersection(MARLIN_MOE_OTHER_ARCHS "7.5;8.0+PTX" "${CUDA_ARCHS}")
-  if (MARLIN_MOE_OTHER_ARCHS)
+  if (MARLIN_MOE_OTHER_ARCHS AND NOT MSVC)
 
     #
     # For the Marlin MOE kernels we automatically generate sources for various
@@ -1282,5 +1295,9 @@ if (VLLM_GPU_LANG STREQUAL "CUDA")
     include(cmake/external_projects/qutlass.cmake)
 
     # vllm-flash-attn should be last as it overwrites some CMake functions
-    include(cmake/external_projects/vllm_flash_attn.cmake)
+    if(NOT MSVC)
+      include(cmake/external_projects/vllm_flash_attn.cmake)
+    else()
+      message(STATUS "Not building vllm-flash-attn extensions on MSVC.")
+    endif()
 endif ()

@@ -5065,7 +5065,10 @@ class GPUModelRunner(
                 if not is_mixture_of_experts(moe_candidate) and isinstance(
                     moe_candidate, SupportsMultiModal
                 ):
-                    moe_candidate = moe_candidate.get_language_model()
+                    try:
+                        moe_candidate = moe_candidate.get_language_model()
+                    except NotImplementedError:
+                        moe_candidate = None
                 if is_mixture_of_experts(moe_candidate):
                     self._moe_model = moe_candidate
 

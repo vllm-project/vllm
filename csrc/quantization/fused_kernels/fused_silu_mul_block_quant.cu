@@ -78,7 +78,7 @@ __global__ void silu_and_mul_per_block_quant_kernel(
   if (tid == 0) {
     float group_max = shared_max[0];
 
-    float const quant_range = quant_type_max_v<scalar_out_t>;
+    float const quant_range = quant_type_max_val<scalar_out_t>();
     float group_scale = group_max / quant_range;
 
     // Apply scale upper bound if provided

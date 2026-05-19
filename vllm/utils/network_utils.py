@@ -139,6 +139,14 @@ def get_tcp_uri(ip: str, port: int) -> str:
 
 
 def get_open_zmq_ipc_path() -> str:
+    if sys.platform == "win32":
+        host = get_loopback_ip()
+        family = socket.AF_INET6 if is_valid_ipv6_address(host) else socket.AF_INET
+        with socket.socket(family, socket.SOCK_STREAM) as s:
+            s.bind((host, 0))
+            port = s.getsockname()[1]
+        return get_tcp_uri(host, port)
+
     base_rpc_path = envs.VLLM_RPC_BASE_PATH
     return f"ipc://{base_rpc_path}/{uuid4()}"
 

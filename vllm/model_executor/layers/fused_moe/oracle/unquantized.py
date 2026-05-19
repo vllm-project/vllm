@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import sys
 from enum import Enum
 
 import torch
@@ -61,12 +62,18 @@ def _get_priority_backends(moe_config: FusedMoEConfig) -> list[UnquantizedMoeBac
             UnquantizedMoeBackend.BATCHED_TRITON,
         ]
     elif current_platform.is_cuda():
-        _AVAILABLE_BACKENDS = [
-            UnquantizedMoeBackend.FLASHINFER_TRTLLM,
-            UnquantizedMoeBackend.FLASHINFER_CUTLASS,
-            UnquantizedMoeBackend.TRITON,
-            UnquantizedMoeBackend.BATCHED_TRITON,
-        ]
+        if sys.platform == "win32":
+            _AVAILABLE_BACKENDS = [
+                UnquantizedMoeBackend.TRITON,
+                UnquantizedMoeBackend.BATCHED_TRITON,
+            ]
+        else:
+            _AVAILABLE_BACKENDS = [
+                UnquantizedMoeBackend.FLASHINFER_TRTLLM,
+                UnquantizedMoeBackend.FLASHINFER_CUTLASS,
+                UnquantizedMoeBackend.TRITON,
+                UnquantizedMoeBackend.BATCHED_TRITON,
+            ]
 
         # HACK: Qwen3.5 has crash with FLASHINFER_CUTLASS BF16 if DEP.
         # Updating the oracle querying logic is out of the scope of this
