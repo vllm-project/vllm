@@ -2459,8 +2459,9 @@ class EngineArgs:
             )
             if max_tokens is not None:
                 return max(max_tokens.values())
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(
+                "Failed to determine min multimodal batched tokens: %s", e)
         return None
 
     def _set_default_max_num_seqs_and_batched_tokens_args(
