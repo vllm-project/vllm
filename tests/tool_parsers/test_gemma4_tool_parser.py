@@ -728,3 +728,68 @@ class TestStreamingExtraction:
         }
 
         assert args_text.count("replace_all") == 1
+
+    def test_streaming_multiple_tool_calls_in_single_delta(
+        self, parser, mock_request
+    ):
+        """Multiple tool calls arriving in the same delta must all be parsed.
+
+        Regression test for: Gemma4 parser does not support multiple
+        function calls within a single delta chunk.
+        """
+        # Build chunks using STRING_DELIM to avoid quote issues
+        sd = '<|"|>'
+        chunks = [
+            f'<|tool_call>call:get_weather{{location:{sd}London{sd}}}<tool_call|>'
+            f'<|tool_call>call:get_time{{location:{sd}London{sd}}}<tool_call|>',
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+
+        # Collect all tool call deltas
+        all_tool_calls = []
+        for delta, _ in results:
+            if delta and delta.tool_calls:
+                all_tool_calls.extend(delta.tool_calls)
+
+        # Should have detected both tool calls
+        assert len(all_tool_calls) >= 2, (
+            f"Expected at least 2 tool calls, got {len(all_tool_calls)}"
+        )
+
+        # Verify function names
+        names = []
+        for tc in all_tool_calls:
+            func = tc.function if isinstance(tc.function, dict) else tc.function
+            if isinstance(func, dict):
+                name = func.get("name")
+            else:
+                name = getattr(func, "name", None)
+            if name:
+                names.append(name)
+
+        assert "get_weather" in names, f"get_weather not found in {names}"
+        assert "get_time" in names, f"get_time not found in {names}"
+
+    def test_streaming_multiple_tool_calls_sequential(
+        self, parser, mock_request
+    ):
+        """Multiple tool calls arriving sequentially across chunks."""
+        sd = '<|"|>'
+        chunks = [
+            f'<|tool_call>call:get_weather{{location:{sd}London{sd}}}',
+            "<tool_call|>",
+            f'<|tool_call>call:get_time{{location:{sd}London{sd}}}',
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+
+        all_tool_calls = []
+        for delta, _ in results:
+            if delta and delta.tool_calls:
+                all_tool_calls.extend(delta.tool_calls)
+
+        assert len(all_tool_calls) >= 2, (
+            f"Expected at least 2 tool calls, got {len(all_tool_calls)}"
+        )

@@ -526,56 +526,203 @@ class Gemma4ToolParser(ToolParser):
         current_text: str,
         delta_text: str,
     ) -> DeltaMessage | None:
-        """Tag-counting streaming parser.
+        """Streaming parser using full-match enumeration (Hermes-style).
 
-        Uses the proven approach from FunctionGemma/Hermes: count start/end
-        tags in previous vs current text to determine phase, then
-        accumulate-parse-diff for arguments.
+        Instead of relying on tag counting for phase detection, this method:
+        1. Uses regex findall to enumerate all **complete** tool calls in
+           current_text.
+        2. Compares against prev_tool_call_arr length to discover new ones.
+        3. Handles partial (incomplete) tool calls at the end separately.
+
+        This correctly handles the case where multiple tool calls appear in a
+        single delta (e.g.,
+        ``<|tool_call>call:f1{...}<tool_call|><|tool_call>call:f2{...}<tool_call|>``).
 
         Format: ``<|tool_call>call:name{args}<tool_call|>``
         """
-        start_count = current_text.count(self.tool_call_start_token)
-        end_count = current_text.count(self.tool_call_end_token)
+        # Find all complete tool calls in current text
+        all_matches = self.tool_call_regex.findall(current_text)
         prev_start_count = previous_text.count(self.tool_call_start_token)
         prev_end_count = previous_text.count(self.tool_call_end_token)
+        curr_start_count = current_text.count(self.tool_call_start_token)
+        curr_end_count = current_text.count(self.tool_call_end_token)
 
-        # Case 1: Not inside any tool call — emit as content
-        if (
-            start_count == end_count
-            and prev_end_count == end_count
-            and self.tool_call_end_token not in delta_text
-        ):
+        tool_call_deltas: list[DeltaToolCall] = []
+        content_delta: str | None = None
+
+        # --- Step 1: Process all complete tool calls ---
+        for i, (func_name, args_str) in enumerate(all_matches):
+            # Ensure state arrays are sized for this index
+            while len(self.prev_tool_call_arr) <= i:
+                self.prev_tool_call_arr.append({})
+                self.streamed_args_for_tool.append("")
+
+            # Send function name if not yet sent
+            if "name" not in self.prev_tool_call_arr[i]:
+                self.prev_tool_call_arr[i]["name"] = func_name
+                tool_call_deltas.append(
+                    DeltaToolCall(
+                        index=i,
+                        type="function",
+                        id=make_tool_call_id(),
+                        function=DeltaFunctionCall(name=func_name),
+                    )
+                )
+
+            # Parse arguments and diff against previously streamed
+            final_args = _parse_gemma4_args(args_str)
+            final_args_json = json.dumps(final_args, ensure_ascii=False)
+            prev_streamed = self.streamed_args_for_tool[i]
+
+            if len(final_args_json) > len(prev_streamed):
+                diff = final_args_json[len(prev_streamed):]
+                self.streamed_args_for_tool[i] = final_args_json
+                self.prev_tool_call_arr[i]["arguments"] = final_args
+                tool_call_deltas.append(
+                    DeltaToolCall(
+                        index=i,
+                        function=DeltaFunctionCall(arguments=diff),
+                    )
+                )
+
+            # Update current_tool_id to track the last known tool call
+            self.current_tool_id = i
+            self.current_tool_name_sent = True
+
+        # --- Step 2: Handle partial (incomplete) tool call ---
+        # If there are more start tags than end tags, there's an incomplete
+        # tool call at the end of current_text.
+        if curr_start_count > curr_end_count:
+            partial_idx = len(all_matches)  # index of the incomplete call
+
+            # Ensure state arrays are sized
+            while len(self.prev_tool_call_arr) <= partial_idx:
+                self.prev_tool_call_arr.append({})
+                self.streamed_args_for_tool.append("")
+
+            func_name, args_part = self._extract_partial_call(current_text)
+
+            if func_name is not None:
+                # Send function name if not yet sent
+                if "name" not in self.prev_tool_call_arr[partial_idx]:
+                    self.prev_tool_call_arr[partial_idx]["name"] = func_name
+                    tool_call_deltas.append(
+                        DeltaToolCall(
+                            index=partial_idx,
+                            type="function",
+                            id=make_tool_call_id(),
+                            function=DeltaFunctionCall(name=func_name),
+                        )
+                    )
+                    self.current_tool_id = partial_idx
+                    self.current_tool_name_sent = True
+
+                # Stream argument diff
+                if self.current_tool_name_sent and args_part:
+                    partial_delta = self._emit_argument_diff_for_index(
+                        partial_idx, args_part
+                    )
+                    if partial_delta:
+                        tool_call_deltas.append(partial_delta)
+
+        # --- Step 3: Handle content ---
+        # Case A: No tool call tokens at all — treat as pure content
+        if curr_start_count == 0 and prev_start_count == 0:
             if delta_text:
-                return DeltaMessage(content=delta_text)
+                content_delta = delta_text
+        # Case B: All tool calls completed and text appears after them
+        elif curr_start_count > 0 and curr_start_count == curr_end_count:
+            # Find text after the last <tool_call|>
+            last_end = current_text.rfind(self.tool_call_end_token)
+            if last_end != -1:
+                text_after = current_text[last_end + len(self.tool_call_end_token):]
+                prev_last_end = previous_text.rfind(self.tool_call_end_token)
+                prev_text_after = ""
+                if prev_last_end != -1:
+                    prev_text_after = previous_text[
+                        prev_last_end + len(self.tool_call_end_token):
+                    ]
+                # New content is what appeared since last check
+                if text_after.startswith(prev_text_after):
+                    new_content = text_after[len(prev_text_after):]
+                else:
+                    new_content = text_after
+                if new_content:
+                    content_delta = new_content
+
+        # --- Step 4: Build and return DeltaMessage ---
+        if content_delta or tool_call_deltas:
+            return DeltaMessage(
+                content=content_delta,
+                tool_calls=tool_call_deltas or [],
+            )
+        return None
+
+    def _emit_argument_diff_for_index(
+        self, index: int, raw_args_str: str
+    ) -> DeltaToolCall | None:
+        """Like _emit_argument_diff but accepts an explicit index.
+
+        Parse raw Gemma4 arguments for a specific tool call, convert to JSON,
+        diff against previously streamed args, and emit only the new chars.
+        """
+        try:
+            current_args = _parse_gemma4_args(raw_args_str, partial=True)
+        except Exception:
+            logger.debug(
+                "Could not parse partial Gemma4 args yet: %s",
+                raw_args_str[:100],
+            )
             return None
 
-        # Case 2: Starting a new tool call
-        if start_count > prev_start_count and start_count > end_count:
-            self.current_tool_id += 1
-            self.current_tool_name_sent = False
-            self.streamed_args_for_tool.append("")
-            self.prev_tool_call_arr.append({})
-            logger.debug("Starting new tool call %d", self.current_tool_id)
-            # Don't return yet — fall through to try parsing if there's
-            # content after <|tool_call> in this same delta
-            # (but usually it's just the token itself, so return None)
-            if len(delta_text) <= len(self.tool_call_start_token):
+        if not current_args:
+            return None
+
+        current_args_json = json.dumps(current_args, ensure_ascii=False)
+
+        # Withhold trailing closing characters that may shift as more
+        # tokens arrive. Strip trailing '}', '"', ']' and partial
+        # STRING_DELIM fragments ('<', '|', '\\', '>') to get the
+        # "safe prefix".
+        safe_json = current_args_json
+        while safe_json and safe_json[-1] in ("}", '"', "]", "<", "|", "\\", ">"):
+            safe_json = safe_json[:-1]
+
+        prev_streamed = self.streamed_args_for_tool[index]
+
+        if not safe_json or safe_json == prev_streamed:
+            return None
+
+        # Use find_common_prefix to handle cases where the value changed
+        # structurally (e.g., a string grew).
+        if prev_streamed:
+            prefix = find_common_prefix(prev_streamed, safe_json)
+            sent_len = len(prev_streamed)
+            prefix_len = len(prefix)
+
+            if prefix_len < sent_len:
+                # Structure changed — we sent too much. Truncate our
+                # tracking to the common prefix and wait for the final
+                # flush in _handle_tool_call_end.
+                self.streamed_args_for_tool[index] = prefix
                 return None
 
-        # Case 3: Tool call just ended
-        if end_count > prev_end_count:
-            return self._handle_tool_call_end(current_text)
+            # Stream the new stable portion
+            diff = safe_json[sent_len:]
+        else:
+            # First emission
+            diff = safe_json
 
-        # Case 4: In the middle of a tool call — parse partial content
-        if start_count > end_count:
-            return self._handle_tool_call_middle(current_text)
+        if diff:
+            self.streamed_args_for_tool[index] = safe_json
+            self.prev_tool_call_arr[index]["arguments"] = current_args
 
-        # Default: generate text outside tool calls
-        if delta_text:
-            text = delta_text.replace(self.tool_call_start_token, "")
-            text = text.replace(self.tool_call_end_token, "")
-            if text:
-                return DeltaMessage(content=text)
+            return DeltaToolCall(
+                index=index,
+                id=None,
+                function=DeltaFunctionCall(arguments=diff),
+            )
+
         return None
 
     def _extract_partial_call(self, current_text: str) -> tuple[str | None, str]:
@@ -641,7 +788,7 @@ class Gemma4ToolParser(ToolParser):
                         function=DeltaFunctionCall(
                             name=func_name,
                             arguments="",
-                        ).model_dump(exclude_none=True),
+                        ),
                     )
                 ]
             )
@@ -684,9 +831,7 @@ class Gemma4ToolParser(ToolParser):
                     tool_calls=[
                         DeltaToolCall(
                             index=self.current_tool_id,
-                            function=DeltaFunctionCall(arguments=diff).model_dump(
-                                exclude_none=True
-                            ),
+                            function=DeltaFunctionCall(arguments=diff),
                         )
                     ]
                 )
@@ -780,9 +925,7 @@ class Gemma4ToolParser(ToolParser):
                 tool_calls=[
                     DeltaToolCall(
                         index=self.current_tool_id,
-                        function=DeltaFunctionCall(arguments=diff).model_dump(
-                            exclude_none=True
-                        ),
+                        function=DeltaFunctionCall(arguments=diff),
                     )
                 ]
             )
