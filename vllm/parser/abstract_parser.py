@@ -698,9 +698,9 @@ class DelegatingParser(Parser):
                 delta_text = current_text
                 delta_token_ids = current_token_ids
 
-            # Preserve reasoning from boundary deltas (e.g. when speculative
+            # Preserve fields from boundary deltas (e.g. when speculative
             # decoding accepts a batch spanning the reasoning/content boundary).
-            saved_reasoning = delta_message.reasoning if delta_message else None
+            saved_delta = delta_message
 
             delta_message, state.function_name_returned = (
                 self._extract_tool_calls_streaming(
@@ -717,11 +717,17 @@ class DelegatingParser(Parser):
                 )
             )
 
-            if saved_reasoning is not None:
+            if saved_delta is not None and (
+                saved_delta.reasoning or saved_delta.content or saved_delta.role
+            ):
                 if delta_message is None:
-                    delta_message = DeltaMessage(reasoning=saved_reasoning)
-                else:
-                    delta_message.reasoning = saved_reasoning
+                    delta_message = DeltaMessage()
+                if saved_delta.reasoning:
+                    delta_message.reasoning = saved_delta.reasoning
+                if saved_delta.content:
+                    delta_message.content = saved_delta.content
+                if saved_delta.role:
+                    delta_message.role = saved_delta.role
             if (
                 delta_message
                 and delta_message.tool_calls
