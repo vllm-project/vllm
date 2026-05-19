@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Tests that triton_kernel_moe_forward correctly applies expert_map
-remapping when expert parallelism (EP) is enabled.
+Tests that triton_kernel_moe_forward selects the correct routing path on
+the legacy (v3.5.1) triton_kernels API:
 
-Both EP and non-EP paths use topk + make_routing_data. When expert_map
-is provided, global expert IDs are remapped to local IDs before building
-routing structures.
+- With no expert map (no EP), it uses the fused
+  `triton_kernels.routing.routing()` kernel directly.
+- With an expert map (EP), it falls back to topk + expert_map remap +
+  make_routing_data so global expert IDs are translated to local IDs
+  before building routing structures.
 """
 
 from unittest.mock import MagicMock, patch
@@ -16,14 +18,11 @@ import torch
 
 
 class TestTritonMoeForwardExpertMap:
-    """Test that triton_kernel_moe_forward applies expert_map remapping
-    when expert_map is provided (EP active)."""
+    """Test that triton_kernel_moe_forward dispatches to the right routing
+    path depending on whether expert parallelism is active."""
 
     @pytest.mark.parametrize("expert_map_present", [False, True])
     def test_routing_path_selection(self, expert_map_present):
-        """Verify that both EP and non-EP paths use topk + make_routing_data,
-        and that expert_map remapping is applied when present."""
-
         device = "cuda" if torch.cuda.is_available() else "cpu"
         mock_expert_map = (
             torch.tensor([0, -1, 1, -1], device=device) if expert_map_present else None
@@ -33,7 +32,17 @@ class TestTritonMoeForwardExpertMap:
 
         import_triton_kernels()
 
+        mock_routing_data = MagicMock()
+        mock_gather = MagicMock()
+        mock_scatter = MagicMock()
+
         with (
+            patch(
+                "vllm.model_executor.layers.fused_moe.experts."
+                "gpt_oss_triton_kernels_moe.use_legacy_triton_kernels",
+                True,
+            ),
+            patch("triton_kernels.routing.routing") as mock_fused_routing,
             patch("triton_kernels.topk.topk") as mock_topk,
             patch(
                 "vllm.model_executor.layers.fused_moe.experts."
@@ -48,14 +57,17 @@ class TestTritonMoeForwardExpertMap:
                 triton_kernel_moe_forward,
             )
 
-            mock_routing_data = MagicMock()
-            mock_gather = MagicMock()
-            mock_scatter = MagicMock()
+            mock_fused_routing.return_value = (
+                mock_routing_data,
+                mock_gather,
+                mock_scatter,
+            )
 
             sparse_result = MagicMock()
             sparse_result.indx = torch.tensor([[0, 2]], dtype=torch.int32)
             sparse_result.vals = torch.tensor([[0.6, 0.4]])
             mock_topk.return_value = sparse_result
+
             mock_make_routing.return_value = (
                 mock_routing_data,
                 mock_gather,
@@ -79,14 +91,20 @@ class TestTritonMoeForwardExpertMap:
                 expert_map=mock_expert_map,
             )
 
-            # Both paths use topk + make_routing_data
-            mock_topk.assert_called_once()
-            mock_make_routing.assert_called_once()
-
             if expert_map_present:
+                # EP: topk + expert_map remap + make_routing_data.
+                mock_topk.assert_called_once()
+                mock_make_routing.assert_called_once()
+                mock_fused_routing.assert_not_called()
+
                 # expert_map should be None in the fused_experts call
-                # (already applied)
+                # (already applied).
                 call_kwargs = mock_fused_experts.call_args
                 assert call_kwargs[1].get("expert_map") is None or (
                     len(call_kwargs[0]) > 0
                 )
+            else:
+                # No EP: single fused routing() call, no topk/make_routing.
+                mock_fused_routing.assert_called_once()
+                mock_topk.assert_not_called()
+                mock_make_routing.assert_not_called()
