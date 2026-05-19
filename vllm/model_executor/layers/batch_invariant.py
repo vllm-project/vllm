@@ -933,8 +933,6 @@ def enable_batch_invariant_mode():
     _batch_invariant_LIB = torch.library.Library("aten", "IMPL")
 
     if current_platform.is_cuda():
-        _register_common_overrides(_batch_invariant_LIB, "CUDA")
-
         if current_platform.is_device_capability_family(80):
             # SM80 (Ampere) cannot rely on cuBLASLt-only determinism; install the
             # triton persistent matmul overrides for mm/addmm/matmul/linear.
@@ -949,9 +947,11 @@ def enable_batch_invariant_mode():
         # Triton bmm/persistent-matmul kernels read this for the FP16 N-tile size;
         # set unconditionally because bmm is overridden on all CUDA platforms.
         _fp16_block_size_n = 256 if get_max_shared_memory_bytes() > 106496 else 128
+
+        _register_common_overrides(_batch_invariant_LIB, "CUDA")
     elif current_platform.is_xpu():
-        _register_common_overrides(_batch_invariant_LIB, "XPU")
         _register_matmul_overrides(_batch_invariant_LIB, "XPU")
+        _register_common_overrides(_batch_invariant_LIB, "XPU")
 
     torch.bmm = bmm_batch_invariant
 
