@@ -146,25 +146,27 @@ class PriorityRequestQueue(RequestQueue):
 
     def __init__(self) -> None:
         self._heap: list[Request] = []
-        self._removed: set[int] = set()
-        self._num_removed: int = 0
+        self._active_ids: set[int] = set()
 
     def add_request(self, request: Request) -> None:
         """Add a request to the queue according to priority policy."""
         heapq.heappush(self._heap, request)
+        self._active_ids.add(id(request))
 
     def pop_request(self) -> Request:
         """Pop a request from the queue according to priority policy."""
         while self._heap:
             request = heapq.heappop(self._heap)
-            if id(request) not in self._removed:
+            rid = id(request)
+            if rid in self._active_ids:
+                self._active_ids.remove(rid)
                 return request
         raise IndexError("pop from empty heap")
 
     def peek_request(self) -> Request:
         """Peek at the next request in the queue without removing it."""
         while self._heap:
-            if id(self._heap[0]) not in self._removed:
+            if id(self._heap[0]) in self._active_ids:
                 return self._heap[0]
             heapq.heappop(self._heap)
         raise IndexError("peek from empty heap")
@@ -190,8 +192,7 @@ class PriorityRequestQueue(RequestQueue):
         Uses lazy deletion: the entry remains in the heap but is skipped
         during pop/peek, making this O(1) instead of O(n + heapify).
         """
-        self._removed.add(id(request))
-        self._num_removed += 1
+        self._active_ids.discard(id(request))
         self._maybe_cleanup()
 
     def remove_requests(self, requests: Iterable[Request]) -> None:
@@ -201,37 +202,29 @@ class PriorityRequestQueue(RequestQueue):
         approach.  Stale entries are compacted lazily when they
         accumulate beyond a threshold.
         """
-        removed = self._removed
         for request in requests:
-            rid = id(request)
-            if rid not in removed:
-                removed.add(rid)
-                self._num_removed += 1
+            self._active_ids.discard(id(request))
         self._maybe_cleanup()
 
     def _maybe_cleanup(self) -> None:
         """Compact the heap when removed entries accumulate."""
         # Rebuild the heap when stale entries dominate.
-        if self._heap and self._num_removed > len(self._heap) // 2:
-            removed = self._removed
-            self._heap = [r for r in self._heap if id(r) not in removed]
+        if len(self._heap) > 2 * len(self._active_ids):
+            self._heap = [r for r in self._heap if id(r) in self._active_ids]
             heapq.heapify(self._heap)
-            self._removed.clear()
-            self._num_removed = 0
 
     def __bool__(self) -> bool:
         """Check if queue has any requests."""
-        return self._num_removed < len(self._heap)
+        return bool(self._active_ids)
 
     def __len__(self) -> int:
         """Get number of requests in queue."""
-        return len(self._heap) - self._num_removed
+        return len(self._active_ids)
 
     def __iter__(self) -> Iterator[Request]:
         """Iterate over the queue according to priority policy."""
-        removed = self._removed
         for request in sorted(self._heap):
-            if id(request) not in removed:
+            if id(request) in self._active_ids:
                 yield request
 
 

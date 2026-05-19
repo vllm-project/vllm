@@ -180,8 +180,7 @@ class TestLazyDeletion:
             q.remove_request(r)
         # After cleanup, internal heap should be compact
         assert len(q._heap) == 4
-        assert q._num_removed == 0
-        assert len(q._removed) == 0
+        assert len(q._active_ids) == 4
 
 
 class TestIteration:
