@@ -944,6 +944,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             w2_scale=w2_scale,
             a1_scale=a1_scale,
             a2_scale=a2_scale,
+            swiglu_limit=getattr(layer, "swiglu_limit", None),
         )
 
     def apply_monolithic(

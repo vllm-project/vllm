@@ -357,7 +357,9 @@ def get_adapter_absolute_path(lora_path: str) -> str:
     return local_snapshot_path
 
 
-def process_packed_modules_mapping(model: nn.Module) -> dict[str, list[str]]:
+def process_packed_modules_mapping(
+    model: nn.Module, force_2d_moe: bool = False
+) -> dict[str, list[str]]:
     if is_moe_model(model):
         if moe_packed_mapping := get_moe_expert_mapping(model):
             # This method generates and returns a dictionary mapping packed module
@@ -366,8 +368,11 @@ def process_packed_modules_mapping(model: nn.Module) -> dict[str, list[str]]:
             # the expert indices are expanded based on the configured number
             # of routed experts.
             packed_modules_mapping = get_packed_modules_mapping(model)
-            if not model.is_3d_moe_weight:
-                # 3D MoE LoRA does not need `packed_modules_mapping`
+            # The 2D mapping is needed when the model itself is 2D, or when
+            # the engine forces the universal 2D wrapper via
+            # enable_mixed_moe_lora_format (so 3D models can also load 2D
+            # adapters through FusedMoEWithLoRA).
+            if (not model.is_3d_moe_weight) or force_2d_moe:
                 # Filter out malformed entries: non-gated MoE has empty
                 # ckpt_up_proj_name which results in weight_name containing ".."
                 # (e.g., "experts.0.." instead of "experts.0.layer_name.")

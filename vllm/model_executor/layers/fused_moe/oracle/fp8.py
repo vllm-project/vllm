@@ -186,9 +186,10 @@ def backend_to_kernel_cls(
     elif backend == Fp8MoeBackend.XPU:
         from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
             XPUExpertsFp8,
+            XPUExpertsMxfp8,
         )
 
-        return [XPUExpertsFp8]
+        return [XPUExpertsFp8, XPUExpertsMxfp8]
 
     elif backend == Fp8MoeBackend.CPU:
         from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
@@ -511,6 +512,7 @@ def make_fp8_moe_quant_config(
     block_shape: list[int] | None = None,
     per_act_token_quant: bool = False,
     per_out_ch_quant: bool = False,
+    swiglu_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Create FusedMoEQuantConfig for the specified FP8 Backend.
@@ -554,6 +556,7 @@ def make_fp8_moe_quant_config(
             a2_gscale=(1.0 / a2_scale),
             g1_alphas=(w1_scale * a1_scale).squeeze(),
             g2_alphas=(w2_scale * a2_scale).squeeze(),
+            gemm1_clamp_limit=swiglu_limit,
         )
     # MXFP8 uses "mxfp8" quant_dtype so the prepare step dispatches to
     # _mxfp8_e4m3_quantize rather than standard FP8 block quantization.
@@ -568,6 +571,7 @@ def make_fp8_moe_quant_config(
             a2_scale=a2_scale,
             block_shape=block_shape,
             is_scale_swizzled=False,
+            gemm1_clamp_limit=swiglu_limit,
         )
 
     # All other backends use normal config.
@@ -579,6 +583,7 @@ def make_fp8_moe_quant_config(
         block_shape=block_shape,
         per_act_token_quant=per_act_token_quant,
         per_out_ch_quant=per_out_ch_quant,
+        gemm1_clamp_limit=swiglu_limit,
     )
 
 

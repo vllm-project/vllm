@@ -195,10 +195,12 @@ elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
     endif()
     if(VLLM_RVV_VLEN AND VLLM_RVV_VLEN GREATER 0)
         message(STATUS "RISC-V RVV VLEN=${VLLM_RVV_VLEN}")
+        # Sources gate FP16/BF16 paths on the compiler-provided
+        # __riscv_zvfh / __riscv_zvfbfmin macros, which GCC and clang
+        # define automatically when those extensions appear in -march.
         if(RVV_BF16_FOUND)
             message(STATUS "BF16 extension detected")
             set(MARCH_FLAGS -march=rv64gcv_zvfh_zfbfmin_zvfbfmin_zvl${VLLM_RVV_VLEN}b -mrvv-vector-bits=zvl -mabi=lp64d)
-            add_compile_definitions(RISCV_BF16_SUPPORT)
         elseif(RVV_FP16_FOUND)
             message(WARNING "BF16 functionality is not available")
             set(MARCH_FLAGS -march=rv64gcv_zvfh_zvl${VLLM_RVV_VLEN}b -mrvv-vector-bits=zvl -mabi=lp64d)
