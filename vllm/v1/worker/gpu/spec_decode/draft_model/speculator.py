@@ -642,8 +642,9 @@ class DraftModelSpeculator:
 
         self.input_buffers.positions[:num_reqs].copy_(last_positions)
 
-        # seq_lens for decode = target_seq_lens - num_rejected + 1.
-        # Equivalent: kernel wrote (target + 1), now subtract num_rejected.
+        # seq_lens initial value = target_seq_lens - num_rejected + 1.
+        # The decode loop increments this BEFORE each forward, so step 1
+        # effectively uses target - rejected + 2 = (past KV count) + 1.
         target_seq_lens = input_batch.seq_lens[:num_reqs]
         self.input_buffers.seq_lens[:num_reqs].copy_(
             torch.clamp(
@@ -671,6 +672,15 @@ class DraftModelSpeculator:
                 max=self.max_model_len - 1,
                 out=self.input_buffers.positions[:num_reqs],
             )
+            # Increment seq_lens BEFORE the forward so the attention reads from
+            # the KV slot written by the previous step.  flash_attn computes
+            # context_kv_lens = seq_lens - query_len, so without this
+            # pre-increment the freshly written correction/draft token is missed.
+            torch.clamp(
+                self.input_buffers.seq_lens[:num_reqs] + 1,
+                max=self.max_model_len,
+                out=self.input_buffers.seq_lens[:num_reqs],
+            )
 
             if skip_attn:
                 hidden_states = self.run_model(
@@ -697,12 +707,6 @@ class DraftModelSpeculator:
             logits = self.model.compute_logits(hidden_states[:num_reqs])
             self.draft_tokens[:num_reqs, step] = self._sample_tokens(
                 logits, temperature[:num_reqs]
-            )
-
-            torch.clamp(
-                self.input_buffers.seq_lens[:num_reqs] + 1,
-                max=self.max_model_len,
-                out=self.input_buffers.seq_lens[:num_reqs],
             )
 
         return self.draft_tokens[:num_reqs]
