@@ -63,6 +63,23 @@ def stream_text(parser, tokenizer, text, request, prompt_token_ids=None):
     return results
 
 
+def stream_text_chunked(
+    parser, tokenizer, text, request, chunk_size, prompt_token_ids=None
+):
+    """Stream text in multi-token chunks (simulates speculative decoding)."""
+    token_ids = tokenizer.encode(text, add_special_tokens=False)
+    results: list[DeltaMessage | None] = []
+    for i in range(0, len(token_ids), chunk_size):
+        chunk_ids = token_ids[i : i + chunk_size]
+        delta_text = tokenizer.decode(chunk_ids)
+        result = parser.parse_delta(
+            delta_text, chunk_ids, request, prompt_token_ids=prompt_token_ids
+        )
+        prompt_token_ids = None
+        results.append(result)
+    return results
+
+
 def collect_fields(results):
     all_reasoning = "".join(r.reasoning for r in results if r and r.reasoning)
     all_content = "".join(r.content for r in results if r and r.content)
@@ -163,3 +180,42 @@ def test_parse_delta_reasoning_only_thinking_disabled(tokenizer, request_obj):
     assert "Hello" in content
     assert "assist" in content
     assert len(tool_calls) == 0
+
+
+@pytest.mark.parametrize("chunk_size", [3, 4, 5, 6])
+def test_parse_delta_spec_decode_boundary_preserves_reasoning(
+    tokenizer, request_obj, chunk_size
+):
+    """Regression test for vllm-project/vllm#42781.
+
+    When speculative decoding (MTP) accepts a multi-token batch that
+    spans the reasoning/content boundary, reasoning content in the
+    boundary delta must not be lost when the tool parser processes the
+    content portion.
+    """
+    parser = make_parser(tokenizer, reasoning=True, tool=True)
+
+    # Single-token streaming (baseline): full reasoning preserved
+    results_single = stream_text(
+        parser, tokenizer, MODEL_OUTPUT, request_obj, prompt_token_ids=[]
+    )
+    reasoning_single, _, tools_single = collect_fields(results_single)
+
+    # Multi-token chunked streaming (simulates spec decode batches)
+    parser_chunked = make_parser(tokenizer, reasoning=True, tool=True)
+    results_chunked = stream_text_chunked(
+        parser_chunked,
+        tokenizer,
+        MODEL_OUTPUT,
+        request_obj,
+        chunk_size=chunk_size,
+        prompt_token_ids=[],
+    )
+    reasoning_chunked, _, tools_chunked = collect_fields(results_chunked)
+
+    assert "let me think about this" in reasoning_single
+    assert "let me think about this" in reasoning_chunked, (
+        f"Reasoning lost with chunk_size={chunk_size}: got {reasoning_chunked!r}"
+    )
+    assert len(tools_chunked) > 0
+    assert tools_chunked[0].function.name == "get_weather"
