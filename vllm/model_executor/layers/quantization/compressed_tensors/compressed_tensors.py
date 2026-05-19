@@ -261,10 +261,8 @@ class CompressedTensorsConfig(QuantizationConfig):
         # Raise DeprecationError if non-empty sparse_scheme_map is detected
         if sparse_scheme_map:
             raise DeprecationWarning(
-                "Sparsity support has been removed from vLLM. "
-                "The 'sparsity_config' field in the quantization configuration "
-                "is no longer supported. Please use a model without sparsity "
-                "configuration or contact the vLLM team if you need sparsity support."
+                "Sparsity support has been removed from compressed-tensors. "
+                "Please use a model without sparsity configuration."
             )
 
         return sparse_scheme_map, sparsity_ignore_list
