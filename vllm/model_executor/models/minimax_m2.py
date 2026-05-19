@@ -275,9 +275,6 @@ class MiniMaxM2DecoderLayer(nn.Module):
         layer_idx = int(prefix.split(sep=".")[-1])
 
         self.layer_idx = layer_idx
-        # When True the previous MoE deferred its TP allreduce; fuse
-        # AR + residual + RMSNorm via forward_with_allreduce_fusion
-        # (direct FlashInfer call) before input_layernorm.
         self._defer_ar: bool = False
         self.self_attn = MiniMaxM2Attention(
             hidden_size=self.hidden_size,
@@ -310,28 +307,11 @@ class MiniMaxM2DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> torch.Tensor:
-        # Mirroring SGLang's pattern: when the previous layer's MoE deferred
-        # its TP allreduce, fuse AR + residual + RMSNorm in one FI kernel.
-        # Only for decode (≤128 tokens); prefill & TP+EP fall back to the
-        # regular path.
         _fuse = (
             self._defer_ar
             and residual is not None
             and hidden_states.shape[0] <= 128
         )
-        if not torch.compiler.is_compiling():
-            if _fuse:
-                torch.cuda.nvtx.range_push("DIAG_decoder_fuse_TRUE")
-                torch.cuda.nvtx.range_pop()
-            elif self._defer_ar and residual is not None:
-                torch.cuda.nvtx.range_push("DIAG_decoder_fuse_FALSE_tokens")
-                torch.cuda.nvtx.range_pop()
-            elif self._defer_ar:
-                torch.cuda.nvtx.range_push("DIAG_decoder_fuse_FALSE_residual")
-                torch.cuda.nvtx.range_pop()
-            else:
-                torch.cuda.nvtx.range_push("DIAG_decoder_fuse_FALSE_defer_ar")
-                torch.cuda.nvtx.range_pop()
         if _fuse:
             hidden_states, residual = self.input_layernorm.forward_with_allreduce_fusion(
                 hidden_states, residual
@@ -408,8 +388,6 @@ class MiniMaxM2Model(nn.Module, EagleModelMixin):
                 if runner.moe_config.ep_size <= 1:
                     runner.defer_allreduce = True
                     layer._defer_ar = True
-            # Disable fusion when EP is active — the runner keeps its
-            # own AR because deferral isn't safe across EP all-to-all.
             self._fuse_moe_allreduce = self.layers[
                 self.start_layer
             ].block_sparse_moe.experts.runner.defer_allreduce
@@ -450,16 +428,11 @@ class MiniMaxM2Model(nn.Module, EagleModelMixin):
         for idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer)
         ):
-            hidden_states, residual = layer(
-                positions,
-                hidden_states,
-                residual,
-            )
+            hidden_states, residual = layer(positions, hidden_states, residual)
             self._maybe_add_hidden_state(
                 aux_hidden_states, idx + 1, hidden_states, residual
             )
 
-        # Fuse the last deferred MoE AR with self.norm.
         last_layer_fused = (
             self._fuse_moe_allreduce
             and hidden_states.shape[0] <= 128

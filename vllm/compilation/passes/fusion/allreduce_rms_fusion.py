@@ -67,7 +67,7 @@ FI_ALLREDUCE_FUSION_MAX_SIZE_MB: dict[int, dict[int, float]] = {
     90: {
         2: 64,  # 64MB
         4: 2,  # 2MB
-        8: 2,  # 2MB (raised from 0.5MB for MoE deferred AR)
+        8: 2,  # 2MB
     },
     100: {
         2: 64,  # 64MB
@@ -88,7 +88,7 @@ _FI_ALLREDUCE_ONE_SHOT_MAX_SIZES_MB: dict[int, dict[int, float]] = {
     90: {
         2: 32,  # 32MB
         4: 2,  # 2MB
-        8: 2,  # 2MB (raised from 0.5MB for MoE deferred AR)
+        8: 2,  # 2MB
     },
     100: {
         2: 32,  # 32MB

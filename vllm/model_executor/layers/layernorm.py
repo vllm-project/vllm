@@ -128,16 +128,8 @@ class RMSNorm(CustomOp):
         x: torch.Tensor,
         residual: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Fuse TP allreduce + residual add + RMSNorm into one Lamport kernel.
-
-        Directly calls FlashInfer trtllm allreduce_fusion, bypassing
-        torch.compile pattern matching. Required when ``fused_add_rms_norm``
-        is decomposed to native ops (e.g. ``rms_norm=['native']`` priority),
-        which prevents Pattern 1 from matching in the Inductor pass.
-
-        Falls back to explicit allreduce + forward_native when FlashInfer is
-        unavailable, tp_size <= 1, or workspace allocation fails.
-        """
+        """Fuse TP allreduce + residual add + RMSNorm in one FlashInfer kernel.
+        Falls back to explicit allreduce + forward_native."""
         try:
             import flashinfer.comm as fi_comm
         except ImportError:
@@ -167,8 +159,6 @@ class RMSNorm(CustomOp):
         if workspace is None:
             return self._allreduce_then_norm(x, residual)
 
-        torch.cuda.nvtx.range_push("DIAG_fuse_layernorm_called")
-        torch.cuda.nvtx.range_pop()
         torch.cuda.nvtx.range_push("moe_ar_fused")
         fi_comm.allreduce_fusion(
             input=x,
