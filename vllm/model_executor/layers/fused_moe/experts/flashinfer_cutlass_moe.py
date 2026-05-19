@@ -288,9 +288,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         swiglu_alpha = None
         swiglu_beta = None
         swiglu_limit = (
-            self.gemm1_clamp_limit
-            if activation in [MoEActivation.SILU, MoEActivation.SWIGLUOAI]
-            else None
+            self.gemm1_clamp_limit if activation == MoEActivation.SILU else None
         )
         use_mxfp8_act_scaling = False
         use_w4_group_scaling = False
