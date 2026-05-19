@@ -126,6 +126,10 @@ def test_compile_correctness(
 
     all_args: list[list[str]] = []
     all_envs: list[dict[str, str] | None] = []
+    # Note: torch stock compile is not supported in v2, so keep
+    # the runner fixed across compile modes so this test only checks
+    # compilation correctness
+    base_env = {"VLLM_USE_V2_MODEL_RUNNER": "0"}
 
     for comp_mode in [
         CompilationMode.STOCK_TORCH_COMPILE,
@@ -136,7 +140,7 @@ def test_compile_correctness(
             all_args.append(
                 final_args + [f"-cc.mode={mode.name}", "-cc.backend=inductor"]
             )
-            all_envs.append({})
+            all_envs.append(base_env.copy())
 
         # inductor will change the output, so we only compare if the output
         # is close, not exactly the same.
@@ -156,6 +160,6 @@ def test_compile_correctness(
         CompilationMode.VLLM_COMPILE,
     ]:
         all_args.append(final_args + [f"-cc.mode={mode.name}", "-cc.backend=eager"])
-        all_envs.append({})
+        all_envs.append(base_env.copy())
 
     compare_all_settings(model, all_args, all_envs, method=method)
