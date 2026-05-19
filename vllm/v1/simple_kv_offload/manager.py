@@ -746,8 +746,7 @@ class SimpleCPUOffloadScheduler:
     def reset(self) -> bool:
         """Abort all pending transfers, release block refs, reset CPU cache."""
         gpu_pool = self._gpu_block_pool
-        if gpu_pool is None:
-            return True
+        assert gpu_pool is not None
 
         # Release GPU/CPU refs held by pending store transfers
         for transfer in self._store_event_to_blocks.values():
