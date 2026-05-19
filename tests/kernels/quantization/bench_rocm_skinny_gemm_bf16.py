@@ -43,6 +43,12 @@ SHAPES = [
     # Qwen3.5-35B-A3B (vocab=248320, hidden=2048)
     (248320, 2048, "Qwen3.5-35B-A3B lm_head"),
     (1024, 2048, "Qwen3.5-35B-A3B 1024 proj"),
+    # Llama-3.1-8B (hidden=4096, intermediate=14336, vocab=128256)
+    (4096, 4096, "Llama-8B q/o_proj"),
+    (6144, 4096, "Llama-8B qkv"),
+    (28672, 4096, "Llama-8B gate_up"),
+    (4096, 14336, "Llama-8B down"),
+    (128256, 4096, "Llama-8B lm_head"),
 ]
 
 

@@ -1239,21 +1239,39 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
                                        CuCount);                              \
   }
 
-#define WVSPLIT_TILE_CFG(_THRDS, _WVPRGRP, _sYT, __N)     \
-  {                                                       \
-    bool fit_lds = (Kbp_in * N_in <= max_lds_len);        \
-    if (_sYT <= 1)                                        \
-      WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 4, __N)           \
-    else if (is_gfx11() && (K_in <= 2048))                \
-      WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 4, __N)           \
-    else if ((__N == 1) || (!fit_lds) || (_sYT <= 4 * 2)) \
-      WVSPLITK_CFG(_THRDS, _WVPRGRP, 2, 2, __N)           \
-    else if (_sYT <= 4 * 3)                               \
-      WVSPLITK_CFG(_THRDS, _WVPRGRP, 3, 2, __N)           \
-    else if (__N == 4)                                    \
-      WVSPLITK_CFG(_THRDS, _WVPRGRP, 4, 1, __N)           \
-    else                                                  \
-      WVSPLITK_CFG(_THRDS, _WVPRGRP, 4, 2, __N)           \
+#define WVSPLIT_TILE_CFG(_THRDS, _WVPRGRP, _sYT, __N)                \
+  {                                                                  \
+    bool fit_lds = (Kbp_in * N_in <= max_lds_len);                   \
+    if (is_gfx11()) {                                                \
+      if (_sYT <= 1)                                                 \
+        WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 4, __N)                    \
+      else if (K_in < 1024)                                          \
+        WVSPLITK_CFG(_THRDS, _WVPRGRP, 2, 4, __N)                    \
+      else if ((K_in % 1024 == 512) && (_sYT >= 40 || K_in >= 4096)) \
+        WVSPLITK_CFG(_THRDS, _WVPRGRP, 4, 1, __N)                    \
+      else if (K_in <= 2048)                                         \
+        WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 4, __N)                    \
+      else if (__N >= 2 && !fit_lds) {                               \
+        if (K_in % 1024 == 0 && Kbp_in < max_lds_len / 2)            \
+          WVSPLITK_CFG(_THRDS, _WVPRGRP, 2, 4, __N)                  \
+        else                                                         \
+          WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 4, __N)                  \
+      } else if (__N == 1)                                           \
+        WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 2, __N)                    \
+      else                                                           \
+        WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 1, __N)                    \
+    } else {                                                         \
+      if (_sYT <= 1)                                                 \
+        WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 4, __N)                    \
+      else if ((__N == 1) || (!fit_lds) || (_sYT <= 4 * 2))          \
+        WVSPLITK_CFG(_THRDS, _WVPRGRP, 2, 2, __N)                    \
+      else if (_sYT <= 4 * 3)                                        \
+        WVSPLITK_CFG(_THRDS, _WVPRGRP, 3, 2, __N)                    \
+      else if (__N == 4)                                             \
+        WVSPLITK_CFG(_THRDS, _WVPRGRP, 4, 1, __N)                    \
+      else                                                           \
+        WVSPLITK_CFG(_THRDS, _WVPRGRP, 4, 2, __N)                    \
+    }                                                                \
   }
 
 #define WVSPLIT_TILE(_sYT, __N)                                      \
