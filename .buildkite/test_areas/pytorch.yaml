@@ -77,6 +77,7 @@ steps:
   - "find compile/h100/ -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
 
 - label: PyTorch Compilation Passes Unit Tests
+  device: h200_35gb
   key: pytorch-compilation-passes-unit-tests
   timeout_in_minutes: 20
   source_file_dependencies:
@@ -109,6 +110,7 @@ steps:
   - pytest -s -v compile/passes --ignore compile/passes/distributed
 
 - label: PyTorch Fullgraph Smoke Test
+  device: h200_35gb
   key: pytorch-fullgraph-smoke-test
   timeout_in_minutes: 35
   source_file_dependencies:
