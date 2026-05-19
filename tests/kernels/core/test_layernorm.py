@@ -71,6 +71,46 @@ def test_rms_norm(
         )
 
 
+@torch.inference_mode()
+def test_rms_norm_large_num_tokens_uses_64_bit_row_offsets() -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required to exercise the layernorm CUDA kernel")
+
+    device = torch.device("cuda:0")
+    torch.cuda.set_device(device)
+    torch.cuda.empty_cache()
+
+    hidden_size = 4096
+    num_tokens = 1048641
+    dtype = torch.float16
+    element_size = torch.empty((), dtype=dtype).element_size()
+    required_bytes = 2 * num_tokens * hidden_size * element_size
+    margin_bytes = 1 << 30
+    free_bytes, _ = torch.cuda.mem_get_info(device)
+    if free_bytes < required_bytes + margin_bytes:
+        pytest.skip(
+            "large layernorm overflow test requires "
+            f"{(required_bytes + margin_bytes) / 2**30:.1f} GiB free CUDA "
+            f"memory, found {free_bytes / 2**30:.1f} GiB"
+        )
+
+    x = torch.empty((num_tokens, hidden_size), dtype=dtype, device=device)
+    out = torch.empty_like(x)
+    weight = torch.ones(hidden_size, dtype=dtype, device=device)
+    overflow_row = num_tokens - 1
+
+    # This issue shape exceeds 2^32 elements. A 32-bit row offset wraps and
+    # leaves this row untouched, while the fixed kernel writes the expected 0s.
+    x[overflow_row].zero_()
+    out[overflow_row].fill_(float("nan"))
+
+    torch.ops._C.rms_norm(out, x, weight, 1e-6)
+    torch.cuda.synchronize(device)
+
+    expected = torch.zeros(hidden_size, dtype=dtype, device=device)
+    torch.testing.assert_close(out[overflow_row], expected, atol=0, rtol=0)
+
+
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
 @pytest.mark.parametrize("add_residual", ADD_RESIDUAL)
