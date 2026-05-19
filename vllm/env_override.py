@@ -758,3 +758,69 @@ def _patch_cpp_indirect_assert_if_needed():
 
 
 _patch_cpp_indirect_assert_if_needed()
+# ===================================================
+# Inductor OperatorIssue.operator_str unbounded IR stringification fix
+# ===================================================
+# When Inductor encounters a custom op with no registered lowering, it
+# logs an INFO-level "Creating implicit fallback for: ..." message via
+# `torch/_inductor/graph.py:1285`:
+#
+#   log.info("Creating implicit fallback for:\n%s",
+#            error.operator_str(target, args, kwargs))
+#
+# `OperatorIssue.operator_str` eagerly does `f"args[{i}]: {arg}"` on every
+# IR argument, which triggers `IRNode.__str__` (`torch/_inductor/ir.py:6650`).
+# That method recursively expands every dataclass field with no cycle/depth
+# protection, so on a DAG-shaped IR it stringifies the same subgraph
+# combinatorially. With deep IR (e.g. the view/slice/scatter chain produced
+# by vLLM's `fused_rope_unified_mla_kv_cache_update` feeding into a custom
+# all_reduce op when both `fuse_rope_kvcache_cat_mla` and
+# `use_inductor_graph_partition` are enabled), this turns the INFO log into
+# a multi-minute hang that eventually exhausts the Python recursion limit.
+#
+# Fix: replace `OperatorIssue.operator_str` with a bounded version that
+# represents each arg by its type and id, instead of calling its `__str__`.
+# This keeps the diagnostic message useful (target + arg types are still
+# logged) while making the call O(num_args) instead of O(2^depth).
+#
+# Upstream PyTorch should add depth/cycle protection to `IRNode.__str__`;
+# this workaround can be removed once that lands.
+
+
+def _apply_inductor_operator_str_patch():
+    """Bound IR stringification inside Inductor's OperatorIssue.operator_str.
+
+    Idempotent: marks the class with `_vllm_safe_operator_str_patched`
+    after the first apply.
+    """
+    import textwrap
+
+    import torch._inductor.exc as _iexc
+
+    if getattr(_iexc.OperatorIssue, "_vllm_safe_operator_str_patched", False):
+        return
+
+    def _safe_arg_repr(a):
+        try:
+            return f"{type(a).__module__}.{type(a).__name__}@{id(a):#x}"
+        except Exception:
+            return "<unrepr-able>"
+
+    @staticmethod
+    def _patched_operator_str(target, args, kwargs):
+        lines = [f"target: {target}"] + [
+            f"args[{i}]: {_safe_arg_repr(arg)}" for i, arg in enumerate(args)
+        ]
+        if kwargs:
+            lines.append(
+                "kwargs: {"
+                + ", ".join(f"{k}={_safe_arg_repr(v)}" for k, v in kwargs.items())
+                + "}"
+            )
+        return textwrap.indent("\n".join(lines), "  ")
+
+    _iexc.OperatorIssue.operator_str = _patched_operator_str
+    _iexc.OperatorIssue._vllm_safe_operator_str_patched = True  # type: ignore[attr-defined]
+
+
+_apply_inductor_operator_str_patch()
