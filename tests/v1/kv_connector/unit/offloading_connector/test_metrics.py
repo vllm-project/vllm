@@ -1,14 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from prometheus_client import Counter, Gauge, Histogram
 
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
-    COUNTER_PREFIX,
-    GAUGE_PREFIX,
-    HISTOGRAM_PREFIX,
-    TRANSFER_PREFIX,
+    LOAD_BYTES,
+    LOAD_SIZE,
+    LOAD_TIME,
+    STORE_BYTES,
+    STORE_SIZE,
+    STORE_TIME,
     OffloadingConnectorStats,
     OffloadPromMetrics,
 )
@@ -19,6 +22,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingGaugeMetadata,
     OffloadingHistogramMetadata,
 )
+from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 
 
 class _FakeMetric:
@@ -76,60 +80,55 @@ def test_build_kv_connector_stats_reconstructs_offload_stats():
     """Test that OffloadingConnector stats are properly reconstructed with
     correct data."""
     serialized_data = {
-        TRANSFER_PREFIX + "CPU_to_GPU": [
-            {"op_size": 16, "op_time": 1.0},
-            {"op_size": 8, "op_time": 0.5},
-        ],
-        TRANSFER_PREFIX + "GPU_to_CPU": [
-            {"op_size": 1, "op_time": 0.1},
-            {"op_size": 2, "op_time": 0.2},
-        ],
-        COUNTER_PREFIX + "stores_skipped": 5,
+        LOAD_BYTES: 24,
+        LOAD_TIME: 1.5,
+        LOAD_SIZE: [16, 8],
+        STORE_BYTES: 3,
+        STORE_TIME: 0.3,
+        STORE_SIZE: [1, 2],
+        "stores_skipped": 5,
     }
 
     stats = OffloadingConnector.build_kv_connector_stats(data=serialized_data)
 
     offload_connector_stats = stats
     assert isinstance(offload_connector_stats, OffloadingConnectorStats)
-    assert offload_connector_stats.data[TRANSFER_PREFIX + "CPU_to_GPU"] == [
-        {"op_size": 16, "op_time": 1.0},
-        {"op_size": 8, "op_time": 0.5},
-    ]
-    assert offload_connector_stats.data[TRANSFER_PREFIX + "GPU_to_CPU"] == [
-        {"op_size": 1, "op_time": 0.1},
-        {"op_size": 2, "op_time": 0.2},
-    ]
-    assert offload_connector_stats.data[COUNTER_PREFIX + "stores_skipped"] == 5
+    assert offload_connector_stats.data[LOAD_BYTES] == 24
+    assert offload_connector_stats.data[LOAD_TIME] == 1.5
+    assert offload_connector_stats.data[LOAD_SIZE] == [16, 8]
+    assert offload_connector_stats.data[STORE_BYTES] == 3
+    assert offload_connector_stats.data[STORE_TIME] == 0.3
+    assert offload_connector_stats.data[STORE_SIZE] == [1, 2]
+    assert offload_connector_stats.data["stores_skipped"] == 5
 
 
 def test_aggregate_same_connector():
     """Test aggregating stats from the same connector type."""
     stats1 = OffloadingConnectorStats(
         data={
-            TRANSFER_PREFIX + "CPU_to_GPU": [
-                {"op_size": 16, "op_time": 1.0},
-                {"op_size": 8, "op_time": 0.5},
-            ],
-            TRANSFER_PREFIX + "GPU_to_CPU": [
-                {"op_size": 1, "op_time": 0.1},
-                {"op_size": 2, "op_time": 0.2},
-            ],
-            COUNTER_PREFIX + "stores_skipped": 1,
-            GAUGE_PREFIX + "pending_stores": 3,
-            HISTOGRAM_PREFIX + "lookup_latency": [0.1],
+            LOAD_BYTES: 24,
+            LOAD_TIME: 1.5,
+            LOAD_SIZE: [16, 8],
+            STORE_BYTES: 3,
+            STORE_TIME: 0.3,
+            STORE_SIZE: [1, 2],
+            "stores_skipped": 1,
+            "pending_stores": 3,
+            "lookup_latency": [0.1],
         }
     )
 
     stats2 = OffloadingConnectorStats(
         data={
-            TRANSFER_PREFIX + "CPU_to_GPU": [
-                {"op_size": 3, "op_time": 0.2},
-                {"op_size": 7, "op_time": 0.9},
-            ],
-            TRANSFER_PREFIX + "GPU_to_CPU": [{"op_size": 16, "op_time": 2}],
-            COUNTER_PREFIX + "stores_skipped": 3,
-            GAUGE_PREFIX + "pending_stores": 1,
-            HISTOGRAM_PREFIX + "lookup_latency": [0.2, 0.3],
+            LOAD_BYTES: 10,
+            LOAD_TIME: 1.1,
+            LOAD_SIZE: [3, 7],
+            STORE_BYTES: 16,
+            STORE_TIME: 2,
+            STORE_SIZE: [16],
+            "stores_skipped": 3,
+            "pending_stores": 1,
+            "lookup_latency": [0.2, 0.3],
         }
     )
 
@@ -137,44 +136,30 @@ def test_aggregate_same_connector():
 
     assert result is stats1  # Should return self
     offload_connector_stats = result
-    assert offload_connector_stats.data[TRANSFER_PREFIX + "CPU_to_GPU"] == [
-        {"op_size": 16, "op_time": 1.0},
-        {"op_size": 8, "op_time": 0.5},
-        {"op_size": 3, "op_time": 0.2},
-        {"op_size": 7, "op_time": 0.9},
-    ]
-    assert offload_connector_stats.data[TRANSFER_PREFIX + "GPU_to_CPU"] == [
-        {"op_size": 1, "op_time": 0.1},
-        {"op_size": 2, "op_time": 0.2},
-        {"op_size": 16, "op_time": 2},
-    ]
-    assert offload_connector_stats.data[COUNTER_PREFIX + "stores_skipped"] == 4
-    assert offload_connector_stats.data[GAUGE_PREFIX + "pending_stores"] == 1
-    assert offload_connector_stats.data[HISTOGRAM_PREFIX + "lookup_latency"] == [
-        0.1,
-        0.2,
-        0.3,
-    ]
+    assert offload_connector_stats.data[LOAD_BYTES] == 34
+    assert offload_connector_stats.data[LOAD_TIME] == 2.6
+    assert offload_connector_stats.data[LOAD_SIZE] == [16, 8, 3, 7]
+    assert offload_connector_stats.data[STORE_BYTES] == 19
+    assert offload_connector_stats.data[STORE_TIME] == 2.3
+    assert offload_connector_stats.data[STORE_SIZE] == [1, 2, 16]
+    assert offload_connector_stats.data["stores_skipped"] == 4
+    assert offload_connector_stats.data["pending_stores"] == 1
+    assert offload_connector_stats.data["lookup_latency"] == [0.1, 0.2, 0.3]
 
 
 def test_reduce():
     """Test that reduce() correctly reduces connector stats."""
     stats = OffloadingConnectorStats(
         data={
-            TRANSFER_PREFIX + "CPU_to_GPU": [
-                {"op_size": 16, "op_time": 1.0},
-                {"op_size": 8, "op_time": 0.5},
-                {"op_size": 3, "op_time": 0.2},
-                {"op_size": 7, "op_time": 0.9},
-            ],
-            TRANSFER_PREFIX + "GPU_to_CPU": [
-                {"op_size": 1, "op_time": 0.1},
-                {"op_size": 2, "op_time": 0.2},
-                {"op_size": 16, "op_time": 2},
-            ],
-            COUNTER_PREFIX + "stores_skipped": 11,
-            GAUGE_PREFIX + "pending_stores": 2,
-            HISTOGRAM_PREFIX + "lookup_latency": [0.1, 0.2, 0.3],
+            LOAD_BYTES: 34,
+            LOAD_TIME: 2.6,
+            LOAD_SIZE: [16, 8, 3, 7],
+            STORE_BYTES: 19,
+            STORE_TIME: 2.3,
+            STORE_SIZE: [1, 2, 16],
+            "stores_skipped": 11,
+            "pending_stores": 2,
+            "lookup_latency": [0.1, 0.2, 0.3],
         }
     )
 
@@ -182,14 +167,14 @@ def test_reduce():
 
     assert isinstance(reduced, dict)
     # Check that the stats were reduced (should have aggregated values)
-    assert "CPU_to_GPU_total_bytes" in reduced
-    assert "CPU_to_GPU_total_time" in reduced
-    assert "GPU_to_CPU_total_bytes" in reduced
-    assert "GPU_to_CPU_total_time" in reduced
-    assert reduced["CPU_to_GPU_total_bytes"] == 34
-    assert reduced["CPU_to_GPU_total_time"] == 2.6
-    assert reduced["GPU_to_CPU_total_time"] == 2.3
-    assert reduced["GPU_to_CPU_total_bytes"] == 19
+    assert reduced[LOAD_BYTES] == 34
+    assert reduced[LOAD_TIME] == 2.6
+    assert reduced[f"{LOAD_SIZE}_count"] == 4
+    assert reduced[f"{LOAD_SIZE}_sum"] == 34
+    assert reduced[STORE_BYTES] == 19
+    assert reduced[STORE_TIME] == 2.3
+    assert reduced[f"{STORE_SIZE}_count"] == 3
+    assert reduced[f"{STORE_SIZE}_sum"] == 19
     assert reduced["stores_skipped"] == 11
     assert reduced["pending_stores"] == 2
     assert reduced["lookup_latency_count"] == 3
@@ -200,14 +185,15 @@ def test_reset():
     """Test that reset() resets all connector stats."""
     offload_connector_stats = OffloadingConnectorStats(
         data={
-            TRANSFER_PREFIX + "CPU_to_GPU": [
-                {"op_size": 3, "op_time": 0.2},
-                {"op_size": 7, "op_time": 0.9},
-            ],
-            TRANSFER_PREFIX + "GPU_to_CPU": [{"op_size": 16, "op_time": 2}],
-            COUNTER_PREFIX + "stores_skipped": 4,
-            GAUGE_PREFIX + "pending_stores": 2,
-            HISTOGRAM_PREFIX + "lookup_latency": [0.1],
+            LOAD_BYTES: 10,
+            LOAD_TIME: 1.1,
+            LOAD_SIZE: [3, 7],
+            STORE_BYTES: 16,
+            STORE_TIME: 2,
+            STORE_SIZE: [16],
+            "stores_skipped": 4,
+            "pending_stores": 2,
+            "lookup_latency": [0.1],
         }
     )
 
@@ -232,18 +218,18 @@ def test_prom_metrics_observes_manager_counter():
         per_engine_labelvalues={0: ["model", "0"]},
     )
 
-    prom_metrics.observe({COUNTER_PREFIX + "stores_skipped": 7})
+    prom_metrics.observe({"stores_skipped": 7})
 
-    counter = prom_metrics.offloading_manager_metrics[(0, "stores_skipped")]
+    counter = prom_metrics.offloading_metrics[(0, "stores_skipped")]
     assert counter.increments == [7]
-    counter_def = prom_metrics._offloading_manager_metric_defs["stores_skipped"]
+    counter_def = prom_metrics._offloading_metric_defs["stores_skipped"]
     assert counter_def.kwargs["name"] == "vllm:kv_offload_stores_skipped"
     assert counter.labelvalues == ("model", "0")
 
 
-def test_prom_metrics_observes_manager_gauge_and_histogram():
+def test_prom_metrics_observes_flat_transfer_metrics_and_legacy_metrics():
     prom_metrics = OffloadPromMetrics(
-        vllm_config=_FakeVllmConfig(store_threshold=0),  # type: ignore[arg-type]
+        vllm_config=_FakeVllmConfig(),  # type: ignore[arg-type]
         metric_types={
             Gauge: _FakeMetric,
             Counter: _FakeMetric,
@@ -252,7 +238,39 @@ def test_prom_metrics_observes_manager_gauge_and_histogram():
         labelnames=["model_name", "engine"],
         per_engine_labelvalues={0: ["model", "0"]},
     )
-    prom_metrics._offloading_manager_metric_metadata = {
+
+    prom_metrics.observe(
+        {
+            LOAD_BYTES: 24,
+            LOAD_TIME: 1.5,
+            LOAD_SIZE: [16, 8],
+            STORE_BYTES: 3,
+            STORE_TIME: 0.3,
+            STORE_SIZE: [1, 2],
+        }
+    )
+
+    assert prom_metrics.offloading_metrics[(0, LOAD_BYTES)].increments == [24]
+    assert prom_metrics.offloading_metrics[(0, LOAD_TIME)].increments == [1.5]
+    assert prom_metrics.offloading_metrics[(0, LOAD_SIZE)].observed == [16, 8]
+    assert prom_metrics.offloading_metrics[(0, STORE_BYTES)].increments == [3]
+    assert prom_metrics.offloading_metrics[(0, STORE_TIME)].increments == [0.3]
+    assert prom_metrics.offloading_metrics[(0, STORE_SIZE)].observed == [1, 2]
+
+    assert prom_metrics.counter_kv_bytes[(0, "CPU_to_GPU")].increments == [24]
+    assert prom_metrics.counter_kv_transfer_time[(0, "CPU_to_GPU")].increments == [
+        1.5
+    ]
+    assert prom_metrics.histogram_transfer_size[(0, "CPU_to_GPU")].observed == [16, 8]
+    assert prom_metrics.counter_kv_bytes[(0, "GPU_to_CPU")].increments == [3]
+    assert prom_metrics.counter_kv_transfer_time[(0, "GPU_to_CPU")].increments == [
+        0.3
+    ]
+    assert prom_metrics.histogram_transfer_size[(0, "GPU_to_CPU")].observed == [1, 2]
+
+
+def test_prom_metrics_observes_manager_gauge_and_histogram():
+    metric_definitions = {
         "pending_stores": OffloadingGaugeMetadata(
             name="vllm:kv_offload_pending_stores",
             documentation="Number of currently pending KV offload stores.",
@@ -263,19 +281,34 @@ def test_prom_metrics_observes_manager_gauge_and_histogram():
             buckets=(0.1, 1.0),
         ),
     }
+    with patch.object(
+        OffloadingSpecFactory,
+        "get_metric_definitions",
+        return_value=metric_definitions,
+    ):
+        prom_metrics = OffloadPromMetrics(
+            vllm_config=_FakeVllmConfig(store_threshold=0),  # type: ignore[arg-type]
+            metric_types={
+                Gauge: _FakeMetric,
+                Counter: _FakeMetric,
+                Histogram: _FakeMetric,
+            },
+            labelnames=["model_name", "engine"],
+            per_engine_labelvalues={0: ["model", "0"]},
+        )
 
     prom_metrics.observe(
         {
-            GAUGE_PREFIX + "pending_stores": 5,
-            HISTOGRAM_PREFIX + "lookup_latency": [0.2, 0.4],
+            "pending_stores": 5,
+            "lookup_latency": [0.2, 0.4],
         }
     )
 
-    gauge = prom_metrics.offloading_manager_metrics[(0, "pending_stores")]
-    histogram = prom_metrics.offloading_manager_metrics[(0, "lookup_latency")]
+    gauge = prom_metrics.offloading_metrics[(0, "pending_stores")]
+    histogram = prom_metrics.offloading_metrics[(0, "lookup_latency")]
     assert gauge.set_values == [5]
     assert histogram.observed == [0.2, 0.4]
-    histogram_def = prom_metrics._offloading_manager_metric_defs["lookup_latency"]
+    histogram_def = prom_metrics._offloading_metric_defs["lookup_latency"]
     assert histogram_def.kwargs["buckets"] == (0.1, 1.0)
 
 
@@ -291,4 +324,4 @@ def test_prom_metrics_uses_configured_manager_metrics():
         per_engine_labelvalues={0: ["model", "0"]},
     )
 
-    assert prom_metrics._offloading_manager_metric_metadata == {}
+    assert "stores_skipped" not in prom_metrics._offloading_metric_metadata

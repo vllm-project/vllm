@@ -114,6 +114,10 @@ class MockOffloadingHandler(OffloadingHandler):
 
 
 class MockOffloadingSpec(OffloadingSpec):
+    @classmethod
+    def get_manager_cls(cls) -> type[OffloadingManager]:
+        return OffloadingManager
+
     def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig):
         super().__init__(vllm_config, kv_cache_config)
 

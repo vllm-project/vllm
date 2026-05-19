@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import OrderedDict
 from collections.abc import Collection, Iterable
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from typing_extensions import override
 
@@ -23,6 +23,9 @@ from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
 from vllm.v1.kv_offload.cpu.policies.base import BlockStatus, CachePolicy
 from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
 
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+
 _CACHE_POLICIES: dict[str, type[CachePolicy]] = {
     "lru": LRUCachePolicy,
     "arc": ARCCachePolicy,
@@ -40,7 +43,9 @@ class CPUOffloadingManager(OffloadingManager):
     """
 
     @classmethod
-    def get_metric_definitions(cls) -> dict[str, OffloadingMetricMetadata]:
+    def get_metric_definitions(
+        cls, vllm_config: "VllmConfig"
+    ) -> dict[str, OffloadingMetricMetadata]:
         return {
             "stores_skipped": OffloadingCounterMetadata(
                 name="vllm:kv_offload_stores_skipped",

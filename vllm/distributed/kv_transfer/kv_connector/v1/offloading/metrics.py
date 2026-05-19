@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
@@ -22,22 +22,71 @@ from vllm.v1.kv_offload.worker.worker import TransferType
 
 logger = init_logger(__name__)
 
-TRANSFER_PREFIX = "xfer:"
-COUNTER_PREFIX = "counter:"
-GAUGE_PREFIX = "gauge:"
-HISTOGRAM_PREFIX = "histogram:"
-_TRANSFER_TYPES = ("CPU_to_GPU", "GPU_to_CPU")
+LOAD_BYTES = "load_bytes"
+LOAD_TIME = "load_time"
+LOAD_SIZE = "load_size"
+STORE_BYTES = "store_bytes"
+STORE_TIME = "store_time"
+STORE_SIZE = "store_size"
+
+_LOAD_TRANSFER_TYPE = "CPU_to_GPU"
+_STORE_TRANSFER_TYPE = "GPU_to_CPU"
+
+_TRANSFER_SIZE_BUCKETS = (
+    1e6,
+    5e6,
+    10e6,
+    20e6,
+    40e6,
+    60e6,
+    80e6,
+    100e6,
+    150e6,
+    200e6,
+)
+
+_CONNECTOR_METRIC_DEFINITIONS: dict[str, OffloadingMetricMetadata] = {
+    LOAD_BYTES: OffloadingCounterMetadata(
+        name="vllm:kv_offload_load_bytes",
+        documentation="Total bytes loaded from offload storage to GPU.",
+    ),
+    LOAD_TIME: OffloadingCounterMetadata(
+        name="vllm:kv_offload_load_time",
+        documentation="Total load time from offload storage to GPU, in seconds.",
+    ),
+    LOAD_SIZE: OffloadingHistogramMetadata(
+        name="vllm:kv_offload_load_size",
+        documentation="Histogram of KV offload load operation size, in bytes.",
+        buckets=_TRANSFER_SIZE_BUCKETS,
+    ),
+    STORE_BYTES: OffloadingCounterMetadata(
+        name="vllm:kv_offload_store_bytes",
+        documentation="Total bytes stored from GPU to offload storage.",
+    ),
+    STORE_TIME: OffloadingCounterMetadata(
+        name="vllm:kv_offload_store_time",
+        documentation="Total store time from GPU to offload storage, in seconds.",
+    ),
+    STORE_SIZE: OffloadingHistogramMetadata(
+        name="vllm:kv_offload_store_size",
+        documentation="Histogram of KV offload store operation size, in bytes.",
+        buckets=_TRANSFER_SIZE_BUCKETS,
+    ),
+}
+_KNOWN_COUNTER_METRIC_NAMES = {
+    metric_name
+    for metric_name, metadata in _CONNECTOR_METRIC_DEFINITIONS.items()
+    if isinstance(metadata, OffloadingCounterMetadata)
+} | {"stores_skipped"}
 
 
 @dataclass
 class OffloadingConnectorStats(KVConnectorStats):
     """
-    Offloading connector stats encode the stat type in each key.
+    Offloading connector stats use flat metric names as keys.
 
-    * ``xfer:<transfer_type>`` maps to a list of serialized operation metrics.
-    * ``counter:<counter_name>`` maps to an int or float increment.
-    * ``gauge:<gauge_name>`` maps to the latest int or float value.
-    * ``histogram:<histogram_name>`` maps to observed int or float samples.
+    Counter values are aggregated by summing, gauge values use the latest
+    snapshot, and histogram values are lists of observed samples.
     """
 
     def __post_init__(self):
@@ -51,28 +100,20 @@ class OffloadingConnectorStats(KVConnectorStats):
     def aggregate(self, other: "KVConnectorStats") -> "KVConnectorStats":
         if not other.is_empty():
             for key, value in other.data.items():
-                if key.startswith(TRANSFER_PREFIX):
+                if isinstance(value, list):
                     assert isinstance(value, list)
                     if key not in self.data:
                         self.data[key] = value
                     else:
                         assert isinstance(self.data[key], list)
                         self.data[key].extend(value)
-                elif key.startswith(COUNTER_PREFIX):
-                    assert isinstance(value, int | float)
-                    self.data[key] = self.data.get(key, 0) + value
-                elif key.startswith(GAUGE_PREFIX):
-                    assert isinstance(value, int | float)
-                    self.data[key] = value
-                elif key.startswith(HISTOGRAM_PREFIX):
-                    assert isinstance(value, list)
-                    if key not in self.data:
-                        self.data[key] = value
+                elif isinstance(value, int | float):
+                    if key in _KNOWN_COUNTER_METRIC_NAMES:
+                        self.data[key] = self.data.get(key, 0) + value
                     else:
-                        assert isinstance(self.data[key], list)
-                        self.data[key].extend(value)
+                        self.data[key] = value
                 else:
-                    raise AssertionError(f"Unknown offloading stats key: {key}")
+                    raise AssertionError(f"Invalid offloading stats value: {key}")
         return self
 
     def reduce(self) -> dict[str, int | float]:
@@ -84,30 +125,14 @@ class OffloadingConnectorStats(KVConnectorStats):
         """
         return_dict: dict[str, int | float] = {}
         for key, value in self.data.items():
-            if key.startswith(TRANSFER_PREFIX):
-                transfer_type = key.removeprefix(TRANSFER_PREFIX)
+            if isinstance(value, list):
                 assert isinstance(value, list)
-                total_bytes = 0
-                total_time = 0.0
-                for op in value:
-                    assert isinstance(op, dict)
-                    total_bytes += op["op_size"]
-                    total_time += op["op_time"]
-                return_dict[f"{transfer_type}_total_bytes"] = total_bytes
-                return_dict[f"{transfer_type}_total_time"] = total_time
-            elif key.startswith(COUNTER_PREFIX):
-                assert isinstance(value, int | float)
-                return_dict[key.removeprefix(COUNTER_PREFIX)] = value
-            elif key.startswith(GAUGE_PREFIX):
-                assert isinstance(value, int | float)
-                return_dict[key.removeprefix(GAUGE_PREFIX)] = value
-            elif key.startswith(HISTOGRAM_PREFIX):
-                histogram_name = key.removeprefix(HISTOGRAM_PREFIX)
-                assert isinstance(value, list)
-                return_dict[f"{histogram_name}_count"] = len(value)
-                return_dict[f"{histogram_name}_sum"] = sum(value)
+                return_dict[f"{key}_count"] = len(value)
+                return_dict[f"{key}_sum"] = sum(value)
+            elif isinstance(value, int | float):
+                return_dict[key] = value
             else:
-                raise AssertionError(f"Unknown offloading stats key: {key}")
+                raise AssertionError(f"Invalid offloading stats value: {key}")
         return return_dict
 
     def is_empty(self) -> bool:
@@ -115,25 +140,29 @@ class OffloadingConnectorStats(KVConnectorStats):
 
     def record_transfer(self, num_bytes: int, time: float, transfer_type: TransferType):
         src, dst = transfer_type
-        transfer_type_key = TRANSFER_PREFIX + src + "_to_" + dst
-        op = {"op_size": num_bytes, "op_time": time}
-        self.data.setdefault(transfer_type_key, []).append(op)
+        if (src, dst) == ("CPU", "GPU"):
+            bytes_key, time_key, size_key = LOAD_BYTES, LOAD_TIME, LOAD_SIZE
+        elif (src, dst) == ("GPU", "CPU"):
+            bytes_key, time_key, size_key = STORE_BYTES, STORE_TIME, STORE_SIZE
+        else:
+            raise AssertionError(f"Unknown offloading transfer type: {transfer_type}")
+        self.set_counter(bytes_key, num_bytes)
+        self.set_counter(time_key, time)
+        self.observe_histogram(size_key, num_bytes)
 
     def set_counter(self, counter_name: str, counter_value: int | float) -> None:
         """Set a counter increment on the stats payload."""
-        self.data[COUNTER_PREFIX + counter_name] = counter_value
+        self.data[counter_name] = self.data.get(counter_name, 0) + counter_value
 
     def set_gauge(self, gauge_name: str, gauge_value: int | float) -> None:
         """Set a gauge snapshot on the stats payload."""
-        self.data[GAUGE_PREFIX + gauge_name] = gauge_value
+        self.data[gauge_name] = gauge_value
 
     def observe_histogram(
         self, histogram_name: str, histogram_value: int | float
     ) -> None:
         """Record a histogram observation on the stats payload."""
-        self.data.setdefault(HISTOGRAM_PREFIX + histogram_name, []).append(
-            histogram_value
-        )
+        self.data.setdefault(histogram_name, []).append(histogram_value)
 
 
 class OffloadPromMetrics(KVConnectorPromMetrics):
@@ -149,23 +178,18 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
         self.histogram_transfer_size: dict[tuple[int, str], PromMetricT] = {}
         self.counter_kv_bytes: dict[tuple[int, str], PromMetricT] = {}
         self.counter_kv_transfer_time: dict[tuple[int, str], PromMetricT] = {}
-        self._offloading_manager_metric_metadata: dict[
-            str, OffloadingMetricMetadata
-        ] = OffloadingSpecFactory.get_metric_definitions(vllm_config)
-        self._offloading_manager_metric_defs: dict[str, PromMetricT] = {}
-        self.offloading_manager_metrics: dict[tuple[int, str], PromMetricT] = {}
-        buckets = [  # In bytes
-            1e6,
-            5e6,
-            10e6,
-            20e6,
-            40e6,
-            60e6,
-            80e6,
-            100e6,
-            150e6,
-            200e6,
-        ]
+        manager_metric_metadata = OffloadingSpecFactory.get_metric_definitions(
+            vllm_config
+        )
+        self._offloading_metric_metadata: dict[str, OffloadingMetricMetadata] = {
+            **_CONNECTOR_METRIC_DEFINITIONS,
+            **manager_metric_metadata,
+        }
+        self._offloading_metric_defs: dict[str, PromMetricT] = {}
+        self.offloading_metrics: dict[tuple[int, str], PromMetricT] = {}
+        self._metric_observers: dict[
+            str, Callable[[int | float | list[int | float], int], None]
+        ] = {}
 
         self._counter_kv_bytes = self._counter_cls(
             name="vllm:kv_offload_total_bytes",
@@ -182,7 +206,7 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
         self._histogram_transfer_size = self._histogram_cls(
             name="vllm:kv_offload_size",
             documentation="Histogram of KV offload transfer size, in bytes.",
-            buckets=buckets[:],
+            buckets=_TRANSFER_SIZE_BUCKETS,
             labelnames=labelnames + ["transfer_type"],
         )
 
@@ -199,79 +223,88 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
                     self._counter_kv_transfer_time.labels(*bounded_labelvalues)
                 )
 
-    def _ensure_offloading_manager_metric(
-        self, metric_name: str, engine_idx: int
-    ) -> PromMetricT:
-        assert metric_name in self._offloading_manager_metric_metadata
-        if metric_name not in self._offloading_manager_metric_defs:
-            metadata = self._offloading_manager_metric_metadata[metric_name]
-            kwargs: dict[str, Any] = {
-                "name": metadata.name,
-                "documentation": metadata.documentation,
-                "labelnames": self._labelnames,
-            }
-            if isinstance(metadata, OffloadingCounterMetadata):
-                metric_cls = self._counter_cls
-            elif isinstance(metadata, OffloadingGaugeMetadata):
-                metric_cls = self._gauge_cls
-            elif isinstance(metadata, OffloadingHistogramMetadata):
-                metric_cls = self._histogram_cls
-                if metadata.buckets is not None:
-                    kwargs["buckets"] = metadata.buckets
-            else:
-                raise AssertionError(f"Unknown offloading metric metadata: {metadata}")
-            self._offloading_manager_metric_defs[metric_name] = metric_cls(**kwargs)
-        if (engine_idx, metric_name) not in self.offloading_manager_metrics:
-            metric = self._offloading_manager_metric_defs[metric_name]
-            self.offloading_manager_metrics[(engine_idx, metric_name)] = metric.labels(
-                *self.per_engine_labelvalues[engine_idx]
+        for metric_name, metadata in self._offloading_metric_metadata.items():
+            self._offloading_metric_defs[metric_name] = self._create_metric(metadata)
+            for engine_idx, labelvalues in per_engine_labelvalues.items():
+                self.offloading_metrics[(engine_idx, metric_name)] = (
+                    self._offloading_metric_defs[metric_name].labels(*labelvalues)
+                )
+            self._metric_observers[metric_name] = self._make_observer(
+                metric_name, metadata
             )
-        return self.offloading_manager_metrics[(engine_idx, metric_name)]
+
+    def _create_metric(self, metadata: OffloadingMetricMetadata) -> PromMetricT:
+        kwargs: dict[str, Any] = {
+            "name": metadata.name,
+            "documentation": metadata.documentation,
+            "labelnames": self._labelnames,
+        }
+        if isinstance(metadata, OffloadingCounterMetadata):
+            metric_cls = self._counter_cls
+        elif isinstance(metadata, OffloadingGaugeMetadata):
+            metric_cls = self._gauge_cls
+        elif isinstance(metadata, OffloadingHistogramMetadata):
+            metric_cls = self._histogram_cls
+            if metadata.buckets is not None:
+                kwargs["buckets"] = metadata.buckets
+        else:
+            raise AssertionError(f"Unknown offloading metric metadata: {metadata}")
+        return metric_cls(**kwargs)
+
+    def _make_observer(
+        self, metric_name: str, metadata: OffloadingMetricMetadata
+    ) -> Callable[[int | float | list[int | float], int], None]:
+        if isinstance(metadata, OffloadingCounterMetadata):
+            return lambda value, engine_idx: self._observe_counter(
+                metric_name, value, engine_idx
+            )
+        if isinstance(metadata, OffloadingGaugeMetadata):
+            return lambda value, engine_idx: self._observe_gauge(
+                metric_name, value, engine_idx
+            )
+        if isinstance(metadata, OffloadingHistogramMetadata):
+            return lambda value, engine_idx: self._observe_histogram(
+                metric_name, value, engine_idx
+            )
+        raise AssertionError(f"Unknown offloading metric metadata: {metadata}")
+
+    def _observe_counter(
+        self, metric_name: str, value: int | float | list[int | float], engine_idx: int
+    ) -> None:
+        assert isinstance(value, int | float)
+        self.offloading_metrics[(engine_idx, metric_name)].inc(value)
+        if metric_name == LOAD_BYTES:
+            self.counter_kv_bytes[(engine_idx, _LOAD_TRANSFER_TYPE)].inc(value)
+        elif metric_name == LOAD_TIME:
+            self.counter_kv_transfer_time[(engine_idx, _LOAD_TRANSFER_TYPE)].inc(value)
+        elif metric_name == STORE_BYTES:
+            self.counter_kv_bytes[(engine_idx, _STORE_TRANSFER_TYPE)].inc(value)
+        elif metric_name == STORE_TIME:
+            self.counter_kv_transfer_time[(engine_idx, _STORE_TRANSFER_TYPE)].inc(value)
+
+    def _observe_gauge(
+        self, metric_name: str, value: int | float | list[int | float], engine_idx: int
+    ) -> None:
+        assert isinstance(value, int | float)
+        self.offloading_metrics[(engine_idx, metric_name)].set(value)
+
+    def _observe_histogram(
+        self, metric_name: str, value: int | float | list[int | float], engine_idx: int
+    ) -> None:
+        assert isinstance(value, list)
+        for observation in value:
+            assert isinstance(observation, int | float)
+            self.offloading_metrics[(engine_idx, metric_name)].observe(observation)
+            if metric_name == LOAD_SIZE:
+                self.histogram_transfer_size[
+                    (engine_idx, _LOAD_TRANSFER_TYPE)
+                ].observe(observation)
+            elif metric_name == STORE_SIZE:
+                self.histogram_transfer_size[
+                    (engine_idx, _STORE_TRANSFER_TYPE)
+                ].observe(observation)
 
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
         """Observe transfer statistics."""
         for key, value in transfer_stats_data.items():
-            if key.startswith(COUNTER_PREFIX):
-                metric_name = key.removeprefix(COUNTER_PREFIX)
-                assert isinstance(value, int | float)
-                metadata = self._offloading_manager_metric_metadata[metric_name]
-                assert isinstance(metadata, OffloadingCounterMetadata)
-                counter = self._ensure_offloading_manager_metric(metric_name, engine_idx)
-                counter.inc(value)
-                continue
-            if key.startswith(GAUGE_PREFIX):
-                metric_name = key.removeprefix(GAUGE_PREFIX)
-                assert isinstance(value, int | float)
-                metadata = self._offloading_manager_metric_metadata[metric_name]
-                assert isinstance(metadata, OffloadingGaugeMetadata)
-                gauge = self._ensure_offloading_manager_metric(metric_name, engine_idx)
-                gauge.set(value)
-                continue
-            if key.startswith(HISTOGRAM_PREFIX):
-                metric_name = key.removeprefix(HISTOGRAM_PREFIX)
-                assert isinstance(value, list)
-                metadata = self._offloading_manager_metric_metadata[metric_name]
-                assert isinstance(metadata, OffloadingHistogramMetadata)
-                histogram = self._ensure_offloading_manager_metric(
-                    metric_name, engine_idx
-                )
-                for observation in value:
-                    assert isinstance(observation, int | float)
-                    histogram.observe(observation)
-                continue
-
-            if not key.startswith(TRANSFER_PREFIX):
-                raise AssertionError(f"Unknown offloading stats key: {key}")
-
-            ops = value
-            transfer_type = key.removeprefix(TRANSFER_PREFIX)
-            transfer_size = self.histogram_transfer_size[(engine_idx, transfer_type)]
-            kv_bytes = self.counter_kv_bytes[(engine_idx, transfer_type)]
-            transfer_time = self.counter_kv_transfer_time[(engine_idx, transfer_type)]
-
-            assert isinstance(ops, list)
-            for op in ops:
-                assert isinstance(op, dict)
-                transfer_size.observe(op["op_size"])
-                kv_bytes.inc(op["op_size"])
-                transfer_time.inc(op["op_time"])
+            self._metric_observers[key](value, engine_idx)

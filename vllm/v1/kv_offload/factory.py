@@ -50,11 +50,8 @@ class OffloadingSpecFactory:
     def get_metric_definitions(
         cls, config: "VllmConfig"
     ) -> dict[str, OffloadingMetricMetadata]:
-        kv_transfer_config = config.kv_transfer_config
-        assert kv_transfer_config is not None
-        extra_config = kv_transfer_config.kv_connector_extra_config
         spec_cls = cls.get_spec_cls(config)
-        return spec_cls.get_metric_definitions(extra_config)
+        return spec_cls.get_metric_definitions(config)
 
     @classmethod
     def create_spec(

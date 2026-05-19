@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterator
-from typing import Any
 
 from typing_extensions import override
 
@@ -27,12 +26,19 @@ class CPUOffloadingSpec(OffloadingSpec):
     BLOCK_SIZE_ALIGNMENT = 1
 
     @classmethod
+    def get_manager_cls(cls) -> type[OffloadingManager]:
+        return CPUOffloadingManager
+
+    @classmethod
     def get_metric_definitions(
-        cls, extra_config: dict[str, Any]
+        cls, vllm_config: VllmConfig
     ) -> dict[str, OffloadingMetricMetadata]:
+        kv_transfer_config = vllm_config.kv_transfer_config
+        assert kv_transfer_config is not None
+        extra_config = kv_transfer_config.kv_connector_extra_config
         store_threshold = int(extra_config.get("store_threshold", 0))
         if store_threshold >= 2:
-            return CPUOffloadingManager.get_metric_definitions()
+            return cls.get_manager_cls().get_metric_definitions(vllm_config)
         return {}
 
     def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig):

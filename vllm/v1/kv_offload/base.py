@@ -147,7 +147,9 @@ The class provides the following primitives:
 
 class OffloadingManager(ABC):
     @classmethod
-    def get_metric_definitions(cls) -> dict[str, OffloadingMetricMetadata]:
+    def get_metric_definitions(
+        cls, vllm_config: "VllmConfig"
+    ) -> dict[str, OffloadingMetricMetadata]:
         """Return Prometheus metric definitions emitted by this manager."""
         return {}
 
@@ -409,6 +411,12 @@ class CanonicalKVCaches:
 class OffloadingSpec(ABC):
     """Spec for an offloading connector"""
 
+    @classmethod
+    @abstractmethod
+    def get_manager_cls(cls) -> type[OffloadingManager]:
+        """Return the scheduler-side offloading manager class for this spec."""
+        pass
+
     def __init__(self, vllm_config: "VllmConfig", kv_cache_config: "KVCacheConfig"):
         logger.warning(
             "Initializing OffloadingSpec. This API is experimental and "
@@ -474,10 +482,10 @@ class OffloadingSpec(ABC):
 
     @classmethod
     def get_metric_definitions(
-        cls, extra_config: dict[str, Any]
+        cls, vllm_config: "VllmConfig"
     ) -> dict[str, OffloadingMetricMetadata]:
         """Return Prometheus metric definitions emitted by this spec."""
-        return {}
+        return cls.get_manager_cls().get_metric_definitions(vllm_config)
 
     @abstractmethod
     def get_manager(self) -> OffloadingManager:
