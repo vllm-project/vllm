@@ -38,7 +38,7 @@ if(VLLM_FLASH_ATTN_SRC_DIR)
 else()
   FetchContent_Declare(
           vllm-flash-attn
-          GIT_REPOSITORY https://github.com/vllm-project/flash-attention.git
+          GIT_REPOSITORY https://github.com/carlyou/flash-attention.git
           # TODO: revert to a vllm-project/flash-attention main commit once
           # https://github.com/vllm-project/flash-attention/pull/135
           # (FA4 fused FP8 output) is merged. Currently pinned to the PR head.
