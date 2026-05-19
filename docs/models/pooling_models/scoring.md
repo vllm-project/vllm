@@ -130,7 +130,7 @@ The following [pooling parameters][vllm.PoolingParams] are only supported by cro
 
 ### `LLM.score`
 
-The [score][vllm.LLM.score] method outputs similarity scores between sentence pairs.
+The [score][vllm.entrypoints.pooling.offline.PoolingOfflineMixin.score] method outputs similarity scores between sentence pairs.
 
 ```python
 from vllm import LLM

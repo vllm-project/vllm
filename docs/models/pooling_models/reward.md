@@ -87,7 +87,7 @@ The following [pooling parameters][vllm.PoolingParams] are supported.
 
 ### `LLM.encode`
 
-The [encode][vllm.LLM.encode] method is available to all pooling models in vLLM.
+The [encode][vllm.entrypoints.pooling.offline.PoolingOfflineMixin.encode] method is available to all pooling models in vLLM.
 
 - Reward Models
 

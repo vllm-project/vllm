@@ -5,7 +5,6 @@ import torch
 # this import will also register the custom ops
 import vllm.model_executor.kernels.mhc as mhc_kernels
 from vllm.model_executor.custom_op import CustomOp
-from vllm.platforms import current_platform
 
 
 # --8<-- [start:mhc_pre]
@@ -62,31 +61,35 @@ class MHCPreOp(CustomOp):
         sinkhorn_repeat: int,
         n_splits: int = 1,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        hidden_size = residual.shape[-1]
-        if hidden_size % 256 == 0:
-            return torch.ops.vllm.mhc_pre_aiter(
-                residual,
-                fn,
-                hc_scale,
-                hc_base,
-                rms_eps,
-                hc_pre_eps,
-                hc_sinkhorn_eps,
-                hc_post_mult_value,
-                sinkhorn_repeat,
-            )
-        else:
-            return mhc_kernels.mhc_pre_torch(
-                residual,
-                fn,
-                hc_scale,
-                hc_base,
-                rms_eps,
-                hc_pre_eps,
-                hc_sinkhorn_eps,
-                hc_post_mult_value,
-                sinkhorn_repeat,
-            )
+        # TODO: Reenable aiter after we are at the aiter
+        # version that has this bugfix
+        # https://github.com/ROCm/aiter/commit/b639cb63bcac4672dce33a731fad042a65cb3649
+        # It has accuracy problem at large number of tokens.
+        # hidden_size = residual.shape[-1]
+        # if hidden_size % 256 == 0:
+        #     return torch.ops.vllm.mhc_pre_aiter(
+        #         residual,
+        #         fn,
+        #         hc_scale,
+        #         hc_base,
+        #         rms_eps,
+        #         hc_pre_eps,
+        #         hc_sinkhorn_eps,
+        #         hc_post_mult_value,
+        #         sinkhorn_repeat,
+        #     )
+        # else:
+        return mhc_kernels.mhc_pre_torch(
+            residual,
+            fn,
+            hc_scale,
+            hc_base,
+            rms_eps,
+            hc_pre_eps,
+            hc_sinkhorn_eps,
+            hc_post_mult_value,
+            sinkhorn_repeat,
+        )
 
     def forward_native(self, *args, **kwargs):
         raise NotImplementedError("Native implementation of mhc_pre is not available")
@@ -125,21 +128,25 @@ class MHCPostOp(CustomOp):
         post_layer_mix: torch.Tensor,
         comb_res_mix: torch.Tensor,
     ) -> torch.Tensor:
-        hidden_size = residual.shape[-1]
-        if hidden_size % 256 == 0:
-            return torch.ops.vllm.mhc_post_aiter(
-                x,
-                residual,
-                post_layer_mix,
-                comb_res_mix,
-            )
-        else:
-            return mhc_kernels.mhc_post_torch(
-                x,
-                residual,
-                post_layer_mix,
-                comb_res_mix,
-            )
+        # TODO: Reenable aiter after we are at the aiter
+        # version that has this bugfix
+        # https://github.com/ROCm/aiter/commit/b639cb63bcac4672dce33a731fad042a65cb3649
+        # It has accuracy problem at large number of tokens.
+        # hidden_size = residual.shape[-1]
+        # if hidden_size % 256 == 0:
+        #     return torch.ops.vllm.mhc_post_aiter(
+        #         x,
+        #         residual,
+        #         post_layer_mix,
+        #         comb_res_mix,
+        #     )
+        # else:
+        return mhc_kernels.mhc_post_torch(
+            x,
+            residual,
+            post_layer_mix,
+            comb_res_mix,
+        )
 
     def forward_native(self, *args, **kwargs):
         raise NotImplementedError("Native implementation of mhc_post is not available")
@@ -190,8 +197,6 @@ class HCHeadOp(CustomOp):
         )
         return out.view(*outer_shape, hidden_size)
 
-    # This @torch.compile is necessary for accuracy as well as performance.
-    @torch.compile(backend=current_platform.simple_compile_backend)
     def forward_hip(
         self,
         hidden_states: torch.Tensor,

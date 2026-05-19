@@ -94,7 +94,7 @@ The following [pooling parameters][vllm.PoolingParams] are supported.
 
 ### `LLM.encode`
 
-The [encode][vllm.LLM.encode] method is available to all pooling models in vLLM.
+The [encode][vllm.entrypoints.pooling.offline.PoolingOfflineMixin.encode] method is available to all pooling models in vLLM.
 
 Set `pooling_task="token_embed"` when using `LLM.encode` for token embedding Models:
 
@@ -110,7 +110,7 @@ print(f"Data: {data!r}")
 
 ### `LLM.score`
 
-The [score][vllm.LLM.score] method outputs similarity scores between sentence pairs.
+The [score][vllm.entrypoints.pooling.offline.PoolingOfflineMixin.score] method outputs similarity scores between sentence pairs.
 
 All models that support token embedding task also support using the score API to compute similarity scores by calculating the late interaction of two input prompts.
 
