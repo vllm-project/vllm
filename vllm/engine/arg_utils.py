@@ -2439,6 +2439,30 @@ class EngineArgs:
             self.reasoning_config = ReasoningConfig()
         self.reasoning_config.reasoning_parser = self.reasoning_parser
 
+    @staticmethod
+    def _get_min_mm_batched_tokens(
+        model_config: ModelConfig,
+    ) -> int | None:
+        """Get the minimum max_num_batched_tokens needed for a multimodal
+        prefix-LM model to process at least one item of any supported modality.
+
+        Returns None if the value cannot be determined at this stage.
+        """
+        try:
+            from vllm.multimodal import MULTIMODAL_REGISTRY
+
+            info = MULTIMODAL_REGISTRY.get_processing_info(model_config)
+            mm_counts = {modality: 1 for modality in info.supported_mm_limits}
+            max_tokens = info.get_mm_max_tokens_per_item(
+                seq_len=model_config.max_model_len,
+                mm_counts=mm_counts,
+            )
+            if max_tokens is not None:
+                return max(max_tokens.values())
+        except Exception:
+            pass
+        return None
+
     def _set_default_max_num_seqs_and_batched_tokens_args(
         self,
         usage_context: UsageContext | None,
@@ -2488,6 +2512,21 @@ class EngineArgs:
                     model_config.max_model_len,
                     self.max_num_batched_tokens,
                 )
+
+            # For multimodal prefix-LM models (e.g., Gemma 4) that disable
+            # chunked MM input, a single multimodal item must fit in one batch.
+            # Raise the floor to accommodate the largest per-item token count.
+            if model_config.is_multimodal_model and model_config.is_mm_prefix_lm:
+                mm_min = self._get_min_mm_batched_tokens(model_config)
+                if mm_min is not None and mm_min > self.max_num_batched_tokens:
+                    logger.info(
+                        "Raising max_num_batched_tokens from %d to %d to "
+                        "accommodate multimodal input for prefix-LM model %s.",
+                        self.max_num_batched_tokens,
+                        mm_min,
+                        model_config.model,
+                    )
+                    self.max_num_batched_tokens = mm_min
 
             # When using default settings,
             # Ensure max_num_batched_tokens does not exceed model limit.

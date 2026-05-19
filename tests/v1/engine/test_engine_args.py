@@ -90,3 +90,21 @@ def test_defaults_with_usage_context():
     vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
     assert vllm_config.scheduler_config.max_num_seqs == default_max_num_seqs
     assert vllm_config.scheduler_config.max_num_batched_tokens == default_server_tokens  # noqa: E501
+
+
+def test_mm_prefix_lm_raises_batched_tokens_floor():
+    """Verify that prefix-LM multimodal models (e.g., Gemma 4) auto-raise
+    max_num_batched_tokens to fit at least one multimodal item.
+
+    Regression test for https://github.com/vllm-project/vllm/issues/42687
+    """
+    engine_args = EngineArgs(
+        model="google/gemma-4-27B-it",
+        max_model_len=4096,
+        enforce_eager=True,
+    )
+    vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
+    # Gemma 4 video budget = 32 * (70 + 2 + 6) = 2496.
+    # Without the fix, GPUs < 70GB would get max_num_batched_tokens = 2048,
+    # which is too small. The fix should raise it to at least 2496.
+    assert vllm_config.scheduler_config.max_num_batched_tokens >= 2496
