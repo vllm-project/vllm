@@ -3,6 +3,7 @@
 import contextlib
 import importlib.metadata
 import os
+import platform
 import random
 import threading
 from collections.abc import Callable, Collection
@@ -65,6 +66,11 @@ MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {
 }
 
 T = TypeVar("T")
+
+
+# Pin memory in non-WSL case.
+# Logic duplicated here for now to avoid circular import.
+PIN_MEMORY = "microsoft" not in " ".join(platform.uname()).lower()
 
 
 def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
@@ -602,12 +608,12 @@ def create_kv_caches_with_random(
 def async_tensor_h2d(
     data: list,
     dtype: torch.dtype,
-    target_device: str | torch.device,
-    pin_memory: bool,
+    device: str | torch.device,
+    pin_memory: bool = PIN_MEMORY,
 ) -> torch.Tensor:
     """Asynchronously create a tensor and copy it from host to device."""
     t = torch.tensor(data, dtype=dtype, pin_memory=pin_memory, device="cpu")
-    return t.to(device=target_device, non_blocking=True)
+    return t.to(device=device, non_blocking=True)
 
 
 def make_ndarray_with_pad(

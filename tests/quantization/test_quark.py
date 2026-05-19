@@ -240,8 +240,13 @@ WIKITEXT_ACCURACY_CONFIGS = [
     not QUARK_MXFP4_AVAILABLE,
     reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available",
 )
-@pytest.mark.parametrize("config", WIKITEXT_ACCURACY_CONFIGS)
-@pytest.mark.parametrize("tp_size", [1, 2])
+@pytest.mark.parametrize(
+    "config",
+    [pytest.param(val, id=f"config:{val}") for val in WIKITEXT_ACCURACY_CONFIGS],
+)
+@pytest.mark.parametrize(
+    "tp_size", [pytest.param(val, id=f"tp_size:{val}") for val in [1, 2]]
+)
 def test_ocp_mx_wikitext_correctness(config: AccuracyTestConfig, tp_size: int):
     device_count = torch.accelerator.device_count()
     if device_count < tp_size:
@@ -256,6 +261,53 @@ def test_ocp_mx_wikitext_correctness(config: AccuracyTestConfig, tp_size: int):
         model_args=config.get_model_args(
             tp_size=tp_size, kwargs={"cudagraph_capture_sizes": [16]}
         ),
+        tasks=task,
+        batch_size=64,
+    )
+
+    EXPECTED_VALUE = config.excepted_value
+    measured_value = results["results"][task]["word_perplexity,none"]
+    assert (
+        measured_value < EXPECTED_VALUE + rtol
+        and measured_value > EXPECTED_VALUE - rtol
+    ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
+
+
+@pytest.mark.skipif(
+    not QUARK_MXFP4_AVAILABLE,
+    reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available",
+)
+@pytest.mark.parametrize("tp_size", [1, 2])
+def test_nvfp4_wikitext_correctness(tp_size: int):
+    device_count = torch.accelerator.device_count()
+    if device_count < tp_size:
+        pytest.skip(f"This test requires >={tp_size} gpus, got only {device_count}")
+
+    # NOTE: expected_value from nvidia/Qwen3-30B-A3B-NVFP4
+    expected_value = 11.2391
+
+    model_name = "amd-quark/Qwen3-30B-A3B-nvfp4-quark"
+    task = "wikitext"
+
+    rtol = 0.25
+
+    config = AccuracyTestConfig(
+        model_name=model_name,
+        excepted_value=expected_value,
+    )
+
+    model_args = config.get_model_args(
+        tp_size=tp_size,
+        kwargs={
+            "cudagraph_capture_sizes": [16],
+        },
+    )
+    model_args.pop("add_bos_token")
+
+    # Smaller cudagraph_capture_sizes to speed up the test.
+    results = lm_eval.simple_evaluate(
+        model="vllm",
+        model_args=model_args,
         tasks=task,
         batch_size=64,
     )
