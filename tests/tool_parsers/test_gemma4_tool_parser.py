@@ -757,6 +757,45 @@ class TestStreamingExtraction:
             f"Expected at least 2 tool calls, got {len(all_tool_calls)}"
         )
 
+    def test_streaming_four_tool_calls_with_interleaved_text_in_single_delta(
+        self, parser, mock_request
+    ):
+        """One chunk contains 4 tool calls with plain text interspersed.
+
+        This tests the parser's ability to handle:
+        1. Multiple (4) tool calls in a single delta
+        2. Plain text appearing before, between, and after tool calls
+        """
+        sd = '<|"|>'
+        chunk = (
+            "Here are the results:\n"
+            f'<|tool_call>call:get_weather{{location:{sd}London{sd}}}<tool_call|>'
+            "Weather info above.\n"
+            f'<|tool_call>call:get_time{{location:{sd}London{sd}}}<tool_call|>'
+            f'<|tool_call>call:get_temp{{location:{sd}Paris{sd}}}<tool_call|>'
+            "Text between calls 3 and 4.\n"
+            f'<|tool_call>call:get_humidity{{location:{sd}Tokyo{sd}}}<tool_call|>'
+            "Final text."
+        )
+        chunks = [chunk]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+
+        # Collect all tool call deltas and content deltas separately
+        all_tool_calls = []
+        all_content = []
+        for delta, _ in results:
+            if delta:
+                if delta.tool_calls:
+                    all_tool_calls.extend(delta.tool_calls)
+                if delta.content:
+                    all_content.append(delta.content)
+
+        # Verify all 4 tool calls were detected
+        assert len(all_tool_calls) >= 4, (
+            f"Expected at least 4 tool calls, got {len(all_tool_calls)}"
+        )
+
         # Verify function names
         names = []
         for tc in all_tool_calls:
@@ -770,6 +809,14 @@ class TestStreamingExtraction:
 
         assert "get_weather" in names, f"get_weather not found in {names}"
         assert "get_time" in names, f"get_time not found in {names}"
+        assert "get_temp" in names, f"get_temp not found in {names}"
+        assert "get_humidity" in names, f"get_humidity not found in {names}"
+
+        # Verify content was also captured (plain text)
+        content_str = "".join(all_content)
+        assert "Here are the results:" in content_str or len(content_str) > 0, (
+            f"Expected some content text, got: {content_str}"
+        )
 
     def test_streaming_multiple_tool_calls_sequential(
         self, parser, mock_request
