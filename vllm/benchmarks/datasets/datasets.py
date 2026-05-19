@@ -1412,12 +1412,12 @@ class TimedTrace(BenchmarkDataset):
         np.random.seed(self.random_seed)
 
         # Set parameters with defaults from timed_trace_group arguments
-        self.chunk_size = int(kwargs.get("chunk_hash_size", 16))
-        self.sec_multiplier = float(kwargs.get("sec_multiplier", 1))
-        self.label_ts = str(kwargs.get("label_timestamp"))
-        self.label_input_length = str(kwargs.get("label_input_length"))
-        self.label_output_length = str(kwargs.get("label_output_length"))
-        self.label_hash_ids = str(kwargs.get("label_hash_ids"))
+        self.chunk_size = int(kwargs.get("timed_trace_chunk_hash_size", 16))
+        self.sec_multiplier = float(kwargs.get("timed_trace_sec_multiplier", 1))
+        self.label_ts = str(kwargs.get("timed_trace_label_timestamp"))
+        self.label_input_length = str(kwargs.get("timed_trace_label_input_length"))
+        self.label_output_length = str(kwargs.get("timed_trace_label_output_length"))
+        self.label_hash_ids = str(kwargs.get("timed_trace_label_hash_ids"))
         print(
             f"timed-trace: chunk_size: {self.chunk_size}, "
             f"sec_multiplier: {self.sec_multiplier}, "
@@ -1683,12 +1683,10 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         help="Output length for each request. Overrides the output length "
         "from the ShareGPT dataset.",
     )
-
-    # FIXME(atr): I dont know why "timed-trace dataset options" as the
-    # name does not work!
-    timed_trace_group = parser.add_argument_group("timed-trace")
+    
+    timed_trace_group = parser.add_argument_group("timed-trace dataset options")
     timed_trace_group.add_argument(
-        "--chunk-hash-size",
+        "--timed-trace-chunk-hash-size",
         type=int,
         default=16,
         help=(
@@ -1698,7 +1696,7 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         ),
     )
     timed_trace_group.add_argument(
-        "--sec-multiplier",
+        "--timed-trace-sec-multiplier",
         type=float,
         default=1,
         help=(
@@ -1709,25 +1707,25 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         ),
     )
     timed_trace_group.add_argument(
-        "--label-timestamp",
+        "--timed-trace-label-timestamp",
         type=str,
         default="timestamp",
         help="What json label to use to index the timestamp in the trace.",
     )
     timed_trace_group.add_argument(
-        "--label-input-length",
+        "--timed-trace-label-input-length",
         type=str,
         default="input_length",
         help=("What json label to use to index the input length field in the trace."),
     )
     timed_trace_group.add_argument(
-        "--label-output-length",
+        "--timed-trace-label-output-length",
         type=str,
         default="output_length",
         help=("What json label to use to index the output length field in the trace."),
     )
     timed_trace_group.add_argument(
-        "--label-hash-ids",
+        "--timed-trace-label-hash-ids",
         type=str,
         default="hash_ids",
         help=("What json label to use to index the hash ids for the input prompts."),

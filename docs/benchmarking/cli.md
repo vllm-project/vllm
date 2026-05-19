@@ -937,8 +937,8 @@ Run the benchmark:
 vllm bench serve --model Qwen/Qwen3.5-2B \  
 --dataset-name=timed_trace --num-prompts 100 --host 127.0.0.1 \
 --port 8000 --dataset-path ./conversation_trace.jsonl \
---ignore-eos  --self-timed --chunk-hash-size 512 \
---sec-multiplier 0.001 
+--ignore-eos  --self-timed --timed-trace-chunk-hash-size 512 \
+--timed-trace-sec-multiplier 0.001 
 ```
 
 This will replay the first 100 lines from the trace file `conversation.jsonl`.  
