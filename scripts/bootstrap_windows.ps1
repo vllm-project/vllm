@@ -39,7 +39,9 @@ param(
         "nvidia-ml-py",
         "requests",
         "tabulate",
-        "tqdm"
+        "tqdm",
+        "llguidance>=1.7.0,<1.8.0",
+        "xgrammar>=0.2.0,<1.0.0"
     ),
     [switch]$SkipDependencyInstall,
     [switch]$SkipBuild,
@@ -215,6 +217,7 @@ function Set-BootstrapEnvironment {
     $env:HF_HUB_DISABLE_SYMLINKS = "1"
     $env:HF_HUB_DISABLE_SYMLINKS_WARNING = "1"
     $env:VLLM_WORKER_MULTIPROC_METHOD = "spawn"
+    $env:VLLM_USE_FLASHINFER_SAMPLER = "0"
 }
 
 if (-not $RepoPath) {
