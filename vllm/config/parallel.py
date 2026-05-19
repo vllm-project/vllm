@@ -897,8 +897,9 @@ class ParallelConfig:
                 # support stateless mode), so we use PyNCCL backend
                 self.eplb_config.communicator = "pynccl"
             else:
-                # Avoid torch_nccl: batched isend/irecv with NCCL
-                # hangs under high load (many ops, large tensors).
+                # Avoid torch_nccl: NCCL is fundamentally incompatible
+                # with async EPLB due to multi-stream conflicts, and
+                # batched isend/irecv hangs under high load.
                 # See https://github.com/pytorch/pytorch/issues/174288
                 # Prefer nixl when available; fall back to torch_gloo.
                 from vllm.distributed.nixl_utils import is_nixl_available
