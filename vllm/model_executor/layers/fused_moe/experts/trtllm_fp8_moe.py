@@ -91,9 +91,6 @@ class TrtLlmFp8ExpertsBase:
     def supports_chunking(self) -> bool:
         return False
 
-    def supports_expert_map(self) -> bool:
-        return False
-
 
 class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
     """

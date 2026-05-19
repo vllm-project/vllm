@@ -12,7 +12,6 @@ from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEActivationFormat,
-    FusedMoEExpertsModular,
     FusedMoeWeightScaleSupported,
     RoutedExperts,
     SharedExperts,
@@ -56,7 +55,6 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         assert self.weight_quant.actorder != "group"
         assert self.group_size == 128, "Only group size 128 supported for W4A8 MoE"
 
-        self.disable_expert_map = False
         self.layer_name = layer_name
 
         from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
@@ -277,10 +275,8 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
         from vllm.model_executor.layers.fused_moe import CutlassExpertsW4A8Fp8
 
-        experts: FusedMoEExpertsModular
-
         logger.debug("CutlassExpertsW4A8Fp8(%s)", self.__class__.__name__)
-        experts = CutlassExpertsW4A8Fp8(
+        return CutlassExpertsW4A8Fp8(
             out_dtype=self.moe.in_dtype,
             a_strides1=self.a_strides1_c_strides2,
             a_strides2=self.a_strides2,
@@ -294,13 +290,6 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             quant_config=self.moe_quant_config,
             group_size=self.group_size,
         )
-
-        num_dispatchers = prepare_finalize.num_dispatchers()
-        self.disable_expert_map = (
-            num_dispatchers > 1 or not experts.supports_expert_map()
-        )
-
-        return experts
 
     def apply(
         self,
@@ -327,7 +316,7 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             quant_config=self.moe_quant_config,
             activation=layer.activation,
             global_num_experts=layer.global_num_experts,
-            expert_map=None if self.disable_expert_map else layer.expert_map,
+            expert_map=layer.expert_map,
             a_strides1=self.a_strides1_c_strides2,
             a_strides2=self.a_strides2,
             b_strides1=self.b_strides1,

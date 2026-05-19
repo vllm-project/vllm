@@ -572,9 +572,6 @@ class BaseOAITritonExperts(mk.FusedMoEExpertsModular):
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         return True
 
-    def supports_expert_map(self) -> bool:
-        return True
-
     def moe_problem_size(
         self,
         a1: torch.Tensor,
@@ -998,9 +995,6 @@ class OAITritonMxfp4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         router_logits_dtype: torch.dtype | None,
         routing_method: RoutingMethodType,
     ) -> bool:
-        return True
-
-    def supports_expert_map(self) -> bool:
         return True
 
     @property

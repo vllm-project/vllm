@@ -102,9 +102,6 @@ class TrtLlmBf16Experts(mk.FusedMoEExpertsMonolithic):
     def supports_chunking(self) -> bool:
         return False
 
-    def supports_expert_map(self) -> bool:
-        return False
-
     @property
     def expects_unquantized_inputs(self) -> bool:
         return True

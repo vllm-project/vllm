@@ -248,9 +248,6 @@ class AiterW4A8ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
     ) -> bool:
         return True
 
-    def supports_expert_map(self) -> bool:
-        return False  # Expert parallelism not yet supported
-
     @property
     def expects_unquantized_inputs(self) -> bool:
         return True
