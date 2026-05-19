@@ -1096,6 +1096,14 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
             return False
         return bool(compile_range.end <= self.max_token_num)
 
+    @VllmInductorPass.time_and_log
+    def __call__(self, graph: fx.Graph) -> None:
+        self.matched_count = self.pm_pass.apply(graph)
+        VllmPatternMatcherPass.match_table[self.pass_name] += self.matched_count
+        logger.debug(
+            "%s Replaced %s patterns", self.__class__.__name__, self.matched_count
+        )
+
     def __del__(self) -> None:
         if getattr(self, "disabled", True):
             return
