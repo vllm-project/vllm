@@ -76,8 +76,18 @@ class MambaStateDtypeCalculator:
         mamba_cache_dtype: MambaDType,
         mamba_ssm_cache_dtype: MambaDType,
     ) -> tuple[torch.dtype, ...]:
-        return cls._mamba_state_dtype(
+        conv_state_dtype, temporal_state_dtype = cls._mamba_state_dtype(
             model_dtype, mamba_cache_dtype, mamba_ssm_cache_dtype
+        )
+        return (
+            conv_state_dtype,
+            temporal_state_dtype,
+            torch.bfloat16,
+            torch.bfloat16,
+            torch.float32,
+            torch.float32,
+            torch.int32,
+            torch.int32,
         )
 
     @classmethod
@@ -169,7 +179,8 @@ class MambaStateShapeCalculator:
         state_size: int,
         conv_kernel: int,
         num_spec: int = 0,
-    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
+        checkpoint_interval: int = 1,
+    ) -> tuple[tuple[int, ...], ...]:
         # if n_groups is not divisible by world_size, need to extend the shards
         # to ensure all groups needed by a head is sharded along with it
         n_groups = n_groups + cls.extra_groups_for_head_shards(n_groups, tp_world_size)
@@ -184,7 +195,24 @@ class MambaStateShapeCalculator:
         # - they are typically small
         #   e.g., (h_heads, head_dim, state_size) = (128, 64, 128)
         temporal_state_shape = (divide(num_heads, tp_world_size), head_dim, state_size)
-        return conv_state_shape, temporal_state_shape
+        nheads = divide(num_heads, tp_world_size)
+        ngroups = max(1, divide(n_groups, tp_world_size))
+        old_x_shape = (checkpoint_interval, nheads, head_dim)
+        old_B_shape = (2, checkpoint_interval, ngroups, state_size)
+        old_dt_shape = (2, nheads, checkpoint_interval)
+        old_cumAdt_shape = (2, nheads, checkpoint_interval)
+        cache_buf_idx_shape = ()
+        prev_num_accepted_tokens_shape = ()
+        return (
+            conv_state_shape,
+            temporal_state_shape,
+            old_x_shape,
+            old_B_shape,
+            old_dt_shape,
+            old_cumAdt_shape,
+            cache_buf_idx_shape,
+            prev_num_accepted_tokens_shape,
+        )
 
     @classmethod
     def short_conv_state_shape(
@@ -342,6 +370,21 @@ def get_temporal_copy_spec(
     )
 
 
+def get_stable_temporal_copy_spec(
+    state: torch.Tensor,
+    block_ids: list[int],
+    cur_block_idx: int,
+    num_accepted_tokens: int,
+) -> MambaCopySpec:
+    """Return a copy spec for state kept on the stable per-request block."""
+    del num_accepted_tokens
+    src_block_id = block_ids[cur_block_idx]
+    src_state = state[src_block_id]
+    return MambaCopySpec(
+        start_addr=src_state.data_ptr(), num_elements=src_state.numel()
+    )
+
+
 class MambaStateCopyFuncCalculator:
     @classmethod
     def linear_attention_state_copy_func(cls):
@@ -353,7 +396,31 @@ class MambaStateCopyFuncCalculator:
 
     @classmethod
     def mamba2_state_copy_func(cls):
-        return get_conv_copy_spec, get_temporal_copy_spec
+        return (
+            get_conv_copy_spec,
+            get_temporal_copy_spec,
+            get_stable_temporal_copy_spec,
+            get_stable_temporal_copy_spec,
+            get_stable_temporal_copy_spec,
+            get_stable_temporal_copy_spec,
+            get_stable_temporal_copy_spec,
+            get_stable_temporal_copy_spec,
+        )
+
+    @classmethod
+    def mamba2_checkpointing_state_copy_func(cls):
+        # Convolution state is still materialized by the conv update kernel.
+        # The SSM checkpoint state and replay tensors stay on the stable slot.
+        return (
+            get_conv_copy_spec,
+            get_stable_temporal_copy_spec,
+            get_stable_temporal_copy_spec,
+            get_stable_temporal_copy_spec,
+            get_stable_temporal_copy_spec,
+            get_stable_temporal_copy_spec,
+            get_stable_temporal_copy_spec,
+            get_stable_temporal_copy_spec,
+        )
 
     @classmethod
     def short_conv_state_copy_func(cls):
