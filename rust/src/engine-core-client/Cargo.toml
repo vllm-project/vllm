@@ -15,6 +15,7 @@ bytes.workspace = true
 easy-ext.workspace = true
 enum-as-inner.workspace = true
 futures.workspace = true
+half.workspace = true
 hex.workspace = true
 itertools.workspace = true
 parking_lot.workspace = true

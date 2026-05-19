@@ -1,16 +1,22 @@
 use std::collections::HashMap;
 
+use half::{bf16, f16};
 use llm_multimodal::{ModelSpecificValue, PreprocessedImages};
+use vllm_engine_core_client::protocol::ModelDtype;
 use vllm_engine_core_client::protocol::multimodal::MmKwargValue as ProtocolKwargValue;
 use vllm_engine_core_client::protocol::tensor::{ShapeExt as _, WireTensor};
 
 use crate::error::{Error, Result, bail_multimodal, multimodal};
 
 /// Representation for multimodal kwarg values for transformation.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub(super) enum KwargValue {
     /// Float tensor with row-major flat data and shape.
     F32Tensor { data: Vec<f32>, shape: Vec<usize> },
+    /// Float16 tensor with row-major flat data and shape.
+    F16Tensor { data: Vec<f16>, shape: Vec<usize> },
+    /// BFloat16 tensor with row-major flat data and shape.
+    Bf16Tensor { data: Vec<bf16>, shape: Vec<usize> },
     /// Signed integer tensor with row-major flat data and shape.
     I64Tensor { data: Vec<i64>, shape: Vec<usize> },
     /// Unsigned integer tensor with row-major flat data and shape.
@@ -20,35 +26,38 @@ pub(super) enum KwargValue {
 }
 
 /// Collect `pixel_values` and model-specific outputs into one tensor map.
-// FIXME: the model runner expects tensor data to be in the desired dtype,
-// otherwise it will fail. We should be aware of the resolved model dtype and do
-// conversions here if needed.
-pub(super) fn collect_tensors(preprocessed: PreprocessedImages) -> HashMap<String, KwargValue> {
+pub(super) fn collect_tensors(
+    preprocessed: PreprocessedImages,
+    float_dtype: ModelDtype,
+) -> Result<HashMap<String, KwargValue>> {
     let PreprocessedImages {
         pixel_values,
         model_specific,
         ..
     } = preprocessed;
 
-    let mut tensors = HashMap::from([(
-        "pixel_values".to_string(),
-        KwargValue::F32Tensor {
-            shape: pixel_values.shape().to_vec(),
-            data: pixel_values.into_iter().collect(),
-        },
-    )]);
+    let pixel_values = {
+        let shape = pixel_values.shape().to_vec();
+        let data = pixel_values.into_iter().collect();
+        KwargValue::from_f32_tensor(data, shape, float_dtype)?
+    };
+
+    let mut tensors = HashMap::new();
+    tensors.insert("pixel_values".to_string(), pixel_values);
     for (key, value) in model_specific {
-        tensors.insert(key, KwargValue::from(value));
+        tensors.insert(key, KwargValue::from_model_specific(value, float_dtype)?);
     }
-    tensors
+    Ok(tensors)
 }
 
-impl From<ModelSpecificValue> for KwargValue {
-    fn from(value: ModelSpecificValue) -> Self {
+impl KwargValue {
+    fn from_model_specific(value: ModelSpecificValue, float_dtype: ModelDtype) -> Result<Self> {
         use ProtocolKwargValue::*;
 
-        match value {
-            ModelSpecificValue::Tensor { data, shape } => Self::F32Tensor { data, shape },
+        Ok(match value {
+            ModelSpecificValue::Tensor { data, shape } => {
+                Self::from_f32_tensor(data, shape, float_dtype)?
+            }
             ModelSpecificValue::IntTensor { data, shape } => Self::I64Tensor { data, shape },
             ModelSpecificValue::UintTensor { data, shape } => Self::U32Tensor { data, shape },
             ModelSpecificValue::Int(value) => Self::Passthrough(Int(value)),
@@ -69,6 +78,22 @@ impl From<ModelSpecificValue> for KwargValue {
                     .collect(),
             )),
             ModelSpecificValue::Bool(value) => Self::Passthrough(Int(i64::from(value))),
+        })
+    }
+
+    /// Convert a float tensor to the target float dtype if needed, keeping the
+    /// same shape.
+    fn from_f32_tensor(data: Vec<f32>, shape: Vec<usize>, float_dtype: ModelDtype) -> Result<Self> {
+        match float_dtype {
+            ModelDtype::Float16 => Ok(Self::F16Tensor {
+                data: data.into_iter().map(f16::from_f32).collect(),
+                shape,
+            }),
+            ModelDtype::BFloat16 => Ok(Self::Bf16Tensor {
+                data: data.into_iter().map(bf16::from_f32).collect(),
+                shape,
+            }),
+            ModelDtype::Float32 => Ok(Self::F32Tensor { data, shape }),
         }
     }
 }
@@ -80,6 +105,12 @@ impl TryFrom<KwargValue> for ProtocolKwargValue {
         match value {
             KwargValue::F32Tensor { data, shape } => Ok(Self::Tensor(
                 WireTensor::from_f32(shape, data).map_err(Error::Multimodal)?,
+            )),
+            KwargValue::F16Tensor { data, shape } => Ok(Self::Tensor(
+                WireTensor::from_f16(shape, data).map_err(Error::Multimodal)?,
+            )),
+            KwargValue::Bf16Tensor { data, shape } => Ok(Self::Tensor(
+                WireTensor::from_bf16(shape, data).map_err(Error::Multimodal)?,
             )),
             KwargValue::I64Tensor { data, shape } => Ok(Self::Tensor(
                 WireTensor::from_i64(shape, data).map_err(Error::Multimodal)?,
@@ -103,6 +134,14 @@ impl KwargValue {
                 let (shape, data) = slice_first_axis_range(shape, data, index, index + 1, true)?;
                 Ok(Self::F32Tensor { data, shape })
             }
+            Self::F16Tensor { data, shape } => {
+                let (shape, data) = slice_first_axis_range(shape, data, index, index + 1, true)?;
+                Ok(Self::F16Tensor { data, shape })
+            }
+            Self::Bf16Tensor { data, shape } => {
+                let (shape, data) = slice_first_axis_range(shape, data, index, index + 1, true)?;
+                Ok(Self::Bf16Tensor { data, shape })
+            }
             Self::I64Tensor { data, shape } => {
                 let (shape, data) = slice_first_axis_range(shape, data, index, index + 1, true)?;
                 Ok(Self::I64Tensor { data, shape })
@@ -123,6 +162,14 @@ impl KwargValue {
             Self::F32Tensor { data, shape } => {
                 let (shape, data) = slice_first_axis_range(shape, data, start, end, false)?;
                 Ok(Self::F32Tensor { data, shape })
+            }
+            Self::F16Tensor { data, shape } => {
+                let (shape, data) = slice_first_axis_range(shape, data, start, end, false)?;
+                Ok(Self::F16Tensor { data, shape })
+            }
+            Self::Bf16Tensor { data, shape } => {
+                let (shape, data) = slice_first_axis_range(shape, data, start, end, false)?;
+                Ok(Self::Bf16Tensor { data, shape })
             }
             Self::I64Tensor { data, shape } => {
                 let (shape, data) = slice_first_axis_range(shape, data, start, end, false)?;
@@ -261,5 +308,35 @@ mod tests {
         assert!(
             matches!(error, Error::Multimodal(message) if message.contains("expects 4 elements"))
         );
+    }
+
+    #[test]
+    fn bfloat16_tensor_wire_uses_bfloat16_dtype() {
+        let value =
+            KwargValue::from_f32_tensor(vec![1.0, -1.0], vec![2], ModelDtype::BFloat16).unwrap();
+
+        let ProtocolKwargValue::Tensor(tensor) = ProtocolKwargValue::try_from(value).unwrap()
+        else {
+            panic!("expected tensor");
+        };
+
+        assert_eq!(tensor.dtype, "bfloat16");
+        assert_eq!(tensor.shape, vec![2]);
+        assert_eq!(tensor.data.into_raw_view().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn float16_tensor_wire_uses_float16_dtype() {
+        let value =
+            KwargValue::from_f32_tensor(vec![1.0, -1.0], vec![2], ModelDtype::Float16).unwrap();
+
+        let ProtocolKwargValue::Tensor(tensor) = ProtocolKwargValue::try_from(value).unwrap()
+        else {
+            panic!("expected tensor");
+        };
+
+        assert_eq!(tensor.dtype, "float16");
+        assert_eq!(tensor.shape, vec![2]);
+        assert_eq!(tensor.data.into_raw_view().unwrap().len(), 4);
     }
 }

@@ -12,7 +12,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, Once};
 
 use itertools::izip;
 use llm_multimodal::{
@@ -22,6 +22,7 @@ use llm_multimodal::{
     TrackedMedia,
 };
 use tracing::warn;
+use vllm_engine_core_client::protocol::ModelDtype;
 use vllm_engine_core_client::protocol::multimodal::{
     MmBatchedField, MmFeatureSpec, MmFeatures, MmField, MmFieldElem, MmFlatField, MmKwargsItem,
     MmSharedField, MmSlice, PlaceholderRange, SliceSpec,
@@ -238,6 +239,7 @@ pub(crate) async fn finalize_rendered_prompt(
     request: &ChatRequest,
     rendered: RenderedPrompt,
     info: Option<&MultimodalModelInfo>,
+    model_dtype: Option<ModelDtype>,
 ) -> Result<(Prompt, Option<MmFeatures>)> {
     if !request.has_multimodal() {
         return Ok((rendered.prompt, None));
@@ -247,13 +249,23 @@ pub(crate) async fn finalize_rendered_prompt(
         bail_multimodal!("multimodal chat renderer must return a text prompt before expansion");
     };
     let media_parts = extract_media_parts(request)?;
+    let model_dtype = model_dtype.unwrap_or_else(|| {
+        static WARN_ONCE: Once = Once::new();
+        WARN_ONCE.call_once(|| {
+            warn!(
+                "engine handshake did not report model dtype; \
+                 falling back to float32 for multimodal tensor encoding"
+            );
+        });
+        ModelDtype::Float32
+    });
 
     let mut prompt_token_ids = info
         .context
         .tokenizer()
         .encode(&prompt, request.add_special_tokens)
         .map_err(|error| multimodal!("{error}"))?;
-    let prepared = info.prepare_multimodal(media_parts, &mut prompt_token_ids).await?;
+    let prepared = info.prepare_multimodal(media_parts, &mut prompt_token_ids, model_dtype).await?;
 
     Ok((Prompt::TokenIds(prompt_token_ids), Some(prepared)))
 }
@@ -304,6 +316,7 @@ impl MultimodalModelInfo {
         &self,
         media_parts: Vec<MediaContentPart>,
         prompt_token_ids: &mut Vec<u32>,
+        model_dtype: ModelDtype,
     ) -> Result<MmFeatures> {
         if media_parts.is_empty() {
             return Ok(Vec::new());
@@ -315,7 +328,7 @@ impl MultimodalModelInfo {
         let replacements = self.spec.prompt_replacements(&self.context, &preprocessed)?;
         let ranges = self.expand_prompt_tokens(prompt_token_ids, replacements)?;
 
-        let features = self.build_features(preprocessed, fetched, ranges)?;
+        let features = self.build_features(preprocessed, fetched, ranges, model_dtype)?;
         if features.len() != media_parts_len {
             bail_multimodal!(
                 "number of built multimodal features {} does not match number of media parts {}",
@@ -437,9 +450,10 @@ impl MultimodalModelInfo {
         preprocessed: PreprocessedImages,
         images: FetchedImageMedia,
         ranges: Vec<PlaceholderRange>,
+        model_dtype: ModelDtype,
     ) -> Result<MmFeatures> {
         let len = images.frames.len();
-        let tensors = tensor::collect_tensors(preprocessed);
+        let tensors = tensor::collect_tensors(preprocessed, model_dtype)?;
 
         let mut features = Vec::with_capacity(images.frames.len());
         for (index, (frame, uuid, range)) in izip!(images.frames, images.uuids, ranges).enumerate()

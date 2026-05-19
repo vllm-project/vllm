@@ -1,5 +1,6 @@
 use bytemuck::allocation::pod_collect_to_vec;
 use enum_as_inner::EnumAsInner;
+use half::{bf16, f16};
 use rmpv::Value;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
@@ -42,6 +43,26 @@ impl WireNdArray {
             dtype: "float32".to_string(),
             shape,
             data: WireArrayData::RawView(pod_collect_to_vec::<f32, u8>(&data)),
+        })
+    }
+
+    /// Build a float16 tensor/ndarray backed by native-endian raw-view bytes.
+    pub fn from_f16(shape: Vec<usize>, data: Vec<f16>) -> Result<Self, String> {
+        validate_element_count(&shape, data.len())?;
+        Ok(Self {
+            dtype: "float16".to_string(),
+            shape,
+            data: WireArrayData::RawView(pod_collect_to_vec::<f16, u8>(&data)),
+        })
+    }
+
+    /// Build a bfloat16 tensor/ndarray backed by native-endian raw-view bytes.
+    pub fn from_bf16(shape: Vec<usize>, data: Vec<bf16>) -> Result<Self, String> {
+        validate_element_count(&shape, data.len())?;
+        Ok(Self {
+            dtype: "bfloat16".to_string(),
+            shape,
+            data: WireArrayData::RawView(pod_collect_to_vec::<bf16, u8>(&data)),
         })
     }
 
@@ -182,6 +203,19 @@ mod tests {
             f32_tensor.data.into_raw_view().expect("raw view"),
             [1.0_f32, 2.5].into_iter().flat_map(f32::to_ne_bytes).collect::<Vec<_>>()
         );
+
+        let f16_tensor =
+            WireNdArray::from_f16(vec![2], vec![f16::from_f32(1.0), f16::from_f32(2.5)]).unwrap();
+        assert_eq!(f16_tensor.dtype, "float16");
+        assert_eq!(f16_tensor.shape, vec![2]);
+        assert_eq!(f16_tensor.data.into_raw_view().expect("raw view").len(), 4);
+
+        let bf16_tensor =
+            WireNdArray::from_bf16(vec![2], vec![bf16::from_f32(1.0), bf16::from_f32(2.5)])
+                .unwrap();
+        assert_eq!(bf16_tensor.dtype, "bfloat16");
+        assert_eq!(bf16_tensor.shape, vec![2]);
+        assert_eq!(bf16_tensor.data.into_raw_view().expect("raw view").len(), 4);
 
         let i64_tensor = WireNdArray::from_i64(vec![1], vec![-7]).unwrap();
         assert_eq!(i64_tensor.dtype, "int64");

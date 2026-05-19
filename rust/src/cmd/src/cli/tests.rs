@@ -72,15 +72,18 @@ fn serve_args_auto_forward_python_flags_without_separator() {
         "Qwen/Qwen3-0.6B",
         "--python",
         "python3",
-        "--dtype",
-        "float16",
+        "--quantization",
+        "awq",
     ])
     .unwrap();
 
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    assert_eq!(args.managed_engine.python_args, vec!["--dtype", "float16"]);
+    assert_eq!(
+        args.managed_engine.python_args,
+        vec!["--quantization", "awq"]
+    );
 }
 
 #[test]
@@ -557,13 +560,22 @@ fn serve_args_auto_forward_unknown_flags_without_separator() {
 
 #[test]
 fn serve_args_auto_forward_negative_value_without_separator() {
-    let cli =
-        Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", "--dtype", "-1"]).unwrap();
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--num-gpu-blocks-override",
+        "-1",
+    ])
+    .unwrap();
 
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    assert_eq!(args.managed_engine.python_args, vec!["--dtype", "-1"]);
+    assert_eq!(
+        args.managed_engine.python_args,
+        vec!["--num-gpu-blocks-override", "-1"]
+    );
 }
 
 #[test]

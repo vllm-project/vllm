@@ -10,7 +10,9 @@ use crate::client::imp::{ClientInner, run_abort_loop, run_output_dispatcher_loop
 use crate::coordinator::CoordinatorHandle;
 use crate::error::{Error, Result};
 use crate::protocol::handshake::EngineCoreReadyResponse;
-use crate::protocol::{EngineCoreRequest, EngineCoreRequestType, EngineCoreUtilityRequest};
+use crate::protocol::{
+    EngineCoreRequest, EngineCoreRequestType, EngineCoreUtilityRequest, ModelDtype,
+};
 use crate::transport::{self, ConnectedEngine};
 
 pub(crate) mod imp;
@@ -371,6 +373,14 @@ impl EngineCoreClient {
             .iter()
             .filter_map(|engine| engine.ready_response.as_ref())
             .collect()
+    }
+
+    /// Return the engine-reported effective model dtype, when available.
+    pub fn model_dtype(&self) -> Option<ModelDtype> {
+        self.engines
+            .iter()
+            .filter_map(|engine| engine.ready_response.as_ref())
+            .find_map(|response| response.dtype)
     }
 
     /// Return the total number of GPU blocks summed across all connected

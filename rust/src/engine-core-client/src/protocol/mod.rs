@@ -36,6 +36,7 @@ fn is_false(v: &bool) -> bool {
 }
 
 mod classfied_outputs;
+pub mod dtype;
 pub mod handshake;
 pub mod logprobs;
 pub mod multimodal;
@@ -44,6 +45,7 @@ pub mod tensor;
 pub use classfied_outputs::{
     ClassifiedEngineCoreOutputs, DpControlMessage, RequestBatchOutputs, UtilityCallOutput,
 };
+pub use dtype::ModelDtype;
 pub use logprobs::decode_engine_core_outputs;
 
 /// Request types are encoded as single-byte protocol constants so they can be

@@ -50,6 +50,7 @@ mod request;
 mod stream;
 
 use vllm_engine_core_client::EngineCoreClient;
+use vllm_engine_core_client::protocol::ModelDtype;
 use vllm_llm::Llm;
 use vllm_text::{TextLlm, TextRequest};
 
@@ -91,6 +92,8 @@ pub fn validate_parser_overrides(
 pub struct ChatLlm {
     text: TextLlm,
     backend: DynChatBackend,
+    /// Effective model dtype reported by the engine.
+    model_dtype: Option<ModelDtype>,
     /// Tool-call parser selection.
     tool_call_parser: ParserSelection,
     /// Reasoning parser selection.
@@ -101,9 +104,12 @@ impl ChatLlm {
     /// Create a new chat facade from a text-generation facade plus a chat
     /// backend.
     pub fn new(text: TextLlm, backend: DynChatBackend) -> Self {
+        let model_dtype = text.engine_core_client().model_dtype();
+
         Self {
             text,
             backend,
+            model_dtype,
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
         }
@@ -125,6 +131,12 @@ impl ChatLlm {
     /// Set reasoning parser selection.
     pub fn with_reasoning_parser(mut self, selection: ParserSelection) -> Self {
         self.reasoning_parser = selection;
+        self
+    }
+
+    /// Override the effective model dtype used for multimodal tensor encoding.
+    pub fn with_model_dtype(mut self, model_dtype: Option<ModelDtype>) -> Self {
+        self.model_dtype = model_dtype;
         self
     }
 
@@ -162,6 +174,7 @@ impl ChatLlm {
             &request,
             rendered,
             self.backend.multimodal_model_info(),
+            self.model_dtype,
         )
         .await?;
 

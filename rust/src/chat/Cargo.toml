@@ -9,6 +9,7 @@ anyhow.workspace = true
 asynk-strim-attr.workspace = true
 easy-ext.workspace = true
 futures.workspace = true
+half.workspace = true
 itertools.workspace = true
 llm-multimodal.workspace = true
 minijinja.workspace = true

@@ -10,6 +10,7 @@ use zeromq::util::PeerIdentity;
 use zeromq::{DealerSocket, PushSocket, SocketOptions, SubSocket, ZmqMessage};
 
 use crate::EngineId;
+use crate::protocol::ModelDtype;
 use crate::protocol::handshake::{EngineCoreReadyResponse, HandshakeInitMessage, ReadyMessage};
 
 /// Per-test IPC endpoint namespace backed by a unique temporary directory.
@@ -68,6 +69,7 @@ fn ready_response_payload() -> Vec<u8> {
         max_model_len: 4096,
         num_gpu_blocks: 0,
         dp_stats_address: None,
+        dtype: Some(ModelDtype::Float32),
     })
     .expect("encode ready response payload")
 }
