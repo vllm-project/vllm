@@ -603,26 +603,36 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
             total_dispatch_payload_size_per_token=total_dispatch_payload_size_per_token,
             combine_payload_size_per_token=combine_payload_size_per_token,
         )
-        # Different MoE layers in the same model may have different per-token
-        # payload sizes (heterogeneous MoE quantization, or a quantized base
-        # MoE plus an unquantized MTP head), so grow the shared workspace to
-        # the union and rebuild when the existing workspace is too small. All
-        # ranks see the same MoE layers in the same order with identical
-        # shapes, so the skip / rebuild branches are taken consistently across
-        # ranks.
-        if (
-            self.initialized
-            and needed_workspace_size <= self.workspace_size
-            and max_num_tokens <= self.max_num_tokens
-            and top_k <= self.top_k
-            and num_experts <= self.num_experts
-        ):
-            return
+        # workspace_size and max_num_tokens are kernel-side max-bounds, so
+        # heterogeneous MoE layers (e.g. NVFP4 base + bf16 MTP head) only
+        # need the shared workspace grown to the union. top_k and num_experts
+        # must match across layers: top_k is a strict-equality assert at
+        # dispatch (FlashInfer csrc/trtllm_moe_alltoall.cu), and num_experts
+        # feeds the expert-to-rank routing math, so any mismatch would crash
+        # or silently corrupt routing. All ranks see the same MoE layers in
+        # the same order with identical shapes, so the skip / rebuild
+        # branches are taken consistently across ranks.
+        if self.initialized:
+            assert top_k == self.top_k, (
+                "FlashInfer one-sided MoeAlltoAll does not support "
+                f"heterogeneous top_k across MoE layers (got {top_k}, "
+                f"was built with {self.top_k})"
+            )
+            assert num_experts == self.num_experts, (
+                "FlashInfer one-sided MoeAlltoAll does not support "
+                f"heterogeneous num_experts across MoE layers (got "
+                f"{num_experts}, was built with {self.num_experts})"
+            )
+            if (
+                needed_workspace_size <= self.workspace_size
+                and max_num_tokens <= self.max_num_tokens
+            ):
+                return
 
         self.workspace_size = max(self.workspace_size, needed_workspace_size)
         self.max_num_tokens = max(self.max_num_tokens, max_num_tokens)
-        self.top_k = max(self.top_k, top_k)
-        self.num_experts = max(self.num_experts, num_experts)
+        self.top_k = top_k
+        self.num_experts = num_experts
 
         self.cleanup()
         gpus_per_node = torch.accelerator.device_count()
