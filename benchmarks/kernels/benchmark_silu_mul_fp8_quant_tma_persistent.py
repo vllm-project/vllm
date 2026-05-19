@@ -3,17 +3,24 @@
 
 """
 Benchmark comparing FP8 SiLU+Mul+FP8Quant kernel variants:
-  baseline  — flashinfer vectorized (4 warps/CTA, global loads)
+  baseline   — flashinfer vectorized (4 warps/CTA, global loads)
   persistent — TMA warp-specialized persistent (3D TMA descriptors)
 
+Methodology:
+  - CUDA graphs eliminate CPU kernel launch overhead
+  - ArgPool rotates through multiple input sets to defeat L2 cache
+  - torch.utils.benchmark.Timer with blocked_autorange for statistical rigor
+
 Usage:
-    python -m benchmarks.kernels.benchmark_silu_mul_fp8_quant_tma_persistent
+    python benchmarks/kernels/benchmark_silu_mul_fp8_quant_tma_persistent.py
+    python benchmarks/kernels/benchmark_silu_mul_fp8_quant_tma_persistent.py \
+        --batch-sizes 1 2 4 8 --tokens 16384 65536 262144
 """
 
 import argparse
-import gc
 
 import torch
+import torch.utils.benchmark as TBenchmark
 import vllm._moe_C  # noqa: F401
 
 from vllm.platforms import current_platform
@@ -25,7 +32,6 @@ GROUP_SIZE = 128
 
 
 def make_fp8_input(N: int, H: int):
-    """Create random FP8 input with per-group scales."""
     G = H // GROUP_SIZE
     bf16 = torch.randn(N, 2 * H, dtype=torch.bfloat16, device="cuda")
 
@@ -41,7 +47,10 @@ def make_fp8_input(N: int, H: int):
     up_fp8 = (up / up_scales.unsqueeze(-1)).clamp(-E4M3_MAX, E4M3_MAX)
 
     input_fp8 = torch.cat(
-        [gate_fp8.reshape(N, H).to(FP8_DTYPE), up_fp8.reshape(N, H).to(FP8_DTYPE)],
+        [
+            gate_fp8.reshape(N, H).to(FP8_DTYPE),
+            up_fp8.reshape(N, H).to(FP8_DTYPE),
+        ],
         dim=1,
     )
 
@@ -52,70 +61,47 @@ def make_fp8_input(N: int, H: int):
     return input_fp8, input_scales
 
 
-def free_gpu():
-    gc.collect()
-    torch.accelerator.empty_cache()
-
-
-def cuda_event_bench(fn, warmup=10, iters=100):
-    """Benchmark using CUDA events, returns time in seconds."""
-    for _ in range(warmup):
-        fn()
-    torch.accelerator.synchronize()
-    start = torch.Event("cuda", enable_timing=True)
-    end = torch.Event("cuda", enable_timing=True)
-    start.record()
-    for _ in range(iters):
-        fn()
-    end.record()
-    torch.accelerator.synchronize()
-    return start.elapsed_time(end) / iters / 1e3
-
-
-def bench_baseline(N: int, H: int, use_tanh_silu: bool) -> tuple[float, int]:
-    """Benchmark baseline kernel. Returns (time_s, total_nbytes)."""
+def make_fp8_outputs(N: int, H: int):
     G = H // GROUP_SIZE
-    input_fp8, input_scales = make_fp8_input(N, H)
     output = torch.empty(N, H, dtype=FP8_DTYPE, device="cuda")
     output_scales = torch.empty(G, N, dtype=torch.float32, device="cuda")
-    n_tokens = torch.tensor([N], dtype=torch.int32, device="cuda")
-
-    # Baseline expects flat scale layout matching input_scales
-    dt = cuda_event_bench(
-        lambda: torch.ops._moe_C.silu_mul_fp8_quant_baseline(
-            input_fp8, input_scales, output, output_scales, n_tokens, use_tanh_silu
-        )
-    )
-
-    total_nbytes = N * 2 * H + 2 * G * N * 4 + N * H + G * N * 4
-    return dt, total_nbytes
+    return output, output_scales
 
 
-def bench_persistent(
-    N: int, H: int, n_compute: int, batch_size: int, use_tanh_silu: bool
-) -> tuple[float, int]:
-    """Benchmark persistent kernel. Returns (time_s, total_nbytes)."""
-    G = H // GROUP_SIZE
-    input_fp8, input_scales = make_fp8_input(N, H)
-    output = torch.empty(N, H, dtype=FP8_DTYPE, device="cuda")
-    output_scales = torch.empty(G, N, dtype=torch.float32, device="cuda")
-    n_tokens = torch.tensor([N], dtype=torch.int32, device="cuda")
+def bench_cuda_graph(
+    fn,
+    args_list: list[tuple],
+    label: str,
+    sub_label: str,
+    description: str,
+) -> TBenchmark.Measurement:
+    """Benchmark using CUDA graphs with ArgPool rotation."""
+    n_args = len(args_list)
 
-    dt = cuda_event_bench(
-        lambda: torch.ops._moe_C.silu_mul_fp8_quant_tma_ws_persistent(
-            input_fp8,
-            input_scales,
-            output,
-            output_scales,
-            n_tokens,
-            n_compute,
-            batch_size,
-            use_tanh_silu,
-        )
-    )
+    # Warmup
+    for args in args_list:
+        fn(*args)
+    torch.accelerator.synchronize()
 
-    total_nbytes = N * 2 * H + 2 * G * N * 4 + N * H + G * N * 4
-    return dt, total_nbytes
+    # Capture CUDA graph cycling through all arg sets
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g):
+            for args in args_list:
+                fn(*args)
+
+    torch.accelerator.synchronize()
+
+    timer = TBenchmark.Timer(
+        stmt="g.replay()",
+        globals={"g": g},
+        label=f"{label} | cugraph {n_args} ops",
+        sub_label=sub_label,
+        description=description,
+    ).blocked_autorange(min_run_time=1)
+
+    return timer, n_args
 
 
 def main():
@@ -131,18 +117,28 @@ def main():
     )
     parser.add_argument("--tanh-silu", action="store_true")
     parser.add_argument("--hbm-peak", type=float, default=8.0, help="HBM peak TB/s")
+    parser.add_argument(
+        "--arg-pool-size",
+        type=int,
+        default=8,
+        help="Number of input sets for L2 cache rotation",
+    )
     args = parser.parse_args()
 
     set_random_seed(42)
 
     H = args.H
     nc = args.n_compute
+    pool = args.arg_pool_size
     silu_type = "tanh" if args.tanh_silu else "real"
     peak = args.hbm_peak
 
     print(f"FP8 SiLU+Mul+FP8Quant benchmark: H={H}, nc={nc}, silu={silu_type}")
     print(f"HBM peak: {peak} TB/s")
+    print(f"Methodology: CUDA graphs, ArgPool={pool}, blocked_autorange")
     print()
+
+    G = H // GROUP_SIZE
 
     hdr = (
         f"{'Kernel':<30} {'Tokens':>7} {'Time(us)':>10} "
@@ -153,19 +149,67 @@ def main():
     print(hdr)
     print(sep)
 
+    all_timers = []
+
     for N in args.tokens:
-        dt_base, nbytes = bench_baseline(N, H, args.tanh_silu)
-        free_gpu()
-        results = [("baseline", dt_base, nbytes)]
+        total_nbytes = N * 2 * H + 2 * G * N * 4 + N * H + G * N * 4
+
+        # Build arg pools
+        baseline_args_list = []
+        for _ in range(pool):
+            inp, scales = make_fp8_input(N, H)
+            out, oscales = make_fp8_outputs(N, H)
+            n_tok = torch.tensor([N], dtype=torch.int32, device="cuda")
+            baseline_args_list.append(
+                (inp, scales, out, oscales, n_tok, args.tanh_silu)
+            )
+
+        def baseline_fn(inp, scales, out, oscales, n_tok, tanh):
+            torch.ops._moe_C.silu_mul_fp8_quant_baseline(
+                inp, scales, out, oscales, n_tok, tanh
+            )
+
+        timer, nops = bench_cuda_graph(
+            baseline_fn,
+            baseline_args_list,
+            "fp8-silu-mul-quant",
+            f"N={N}",
+            "baseline",
+        )
+        dt_base = timer.median / nops
+        all_timers.append(timer)
+
+        results = [("baseline", dt_base)]
 
         for bs in args.batch_sizes:
-            dt, nbytes = bench_persistent(N, H, nc, bs, args.tanh_silu)
-            free_gpu()
-            results.append((f"persist bs={bs}", dt, nbytes))
+            persist_args_list = []
+            for _ in range(pool):
+                inp, scales = make_fp8_input(N, H)
+                out, oscales = make_fp8_outputs(N, H)
+                n_tok = torch.tensor([N], dtype=torch.int32, device="cuda")
+                persist_args_list.append(
+                    (inp, scales, out, oscales, n_tok, nc, bs, args.tanh_silu)
+                )
+
+            def persist_fn(inp, scales, out, oscales, n_tok, nc_, bs_, tanh):
+                torch.ops._moe_C.silu_mul_fp8_quant_tma_ws_persistent(
+                    inp, scales, out, oscales, n_tok, nc_, bs_, tanh
+                )
+
+            timer, nops = bench_cuda_graph(
+                persist_fn,
+                persist_args_list,
+                "fp8-silu-mul-quant",
+                f"N={N}",
+                f"persist-nc{nc}-bs{bs}",
+            )
+            dt = timer.median / nops
+            all_timers.append(timer)
+            results.append((f"persist bs={bs}", dt))
 
         best_dt = min(r[1] for r in results)
-        for name, dt, nbytes in results:
-            tbps = nbytes / dt / 1e12
+        for name, dt in results:
+            tbps = total_nbytes / dt / 1e12
             pct = tbps / peak * 100
             ratio = dt_base / dt
             marker = " <--" if dt == best_dt and dt < dt_base else ""
@@ -174,6 +218,10 @@ def main():
                 f"{tbps:>7.2f} {pct:>5.1f}% {ratio:>7.2f}x{marker}"
             )
         print("-" * len(hdr))
+
+    print()
+    compare = TBenchmark.Compare(all_timers)
+    compare.print()
 
 
 if __name__ == "__main__":
