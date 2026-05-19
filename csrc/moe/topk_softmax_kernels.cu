@@ -172,16 +172,12 @@ struct TopKPairArgMax {
     __device__ __forceinline__ TopKPair operator()(const TopKPair& a, const TopKPair& b) const {
         cub::KeyValuePair<int, float> globalMax, globalSecondMax;
 
-        if (a.max.value > b.max.value) {
+        if (a.max.value > b.max.value || (a.max.value == b.max.value && a.max.key < b.max.key)) {
             globalMax = a.max;
+            globalSecondMax = (a.secondMax.value > b.max.value || (a.secondMax.value == b.max.value && a.secondMax.key < b.max.key)) ? a.secondMax : b.max;
         } else {
             globalMax = b.max;
-        }
-
-        if (globalMax.key == a.max.key) {
-            globalSecondMax = (a.secondMax.value > b.max.value) ? a.secondMax : b.max;
-        } else {
-            globalSecondMax = (b.secondMax.value > a.max.value) ? b.secondMax : a.max;
+            globalSecondMax = (b.secondMax.value > a.max.value || (b.secondMax.value == a.max.value && b.secondMax.key < a.max.key)) ? b.secondMax : a.max;
         }
         return TopKPair(globalMax, globalSecondMax);
     }
