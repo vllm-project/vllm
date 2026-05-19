@@ -319,6 +319,19 @@ class MiniMaxM2DecoderLayer(nn.Module):
             and residual is not None
             and hidden_states.shape[0] <= 128
         )
+        if not torch.compiler.is_compiling():
+            if _fuse:
+                torch.cuda.nvtx.range_push("DIAG_decoder_fuse_TRUE")
+                torch.cuda.nvtx.range_pop()
+            elif self._defer_ar and residual is not None:
+                torch.cuda.nvtx.range_push("DIAG_decoder_fuse_FALSE_tokens")
+                torch.cuda.nvtx.range_pop()
+            elif self._defer_ar:
+                torch.cuda.nvtx.range_push("DIAG_decoder_fuse_FALSE_residual")
+                torch.cuda.nvtx.range_pop()
+            else:
+                torch.cuda.nvtx.range_push("DIAG_decoder_fuse_FALSE_defer_ar")
+                torch.cuda.nvtx.range_pop()
         if _fuse:
             hidden_states, residual = self.input_layernorm.forward_with_allreduce_fusion(
                 hidden_states, residual

@@ -167,6 +167,8 @@ class RMSNorm(CustomOp):
         if workspace is None:
             return self._allreduce_then_norm(x, residual)
 
+        torch.cuda.nvtx.range_push("DIAG_fuse_layernorm_called")
+        torch.cuda.nvtx.range_pop()
         torch.cuda.nvtx.range_push("moe_ar_fused")
         fi_comm.allreduce_fusion(
             input=x,
