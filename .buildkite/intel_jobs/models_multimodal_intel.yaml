@@ -1,0 +1,43 @@
+group: Models - Multimodal
+depends_on: 
+  - image-build-xpu
+steps:
+- label: "Multi-Modal Models (Standard) 1: qwen2"
+  key: multi-modal-models-standard-1-qwen2
+  timeout_in_minutes: 45
+  device: intel_gpu
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'pip install git+https://github.com/TIGER-AI-Lab/Mantis.git &&
+      cd tests &&
+      pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "qwen2"'
+
+- label: "Multi-Modal Models (Standard) 2: qwen3 + gemma"
+  key: multi-modal-models-standard-2-qwen3-gemma
+  timeout_in_minutes: 45
+  device: intel_gpu
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'pip install git+https://github.com/TIGER-AI-Lab/Mantis.git &&
+      cd tests &&
+      pytest -v -s models/multimodal/generation/test_qwen2_5_vl.py -m core_model'
