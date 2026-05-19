@@ -223,9 +223,7 @@ OPTIMIZATION_LEVEL_01 = {
         "use_inductor_graph_partition": False,
     },
     "kernel_config": {
-        # Disabled for now due to correctness issues:
-        # https://github.com/flashinfer-ai/flashinfer/issues/3197
-        "enable_flashinfer_autotune": False,
+        "enable_flashinfer_autotune": True,
     },
 }
 OPTIMIZATION_LEVEL_02 = {
@@ -246,9 +244,7 @@ OPTIMIZATION_LEVEL_02 = {
         "use_inductor_graph_partition": False,
     },
     "kernel_config": {
-        # Disabled for now due to correctness issues:
-        # https://github.com/flashinfer-ai/flashinfer/issues/3197
-        "enable_flashinfer_autotune": False,
+        "enable_flashinfer_autotune": True,
     },
 }
 OPTIMIZATION_LEVEL_03 = {
@@ -497,10 +493,6 @@ class VllmConfig:
         use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
         if use_v2_model_runner is not None:
             return use_v2_model_runner
-
-        # KVCache layout changes are breaking, let's stick with v1 for now (see #42846)
-        if self.kv_transfer_config is not None:
-            return False
 
         if not self._is_default_v2_model_runner_model():
             return False
@@ -1995,6 +1987,10 @@ class VllmConfig:
                 unsupported.append("ngram/ngram_gpu speculative decoding")
             elif speculative_config.method not in ("eagle", "eagle3", "mtp"):
                 unsupported.append(f"speculative method '{speculative_config.method}'")
+
+            # V2 EagleSpeculator does not support parallel_drafting (required by PEagle)
+            if speculative_config.parallel_drafting:
+                unsupported.append("parallel drafting for speculative decoding")
 
             if (
                 speculative_config.method == "eagle3"

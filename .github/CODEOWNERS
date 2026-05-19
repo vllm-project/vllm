@@ -153,9 +153,7 @@ mkdocs.yaml @hmellor
 /vllm/model_executor/models/deepseek_mtp.py @luccafong
 
 # DeepseekV4-specific files
-/vllm/v1/attention/ops/deepseek_v4_ops @zyongye
-/vllm/model_executor/layers/deepseek_compressor.py @zyongye
-/vllm/model_executor/layers/deepseek_v4_attention.py @zyongye
+/vllm/models/deepseek_v4 @zyongye
 /vllm/model_executor/layers/sparse_attn_indexer.py @zyongye
 
 # Mistral-specific files
