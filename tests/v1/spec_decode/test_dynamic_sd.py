@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Regression tests for the Dynamic SD batch-size schedule manager."""
 
+import pytest
+
 from tests.v1.core.utils import create_requests, create_scheduler
 from vllm.config.speculative import DynamicSpeculativeConfig
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -58,27 +60,6 @@ def _add_requests_and_schedule(
     return scheduler.schedule()
 
 
-def _assert_raises(exception_type: type[Exception], fn) -> None:
-    try:
-        fn()
-    except exception_type:
-        return
-    raise AssertionError(f"Expected {exception_type.__name__} to be raised")
-
-
-def _assert_raises_with_message(
-    exception_type: type[Exception], expected_substring: str, fn
-) -> None:
-    try:
-        fn()
-    except exception_type as exc:
-        assert expected_substring in str(exc), (
-            f"Expected {expected_substring!r} in error message {str(exc)!r}"
-        )
-        return
-    raise AssertionError(f"Expected {exception_type.__name__} to be raised")
-
-
 def test_dynamic_sd_uses_batch_size_schedule():
     manager = _make_manager(
         {
@@ -100,11 +81,8 @@ def test_dynamic_sd_uses_batch_size_schedule():
 
 
 def test_dynamic_sd_requires_schedule_starting_at_batch_size_one():
-    _assert_raises_with_message(
-        ValueError,
-        "must start at 1",
-        lambda: _make_manager({"2-16": 3}),
-    )
+    with pytest.raises(ValueError, match="must start at 1"):
+        _make_manager({"2-16": 3})
 
 
 def test_dynamic_sd_clamps_k_to_runtime_max():
@@ -118,62 +96,43 @@ def test_dynamic_sd_clamps_k_to_runtime_max():
 
 
 def test_dynamic_sd_rejects_invalid_range_string():
-    _assert_raises_with_message(
-        ValueError,
-        "Expected 'N' or 'N-M'",
-        lambda: _make_manager({"foo": 3}),
-    )
+    with pytest.raises(ValueError, match="Expected 'N' or 'N-M'"):
+        _make_manager({"foo": 3})
 
 
 def test_dynamic_sd_rejects_overlapping_ranges():
-    _assert_raises_with_message(
-        ValueError,
-        "non-overlapping and sorted",
-        lambda: _make_manager({"1-16": 3, "16-32": 2}),
-    )
+    with pytest.raises(ValueError, match="non-overlapping and sorted"):
+        _make_manager({"1-16": 3, "16-32": 2})
 
 
 def test_dynamic_sd_rejects_negative_k():
-    _assert_raises_with_message(
-        ValueError,
-        "values must be >= 0",
-        lambda: _make_manager({"1-16": -1}),
-    )
+    with pytest.raises(ValueError, match="values must be >= 0"):
+        _make_manager({"1-16": -1})
 
 
 def test_dynamic_sd_rejects_empty_schedule():
-    _assert_raises_with_message(
-        ValueError,
-        "must not be empty",
-        lambda: _make_manager({}),
-    )
+    with pytest.raises(ValueError, match="must not be empty"):
+        _make_manager({})
 
 
 def test_dynamic_sd_requires_schedule_config():
-    _assert_raises_with_message(
-        ValueError,
-        "num_speculative_tokens_per_batch_size is required",
-        lambda: DynamicSpeculativeDecodingManager(
+    with pytest.raises(
+        ValueError, match="num_speculative_tokens_per_batch_size is required"
+    ):
+        DynamicSpeculativeDecodingManager(
             DynamicSpeculativeConfig(),
             vllm_max_batch_size=256,
             vllm_num_speculative_tokens=3,
-        ),
-    )
+        )
 
 
 def test_dynamic_sd_rejects_invalid_batch_size_queries():
     manager = _make_manager({"1-256": 3})
 
-    _assert_raises_with_message(
-        ValueError,
-        "batch_size must be > 0",
-        lambda: manager.get_optimal_num_speculative_tokens(0),
-    )
-    _assert_raises_with_message(
-        ValueError,
-        "batch_size must be <= vllm_max_batch_size",
-        lambda: manager.get_optimal_num_speculative_tokens(257),
-    )
+    with pytest.raises(ValueError, match="batch_size must be > 0"):
+        manager.get_optimal_num_speculative_tokens(0)
+    with pytest.raises(ValueError, match="batch_size must be <= vllm_max_batch_size"):
+        manager.get_optimal_num_speculative_tokens(257)
 
 
 def test_scheduler_initializes_dynamic_sd_manager_from_speculative_config():
@@ -243,11 +202,8 @@ def test_scheduler_uses_static_k_when_no_requests_are_scheduled():
 
 
 def test_scheduler_rejects_bad_dsd_config_at_construction():
-    _assert_raises_with_message(
-        ValueError,
-        "must start at 1",
-        lambda: _make_scheduler_with_dynamic_sd({"2-16": 3}),
-    )
+    with pytest.raises(ValueError, match="must start at 1"):
+        _make_scheduler_with_dynamic_sd({"2-16": 3})
 
 
 def test_scheduler_passes_max_num_seqs_as_dsd_runtime_batch_limit():

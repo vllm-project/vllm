@@ -811,7 +811,6 @@ class SpeculativeConfig:
                         self.target_parallel_config, self.draft_tensor_parallel_size
                     )
                 )
-
         return self
 
     def _validate_suffix_decoding(self):
