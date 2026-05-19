@@ -354,6 +354,7 @@ def triton_reshape_and_cache_flash(
         "auto",
         "float16",
         "bfloat16",
+        "float32",
     ) or is_quantized_kv_cache(kv_cache_dtype), (
         f"unsupported kv_cache_dtype (str), got {kv_cache_dtype}."
     )
@@ -537,6 +538,7 @@ def triton_reshape_and_cache_flash_diffkv(
         "auto",
         "float16",
         "bfloat16",
+        "float32",
     ) or is_quantized_kv_cache(kv_cache_dtype), (
         f"unsupported kv_cache_dtype (str), got {kv_cache_dtype}."
     )
