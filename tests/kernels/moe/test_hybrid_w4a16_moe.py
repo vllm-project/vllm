@@ -222,7 +222,17 @@ def _run_hybrid_moe(
     reason="HybridW4A16MoEExperts requires ROCm",
 )
 @pytest.mark.parametrize("m", [1, 4, 16, 64])
-@pytest.mark.parametrize("n,k", [(256, 256), (512, 256)])
+@pytest.mark.parametrize(
+    "n,k",
+    [
+        (256, 256),
+        (512, 256),
+        # Qwen3.5-A3B MoE shapes -- exercise the gfx11 K=2048 (gate_up) and
+        # K=512 (down) dispatch branches added by this PR.
+        (1024, 2048),
+        (2048, 512),
+    ],
+)
 @pytest.mark.parametrize("e,topk", [(8, 2), (16, 4)])
 @pytest.mark.parametrize("group_size", [32, 128])
 def test_hybrid_w4a16_moe(m: int, n: int, k: int, e: int, topk: int, group_size: int):
