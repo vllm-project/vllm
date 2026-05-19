@@ -185,6 +185,11 @@ def test_openvla_prompt_update_inserts_image_tokens_after_bos() -> None:
     image = Image.new("RGB", (640, 480), color=(255, 255, 255))
     mm_items = MultiModalDataItems({"image": ImageProcessorItems([image])})
 
+    assert (
+        processor._hf_processor_applies_updates("In: test\nOut:", mm_items, {}, {})
+        is False
+    )
+
     prompt_update = processor._get_prompt_updates(mm_items, {}, {})[0]
     resolved = prompt_update.resolve(0)
     content = resolved.content
