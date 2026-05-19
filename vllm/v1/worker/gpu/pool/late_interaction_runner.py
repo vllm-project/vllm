@@ -68,6 +68,11 @@ class LateInteractionRunner:
                     del batch, offs, lens
                 del Q
         except Exception as e:
+            # Warmup is a pure latency optimization (pre-compiling Triton
+            # kernels). A failure here — transient CUDA error, OOM on the
+            # dummy allocations, or a Triton autotune edge case — must not
+            # take down the server: the kernels JIT on the first real
+            # request instead, only that request pays the autotune cost.
             logger.warning("flash-maxsim kernel warmup failed: %s", e)
         finally:
             if torch.cuda.is_available():
@@ -127,7 +132,6 @@ class LateInteractionRunner:
         if not any(p.late_interaction_params is not None for p in pooling_params):
             return raw_pooler_output
 
-        # Can we use zero-copy scoring?
         use_zerocopy = (
             projected_batch is not None
             and pooling_cursor is not None
