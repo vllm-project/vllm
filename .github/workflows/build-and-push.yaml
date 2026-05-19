@@ -162,10 +162,35 @@ jobs:
         run: |
           IMG_SUFFIX=${{ matrix.provider == 'amd' && 'rocm' || 'nvidia' }}
           BASE_REPO="us-central1-docker.pkg.dev/cohere-artifacts/cohere/vllm-${IMG_SUFFIX}"
-          # Base images are tagged as base-<sha> in the same repo as final images.
+
+          # Paths that affect the base image contents (compiled extensions,
+          # installed dependencies, Docker layer structure). If any of these
+          # changed between a candidate base commit and HEAD the base image is
+          # stale and must not be reused for an incremental build.
+          REBUILD_PATTERNS=(
+            'requirements/'
+            'pyproject.toml'
+            'setup.py'
+            'setup.cfg'
+            'docker/'
+            'CMakeLists.txt'
+            'cmake/'
+            'csrc/'
+            'Makefile'
+          )
+
           BASE_IMAGE=""
           for sha in $(git rev-list --max-count=200 HEAD); do
             if docker manifest inspect "${BASE_REPO}:base-${sha}" &> /dev/null; then
+              if [ "$sha" != "$(git rev-parse HEAD)" ]; then
+                CHANGED=$(git diff --name-only "${sha}..HEAD" -- "${REBUILD_PATTERNS[@]}")
+                if [ -n "$CHANGED" ]; then
+                  echo "Nearest base image (${sha}) is stale -- rebuild-trigger files changed:"
+                  echo "$CHANGED"
+                  echo "Older base images will also be stale; falling back to full build."
+                  break
+                fi
+              fi
               BASE_IMAGE="${BASE_REPO}:base-${sha}"
               break
             fi
@@ -174,7 +199,7 @@ jobs:
             echo "Found base image: $BASE_IMAGE"
             echo "base_image=$BASE_IMAGE" >> "$GITHUB_OUTPUT"
           else
-            echo "No base image found in the last 200 commits."
+            echo "No suitable base image found in the last 200 commits."
           fi
 
       # note: the underlying image might already be built, but not tagged with push_tag yet.

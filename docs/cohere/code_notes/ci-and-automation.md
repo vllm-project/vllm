@@ -57,6 +57,42 @@ Reporting consequence:
 - nightly benchmark/eval artifacts still flow through the result-upload path
   described below, rather than the `Test Report` UI.
 
+## 1c) Incremental Build Safety Check
+
+`build-and-push.yaml` supports an **incremental build** mode (enabled by
+`incremental_build: true`). Instead of compiling vLLM from scratch, it finds
+a previously built `base-<sha>` image in the container registry and layers
+only the Cohere-specific `Dockerfile.cohere` on top, which reinstalls vLLM
+Python sources with `pip install -e . --no-deps`.
+
+Because the incremental path skips C++ compilation and dependency
+installation, it is only safe when nothing outside pure Python sources has
+changed since the base image was built. The "Find latest base image" step
+enforces this by diffing each candidate base commit against HEAD for a set of
+**rebuild-trigger patterns**:
+
+```text
+requirements/  pyproject.toml  setup.py  setup.cfg
+docker/        CMakeLists.txt  cmake/    csrc/
+Makefile
+```
+
+If any of these paths changed between the nearest base image commit and HEAD,
+the build immediately falls back to a full rebuild (older base images are
+guaranteed to be equally or more stale, so searching further is pointless).
+If no base image exists within 200 commits, the build also falls back to a
+full rebuild.
+
+Callers that pass `incremental_build: true` (`build-and-test.yaml`,
+`build-and-eval.yaml`, `build-and-bench.yaml`) rely on this guard to avoid
+silently stale images. Manual `workflow_dispatch` defaults to
+`incremental_build: true` but also exposes a `force_build` toggle to override
+the image-exists check entirely.
+
+When adding new files or directories whose changes should invalidate the base
+image, add the path to the `REBUILD_PATTERNS` array in the "Find latest base
+image for incremental build" step of `build-and-push.yaml`.
+
 ## 2) Dispatcher Matrix Logic (Important Behavioral Contract)
 
 The matrix builder in `.github/scripts/dispatcher-set-matrix.js` (invoked by `dispatcher.yaml`) does more than routing:

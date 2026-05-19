@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Automaticallu apply hardware_profiles.yaml to EngineArgs for Cohere models.
+"""Automatically apply hardware_profiles.yaml to EngineArgs for Cohere models.
 
 Invoked from `vllm/engine/arg_utils.py::EngineArgs.__post_init__`
 """
