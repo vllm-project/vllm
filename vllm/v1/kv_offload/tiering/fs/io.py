@@ -6,6 +6,9 @@ import os
 
 logger = logging.getLogger(__name__)
 
+# O_DIRECT is Linux-specific and not available on macOS
+O_DIRECT = getattr(os, "O_DIRECT", 0)
+
 
 def _ensure_dirs(path: str) -> None:
     """Create parent directories of *path* if they don't exist."""
@@ -35,7 +38,7 @@ def store_block(
     try:
         fd = os.open(
             tmp_path,
-            os.O_CREAT | os.O_WRONLY | os.O_TRUNC | os.O_DIRECT,
+            os.O_CREAT | os.O_WRONLY | os.O_TRUNC | O_DIRECT,
             0o644,
         )
         try:
@@ -67,7 +70,7 @@ def load_block(
     fd: int | None = None
     view_slice = view.cast("B")[offset : offset + block_size]
     try:
-        fd = os.open(source_path, os.O_RDONLY | os.O_DIRECT)
+        fd = os.open(source_path, os.O_RDONLY | O_DIRECT)
         bytes_read = os.readv(fd, [view_slice])
         if bytes_read < block_size:
             raise OSError(f"Short read: expected {block_size} bytes, read {bytes_read}")
