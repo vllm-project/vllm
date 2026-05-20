@@ -1050,7 +1050,12 @@ class InputBatch:
             # output placeholders (tokens can be discarded after kv-load
             # failure) or a larger number (async spec decode adds optimistic
             # placeholders that may exceed the actual acceptance count).
-            first_placeholder = req_output_token_ids.index(-1)
+            first_placeholder = len(req_output_token_ids)
+            while (
+                first_placeholder > 0
+                and req_output_token_ids[first_placeholder - 1] == -1
+            ):
+                first_placeholder -= 1
             num_placeholders = len(req_output_token_ids) - first_placeholder
             num_to_replace = min(num_sampled_ids, num_placeholders)
             del new_ids[num_to_replace:]
