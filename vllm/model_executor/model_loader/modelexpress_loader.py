@@ -25,12 +25,12 @@ _MISSING_MODELEXPRESS_MODULES = frozenset(
 
 def _missing_modelexpress_error() -> ImportError:
     return ImportError(
-        "The 'mx' load format requires the ModelExpress Python package. "
+        "The 'modelexpress' load format requires the ModelExpress Python package. "
         "Install it with `pip install modelexpress`."
     )
 
 
-class MxModelLoader(BaseModelLoader):
+class ModelExpressModelLoader(BaseModelLoader):
     """Thin vLLM loader wrapper for ModelExpress."""
 
     def __init__(self, load_config: LoadConfig):
@@ -46,8 +46,8 @@ class MxModelLoader(BaseModelLoader):
                 raise
             raise _missing_modelexpress_error() from exc
 
-        ModelexpressVllmLoader = module.MxModelLoader
-        return ModelexpressVllmLoader(load_config)
+        ModelExpressVllmLoader = module.MxModelLoader
+        return ModelExpressVllmLoader(load_config)
 
     def download_model(self, model_config: ModelConfig) -> None:
         self._loader.download_model(model_config)

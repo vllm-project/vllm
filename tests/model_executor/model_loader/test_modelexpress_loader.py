@@ -10,7 +10,9 @@ from torch import nn
 from vllm.config import VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.model_executor.model_loader import get_model_loader
-from vllm.model_executor.model_loader.mx_loader import MxModelLoader
+from vllm.model_executor.model_loader.modelexpress_loader import (
+    ModelExpressModelLoader,
+)
 
 
 class FakeModelexpressLoader:
@@ -47,17 +49,17 @@ def _install_fake_modelexpress(monkeypatch):
     monkeypatch.setitem(sys.modules, module.__name__, module)
 
 
-def test_mx_load_format_resolves_to_mx_loader(monkeypatch):
+def test_modelexpress_load_format_resolves_to_modelexpress_loader(monkeypatch):
     _install_fake_modelexpress(monkeypatch)
 
-    loader = get_model_loader(LoadConfig(load_format="mx"))
+    loader = get_model_loader(LoadConfig(load_format="modelexpress"))
 
-    assert isinstance(loader, MxModelLoader)
+    assert isinstance(loader, ModelExpressModelLoader)
 
 
-def test_mx_loader_delegates_to_modelexpress(monkeypatch):
+def test_modelexpress_loader_delegates_to_modelexpress(monkeypatch):
     _install_fake_modelexpress(monkeypatch)
-    loader = MxModelLoader(LoadConfig(load_format="mx"))
+    loader = ModelExpressModelLoader(LoadConfig(load_format="modelexpress"))
     model = nn.Module()
     model_config = SimpleNamespace()
     vllm_config = SimpleNamespace()
@@ -88,7 +90,7 @@ def test_mx_loader_delegates_to_modelexpress(monkeypatch):
     ]
 
 
-def test_mx_loader_missing_modelexpress_error(monkeypatch):
+def test_modelexpress_loader_missing_modelexpress_error(monkeypatch):
     import importlib
 
     def missing_modelexpress(name):
@@ -97,10 +99,10 @@ def test_mx_loader_missing_modelexpress_error(monkeypatch):
     monkeypatch.setattr(importlib, "import_module", missing_modelexpress)
 
     with pytest.raises(ImportError, match="requires the ModelExpress Python package"):
-        MxModelLoader(LoadConfig(load_format="mx"))
+        ModelExpressModelLoader(LoadConfig(load_format="modelexpress"))
 
 
-def test_mx_loader_preserves_internal_import_errors(monkeypatch):
+def test_modelexpress_loader_preserves_internal_import_errors(monkeypatch):
     import importlib
 
     def missing_dependency(name):
@@ -109,11 +111,11 @@ def test_mx_loader_preserves_internal_import_errors(monkeypatch):
     monkeypatch.setattr(importlib, "import_module", missing_dependency)
 
     with pytest.raises(ModuleNotFoundError) as exc_info:
-        MxModelLoader(LoadConfig(load_format="mx"))
+        ModelExpressModelLoader(LoadConfig(load_format="modelexpress"))
     assert exc_info.value.name == "not_modelexpress_dependency"
 
 
-def test_mx_load_format_allows_object_storage_model_weights():
+def test_modelexpress_load_format_allows_object_storage_model_weights():
     model_config = SimpleNamespace(
         architecture="UnknownForTest",
         config_updated=False,
@@ -124,8 +126,8 @@ def test_mx_load_format_allows_object_storage_model_weights():
     )
     vllm_config = object.__new__(VllmConfig)
     vllm_config.model_config = model_config
-    vllm_config.load_config = LoadConfig(load_format="mx")
+    vllm_config.load_config = LoadConfig(load_format="modelexpress")
 
     vllm_config.try_verify_and_update_config()
 
-    assert vllm_config.load_config.load_format == "mx"
+    assert vllm_config.load_config.load_format == "modelexpress"

@@ -1900,13 +1900,13 @@ class VllmConfig:
                 )
                 self.load_config.load_format = "runai_streamer"
             elif self.load_config.load_format not in (
-                "mx",
+                "modelexpress",
                 "runai_streamer",
                 "runai_streamer_sharded",
             ):
                 raise ValueError(
                     f"To load a model from object storage (S3/GCS/Azure), "
-                    f"'load_format' must be 'mx', 'runai_streamer' or "
+                    f"'load_format' must be 'modelexpress', 'runai_streamer' or "
                     f"'runai_streamer_sharded', "
                     f"but got '{self.load_config.load_format}'. "
                     f"Model: {self.model_config.model}"
