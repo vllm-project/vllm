@@ -206,8 +206,7 @@ class APIServerProcessManager:
         # TCP placeholders -> children bind wildcard and pipe-back real
         # endpoints (#40443, mirrors DPCoordinator).
         defer_bind = any(
-            addr.endswith(":0")
-            for addr in (*input_addresses, *output_addresses)
+            addr.endswith(":0") for addr in (*input_addresses, *output_addresses)
         )
         parent_conns: list[connection.Connection] = []
 
@@ -231,7 +230,7 @@ class APIServerProcessManager:
                 parent_conns.append(parent_conn)
                 client_config["zmq_addr_pipe"] = child_conn
 
-            proc = spawn_context.Process(
+            proc: BaseProcess = spawn_context.Process(
                 target=target_server_fn or run_api_server_worker_proc,
                 name=f"ApiServer_{i}",
                 args=(listen_address, sock, args, client_config),
@@ -244,9 +243,7 @@ class APIServerProcessManager:
         logger.info("Started %d API server processes", len(self.processes))
 
         if defer_bind:
-            for i, (parent_conn, proc) in enumerate(
-                zip(parent_conns, self.processes)
-            ):
+            for i, (parent_conn, proc) in enumerate(zip(parent_conns, self.processes)):
                 ready = connection.wait(
                     [parent_conn, proc.sentinel],
                     timeout=_ZMQ_ADDR_REPORT_TIMEOUT_S,
