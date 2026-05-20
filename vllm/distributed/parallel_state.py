@@ -335,16 +335,9 @@ class GroupCoordinator:
         self_device_group = None
         self_cpu_group = None
 
-        timeout: timedelta | None = None
-        from vllm.config import get_current_vllm_config_or_none
+        from vllm.distributed.utils import get_cpu_distributed_timeout_or_none
 
-        _cfg = get_current_vllm_config_or_none()
-        if (
-            _cfg is not None
-            and _cfg.parallel_config.cpu_distributed_timeout_seconds is not None
-        ):
-            timeout_seconds = _cfg.parallel_config.cpu_distributed_timeout_seconds
-            timeout = timedelta(seconds=timeout_seconds)
+        timeout = get_cpu_distributed_timeout_or_none()
 
         for ranks in group_ranks:
             device_group = torch.distributed.new_group(
