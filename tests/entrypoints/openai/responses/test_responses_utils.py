@@ -900,8 +900,9 @@ class TestConstructInputMessagesPrevResponseToolCalls:
         assert has_tool_calls
 
     def test_prev_response_with_reasoning_and_tool_call(self):
-        """Reasoning + tool call in prev_response_output should merge into
-        a single assistant message."""
+        """Reasoning in prev_response_output should be filtered out (most
+        models don't expect prior reasoning in context), but tool calls
+        should be preserved."""
         prev_output = [
             make_reasoning_item(content_text="I should look up the weather"),
             make_function_call(
@@ -916,7 +917,9 @@ class TestConstructInputMessagesPrevResponseToolCalls:
         )
         assistant_msgs = [m for m in msgs if m.get("role") == "assistant"]
         assert len(assistant_msgs) == 1
-        assert assistant_msgs[0].get("reasoning") == "I should look up the weather"
+        # Reasoning should be filtered out
+        assert "reasoning" not in assistant_msgs[0]
+        # Tool call should be preserved
         assert assistant_msgs[0]["tool_calls"][0]["id"] == "call_r1"
 
     def test_prev_response_output_message_only(self):
@@ -958,8 +961,8 @@ class TestConstructInputMessagesPrevResponseToolCalls:
         assert len(assistant_msgs) == 0
 
     def test_prev_response_output_message_multi_content(self):
-        """ResponseOutputMessage with multiple content parts should
-        preserve all text."""
+        """ResponseOutputMessage with multiple content parts uses the first
+        part (matching request_input path behavior)."""
         multi_msg = ResponseOutputMessage(
             id="msg_multi",
             content=[
@@ -989,8 +992,7 @@ class TestConstructInputMessagesPrevResponseToolCalls:
         )
         assistant_msgs = [m for m in msgs if m.get("role") == "assistant"]
         assert len(assistant_msgs) == 1
-        assert "Step 1: Analyze" in assistant_msgs[0]["content"]
-        assert "Step 2: Execute" in assistant_msgs[0]["content"]
+        assert assistant_msgs[0]["content"] == "Step 1: Analyze"
 
 
 class TestConstructInputMessagesInstructionsLeak:

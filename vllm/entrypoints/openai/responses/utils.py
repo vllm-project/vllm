@@ -99,7 +99,14 @@ def construct_input_messages(
         # The current request's instructions (if any) were already added above.
         messages.extend(m for m in prev_msg if m.get("role") != "system")
     if prev_response_output is not None:
-        output_messages = construct_chat_messages_with_tool_call(prev_response_output)
+        # Filter reasoning items: most models do not expect reasoning from
+        # previous turns to appear in the conversation context.
+        filtered_output = [
+            item
+            for item in prev_response_output
+            if not isinstance(item, ResponseReasoningItem)
+        ]
+        output_messages = construct_chat_messages_with_tool_call(filtered_output)
         messages.extend(output_messages)
 
     # Append the new input.
@@ -203,9 +210,7 @@ def _construct_message_from_response_item(
     elif isinstance(item, ResponseOutputMessage):
         if not item.content:
             return None
-        output_text = "\n".join(part.text for part in item.content if part.text)
-        if not output_text:
-            return None
+        output_text = item.content[0].text
         if prev_assistant_msg:
             previous_content = prev_assistant_msg.get("content")
             if previous_content is None:
