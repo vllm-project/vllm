@@ -19,9 +19,6 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.model_executor.layers.batch_invariant import (
-    vllm_is_batch_invariant,
-)
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 
@@ -34,6 +31,14 @@ FLASHINFER_CUBINS_REPOSITORY = os.environ.get(
     "FLASHINFER_CUBINS_REPOSITORY",
     "https://edge.urm.nvidia.com/artifactory/sw-kernelinferencelibrary-public-generic-local/",  # noqa: E501
 )
+
+
+def _is_fp8_kv_cache_dtype(kv_cache_dtype: str | torch.dtype | None) -> bool:
+    if kv_cache_dtype is None:
+        return False
+    if isinstance(kv_cache_dtype, torch.dtype):
+        return kv_cache_dtype in (torch.float8_e4m3fn, torch.float8_e5m2)
+    return kv_cache_dtype.startswith("fp8")
 
 
 @functools.cache
@@ -355,7 +360,7 @@ def check_trtllm_attention_support(
     num_qo_heads: int | None = None,
     num_kv_heads: int | None = None,
     dcp_world_size: int | None = None,
-    kv_cache_dtype: str | None = None,
+    kv_cache_dtype: str | torch.dtype | None = None,
     q_data_type: torch.dtype | None = None,
     has_sinks: bool | None = None,
     has_spec: bool | None = None,
@@ -385,7 +390,7 @@ def check_trtllm_attention_support(
         used.
     """
 
-    if vllm_is_batch_invariant():
+    if envs.VLLM_BATCH_INVARIANT:
         return False, "Batch-invariant mode is enabled."
 
     if not has_nvidia_artifactory():
@@ -400,7 +405,7 @@ def check_trtllm_attention_support(
         if (
             is_prefill
             and kv_cache_dtype is not None
-            and not kv_cache_dtype.startswith("fp8")
+            and not _is_fp8_kv_cache_dtype(kv_cache_dtype)
             and q_data_type in [torch.float8_e4m3fn, torch.float8_e5m2]
         ):
             return False, "trtllm-gen prefill does not support FP8-Q with BF16/FP16-Q."
@@ -424,6 +429,13 @@ def check_trtllm_attention_support(
         return True, "Has attention sinks."
 
     return None, ""
+
+
+@functools.cache
+def supports_trtllm_attention() -> bool:
+    """Return whether TRTLLM attention is available for decode."""
+    supported, _ = check_trtllm_attention_support(is_prefill=False)
+    return supported is not False
 
 
 def force_use_trtllm_attention() -> bool | None:
@@ -455,7 +467,7 @@ def use_trtllm_attention(
     num_qo_heads: int | None = None,
     num_kv_heads: int | None = None,
     dcp_world_size: int | None = None,
-    kv_cache_dtype: str | None = None,
+    kv_cache_dtype: str | torch.dtype | None = None,
     q_data_type: torch.dtype | None = None,
     has_sinks: bool | None = None,
     has_spec: bool | None = None,

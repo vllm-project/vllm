@@ -29,9 +29,6 @@ from vllm.config import (
 from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
-from vllm.model_executor.layers.batch_invariant import (
-    vllm_is_batch_invariant,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
@@ -47,7 +44,12 @@ from vllm.utils.flashinfer import (
 )
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.utils.torch_utils import is_strictly_contiguous
+from vllm.utils.torch_utils import (
+    canonicalize_singleton_dim_strides,
+    is_strictly_contiguous,
+    nvfp4_kv_cache_full_dim,
+    nvfp4_kv_cache_split_views,
+)
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -529,7 +531,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         ) = None  # Wrapper for prefill/append
         self._decode_wrapper = None  # Wrapper for decode (general shape)
 
-        if vllm_is_batch_invariant():
+        if envs.VLLM_BATCH_INVARIANT:
             self.decode_fixed_split_size = 2048
             self.prefill_fixed_split_size = 4096
             self.disable_split_kv = True
@@ -587,6 +589,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.head_dim = self.kv_cache_spec.head_size
         self.page_size = self.kv_cache_spec.block_size
 
+        self.cache_dtype = vllm_config.cache_config.cache_dtype
+        self.is_kvcache_nvfp4 = self.cache_dtype == "nvfp4"
         self.kv_cache_dtype = self.get_kv_cache_dtype(vllm_config, self.kv_cache_spec)
         self.q_data_type_prefill = self.get_q_data_type(
             vllm_config,
@@ -677,10 +681,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     @classmethod
     def get_kv_cache_dtype(
         cls, vllm_config: VllmConfig, kv_cache_spec: AttentionSpec
-    ) -> torch.dtype:
+    ) -> str | torch.dtype:
         cache_dtype = vllm_config.cache_config.cache_dtype
         if cache_dtype.startswith("fp8"):
-            return FlashInferBackend.get_fp8_dtype_for_flashinfer(cache_dtype)
+            return FlashInferBackend.get_dtype_for_flashinfer(cache_dtype)
+        if cache_dtype == "nvfp4":
+            return cache_dtype
 
         assert kv_cache_spec.dtype == vllm_config.model_config.dtype
         return kv_cache_spec.dtype
@@ -768,7 +774,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     def _get_workspace_buffer(self):
         if self._workspace_buffer is None:
             buffer_size = envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE
-            if vllm_is_batch_invariant():
+            if envs.VLLM_BATCH_INVARIANT:
                 buffer_size = FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT
             self._workspace_buffer = torch.zeros(
                 buffer_size, dtype=torch.uint8, device=self.device
@@ -1319,12 +1325,13 @@ class FlashInferImpl(AttentionImpl):
                 )
             self.sinks = sinks
 
-        vllm_config = get_current_vllm_config()
+        vllm_config = get_current_vllm_config_or_none()
         self.supports_quant_query_input = (
             self.kv_cache_dtype.startswith("fp8")
             # For SM90, prefill needs FP8 query but decode needs BF16/FP16-Q.
             # Therefore, set to False and do the quant inside forward() instead.
             and current_platform.is_device_capability_family(100)
+            and vllm_config is not None
             and not vllm_config.attention_config.disable_flashinfer_q_quantization
         )
         self.bmm1_scale: float | None = None
@@ -1373,7 +1380,7 @@ class FlashInferImpl(AttentionImpl):
             and self.kv_cache_dtype.startswith("fp8")
             # XQA does not support FP8/NVFP4 output.
             and current_platform.is_device_capability_family(100)
-            and quant_key in (kFp8StaticTensorSym, kNvfp4Quant)
+            and quant_key in (kFp8StaticTensorSym, kNvfp4Dynamic)
         )
 
     # FlashInfer requires attention sinks to be float32
@@ -1664,6 +1671,8 @@ class FlashInferImpl(AttentionImpl):
                     assert self.o_sf_scale is None
                     out = output[num_decode_tokens:]
 
+                needs_fp8_out = False
+                prefill_kv_block_scales = None
                 if (
                     attn_metadata.q_data_type_prefill != FP8_DTYPE
                     and self.kv_cache_dtype.startswith("fp8")
@@ -1934,92 +1943,55 @@ def fast_plan_decode(
     # this warm up is to generate the _cached_module for the decode wrapper.
     if not self.is_cuda_graph_enabled or getattr(self, "vllm_first_call", True):
         self.plan(
-            indptr_cpu,
-            indices,
-            last_page_len_cpu,
-            num_qo_heads,
-            num_kv_heads,
-            head_dim,
-            page_size,
-            pos_encoding_mode,
-            window_left,
-            logits_soft_cap,
-            q_data_type,
-            kv_data_type,
-            o_data_type,
-            data_type,
-            sm_scale,
-            rope_scale,
-            rope_theta,
-            non_blocking,
-            None,  # block_tables
-            None,  # seq_lens
-            fixed_split_size,
-            disable_split_kv,
+            indptr=indptr_cpu,
+            indices=indices,
+            last_page_len=last_page_len_cpu,
+            num_qo_heads=num_qo_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            page_size=page_size,
+            pos_encoding_mode=pos_encoding_mode,
+            window_left=window_left,
+            logits_soft_cap=logits_soft_cap,
+            q_data_type=q_data_type,
+            kv_data_type=kv_data_type,
+            o_data_type=o_data_type,
+            data_type=data_type,
+            sm_scale=sm_scale,
+            rope_scale=rope_scale,
+            rope_theta=rope_theta,
+            non_blocking=non_blocking,
+            block_tables=None,
+            seq_lens=None,
+            fixed_split_size=fixed_split_size,
+            disable_split_kv=disable_split_kv,
         )
         self.vllm_first_call = False
         return
 
     assert self.is_cuda_graph_enabled, "Should be cudagraph only here"
-    batch_size = len(last_page_len_cpu)
-    if logits_soft_cap is None:
-        logits_soft_cap = 0.0
-
-    if batch_size != self._fixed_batch_size:
-        raise ValueError(
-            "The batch size should be fixed in cudagraph mode, the runtime "
-            "batch size {} mismatches the batch size set during "
-            "initialization {}".format(batch_size, self._fixed_batch_size)
-        )
-    if len(indices) > len(self._paged_kv_indices_buf):
-        raise ValueError(
-            "The size of indices should be less than or equal to the allocated buffer"
-        )
-
-    # host-to-device copy for the indptr buffer
-    self._paged_kv_indptr_buf.copy_(indptr_cpu, non_blocking=True)
-    # host-to-device copy for the last_page_len buffer
-    self._paged_kv_last_page_len_buf.copy_(last_page_len_cpu, non_blocking=True)
-
-    qo_indptr_host = _get_range_buf(batch_size + 1, "cpu")
-
-    try:
-        # Make sure we pass exactly 19 arguments for fa2 backend and 16 arguments for
-        # fa3 backend
-        args = [
-            self._float_workspace_buffer,
-            self._int_workspace_buffer,
-            self._pin_memory_int_workspace_buffer,
-            qo_indptr_host,
-            indptr_cpu,
-            seq_lens_cpu,
-            batch_size,  # total_num_rows
-            batch_size,
-            num_qo_heads,
-            num_kv_heads,
-            page_size,
-            self.is_cuda_graph_enabled,
-            head_dim,
-            head_dim,
-            False,  # causal
-            window_left,
-        ]
-        if self._backend == "fa2":
-            args.append(fixed_split_size)
-            args.append(disable_split_kv)
-            args.append(0)  # num_colocated_ctas
-        self._plan_info = self._cached_module.plan(
-            *args,
-        )
-    except Exception as e:
-        raise RuntimeError(f"Error in tensor core plan: {e}") from e
-
-    self._pos_encoding_mode = pos_encoding_mode
-    self._window_left = window_left
-    self._logits_soft_cap = logits_soft_cap
-    self._sm_scale = sm_scale
-    self._rope_scale = rope_scale
-    self._rope_theta = rope_theta
+    fast_decode_plan(
+        self,
+        indptr=indptr_cpu,
+        indices=indices,
+        last_page_len=last_page_len_cpu,
+        num_qo_heads=num_qo_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        page_size=page_size,
+        pos_encoding_mode=pos_encoding_mode,
+        window_left=window_left,
+        logits_soft_cap=logits_soft_cap,
+        q_data_type=q_data_type,
+        kv_data_type=kv_data_type,
+        data_type=data_type,
+        sm_scale=sm_scale,
+        rope_scale=rope_scale,
+        rope_theta=rope_theta,
+        non_blocking=non_blocking,
+        fixed_split_size=fixed_split_size,
+        disable_split_kv=disable_split_kv,
+    )
 
 @triton.jit
 def _copy_page_indices_kernel(
