@@ -207,6 +207,14 @@ cython_debug/
 # Results
 *.csv
 
+# Inference job artifacts (Nsight traces, plots, Slurm logs — do not commit)
+results/
+*.nsys-rep
+*.qdstrm
+**/exported/
+# Nsight GUI JSONL exports can be 100MB–1GB+
+**/worker_process_*.jsonl
+
 # Python pickle files
 *.pkl
 

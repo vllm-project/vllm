@@ -1,0 +1,503 @@
+"""Matplotlib plots for vLLM / MoE trace analysis."""
+
+from __future__ import annotations
+
+import json
+import re
+from collections import Counter, defaultdict
+from pathlib import Path
+from typing import Any
+
+import matplotlib.pyplot as plt
+import numpy as np
+from matplotlib.colors import LinearSegmentedColormap
+from matplotlib.patches import Patch
+
+from plotting_tools.classify import classify_comm_operation, comm_operation_label
+from plotting_tools.trace_io import duty_by_sub, merge_intervals
+
+# White (no traffic) -> green -> dark blue (heavy traffic)
+TRAFFIC_CMAP = LinearSegmentedColormap.from_list(
+    "traffic_wgb",
+    ["#ffffff", "#41ab5d", "#08306b"],
+)
+
+DECOMPOSED_LAYERS = (
+    ("attention_comp", "Attention Comp", "#4c78a8"),
+    ("gate_comp", "Gate Comp", "#f58518"),
+    ("experts_comp", "Experts Comp", "#54a24b"),
+    ("add_norm_comp", "Add and Norm Comp", "#b279a2"),
+    ("other_compute", "Other Compute", "#9ecae9"),
+    ("collective_comm", "Collective Comm", "#e45756"),
+    ("control", "Control", "#bab0ac"),
+)
+
+SUBCATEGORY_LABELS = {k: label for k, label, _ in DECOMPOSED_LAYERS}
+
+
+def _ensure_out(out_dir: Path) -> Path:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return out_dir
+
+
+def plot_decomposed_timeline(
+    events: list[dict[str, Any]],
+    out_path: Path,
+    *,
+    title: str = "Decomposed timeline",
+    max_ms: float | None = None,
+) -> None:
+    """Horizontal stacked bands: attention / gate / experts / norm / comm / control."""
+    if not events:
+        return
+    t0 = events[0]["ts"]
+    fig, ax = plt.subplots(figsize=(18, 5))
+    y_positions = {spec[0]: i for i, spec in enumerate(DECOMPOSED_LAYERS)}
+
+    for sub, _label, color in DECOMPOSED_LAYERS:
+        intervals = [
+            ((e["ts"] - t0) / 1000.0, e["dur"] / 1000.0)
+            for e in events
+            if e["sub"] == sub
+        ]
+        if not intervals:
+            continue
+        y = y_positions[sub]
+        ax.broken_barh(intervals, (y, 0.85), facecolors=color, edgecolors="none")
+
+    ax.set_yticks([i + 0.4 for i in range(len(DECOMPOSED_LAYERS))])
+    ax.set_yticklabels([spec[1] for spec in DECOMPOSED_LAYERS])
+    ax.set_xlabel("Time (ms)")
+    ax.set_title(title)
+    ax.grid(True, axis="x", linestyle="--", alpha=0.3)
+    if max_ms is not None:
+        ax.set_xlim(0, max_ms)
+    plt.tight_layout()
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
+
+
+def _gpu_active_intervals(events: list[dict[str, Any]]) -> list[tuple[int, int]]:
+    return [
+        (e["ts"], e["end"])
+        for e in events
+        if e["kind"] == "compute"
+        or (e["kind"] == "comm" and "memcpy" in e.get("name", "").lower())
+        or (e["kind"] == "comm" and "nccl" in e.get("name", "").lower())
+    ]
+
+
+def gpu_idle_windows_ms(events: list[dict[str, Any]]) -> list[float]:
+    if not events:
+        return []
+    t0 = min(e["ts"] for e in events)
+    t1 = max(e["end"] for e in events)
+    active = merge_intervals(_gpu_active_intervals(events))
+    gaps: list[float] = []
+    cur = t0
+    for s, e in active:
+        if cur < s:
+            gaps.append((s - cur) / 1000.0)
+        cur = max(cur, e)
+    if cur < t1:
+        gaps.append((t1 - cur) / 1000.0)
+    return [g for g in gaps if g > 0]
+
+
+def gpu_idle_fraction(events: list[dict[str, Any]]) -> float:
+    if not events:
+        return 0.0
+    t0 = min(e["ts"] for e in events)
+    t1 = max(e["end"] for e in events)
+    span = max(t1 - t0, 1)
+    active = merge_intervals(_gpu_active_intervals(events))
+    busy = sum(e - s for s, e in active)
+    return max(0.0, (span - busy) / span)
+
+
+def plot_traffic_volume_pct(
+    events: list[dict[str, Any]],
+    out_path: Path,
+    *,
+    title: str,
+    parallel_label: str,
+) -> None:
+    """Bar chart of duty-cycle % per decomposed category (may exceed 100% if events overlap)."""
+    duty = duty_by_sub(events)
+    labels: list[str] = []
+    vals: list[float] = []
+    colors: list[str] = []
+    for sub, label, color in DECOMPOSED_LAYERS:
+        v = duty.get(sub, 0.0) * 100.0
+        if v <= 0:
+            continue
+        labels.append(label)
+        vals.append(v)
+        colors.append(color)
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    x = np.arange(len(labels))
+    bars = ax.bar(x, vals, color=colors)
+    ax.bar_label(bars, labels=[f"{v:.1f}%" for v in vals], fontsize=8, padding=2)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=25, ha="right")
+    ax.set_ylabel("Summed duration / trace span (%)")
+    ax.set_title(f"{title}\n{parallel_label}")
+    ax.grid(True, axis="y", linestyle="--", alpha=0.3)
+    plt.tight_layout()
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
+
+
+def _extract_comm_bytes(event: dict[str, Any]) -> int | None:
+    args = event.get("args") or {}
+    for key in ("bytes", "size", "nbytes", "Byte", "copy bytes"):
+        if key in args and isinstance(args[key], (int, float)):
+            return int(args[key])
+    name = event.get("name", "")
+    m = re.search(r"(\d+)\s*b", name.lower())
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def comm_message_stats(
+    events: list[dict[str, Any]],
+    phase: str | None = None,
+) -> dict[str, Any]:
+    comms = [
+        e
+        for e in events
+        if e["kind"] == "comm" and (phase is None or e.get("phase", "unknown") == phase)
+    ]
+    sizes: list[int] = []
+    for e in comms:
+        b = _extract_comm_bytes(e)
+        if b is not None and b > 0:
+            sizes.append(b)
+    return {
+        "count": len(comms),
+        "sizes_bytes": sizes,
+        "avg_bytes": float(np.mean(sizes)) if sizes else 0.0,
+        "total_bytes": int(sum(sizes)),
+    }
+
+
+def plot_message_stats(
+    events: list[dict[str, Any]],
+    out_path: Path,
+    *,
+    prefix: str,
+) -> dict[str, Any]:
+    """Prefill vs decode comm count and average message size."""
+    stats = {
+        "prefill": comm_message_stats(events, "prefill"),
+        "decode": comm_message_stats(events, "decode"),
+    }
+    all_s = comm_message_stats(events)
+
+    phases = ["prefill", "decode", "all"]
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+    counts = [
+        stats["prefill"]["count"],
+        stats["decode"]["count"],
+        all_s["count"],
+    ]
+    avgs_mb = [
+        stats["prefill"]["avg_bytes"] / 1e6,
+        stats["decode"]["avg_bytes"] / 1e6,
+        all_s["avg_bytes"] / 1e6,
+    ]
+
+    axes[0].bar(phases, counts, color=["#4c78a8", "#f58518", "#54a24b"])
+    axes[0].set_ylabel("Event count")
+    axes[0].set_title(f"{prefix}: comm event count")
+
+    axes[1].bar(phases, avgs_mb, color=["#4c78a8", "#f58518", "#54a24b"])
+    axes[1].set_ylabel("Avg size (MB)")
+    axes[1].set_title(f"{prefix}: avg comm message size")
+
+    plt.tight_layout()
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
+    return {"prefill": stats["prefill"], "decode": stats["decode"], "all": all_s}
+
+
+def _peer_from_nccl_name(name: str) -> int | None:
+    m = re.search(r"rank\s*[=:]?\s*(\d+)", name.lower())
+    if m:
+        return int(m.group(1))
+    m = re.search(r"peer\s*[=:]?\s*(\d+)", name.lower())
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def build_traffic_matrix(
+    events: list[dict[str, Any]],
+    n_ranks: int,
+) -> np.ndarray:
+    """Approximate all-to-all bytes matrix from NCCL / comm event names."""
+    mat = np.zeros((n_ranks, n_ranks), dtype=np.float64)
+    local_rank = 0
+    for e in events:
+        if e["kind"] != "comm":
+            continue
+        b = _extract_comm_bytes(e) or 0
+        peer = _peer_from_nccl_name(e.get("name", ""))
+        if peer is None or peer >= n_ranks:
+            continue
+        mat[local_rank, peer] += b
+        if b == 0:
+            mat[local_rank, peer] += e["dur"]  # fallback: time proxy
+    return mat
+
+
+def plot_traffic_heatmap(
+    matrix: np.ndarray,
+    out_path: Path,
+    *,
+    title: str,
+    xlabel: str = "Destination rank",
+    ylabel: str = "Source rank",
+) -> None:
+    fig, ax = plt.subplots(figsize=(7, 6))
+    vmax = matrix.max() if matrix.size else 1.0
+    if vmax <= 0:
+        vmax = 1.0
+    im = ax.imshow(matrix, cmap=TRAFFIC_CMAP, vmin=0, vmax=vmax, aspect="auto")
+    ax.set_title(title)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    n = matrix.shape[0]
+    ax.set_xticks(range(n))
+    ax.set_yticks(range(n))
+    for i in range(n):
+        for j in range(n):
+            val = matrix[i, j]
+            if val > 0:
+                ax.text(j, i, f"{val:.2e}", ha="center", va="center", fontsize=8)
+    plt.colorbar(im, ax=ax, label="Volume (bytes or µs proxy)")
+    plt.tight_layout()
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
+
+
+def plot_expert_traffic_volume(
+    events: list[dict[str, Any]],
+    out_path: Path,
+    *,
+    num_experts: int = 128,
+) -> float:
+    """Estimate expert routing traffic from gate/MoE-related comm + compute duty."""
+    expert_bytes = 0
+    gate_dur = 0
+    for e in events:
+        s = f"{e['name']} {e['cat']}".lower()
+        if e["sub"] == "gate_comp":
+            gate_dur += e["dur"]
+        if e["kind"] == "comm" and any(
+            k in s for k in ("expert", "moe", "dispatch", "combine", "all2all", "all_to_all")
+        ):
+            expert_bytes += _extract_comm_bytes(e) or 0
+    # Heuristic: gate duration correlates with routing metadata volume
+    if expert_bytes == 0 and gate_dur > 0:
+        expert_bytes = int(gate_dur * 100)  # rough µs->byte proxy for plotting
+    total_b = expert_bytes / 1e9
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.bar(["Expert routing (est.)"], [total_b], color="#54a24b")
+    ax.set_ylabel("Volume (GB)")
+    ax.set_title("Expert traffic (routing / MoE comm heuristic)")
+    plt.tight_layout()
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
+    return total_b
+
+
+def comm_operation_breakdown(
+    events: list[dict[str, Any]],
+) -> dict[str, dict[str, float | int]]:
+    """Count and total duration (µs) per comm operation type."""
+    stats: dict[str, dict[str, float | int]] = defaultdict(
+        lambda: {"count": 0, "dur_us": 0, "bytes": 0}
+    )
+    for e in events:
+        if e.get("kind") != "comm":
+            continue
+        op = classify_comm_operation(e.get("name", ""), e.get("cat", ""))
+        if op is None:
+            op = "other_comm"
+        stats[op]["count"] += 1
+        stats[op]["dur_us"] += e["dur"]
+        b = _extract_comm_bytes(e)
+        if b:
+            stats[op]["bytes"] += b
+    return dict(stats)
+
+
+def plot_collective_ops_breakdown(
+    events: list[dict[str, Any]],
+    out_path: Path,
+    *,
+    title: str,
+) -> dict[str, dict[str, float | int]]:
+    """Bar chart: comm op type vs event count and vs total time (ms)."""
+    stats = comm_operation_breakdown(events)
+    if not stats:
+        return stats
+
+    ops = sorted(
+        stats.keys(),
+        key=lambda k: stats[k]["dur_us"],
+        reverse=True,
+    )
+    labels = [comm_operation_label(o) for o in ops]
+    counts = [stats[o]["count"] for o in ops]
+    dur_ms = [stats[o]["dur_us"] / 1000.0 for o in ops]
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    x = np.arange(len(ops))
+    axes[0].bar(x, counts, color="#e45756")
+    axes[0].set_xticks(x)
+    axes[0].set_xticklabels(labels, rotation=35, ha="right")
+    axes[0].set_ylabel("Event count")
+    axes[0].set_title("Count by comm op")
+    axes[0].grid(True, axis="y", linestyle="--", alpha=0.3)
+
+    axes[1].bar(x, dur_ms, color="#4c78a8")
+    axes[1].set_xticks(x)
+    axes[1].set_xticklabels(labels, rotation=35, ha="right")
+    axes[1].set_ylabel("Total time (ms)")
+    axes[1].set_title("GPU time by comm op")
+    axes[1].grid(True, axis="y", linestyle="--", alpha=0.3)
+
+    fig.suptitle(title, fontsize=12, y=1.02)
+    plt.tight_layout()
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return stats
+
+
+def collect_nccl_ops(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    ops: list[dict[str, Any]] = []
+    for e in events:
+        if e["kind"] != "comm":
+            continue
+        name = e.get("name", "")
+        if "nccl" not in name.lower():
+            continue
+        shape = None
+        args = e.get("args") or {}
+        for k in ("shape", "dims", "tensor_shape"):
+            if k in args:
+                shape = args[k]
+        ops.append(
+            {
+                "ts_ms": (e["ts"] - events[0]["ts"]) / 1000.0,
+                "name": name,
+                "dur_us": e["dur"],
+                "bytes": _extract_comm_bytes(e),
+                "shape": shape,
+            }
+        )
+    return ops
+
+
+def write_collective_ops_table(
+    ops: list[dict[str, Any]],
+    out_path: Path,
+) -> None:
+    with out_path.open("w") as f:
+        json.dump(ops, f, indent=2)
+
+
+def plot_window_cdf(
+    vals: list[float],
+    out_path: Path,
+    *,
+    xlabel: str,
+    title: str,
+) -> None:
+    if not vals:
+        return
+    vals = sorted(vals)
+    n = len(vals)
+    cdf = [(i + 1) / n for i in range(n)]
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.plot(vals, cdf)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("CDF")
+    ax.set_title(title)
+    ax.grid(True, linestyle="--", alpha=0.35)
+    plt.tight_layout()
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
+
+
+def nocomm_windows(events: list[dict[str, Any]]) -> list[float]:
+    comms = [(e["ts"], e["end"]) for e in events if e["kind"] == "comm"]
+    if not comms:
+        return []
+    comms = merge_intervals(comms)
+    start = min(e["ts"] for e in events)
+    end = max(e["end"] for e in events)
+    windows: list[tuple[int, int]] = []
+    cur = start
+    for s, e in comms:
+        if cur < s:
+            windows.append((cur, s))
+        cur = max(cur, e)
+    if cur < end:
+        windows.append((cur, end))
+    merged = merge_intervals(windows)
+    return [(e - s) / 1000.0 for s, e in merged if e > s]
+
+
+def comm_delta(events: list[dict[str, Any]]) -> list[float]:
+    comms = sorted([e for e in events if e["kind"] == "comm"], key=lambda e: e["ts"])
+    if len(comms) < 2:
+        return []
+    return [(comms[i + 1]["ts"] - comms[i]["ts"]) / 1000.0 for i in range(len(comms) - 1)]
+
+
+def plot_classic_timeline(
+    events: list[dict[str, Any]],
+    out_path: Path,
+    *,
+    title: str,
+) -> None:
+    t0 = events[0]["ts"]
+    bands = {
+        "compute": (2.0, "tab:blue"),
+        "comm": (1.0, "tab:orange"),
+        "control": (0.0, "tab:green"),
+    }
+    fig, ax = plt.subplots(figsize=(16, 4))
+    for kind, (y, color) in bands.items():
+        intervals = [
+            ((e["ts"] - t0) / 1000.0, e["dur"] / 1000.0)
+            for e in events
+            if e["kind"] == kind
+        ]
+        if intervals:
+            ax.broken_barh(intervals, (y, 0.7), facecolors=color, label=kind)
+    ax.set_xlabel("Time (ms)")
+    ax.set_yticks([0.35, 1.35, 2.35])
+    ax.set_yticklabels(["control", "communication", "compute"])
+    ax.set_title(title)
+    ax.legend(loc="upper right")
+    ax.grid(True, axis="x", linestyle="--", alpha=0.35)
+    plt.tight_layout()
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
+
+
+def write_summary_json(
+    path: Path,
+    payload: dict[str, Any],
+) -> None:
+    with path.open("w") as f:
+        json.dump(payload, f, indent=2)
