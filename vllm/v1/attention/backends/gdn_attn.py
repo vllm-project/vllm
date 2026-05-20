@@ -7,7 +7,6 @@ from dataclasses import dataclass
 import torch
 
 from vllm.config import VllmConfig
-from vllm.platforms import current_platform
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -98,12 +97,12 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             else "auto"
         )
         backend = str(backend_cfg).strip().lower()
-        self.use_cutedsl_gdn_prefill = (
-            backend == "cutedsl"
-            and current_platform.is_cuda()
-            and device.type == "cuda"
-            and current_platform.has_device_capability(100)
+        head_k_dim = kv_cache_spec.shapes[1][-1]
+        from vllm.model_executor.layers.mamba.gdn_linear_attn import (
+            _resolve_gdn_prefill_backend,
         )
+
+        self.gdn_prefill_backend = _resolve_gdn_prefill_backend(backend, head_k_dim)
 
         if self.speculative_config:
             assert self.speculative_config.num_speculative_tokens is not None
@@ -332,7 +331,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         if num_prefills > 0:
             from vllm.model_executor.layers.fla.ops.utils import FLA_CHUNK_SIZE
 
-            if self.use_cutedsl_gdn_prefill:
+            if self.gdn_prefill_backend == "cutedsl":
                 from vllm.model_executor.layers.mamba.ops.gdn_chunk_cutedsl import (
                     prepare_metadata_cutedsl,
                 )
