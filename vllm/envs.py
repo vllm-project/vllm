@@ -1452,10 +1452,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
             "relax",
         ],
     ),
-    # Whether to use TRT-LLM fmha_v2 for prefill attention
-    "VLLM_USE_TRTLLM_FMHA_V2": lambda: bool(
-        int(os.getenv("VLLM_USE_TRTLLM_FMHA_V2", "1"))
-    ),
     # Whether to use fused grouped_topk used for MoE expert selection.
     "VLLM_USE_FUSED_MOE_GROUPED_TOPK": lambda: bool(
         int(os.getenv("VLLM_USE_FUSED_MOE_GROUPED_TOPK", "1"))
