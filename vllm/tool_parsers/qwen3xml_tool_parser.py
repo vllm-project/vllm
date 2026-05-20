@@ -1167,11 +1167,7 @@ class Qwen3XMLToolParser(ToolParser):
         # Reset tool call tracking arrays for new extraction
         self.prev_tool_call_arr = []
         self.streamed_args_for_tool = []
-        # Prefer per-request tools over the parser-level self.tools so
-        # type-aware conversion works when the parser instance is reused
-        # across requests with different tool schemas.
-        request_tools = request.tools if request is not None and request.tools else None
-        self.parser.set_tools(request_tools if request_tools else self.tools)
+        self.parser.set_tools(self.tools)
         result = self.parser.parse_single_streaming_chunks(model_output)
         if not result.tool_calls:
             return ExtractedToolCallInformation(
@@ -1242,11 +1238,7 @@ class Qwen3XMLToolParser(ToolParser):
             # Reset tool call tracking arrays for new streaming session
             self.prev_tool_call_arr = []
             self.streamed_args_for_tool = []
-            # Prefer per-request tools over the parser-level self.tools.
-            request_tools = (
-                request.tools if request is not None and request.tools else None
-            )
-            self.parser.set_tools(request_tools if request_tools else self.tools)
+            self.parser.set_tools(self.tools)
 
         # Model sometimes outputs separately causing delta_text to be empty.
         # If there were tool_calls before and all current tool_calls have ended,

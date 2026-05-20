@@ -474,7 +474,7 @@ hello world
     assert args["obj_param"] == {"key": "value"}
 
 
-def test_extract_tool_calls_anyof_type_conversion(qwen3_tool_parser):
+def test_extract_tool_calls_anyof_type_conversion(qwen3_tokenizer):
     """Test type conversion for anyOf/oneOf nullable schemas (Pydantic v2).
 
     Pydantic v2 emits anyOf for Optional[T] fields, e.g.:
@@ -525,15 +525,6 @@ def test_extract_tool_calls_anyof_type_conversion(qwen3_tool_parser):
                                 {"type": "null"},
                             ],
                         },
-                        "ref_param": {
-                            "$ref": "#/$defs/ToolInput",
-                        },
-                        "anyof_ref": {
-                            "anyOf": [
-                                {"$ref": "#/$defs/ToolInput"},
-                                {"type": "null"},
-                            ],
-                        },
                     },
                 },
             },
@@ -560,17 +551,12 @@ hello
 <parameter=multi_non_null>
 some text
 </parameter>
-<parameter=ref_param>
-{"city": "Paris"}
-</parameter>
-<parameter=anyof_ref>
-{"city": "London"}
-</parameter>
 </function>
 </tool_call>"""
 
+    parser = Qwen3CoderToolParser(qwen3_tokenizer, tools=tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
-    extracted = qwen3_tool_parser.extract_tool_calls(model_output, request=request)
+    extracted = parser.extract_tool_calls(model_output, request=request)
 
     args = json.loads(extracted.tool_calls[0].function.arguments)
     assert args["anyof_int"] == 5
@@ -586,17 +572,9 @@ some text
     # Multi non-null: anyOf[string, integer, null] → first non-null is string
     assert args["multi_non_null"] == "some text"
     assert isinstance(args["multi_non_null"], str)
-    # $ref: treated as object, parsed via json.loads
-    assert args["ref_param"] == {"city": "Paris"}
-    assert isinstance(args["ref_param"], dict)
-    # anyOf[$ref, null]: Optional[BaseModel] pattern → object via json.loads
-    assert args["anyof_ref"] == {"city": "London"}
-    assert isinstance(args["anyof_ref"], dict)
 
 
-def test_extract_tool_calls_anyof_type_conversion_streaming(
-    qwen3_tool_parser, qwen3_tokenizer
-):
+def test_extract_tool_calls_anyof_type_conversion_streaming(qwen3_tokenizer):
     """Test streaming e2e for anyOf/oneOf nullable schemas (Pydantic v2).
 
     Verifies that the full streaming pipeline — tokenize, incrementally
@@ -630,9 +608,6 @@ def test_extract_tool_calls_anyof_type_conversion_streaming(
                                 {"type": "null"},
                             ],
                         },
-                        "filters": {
-                            "$ref": "#/$defs/SearchFilters",
-                        },
                     },
                 },
             },
@@ -650,17 +625,15 @@ vllm tool parser
 <parameter=verbose>
 true
 </parameter>
-<parameter=filters>
-{"lang": "en", "year": 2025}
-</parameter>
 </function>
 </tool_call>"""
 
+    parser = Qwen3CoderToolParser(qwen3_tokenizer, tools=tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
 
     tool_states = {}
     for delta_message in stream_delta_message_generator(
-        qwen3_tool_parser, qwen3_tokenizer, model_output, request
+        parser, qwen3_tokenizer, model_output, request
     ):
         if delta_message.tool_calls:
             for tool_call in delta_message.tool_calls:
@@ -683,9 +656,6 @@ true
     assert isinstance(args["count"], int)
     assert args["verbose"] is True
     assert isinstance(args["verbose"], bool)
-    # $ref: treated as object, parsed via json.loads
-    assert args["filters"] == {"lang": "en", "year": 2025}
-    assert isinstance(args["filters"], dict)
 
 
 @pytest.mark.parametrize(

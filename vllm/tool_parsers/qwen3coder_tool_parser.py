@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import ast
 import json
 import uuid
 from collections.abc import Sequence
@@ -30,7 +29,11 @@ from vllm.tool_parsers.structural_tag_registry import (
     get_enable_structured_outputs_in_reasoning,
     get_model_structural_tag,
 )
-from vllm.tool_parsers.utils import find_tool_properties
+from vllm.tool_parsers.utils import (
+    coerce_to_schema_type,
+    extract_types_from_schema,
+    find_tool_properties,
+)
 
 logger = init_logger(__name__)
 
@@ -117,175 +120,24 @@ class Qwen3CoderToolParser(ToolParser):
         self.accumulated_params = {}
         self.streaming_request = None
 
-    @staticmethod
-    def _first_non_null_type(type_value: Any) -> str | None:
-        """Extract the first non-null type from a type value.
-
-        Handles both scalar types ("integer") and type-as-array
-        (["integer", "null"]) per JSON Schema spec.
-        """
-        if isinstance(type_value, list):
-            return next(
-                (
-                    str(t).strip().lower()
-                    for t in type_value
-                    if t is not None and str(t).lower() != "null"
-                ),
-                None,
-            )
-        if type_value is not None and str(type_value).lower() != "null":
-            return str(type_value).strip().lower()
-        return None
-
-    def _resolve_param_type(self, param_def: dict) -> str:
-        """Resolve the effective type string from a parameter definition.
-
-        Handles direct "type" fields (including type-as-array),
-        anyOf/oneOf schemas emitted by Pydantic v2 for Optional[T],
-        and $ref schemas from Pydantic model inputs.
-        """
-        if "type" in param_def:
-            resolved = self._first_non_null_type(param_def["type"])
-            return resolved or "string"
-
-        if "anyOf" in param_def or "oneOf" in param_def:
-            variants = param_def.get("anyOf") or param_def.get("oneOf", [])
-            for v in variants:
-                if not isinstance(v, dict):
-                    continue
-                if "$ref" in v:
-                    return "object"
-                resolved = self._first_non_null_type(v.get("type"))
-                if resolved:
-                    return resolved
-
-        # $ref points to a schema definition (e.g. a Pydantic model).
-        # The referenced type is almost always an object, so treat it
-        # as such to route through json.loads.
-        if "$ref" in param_def:
-            return "object"
-
-        return "string"
-
     def _convert_param_value(
         self, param_value: str, param_name: str, param_config: dict, func_name: str
     ) -> Any:
         """Convert parameter value based on its type in the schema."""
-        if param_value.lower() == "null":
-            return None
-
-        if param_name not in param_config:
-            if param_config != {}:
-                logger.debug(
-                    "Parsed parameter '%s' is not defined in the tool "
-                    "parameters for tool '%s', directly returning the "
-                    "string value.",
-                    param_name,
-                    func_name,
-                )
+        if not isinstance(param_value, str):
             return param_value
+        param_schema = param_config.get(param_name, {})
+        param_types = extract_types_from_schema(param_schema)
+        return coerce_to_schema_type(param_value, param_types)
 
-        if not isinstance(param_config[param_name], dict):
-            return param_value
-
-        param_type = self._resolve_param_type(param_config[param_name])
-        if param_type in ["string", "str", "text", "varchar", "char", "enum"]:
-            return param_value
-        elif (
-            param_type.startswith("int")
-            or param_type.startswith("uint")
-            or param_type.startswith("long")
-            or param_type.startswith("short")
-            or param_type.startswith("unsigned")
-        ):
-            try:
-                return int(param_value)
-            except (ValueError, TypeError):
-                logger.debug(
-                    "Parsed value '%s' of parameter '%s' is not an "
-                    "integer in tool '%s', degenerating to string.",
-                    param_value,
-                    param_name,
-                    func_name,
-                )
-                return param_value
-        elif param_type.startswith("num") or param_type.startswith("float"):
-            try:
-                float_param_value = float(param_value)
-                return (
-                    float_param_value
-                    if float_param_value - int(float_param_value) != 0
-                    else int(float_param_value)
-                )
-            except (ValueError, TypeError):
-                logger.debug(
-                    "Parsed value '%s' of parameter '%s' is not a float "
-                    "in tool '%s', degenerating to string.",
-                    param_value,
-                    param_name,
-                    func_name,
-                )
-                return param_value
-        elif param_type in ["boolean", "bool", "binary"]:
-            param_value = param_value.lower()
-            if param_value not in ["true", "false"]:
-                logger.debug(
-                    "Parsed value '%s' of parameter '%s' is not a boolean "
-                    "(`true` or `false`) in tool '%s', degenerating to "
-                    "false.",
-                    param_value,
-                    param_name,
-                    func_name,
-                )
-            return param_value == "true"
-        else:
-            if (
-                param_type in ["object", "array", "arr"]
-                or param_type.startswith("dict")
-                or param_type.startswith("list")
-            ):
-                try:
-                    param_value = json.loads(param_value)
-                    return param_value
-                except (json.JSONDecodeError, TypeError, ValueError):
-                    logger.debug(
-                        "Parsed value '%s' of parameter '%s' cannot be "
-                        "parsed with json.loads in tool '%s', will try "
-                        "other methods to parse it.",
-                        param_value,
-                        param_name,
-                        func_name,
-                    )
-            try:
-                param_value = ast.literal_eval(param_value)  # safer
-            except (ValueError, SyntaxError, TypeError):
-                logger.debug(
-                    "Parsed value '%s' of parameter '%s' cannot be "
-                    "converted via Python `ast.literal_eval()` in tool "
-                    "'%s', degenerating to string.",
-                    param_value,
-                    param_name,
-                    func_name,
-                )
-            return param_value
-
-    def _parse_xml_function_call(
-        self,
-        function_call_str: str,
-        tools: list[Tool] | None = None,
-    ) -> ToolCall | None:
+    def _parse_xml_function_call(self, function_call_str: str) -> ToolCall | None:
         # Extract function name
         end_index = function_call_str.find(">")
         # If there's no ">" character, this is not a valid xml function call
         if end_index == -1:
             return None
         function_name = function_call_str[:end_index]
-        # Prefer per-request tools (passed in from extract_tool_calls) over
-        # parser-level self.tools so type-aware conversion works when the
-        # parser instance is reused across requests with different schemas.
-        param_config = find_tool_properties(
-            tools if tools else self.tools, function_name
-        )
+        param_config = find_tool_properties(self.tools, function_name)
         parameters = function_call_str[end_index + 1 :]
         param_dict = {}
         for match_text in self.tool_call_parameter_regex.findall(parameters):
@@ -346,11 +198,8 @@ class Qwen3CoderToolParser(ToolParser):
                     tools_called=False, tool_calls=[], content=model_output
                 )
 
-            request_tools = (
-                request.tools if request is not None and request.tools else None
-            )
             tool_calls = [
-                self._parse_xml_function_call(function_call_str, request_tools)
+                self._parse_xml_function_call(function_call_str)
                 for function_call_str in function_calls
             ]
             # Populate prev_tool_call_arr for serving layer to set finish_reason
@@ -641,18 +490,8 @@ class Qwen3CoderToolParser(ToolParser):
                 self.current_param_name = current_param_name
                 self.accumulated_params[current_param_name] = param_value
 
-                # Prefer the per-request tools (set on the streaming
-                # request) over the parser-level self.tools so that
-                # type-aware conversion works when the parser instance
-                # is reused across requests with different tool schemas.
-                streaming_tools = (
-                    self.streaming_request.tools
-                    if self.streaming_request is not None
-                    and self.streaming_request.tools
-                    else self.tools
-                )
                 param_config = find_tool_properties(
-                    streaming_tools, self.current_function_name or ""
+                    self.tools, self.current_function_name or ""
                 )
 
                 converted_value = self._convert_param_value(
@@ -711,10 +550,6 @@ class Qwen3CoderToolParser(ToolParser):
                     try:
                         parsed_tool = self._parse_xml_function_call(
                             func_content,
-                            self.streaming_request.tools
-                            if self.streaming_request is not None
-                            and self.streaming_request.tools
-                            else None,
                         )
                         if parsed_tool and self.current_tool_index < len(
                             self.prev_tool_call_arr
