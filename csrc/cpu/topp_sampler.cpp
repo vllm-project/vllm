@@ -6,6 +6,13 @@
 #include <limits>
 #include <vector>
 
+namespace {
+constexpr float kPadSentinel = -1e30f;  // logits below this are PAD
+constexpr float kBoundaryTol = 1e-5f;   // tie tolerance for top-p cut
+constexpr int kMeanStdSampleN = 8192;   // Pass 0 sample size
+constexpr int kBsearchMaxIters = 32;    // binary-search iteration cap
+}  // namespace
+
 // Matches _NORMAL_CDF_TO_SIGMA_TABLE in topk_topp_triton.py (200 entries).
 static const float NORMAL_CDF_TO_SIGMA_TABLE[200] = {
     3.656f,  3.650f,  3.650f, 3.650f, 3.626f, 3.626f, 3.626f, 3.514f, 3.514f,
@@ -33,70 +40,181 @@ static const float NORMAL_CDF_TO_SIGMA_TABLE[200] = {
     -0.110f, -3.813f,
 };
 
-// Binary search on a pre-computed probability buffer.
-static float binary_search_buffer(const float* buf, int n, float p_val,
-                                  float lo, float hi, double* sum_above_out) {
-  auto sum_gt = [&](float threshold) -> double {
-    double s = 0.0;
-    int j = 0;
+namespace {
+
+// Stateful FP64 accumulator over FP32Vec16 chunks. Cross-lane reduction
+// happens once at reduce() — keeps Pass 2's chained-acc pattern intact.
 #if defined(__AVX512F__)
-    __m512d acc0 = _mm512_setzero_pd(), acc1 = _mm512_setzero_pd();
-    const __m512 thr16 = _mm512_set1_ps(threshold);
-    for (; j + 16 <= n; j += 16) {
-      __m512 b16 = _mm512_loadu_ps(buf + j);
-      __mmask16 mask = _mm512_cmp_ps_mask(b16, thr16, _CMP_GT_OQ);
-      __m256 lo8 = _mm512_castps512_ps256(b16);
-      __m256 hi8 = _mm512_extractf32x8_ps(b16, 1);
-      acc0 = _mm512_add_pd(acc0,
-                           _mm512_maskz_cvtps_pd((__mmask8)(mask & 0xFF), lo8));
-      acc1 = _mm512_add_pd(acc1,
-                           _mm512_maskz_cvtps_pd((__mmask8)(mask >> 8), hi8));
-    }
-    s = _mm512_reduce_add_pd(acc0) + _mm512_reduce_add_pd(acc1);
+struct Fp64Acc16 {
+  __m512d acc0 = _mm512_setzero_pd();
+  __m512d acc1 = _mm512_setzero_pd();
+  inline void add(const vec_op::FP32Vec16& v) {
+    __m256 lo8 = _mm512_castps512_ps256(v.reg);
+    __m256 hi8 = _mm512_extractf32x8_ps(v.reg, 1);
+    acc0 = _mm512_add_pd(acc0, _mm512_cvtps_pd(lo8));
+    acc1 = _mm512_add_pd(acc1, _mm512_cvtps_pd(hi8));
+  }
+  inline double reduce() const {
+    return _mm512_reduce_add_pd(acc0) + _mm512_reduce_add_pd(acc1);
+  }
+};
 #elif defined(__AVX2__)
-    // _mm256_and_ps with the cmp sign-mask zeroes excluded lanes; zero
-    // contributes nothing to the FP64 sum (do NOT use blendv with -inf here).
-    const __m256 thr = _mm256_set1_ps(threshold);
-    __m256d acc0 = _mm256_setzero_pd(), acc1 = _mm256_setzero_pd();
-    __m256d acc2 = _mm256_setzero_pd(), acc3 = _mm256_setzero_pd();
-    for (; j + 16 <= n; j += 16) {
-      __m256 b_lo = _mm256_loadu_ps(buf + j);
-      __m256 b_hi = _mm256_loadu_ps(buf + j + 8);
-      __m256 masked_lo =
-          _mm256_and_ps(b_lo, _mm256_cmp_ps(b_lo, thr, _CMP_GT_OQ));
-      __m256 masked_hi =
-          _mm256_and_ps(b_hi, _mm256_cmp_ps(b_hi, thr, _CMP_GT_OQ));
-      acc0 = _mm256_add_pd(
-          acc0, _mm256_cvtps_pd(_mm256_extractf128_ps(masked_lo, 0)));
-      acc1 = _mm256_add_pd(
-          acc1, _mm256_cvtps_pd(_mm256_extractf128_ps(masked_lo, 1)));
-      acc2 = _mm256_add_pd(
-          acc2, _mm256_cvtps_pd(_mm256_extractf128_ps(masked_hi, 0)));
-      acc3 = _mm256_add_pd(
-          acc3, _mm256_cvtps_pd(_mm256_extractf128_ps(masked_hi, 1)));
-    }
+struct Fp64Acc16 {
+  __m256d acc0 = _mm256_setzero_pd();
+  __m256d acc1 = _mm256_setzero_pd();
+  __m256d acc2 = _mm256_setzero_pd();
+  __m256d acc3 = _mm256_setzero_pd();
+  inline void add(const vec_op::FP32Vec16& v) {
+    __m128 e_ll = _mm256_extractf128_ps(v.reg_low, 0);
+    __m128 e_lh = _mm256_extractf128_ps(v.reg_low, 1);
+    __m128 e_hl = _mm256_extractf128_ps(v.reg_high, 0);
+    __m128 e_hh = _mm256_extractf128_ps(v.reg_high, 1);
+    acc0 = _mm256_add_pd(acc0, _mm256_cvtps_pd(e_ll));
+    acc1 = _mm256_add_pd(acc1, _mm256_cvtps_pd(e_lh));
+    acc2 = _mm256_add_pd(acc2, _mm256_cvtps_pd(e_hl));
+    acc3 = _mm256_add_pd(acc3, _mm256_cvtps_pd(e_hh));
+  }
+  inline double reduce() const {
     __m256d sum_a =
         _mm256_add_pd(_mm256_add_pd(acc0, acc1), _mm256_add_pd(acc2, acc3));
     __m128d hi128 = _mm256_extractf128_pd(sum_a, 1);
     __m128d lo128 = _mm256_castpd256_pd128(sum_a);
     __m128d s2 = _mm_add_pd(lo128, hi128);
-    s = _mm_cvtsd_f64(_mm_hadd_pd(s2, s2));
+    return _mm_cvtsd_f64(_mm_hadd_pd(s2, s2));
+  }
+};
 #endif
-    for (; j < n; ++j)
-      if (buf[j] > threshold) s += (double)buf[j];
-    return s;
-  };
 
-  for (int iter = 0; iter < 32; ++iter) {
+// Sum (in fp64) of buf[i] for i where buf[i] > threshold.
+__attribute__((always_inline)) static inline double sum_gt_to_double(
+    const float* buf, int n, float threshold) {
+  double s = 0.0;
+  int j = 0;
+#if defined(__AVX512F__)
+  __m512d acc0 = _mm512_setzero_pd(), acc1 = _mm512_setzero_pd();
+  const __m512 thr16 = _mm512_set1_ps(threshold);
+  for (; j + 16 <= n; j += 16) {
+    __m512 b16 = _mm512_loadu_ps(buf + j);
+    __mmask16 mask = _mm512_cmp_ps_mask(b16, thr16, _CMP_GT_OQ);
+    __m256 lo8 = _mm512_castps512_ps256(b16);
+    __m256 hi8 = _mm512_extractf32x8_ps(b16, 1);
+    acc0 = _mm512_add_pd(acc0,
+                         _mm512_maskz_cvtps_pd((__mmask8)(mask & 0xFF), lo8));
+    acc1 =
+        _mm512_add_pd(acc1, _mm512_maskz_cvtps_pd((__mmask8)(mask >> 8), hi8));
+  }
+  s = _mm512_reduce_add_pd(acc0) + _mm512_reduce_add_pd(acc1);
+#elif defined(__AVX2__)
+  // _mm256_and_ps with the cmp sign-mask zeroes excluded lanes; zero
+  // contributes nothing to the FP64 sum (do NOT use blendv with -inf here).
+  const __m256 thr = _mm256_set1_ps(threshold);
+  __m256d acc0 = _mm256_setzero_pd(), acc1 = _mm256_setzero_pd();
+  __m256d acc2 = _mm256_setzero_pd(), acc3 = _mm256_setzero_pd();
+  for (; j + 16 <= n; j += 16) {
+    __m256 b_lo = _mm256_loadu_ps(buf + j);
+    __m256 b_hi = _mm256_loadu_ps(buf + j + 8);
+    __m256 masked_lo =
+        _mm256_and_ps(b_lo, _mm256_cmp_ps(b_lo, thr, _CMP_GT_OQ));
+    __m256 masked_hi =
+        _mm256_and_ps(b_hi, _mm256_cmp_ps(b_hi, thr, _CMP_GT_OQ));
+    acc0 = _mm256_add_pd(acc0,
+                         _mm256_cvtps_pd(_mm256_extractf128_ps(masked_lo, 0)));
+    acc1 = _mm256_add_pd(acc1,
+                         _mm256_cvtps_pd(_mm256_extractf128_ps(masked_lo, 1)));
+    acc2 = _mm256_add_pd(acc2,
+                         _mm256_cvtps_pd(_mm256_extractf128_ps(masked_hi, 0)));
+    acc3 = _mm256_add_pd(acc3,
+                         _mm256_cvtps_pd(_mm256_extractf128_ps(masked_hi, 1)));
+  }
+  __m256d sum_a =
+      _mm256_add_pd(_mm256_add_pd(acc0, acc1), _mm256_add_pd(acc2, acc3));
+  __m128d hi128 = _mm256_extractf128_pd(sum_a, 1);
+  __m128d lo128 = _mm256_castpd256_pd128(sum_a);
+  __m128d s2 = _mm_add_pd(lo128, hi128);
+  s = _mm_cvtsd_f64(_mm_hadd_pd(s2, s2));
+#endif
+  for (; j < n; ++j)
+    if (buf[j] > threshold) s += (double)buf[j];
+  return s;
+}
+
+// Count elements with |row[i] - center| < tol.
+__attribute__((always_inline)) static inline int count_within_tol(
+    const float* row, int V, float center, float tol) {
+  int n = 0;
+  int i = 0;
+#if defined(__AVX512F__)
+  const __m512 c = _mm512_set1_ps(center);
+  const __m512 t = _mm512_set1_ps(tol);
+  for (; i + 16 <= V; i += 16) {
+    __m512 v = _mm512_loadu_ps(row + i);
+    __m512 a = _mm512_abs_ps(_mm512_sub_ps(v, c));
+    __mmask16 m = _mm512_cmp_ps_mask(a, t, _CMP_LT_OQ);
+    n += _mm_popcnt_u32((unsigned)m);
+  }
+#elif defined(__AVX2__)
+  const __m256 c = _mm256_set1_ps(center);
+  const __m256 t = _mm256_set1_ps(tol);
+  const __m256 sign_mask = _mm256_set1_ps(-0.0f);
+  for (; i + 16 <= V; i += 16) {
+    __m256 vlo = _mm256_loadu_ps(row + i);
+    __m256 vhi = _mm256_loadu_ps(row + i + 8);
+    __m256 abslo = _mm256_andnot_ps(sign_mask, _mm256_sub_ps(vlo, c));
+    __m256 abshi = _mm256_andnot_ps(sign_mask, _mm256_sub_ps(vhi, c));
+    __m256 clo = _mm256_cmp_ps(abslo, t, _CMP_LT_OQ);
+    __m256 chi = _mm256_cmp_ps(abshi, t, _CMP_LT_OQ);
+    n += __builtin_popcount((unsigned)_mm256_movemask_ps(clo));
+    n += __builtin_popcount((unsigned)_mm256_movemask_ps(chi));
+  }
+#endif
+  for (; i < V; ++i)
+    if (fabsf(row[i] - center) < tol) ++n;
+  return n;
+}
+
+// In-place: where !(row[i] > threshold), write fill.
+__attribute__((always_inline)) static inline void mask_write_below(
+    float* row, int V, float threshold, float fill) {
+  int i = 0;
+#if defined(__AVX512F__)
+  const __m512 thr = _mm512_set1_ps(threshold);
+  const __m512 f = _mm512_set1_ps(fill);
+  for (; i + 16 <= V; i += 16) {
+    __m512 v = _mm512_loadu_ps(row + i);
+    __mmask16 keep = _mm512_cmp_ps_mask(v, thr, _CMP_GT_OQ);
+    _mm512_storeu_ps(row + i, _mm512_mask_blend_ps(keep, f, v));
+  }
+#elif defined(__AVX2__)
+  const __m256 thr = _mm256_set1_ps(threshold);
+  const __m256 f = _mm256_set1_ps(fill);
+  for (; i + 16 <= V; i += 16) {
+    __m256 vlo = _mm256_loadu_ps(row + i);
+    __m256 vhi = _mm256_loadu_ps(row + i + 8);
+    __m256 klo = _mm256_cmp_ps(vlo, thr, _CMP_GT_OQ);
+    __m256 khi = _mm256_cmp_ps(vhi, thr, _CMP_GT_OQ);
+    _mm256_storeu_ps(row + i, _mm256_blendv_ps(f, vlo, klo));
+    _mm256_storeu_ps(row + i + 8, _mm256_blendv_ps(f, vhi, khi));
+  }
+#endif
+  for (; i < V; ++i)
+    if (!(row[i] > threshold)) row[i] = fill;
+}
+
+}  // namespace
+
+// Binary search on a pre-computed probability buffer.
+static float binary_search_buffer(const float* buf, int n, float p_val,
+                                  float lo, float hi, double* sum_above_out) {
+  for (int iter = 0; iter < kBsearchMaxIters; ++iter) {
     float mid = lo + (hi - lo) * 0.5f;
     if (mid == lo || mid == hi) break;
-    double s = sum_gt(mid);
+    double s = sum_gt_to_double(buf, n, mid);
     if (s >= (double)p_val)
       lo = mid;
     else
       hi = mid;
   }
-  double s = sum_gt(hi);
+  double s = sum_gt_to_double(buf, n, hi);
   *sum_above_out = s;
   return hi;
 }
@@ -106,15 +224,13 @@ static void top_p_row(float* __restrict__ row, int V, float p_val,
                       float* __restrict__ outlier_buf) {
   if (p_val >= 1.0f) return;
 
-  // Pass 0: sample first min(V,8192) for mean/std estimate (scalar; off
-  // critical path and PAD-sentinel branch is awkward to vectorise).
-  constexpr int NS = 8192;
-  int ns = V < NS ? V : NS;
+  // Pass 0: scalar mean/std estimate over up to kMeanStdSampleN logits.
+  int ns = V < kMeanStdSampleN ? V : kMeanStdSampleN;
   float sum_s = 0.f, sum_sq = 0.f;
   int nf = 0;
   for (int i = 0; i < ns; ++i) {
     float v = row[i];
-    if (v > -1e30f) {
+    if (v > kPadSentinel) {
       sum_s += v;
       sum_sq += v * v;
       ++nf;
@@ -131,30 +247,27 @@ static void top_p_row(float* __restrict__ row, int V, float p_val,
   sigma = sigma + fabsf(sigma) * -0.25f;
   float outlier_logit = avg + std_v * sigma;
 
-  // Pass 1: vectorised max/min scan.
-  // Sentinel (-1e30f) marks PAD tokens; blend PAD lanes to +inf before taking
-  // reduce_min so only real logits contribute to min_l.
+  // Pass 1: vectorised max/min scan. PAD lanes (<= kPadSentinel) are blended
+  // to +inf so they don't corrupt reduce_min.
   float max_l, min_l;
   {
     int i = 0;
 #if defined(__AVX512F__) || defined(__AVX2__)
-    const float sentinel_val = -1e30f;
     const float pos_inf_val = std::numeric_limits<float>::infinity();
     vec_op::FP32Vec16 maxv(row[0]);
     vec_op::FP32Vec16 minv(pos_inf_val);
   #if defined(__AVX512F__)
-    const __m512 sentinel = _mm512_set1_ps(sentinel_val);
+    const __m512 sentinel = _mm512_set1_ps(kPadSentinel);
     const __m512 pos_inf = _mm512_set1_ps(pos_inf_val);
     for (; i + 16 <= V; i += 16) {
       vec_op::FP32Vec16 v16(row + i);
       maxv = maxv.max(v16);
-      // Blend PAD lanes to +inf so they don't corrupt reduce_min.
       __mmask16 lt = _mm512_cmp_ps_mask(v16.reg, sentinel, _CMP_LE_OS);
       __m512 safe = _mm512_mask_blend_ps(lt, v16.reg, pos_inf);
       minv.reg = _mm512_min_ps(minv.reg, safe);
     }
   #else  // AVX2
-    const __m256 sentinel256 = _mm256_set1_ps(sentinel_val);
+    const __m256 sentinel256 = _mm256_set1_ps(kPadSentinel);
     const __m256 pos_inf256 = _mm256_set1_ps(pos_inf_val);
     for (; i + 16 <= V; i += 16) {
       vec_op::FP32Vec16 v16(row + i);
@@ -169,11 +282,10 @@ static void top_p_row(float* __restrict__ row, int V, float p_val,
   #endif
     max_l = maxv.reduce_max();
     min_l = minv.reduce_min();
-    // Scalar tail
     for (; i < V; ++i) {
       float v = row[i];
       if (v > max_l) max_l = v;
-      if (v > sentinel_val && v < min_l) min_l = v;
+      if (v > kPadSentinel && v < min_l) min_l = v;
     }
 #else
     max_l = -1e38f;
@@ -181,56 +293,31 @@ static void top_p_row(float* __restrict__ row, int V, float p_val,
     for (; i < V; ++i) {
       float v = row[i];
       if (v > max_l) max_l = v;
-      if (v > -1e30f && v < min_l) min_l = v;
+      if (v > kPadSentinel && v < min_l) min_l = v;
     }
 #endif
   }
   if (min_l > max_l) min_l = max_l;
 
-  // Declare fast_exp and base16 at function scope so Pass 2 and Pass 3 can use
-  // them. DEFINE_FAST_EXP is a no-op on scalar builds.
+  // fast_exp + base16 are reused by Pass 2 and Pass 3.
 #if defined(__AVX512F__) || defined(__AVX2__)
-  DEFINE_FAST_EXP  // defines fast_exp lambda + its constants
-      vec_op::FP32Vec16 base16(max_l);
+  DEFINE_FAST_EXP
+  vec_op::FP32Vec16 base16(max_l);
 #endif
 
-  // Pass 2: vectorised sum_exp.
-  // Accumulates into double to avoid float32 rounding over 128K elements.
+  // Pass 2: vectorised sum_exp; FP64 accumulation guards against rounding
+  // over 128K elements.
   double sum_exp_d = 0.0;
   {
     int i = 0;
-#if defined(__AVX512F__)
-    __m512d acc0 = _mm512_setzero_pd(), acc1 = _mm512_setzero_pd();
+#if defined(__AVX512F__) || defined(__AVX2__)
+    Fp64Acc16 acc;
     for (; i + 16 <= V; i += 16) {
       vec_op::FP32Vec16 v16(row + i);
       vec_op::FP32Vec16 e16 = fast_exp(v16 - base16);
-      __m256 lo8 = _mm512_castps512_ps256(e16.reg);
-      __m256 hi8 = _mm512_extractf32x8_ps(e16.reg, 1);
-      acc0 = _mm512_add_pd(acc0, _mm512_cvtps_pd(lo8));
-      acc1 = _mm512_add_pd(acc1, _mm512_cvtps_pd(hi8));
+      acc.add(e16);
     }
-    sum_exp_d += _mm512_reduce_add_pd(acc0) + _mm512_reduce_add_pd(acc1);
-#elif defined(__AVX2__)
-    __m256d acc0 = _mm256_setzero_pd(), acc1 = _mm256_setzero_pd();
-    __m256d acc2 = _mm256_setzero_pd(), acc3 = _mm256_setzero_pd();
-    for (; i + 16 <= V; i += 16) {
-      vec_op::FP32Vec16 v16(row + i);
-      vec_op::FP32Vec16 e16 = fast_exp(v16 - base16);
-      __m128 e_ll = _mm256_extractf128_ps(e16.reg_low, 0);
-      __m128 e_lh = _mm256_extractf128_ps(e16.reg_low, 1);
-      __m128 e_hl = _mm256_extractf128_ps(e16.reg_high, 0);
-      __m128 e_hh = _mm256_extractf128_ps(e16.reg_high, 1);
-      acc0 = _mm256_add_pd(acc0, _mm256_cvtps_pd(e_ll));
-      acc1 = _mm256_add_pd(acc1, _mm256_cvtps_pd(e_lh));
-      acc2 = _mm256_add_pd(acc2, _mm256_cvtps_pd(e_hl));
-      acc3 = _mm256_add_pd(acc3, _mm256_cvtps_pd(e_hh));
-    }
-    __m256d sum_a =
-        _mm256_add_pd(_mm256_add_pd(acc0, acc1), _mm256_add_pd(acc2, acc3));
-    __m128d hi128 = _mm256_extractf128_pd(sum_a, 1);
-    __m128d lo128 = _mm256_castpd256_pd128(sum_a);
-    __m128d s2 = _mm_add_pd(lo128, hi128);
-    sum_exp_d += _mm_cvtsd_f64(_mm_hadd_pd(s2, s2));
+    sum_exp_d += acc.reduce();
 #endif
     for (; i < V; ++i) sum_exp_d += (double)expf(row[i] - max_l);
   }
@@ -254,10 +341,9 @@ static void top_p_row(float* __restrict__ row, int V, float p_val,
       p16.save(scratch + i);
     }
 #endif
-    // Scalar tail (also entire loop for non-AVX2 builds)
     for (; i < V; ++i) scratch[i] = expf(row[i] - max_l) * inv_sum;
 
-    // Outlier gather (scalar — branchy, not worth vectorising)
+    // Outlier gather is scalar — branchy, not worth vectorising.
     for (int j = 0; j < V; ++j) {
       float prob = scratch[j];
       if (prob > outlier_prob) {
@@ -267,7 +353,7 @@ static void top_p_row(float* __restrict__ row, int V, float p_val,
     }
   }
 
-  // PATH A (peaked) or PATH B (flat)
+  // PATH A (peaked) or PATH B (flat).
   float* sbuf;
   int sn;
   float buf_lo, buf_hi;
@@ -290,39 +376,7 @@ static void top_p_row(float* __restrict__ row, int V, float p_val,
   float dup_logit = logf(boundary_prob * sum_exp) + max_l;
   if (!(dup_logit < max_l)) return;
 
-  // Vectorised boundary count.
-  int n_at_boundary = 0;
-  {
-    int i = 0;
-#if defined(__AVX512F__)
-    const __m512 dup_v = _mm512_set1_ps(dup_logit);
-    const __m512 tol_v = _mm512_set1_ps(1e-5f);
-    for (; i + 16 <= V; i += 16) {
-      __m512 v = _mm512_loadu_ps(row + i);
-      __m512 d = _mm512_sub_ps(v, dup_v);
-      __m512 a = _mm512_abs_ps(d);
-      __mmask16 m = _mm512_cmp_ps_mask(a, tol_v, _CMP_LT_OQ);
-      n_at_boundary += _mm_popcnt_u32((unsigned)m);
-    }
-#elif defined(__AVX2__)
-    const __m256 dup_v256 = _mm256_set1_ps(dup_logit);
-    const __m256 tol_v256 = _mm256_set1_ps(1e-5f);
-    const __m256 sign_mask = _mm256_set1_ps(-0.0f);
-    for (; i + 16 <= V; i += 16) {
-      __m256 vlo = _mm256_loadu_ps(row + i);
-      __m256 vhi = _mm256_loadu_ps(row + i + 8);
-      __m256 abs_lo =
-          _mm256_andnot_ps(sign_mask, _mm256_sub_ps(vlo, dup_v256));  // abs
-      __m256 abs_hi = _mm256_andnot_ps(sign_mask, _mm256_sub_ps(vhi, dup_v256));
-      __m256 clo = _mm256_cmp_ps(abs_lo, tol_v256, _CMP_LT_OQ);
-      __m256 chi = _mm256_cmp_ps(abs_hi, tol_v256, _CMP_LT_OQ);
-      n_at_boundary += __builtin_popcount((unsigned)_mm256_movemask_ps(clo));
-      n_at_boundary += __builtin_popcount((unsigned)_mm256_movemask_ps(chi));
-    }
-#endif
-    for (; i < V; ++i)
-      if (fabsf(row[i] - dup_logit) < 1e-5f) ++n_at_boundary;
-  }
+  int n_at_boundary = count_within_tol(row, V, dup_logit, kBoundaryTol);
 
   int n_keep_at_boundary = 0;
   if (n_at_boundary > 0) {
@@ -337,38 +391,15 @@ static void top_p_row(float* __restrict__ row, int V, float p_val,
 
   if (n_keep_at_boundary == 0) {
     // Fast path (>99% of calls): no boundary tokens to keep partially.
-    // Vectorised mask-write: keep lanes where row[i] > dup_logit.
-    int i = 0;
-#if defined(__AVX512F__)
-    const __m512 dup_v = _mm512_set1_ps(dup_logit);
-    const __m512 neg_inf_v = _mm512_set1_ps(neg_inf);
-    for (; i + 16 <= V; i += 16) {
-      __m512 v = _mm512_loadu_ps(row + i);
-      __mmask16 keep = _mm512_cmp_ps_mask(v, dup_v, _CMP_GT_OQ);
-      _mm512_storeu_ps(row + i, _mm512_mask_blend_ps(keep, neg_inf_v, v));
-    }
-#elif defined(__AVX2__)
-    const __m256 dup_v256 = _mm256_set1_ps(dup_logit);
-    const __m256 neg_inf_v256 = _mm256_set1_ps(neg_inf);
-    for (; i + 16 <= V; i += 16) {
-      __m256 vlo = _mm256_loadu_ps(row + i);
-      __m256 vhi = _mm256_loadu_ps(row + i + 8);
-      __m256 klo = _mm256_cmp_ps(vlo, dup_v256, _CMP_GT_OQ);
-      __m256 khi = _mm256_cmp_ps(vhi, dup_v256, _CMP_GT_OQ);
-      _mm256_storeu_ps(row + i, _mm256_blendv_ps(neg_inf_v256, vlo, klo));
-      _mm256_storeu_ps(row + i + 8, _mm256_blendv_ps(neg_inf_v256, vhi, khi));
-    }
-#endif
-    for (; i < V; ++i)
-      if (!(row[i] > dup_logit)) row[i] = neg_inf;
+    mask_write_below(row, V, dup_logit, neg_inf);
   } else {
-    // Fallback (rare PATH-A duplicate case): order-dependent boundary keep
-    // logic must stay sequential.
+    // Rare PATH-A duplicate case: order-dependent boundary keep must stay
+    // sequential.
     int kept_boundary = 0;
     for (int i = 0; i < V; ++i) {
       float v = row[i];
       bool keep = v > dup_logit;
-      if (!keep && fabsf(v - dup_logit) < 1e-5f &&
+      if (!keep && fabsf(v - dup_logit) < kBoundaryTol &&
           kept_boundary < n_keep_at_boundary) {
         keep = true;
         ++kept_boundary;

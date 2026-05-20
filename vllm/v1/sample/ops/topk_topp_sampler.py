@@ -415,14 +415,8 @@ def apply_top_k_top_p_cpu(
         _cpu_topp_sampling_op(out, p.float())
         return out
 
-    # Fallback: sort-based top-p (original path)
-    logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
-    probs_sort = logits_sort.softmax(dim=-1)
-    probs_sum = torch.cumsum(probs_sort, dim=-1, out=probs_sort)
-    top_p_mask = probs_sum <= 1 - p.unsqueeze(dim=1)
-    top_p_mask[:, -1] = False
-    logits_sort.masked_fill_(top_p_mask, -float("inf"))
-    return logits.scatter_(dim=-1, index=logits_idx, src=logits_sort)
+    # Fallback: sort-based top-p (k already applied above).
+    return apply_top_k_top_p_pytorch(logits, None, p, allow_cpu_sync=True)
 
 
 def random_sample(
