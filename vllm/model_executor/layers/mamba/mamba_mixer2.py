@@ -497,6 +497,10 @@ class MambaMixer2(MambaBase, PluggableLayer):
         # The tuple is (conv_state, ssm_state, old_x, old_B, old_dt,
         # old_cumAdt, cache_buf_idx, prev_num_accepted_tokens).
         self.kv_cache = tuple(torch.tensor([]) for _ in range(8))
+        self._checkpointing_old_x = torch.tensor([])
+        self._checkpointing_old_B = torch.tensor([])
+        self._checkpointing_old_dt = torch.tensor([])
+        self._checkpointing_old_cumAdt = torch.tensor([])
         self._checkpointing_cache_buf_idx = torch.tensor([])
         self._checkpointing_prev_num_accepted_tokens = torch.tensor([])
 
@@ -531,19 +535,24 @@ class MambaMixer2(MambaBase, PluggableLayer):
         # Check if running on Blackwell (SM100+) for kernel tuning
         self.is_blackwell = current_platform.is_device_capability_family(100)
 
-    def _get_contiguous_checkpointing_tracker(
-        self, source: torch.Tensor, attr_name: str
+    def _get_contiguous_checkpointing_buffer(
+        self,
+        source: torch.Tensor,
+        attr_name: str,
+        *,
+        copy_source: bool = False,
     ) -> torch.Tensor:
-        tracker = getattr(self, attr_name)
+        buffer = getattr(self, attr_name)
         if (
-            tracker.shape != source.shape
-            or tracker.device != source.device
-            or tracker.dtype != source.dtype
+            buffer.shape != source.shape
+            or buffer.device != source.device
+            or buffer.dtype != source.dtype
         ):
-            tracker = torch.zeros_like(source, memory_format=torch.contiguous_format)
-            setattr(self, attr_name, tracker)
-        tracker.copy_(source)
-        return tracker
+            buffer = torch.zeros_like(source, memory_format=torch.contiguous_format)
+            setattr(self, attr_name, buffer)
+        if copy_source:
+            buffer.copy_(source)
+        return buffer
 
     def forward(
         self,
@@ -728,14 +737,33 @@ class MambaMixer2(MambaBase, PluggableLayer):
             prev_num_accepted_tokens = self.kv_cache[7]
             cache_buf_idx_src = cache_buf_idx
             prev_num_accepted_tokens_src = prev_num_accepted_tokens
+            if not old_x.is_contiguous():
+                old_x = self._get_contiguous_checkpointing_buffer(
+                    old_x, "_checkpointing_old_x"
+                )
+            if not old_B.is_contiguous():
+                old_B = self._get_contiguous_checkpointing_buffer(
+                    old_B, "_checkpointing_old_B"
+                )
+            if not old_dt.is_contiguous():
+                old_dt = self._get_contiguous_checkpointing_buffer(
+                    old_dt, "_checkpointing_old_dt"
+                )
+            if not old_cumAdt.is_contiguous():
+                old_cumAdt = self._get_contiguous_checkpointing_buffer(
+                    old_cumAdt, "_checkpointing_old_cumAdt"
+                )
             if not cache_buf_idx.is_contiguous():
-                cache_buf_idx = self._get_contiguous_checkpointing_tracker(
-                    cache_buf_idx, "_checkpointing_cache_buf_idx"
+                cache_buf_idx = self._get_contiguous_checkpointing_buffer(
+                    cache_buf_idx,
+                    "_checkpointing_cache_buf_idx",
+                    copy_source=True,
                 )
             if not prev_num_accepted_tokens.is_contiguous():
-                prev_num_accepted_tokens = self._get_contiguous_checkpointing_tracker(
+                prev_num_accepted_tokens = self._get_contiguous_checkpointing_buffer(
                     prev_num_accepted_tokens,
                     "_checkpointing_prev_num_accepted_tokens",
+                    copy_source=True,
                 )
 
             def reset_checkpointing_cache(block_indices: torch.Tensor) -> None:
