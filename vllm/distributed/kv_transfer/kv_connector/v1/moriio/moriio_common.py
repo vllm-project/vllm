@@ -362,7 +362,13 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
             remote_port=remote_handshake_port,
             remote_handshake_port=remote_handshake_port,
             remote_notify_port=remote_notify_port,
-            tp_size=kv_transfer_params.get("tp_size", 1),
+            # Defense-in-depth: callers (e.g. moriio_toy_proxy_server in
+            # READ-mode multi-node TP) may forward `remote_tp_size` only.
+            # Read `tp_size` first, fall back to `remote_tp_size`, default 1.
+            tp_size=kv_transfer_params.get(
+                "tp_size",
+                kv_transfer_params.get("remote_tp_size", 1),
+            ),
             remote_dp_size=kv_transfer_params.get("remote_dp_size", 1),
         )
         if write_mode:

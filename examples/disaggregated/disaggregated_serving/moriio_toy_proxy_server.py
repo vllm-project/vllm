@@ -308,6 +308,7 @@ async def handle_request(api: str, request: Request):
                 "remote_block_ids"
             ]
             req_data["kv_transfer_params"]["transfer_id"] = prefill_kv["transfer_id"]
+            req_data["kv_transfer_params"]["remote_hosts"] = prefill_kv.get("remote_hosts")
 
         req_data["kv_transfer_params"]["remote_dp_size"] = prefill_instance_endpoint[
             "dp_size"
@@ -315,6 +316,7 @@ async def handle_request(api: str, request: Request):
         req_data["kv_transfer_params"]["remote_tp_size"] = prefill_instance_endpoint[
             "tp_size"
         ]
+        req_data["kv_transfer_params"]["tp_size"] = prefill_instance_endpoint["tp_size"]
 
         if selected_prefill_dp_rank is not None:
             req_data["kv_transfer_params"]["remote_dp_rank"] = selected_prefill_dp_rank
