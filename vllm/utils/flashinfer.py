@@ -19,6 +19,9 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.model_executor.layers.batch_invariant import (
+    vllm_is_batch_invariant,
+)
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 
@@ -227,7 +230,6 @@ def has_flashinfer_trtllm_fused_moe() -> bool:
         ("flashinfer.fused_moe", "trtllm_fp8_per_tensor_scale_moe"),
         ("flashinfer.fused_moe", "trtllm_fp4_block_scale_moe"),
         ("flashinfer.fused_moe", "trtllm_mxint4_block_scale_moe"),
-        ("flashinfer.fused_moe", "trtllm_bf16_moe"),
     ]
     for module_name, attr_name in required_functions:
         mod = _get_submodule(module_name)
@@ -267,7 +269,7 @@ def has_flashinfer_cutedsl_grouped_gemm_nt_masked() -> bool:
     required_functions = [
         ("flashinfer.cute_dsl.blockscaled_gemm", "grouped_gemm_nt_masked"),
         ("flashinfer", "scaled_fp4_grouped_quantize"),
-        ("flashinfer", "silu_and_mul_scaled_nvfp4_experts_quantize"),
+        ("flashinfer", "silu_and_scaled_nvfp4_experts_quantize"),
     ]
 
     for module_name, attr_name in required_functions:
@@ -348,19 +350,80 @@ def has_nvidia_artifactory() -> bool:
 
 
 @functools.cache
-def supports_trtllm_attention() -> bool:
+def check_trtllm_attention_support(
+    is_prefill: bool,
+    num_qo_heads: int | None = None,
+    num_kv_heads: int | None = None,
+    dcp_world_size: int | None = None,
+    kv_cache_dtype: str | None = None,
+    q_data_type: torch.dtype | None = None,
+    has_sinks: bool | None = None,
+    has_spec: bool | None = None,
+) -> tuple[bool | None, str]:
     """
-    TRTLLM attention is supported if the platform is SM100,
-    NVIDIA artifactory is accessible, and batch-invariant mode is not enabled.
-    """
-    # Batch-invariant mode disables TRTLLM attention
-    if envs.VLLM_BATCH_INVARIANT:
-        return False
+    Check if the provided config + current platform is supported by TRTLLM attention.
 
-    # Requires SM100 and NVIDIA artifactory to be accessible to download cubins
-    return (
-        current_platform.is_device_capability_family(100) and has_nvidia_artifactory()
-    )
+    Args:
+        is_prefill: Whether it is prefill.
+        num_qo_heads: Number of query heads.
+        num_kv_heads: Number of key/value heads.
+        dcp_world_size: World size of decode context parallel.
+        kv_cache_dtype: Data type of the key/value cache. Could be "auto".
+        q_data_type: Data type of the query.
+        has_sinks: Whether sinks are being used.
+        has_spec: Whether speculative decoding is being used.
+
+    If any args (except for is_prefill) are set to None, the check for that arg is
+    skipped.
+
+    Returns:
+        A tuple of (bool | None, str). If the bool is:
+        - True: TRTLLM attention must be used.
+        - False: TRTLLM attention must not be used.
+        - None: TRTLLM attention can be used.
+        The str is the reason why it must or must not be used. Empty string if can be
+        used.
+    """
+
+    if vllm_is_batch_invariant():
+        return False, "Batch-invariant mode is enabled."
+
+    if not has_nvidia_artifactory():
+        return False, "NVIDIA artifactory is not accessible."
+
+    if current_platform.is_device_capability(90):
+        if is_prefill:
+            return False, "SM90 is not supported for prefill."
+        if q_data_type in [torch.float8_e4m3fn, torch.float8_e5m2]:
+            return False, "xqa does not support FP8-Q."
+    elif current_platform.is_device_capability_family(100):
+        if (
+            is_prefill
+            and kv_cache_dtype is not None
+            and not kv_cache_dtype.startswith("fp8")
+            and q_data_type in [torch.float8_e4m3fn, torch.float8_e5m2]
+        ):
+            return False, "trtllm-gen prefill does not support FP8-Q with BF16/FP16-Q."
+    else:
+        return False, "SMs other than 90/100/103 are not supported."
+
+    if dcp_world_size is not None and dcp_world_size > 1:
+        return False, "DCP is not supported due to lack of LSE return support."
+
+    if (
+        num_qo_heads is not None
+        and num_kv_heads is not None
+        and num_qo_heads % num_kv_heads != 0
+    ):
+        return False, "num_qo_heads must be a multiple of num_kv_heads."
+
+    if has_spec and not is_prefill:
+        return True, "Has speculative decoding in decode phase."
+
+    if has_sinks:
+        return True, "Has attention sinks."
+
+    return None, ""
 
 
 def force_use_trtllm_attention() -> bool | None:
@@ -376,97 +439,112 @@ def force_use_trtllm_attention() -> bool | None:
     vllm_config = get_current_vllm_config()
     return vllm_config.attention_config.use_trtllm_attention
 
-
 def can_use_trtllm_attention(num_qo_heads: int, num_kv_heads: int) -> bool:
     """Check if the current configuration supports TRTLLM attention."""
     if force_use_trtllm_attention() is False:
         return False
-    has_trtllm = supports_trtllm_attention()
-    return has_trtllm and (num_qo_heads % num_kv_heads == 0)
-
+    has_trtllm, _ = check_trtllm_attention_support(
+        is_prefill=False,
+        num_qo_heads=num_qo_heads,
+        num_kv_heads=num_kv_heads,
+    )
+    return has_trtllm is not False
 
 def use_trtllm_attention(
-    num_qo_heads: int,
-    num_kv_heads: int,
-    num_tokens: int,
-    max_seq_len: int,
-    dcp_world_size: int,
-    kv_cache_dtype: str,
-    q_dtype: torch.dtype,
     is_prefill: bool,
-    # None means auto-detection, True means force on, False means force off
-    force_use_trtllm: bool | None = None,
-    has_sinks: bool = False,
-    has_spec: bool = False,
+    num_qo_heads: int | None = None,
+    num_kv_heads: int | None = None,
+    dcp_world_size: int | None = None,
+    kv_cache_dtype: str | None = None,
+    q_data_type: torch.dtype | None = None,
+    has_sinks: bool | None = None,
+    has_spec: bool | None = None,
+    silent: bool = False,
 ) -> bool:
-    """Return `True` if TRTLLM attention is used."""
+    """
+    Decides whether to use TRTLLM attention based on these two functions:
+    - check_trtllm_attention_support(): whether TRTLLM attention must or must not be
+      used.
+    - force_use_trtllm_attention(): whether the user wants to force/disable TRTLLM
+      attention.
+    If the decision does not match the user's preference, print the warning messages.
 
-    # CLI argument is set to 0 - respect it
-    if force_use_trtllm is not None and not force_use_trtllm:
-        return False
+    Args:
+        is_prefill: Whether it is prefill.
+        num_qo_heads: Number of query heads.
+        num_kv_heads: Number of key/value heads.
+        dcp_world_size: World size of decode context parallel.
+        kv_cache_dtype: Data type of the key/value cache. Could be "auto".
+        q_data_type: Data type of the query.
+        has_sinks: Whether sinks are being used.
+        has_spec: Whether speculative decoding is being used.
+        silent: Whether to print the warning/info messages.
 
-    # Decode context parallel is not supported
-    if dcp_world_size > 1:
-        logger.warning_once(
-            "Trtllm does not support returning LSE and as a result "
-            "does not support DCP, reverting to FlashInfer"
-        )
-        return False
-
-    # The platform is not supported
-    if not supports_trtllm_attention():
-        if force_use_trtllm:
-            logger.warning_once(
-                "TRTLLM attention is not supported on this platform, "
-                "but --attention-config.use_trtllm_attention is set to 1"
-            )
-        return False
-
-    # The combination of query and key heads is not supported
-    if num_qo_heads % num_kv_heads != 0:
-        if force_use_trtllm:
-            logger.warning_once(
-                "TRTLLM attention is not supported for this combination of "
-                "query and key heads, but --attention-config.use_trtllm_attention is "
-                "set to 1"
-            )
-        return False
-
-    if has_spec and not is_prefill:
-        # Speculative decoding requires TRTLLM attention for decodes
-        logger.info_once("Using TRTLLM attention (enabled for speculative decoding).")
-        return True
-
-    # Must use TRTLLM attention if query is FP8 quantized
-    if q_dtype == current_platform.fp8_dtype():
-        logger.info_once("Using TRTLLM attention (query is quantized).")
-        return True
-
-    # If sinks are being used, we must use TRTLLM attention as it's
-    # the only backend that supports them
-    if has_sinks:
-        logger.info_once("Using TRTLLM attention (required for attention sinks).")
-        return True
-
-    if force_use_trtllm is None:
-        # CLI argument not set - use auto-detection
-        if is_prefill:
-            # Prefill auto-detection
-            use_trtllm = kv_cache_dtype == "auto"
-            if use_trtllm:
-                logger.warning_once("Using TRTLLM prefill attention (auto-detected).")
-        else:
-            # Decode auto-detection
-            use_trtllm = num_tokens <= 256 and kv_cache_dtype == "auto"
-            if use_trtllm:
-                logger.warning_once("Using TRTLLM decode attention (auto-detected).")
-        return use_trtllm
-
-    # CLI argument is set to 1 - respect it
-    logger.info_once(
-        "Using TRTLLM attention (--attention-config.use_trtllm_attention is set to 1)"
+    If any args (except for is_prefill) are set to None, the check for that arg is
+    skipped.
+    Returns: whether to use TRTLLM attention.
+    """
+    supports_trtllm, reason = check_trtllm_attention_support(
+        is_prefill,
+        num_qo_heads,
+        num_kv_heads,
+        dcp_world_size,
+        kv_cache_dtype,
+        q_data_type,
+        has_sinks,
+        has_spec,
     )
-    return True
+    force_use_trtllm = force_use_trtllm_attention()
+    phase_str = "prefill" if is_prefill else "decode"
+    prefix = "[FlashInfer Attention]"
+
+    # Helper functions to print warning/info if not silent.
+    def print_warning(msg: str):
+        if not silent:
+            logger.warning_once(msg)
+
+    def print_info(msg: str):
+        if not silent:
+            logger.info_once(msg)
+
+    if force_use_trtllm is True:
+        if supports_trtllm is False:
+            print_warning(
+                f"{prefix} Using non-TRTLLM for {phase_str} even though --attention-"
+                f"config.use_trtllm_attention is set to 1. (Reason: {reason})"
+            )
+            return False
+        else:
+            print_info(
+                f"{prefix} Using TRTLLM for {phase_str}. (Reason: --attention-config."
+                f"use_trtllm_attention is set to 1.)"
+            )
+            return True
+    elif force_use_trtllm is False:
+        if supports_trtllm is True:
+            print_warning(
+                f"{prefix} Using TRTLLM for {phase_str} even though --attention-config."
+                f"use_trtllm_attention is set to 0. (Reason: {reason})"
+            )
+            return True
+        else:
+            print_info(
+                f"{prefix} Using non-TRTLLM for {phase_str}. (Reason: --attention-"
+                f"config.use_trtllm_attention is set to 0.)"
+            )
+            return False
+    else:
+        if supports_trtllm is True:
+            print_info(f"{prefix} Using TRTLLM for {phase_str}. (Reason: {reason})")
+            return True
+        elif supports_trtllm is False:
+            print_info(f"{prefix} Using non-TRTLLM for {phase_str}. (Reason: {reason})")
+            return False
+        else:
+            print_info(
+                f"{prefix} Using TRTLLM for {phase_str}. (Reason: auto-detected.)"
+            )
+            return True
 
 
 if has_flashinfer():
@@ -994,8 +1072,8 @@ __all__ = [
     "has_flashinfer_b12x_gemm",
     "has_flashinfer_fp8_blockscale_gemm",
     "has_nvidia_artifactory",
-    "supports_trtllm_attention",
-    "can_use_trtllm_attention",
+    "check_trtllm_attention_support",
+    "force_use_trtllm_attention",
     "use_trtllm_attention",
     "flashinfer_mxfp4_quantize",
     "flashinfer_scaled_fp4_mm",
