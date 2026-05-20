@@ -40,6 +40,59 @@ async def client(server):
     "model_name",
     [MODEL_NAME],
 )
+async def test_chat_completion_truncation_side_controls_prompt_truncation(
+    client: openai.AsyncOpenAI, model_name: str
+) -> None:
+    messages = [
+        {
+            "role": "user",
+            "content": "Summarize how prompt truncation works in one sentence.",
+        }
+    ]
+
+    full_completion = await client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        max_tokens=1,
+        temperature=0.0,
+        extra_body={"return_token_ids": True},
+    )
+    full_token_ids = full_completion.prompt_token_ids
+    assert full_token_ids is not None
+    assert len(full_token_ids) > 4
+
+    right_completion = await client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        max_tokens=1,
+        temperature=0.0,
+        extra_body={
+            "return_token_ids": True,
+            "truncate_prompt_tokens": 4,
+            "truncation_side": "right",
+        },
+    )
+    assert right_completion.prompt_token_ids == full_token_ids[:4]
+
+    left_completion = await client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        max_tokens=1,
+        temperature=0.0,
+        extra_body={
+            "return_token_ids": True,
+            "truncate_prompt_tokens": 4,
+            "truncation_side": "left",
+        },
+    )
+    assert left_completion.prompt_token_ids == full_token_ids[-4:]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME],
+)
 async def test_invalid_json_schema(client: openai.AsyncOpenAI, model_name: str) -> None:
     invalid_json_schema = {
         "$defs": {
