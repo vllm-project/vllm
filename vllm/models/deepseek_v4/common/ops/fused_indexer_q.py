@@ -3,6 +3,7 @@
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_cutedsl
 
@@ -398,7 +399,7 @@ def fused_indexer_q_rope_quant(
         ), index_weights_out
 
     index_q_fp8 = torch.empty_like(index_q, dtype=torch.float8_e4m3fn)
-    if has_cutedsl():
+    if has_cutedsl() and current_platform.has_device_capability(90):
         # lazily import, otherwise some tests fail due to CUDA driver init failure.
         from vllm.models.deepseek_v4.nvidia.ops.fused_indexer_q_cutedsl import (
             fused_indexer_q_rope_quant_fp8_cutedsl,

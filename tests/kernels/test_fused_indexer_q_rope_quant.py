@@ -194,3 +194,46 @@ def test_fused_indexer_q_rope_quant_matches_unfused(
         f"weights mismatch: max abs diff "
         f"{(weights_ref - weights_fused).abs().max().item()}"
     )
+
+
+def test_fp8_cutedsl_dispatch_requires_sm90(monkeypatch):
+    import vllm.models.deepseek_v4.common.ops.fused_indexer_q as fused_indexer_q
+
+    fallback_called = False
+
+    class FakeTritonKernel:
+        def __getitem__(self, grid):
+            def launcher(*args, **kwargs):
+                nonlocal fallback_called
+                fallback_called = True
+
+            return launcher
+
+    monkeypatch.setattr(fused_indexer_q, "has_cutedsl", lambda: True)
+    monkeypatch.setattr(
+        fused_indexer_q.current_platform,
+        "has_device_capability",
+        lambda capability: False,
+    )
+    monkeypatch.setattr(
+        fused_indexer_q,
+        "_fused_indexer_q_rope_quant_kernel",
+        FakeTritonKernel(),
+    )
+
+    q = torch.empty((1, N_HEAD, HEAD_DIM), dtype=torch.bfloat16)
+    positions = torch.empty((1,), dtype=torch.int64)
+    cos_sin_cache = torch.empty((MAX_POS, ROPE_DIM), dtype=torch.float32)
+    weights = torch.empty((1, N_HEAD), dtype=torch.bfloat16)
+
+    fused_indexer_q.fused_indexer_q_rope_quant(
+        positions,
+        q,
+        cos_sin_cache,
+        weights,
+        HEAD_DIM**-0.5,
+        N_HEAD**-0.5,
+        use_fp4=False,
+    )
+
+    assert fallback_called
