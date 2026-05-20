@@ -9,6 +9,10 @@ import torch
 import vllm.envs as envs
 from vllm.platforms import current_platform
 
+SYNC_ERROR_MESSAGE = (
+    "GPU<->CPU sync detected - avoid it or wrap with gpu_sync_allowed()"
+)
+
 _GPU_SYNC_ALLOWED_FIRST_SEEN: set[tuple[str, int]] = set()
 
 # Global sync-check gate. Off during engine setup (model load, KV cache
@@ -150,6 +154,10 @@ if current_platform.is_cuda_alike():
             torch.cuda.set_sync_debug_mode(mode)
             try:
                 return fn(*args, **kwargs)
+            except RuntimeError as re:
+                if str(re) == "called a synchronizing CUDA operation":
+                    raise RuntimeError(SYNC_ERROR_MESSAGE) from re
+                raise re
             finally:
                 torch.cuda.set_sync_debug_mode(prev_mode)
 
