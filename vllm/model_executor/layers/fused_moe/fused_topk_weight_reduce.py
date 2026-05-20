@@ -46,7 +46,7 @@ def _fused_topk_reduce_kernel(
         acc += tl.load(input_ptr + ptr, mask=k_mask, other=0.0).to(tl.float32)
 
     out_ptr = pid_m * stride_om + k_off * stride_ok
-    tl.store(output_ptr + out_ptr, acc.to(output_ptr.dtype.element_ty),
+    tl.store(output_ptr + out_ptr, acc.to(output_ptr.type.element_ty),
              mask=k_mask)
 
 
