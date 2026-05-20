@@ -26,7 +26,7 @@ TRITON3 = HAS_TRITON and (version.parse(triton.__version__) >= version.parse("3.
 
 
 # ---------------------------------------------------------------------------
-# JSON config loading (mirrors fused_moe pattern)
+# JSON config loading
 # ---------------------------------------------------------------------------
 
 _CONFIGS_DIR = os.path.join(
@@ -51,7 +51,7 @@ def get_ssm_device_name() -> str:
     return current_platform.get_device_name().replace(" ", "_")
 
 
-@functools.lru_cache
+@functools.cache
 def get_ssm_configs(
     headdim: int, dstate: int, cache_dtype: str
 ) -> dict[int, Any] | None:
@@ -68,7 +68,7 @@ def get_ssm_configs(
 
     config_file_paths: list[str] = []
 
-    # User-supplied override (same env-var as fused_moe)
+    # User-supplied override
     user_defined_config_folder = envs.VLLM_TUNED_CONFIG_FOLDER
     if user_defined_config_folder is not None:
         config_file_paths.append(
