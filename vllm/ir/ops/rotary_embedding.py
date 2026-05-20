@@ -88,6 +88,24 @@ def rotary_embedding(  # type: ignore[misc]
     return query_out, key_out
 
 
+@rotary_embedding.register_input_generator
+def _rotary_embedding_input_generator(
+    num_tokens: int = 16,
+    num_heads: int = 8,
+    num_kv_heads: int = 2,
+    head_size: int = 64,
+    rotary_dim: int = 64,
+    max_pos: int = 4096,
+    dtype: torch.dtype = torch.float16,
+    is_neox_style: bool = True,
+) -> tuple:
+    positions = torch.randint(0, max_pos, (num_tokens,), dtype=torch.int64)
+    query = torch.randn(num_tokens, num_heads * head_size, dtype=dtype)
+    key = torch.randn(num_tokens, num_kv_heads * head_size, dtype=dtype)
+    cos_sin_cache = torch.randn(max_pos, rotary_dim, dtype=dtype)
+    return positions, query, key, head_size, rotary_dim, cos_sin_cache, is_neox_style
+
+
 @register_op
 def rotary_embedding_query_only(
     positions: Tensor,
@@ -96,7 +114,7 @@ def rotary_embedding_query_only(
     rotary_dim: int,
     cos_sin_cache: Tensor,
     is_neox_style: bool,
-) -> tuple[Tensor]:
+) -> Tensor:
     """A PyTorch-native implementation of forward()."""
     positions = positions.flatten()
     cos_sin = cos_sin_cache.index_select(0, positions)
@@ -112,3 +130,19 @@ def rotary_embedding_query_only(
         is_neox_style,
     )
     return query_out
+
+
+@rotary_embedding_query_only.register_input_generator
+def _rotary_embedding_query_only_input_generator(
+    num_tokens: int = 16,
+    num_heads: int = 8,
+    head_size: int = 64,
+    rotary_dim: int = 64,
+    max_pos: int = 4096,
+    dtype: torch.dtype = torch.float16,
+    is_neox_style: bool = True,
+) -> tuple:
+    positions = torch.randint(0, max_pos, (num_tokens,), dtype=torch.int64)
+    query = torch.randn(num_tokens, num_heads * head_size, dtype=dtype)
+    cos_sin_cache = torch.randn(max_pos, rotary_dim, dtype=dtype)
+    return positions, query, head_size, rotary_dim, cos_sin_cache, is_neox_style
