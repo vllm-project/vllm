@@ -329,6 +329,7 @@ class DPSupervisor:
         """
         Launch vLLM DP Servers on separate GPUs.
         """
+        logger.info("Launching vLLM DP Servers")
         context = multiprocessing.get_context("spawn")
         for local_rank in range(self.args.data_parallel_size_local):
             child_args = _build_vllm_dp_server_args(self.args, local_rank)
