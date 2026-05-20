@@ -5,21 +5,19 @@
 import pytest
 
 from tests.v1.core.utils import create_requests, create_scheduler
-from vllm.config.speculative import DynamicSpeculativeConfig
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.spec_decode.dynamic.manager import DynamicSpeculativeDecodingManager
 from vllm.v1.structured_output import StructuredOutputManager
 
 
 def _make_manager(
-    schedule: dict[str, int],
+    num_speculative_tokens_per_batch_size: dict[str, int],
     *,
     max_batch_size: int = 256,
     runtime_num_speculative_tokens: int = 3,
 ) -> DynamicSpeculativeDecodingManager:
-    config = DynamicSpeculativeConfig(num_speculative_tokens_per_batch_size=schedule)
     return DynamicSpeculativeDecodingManager(
-        config,
+        num_speculative_tokens_per_batch_size=num_speculative_tokens_per_batch_size,
         vllm_max_batch_size=max_batch_size,
         vllm_num_speculative_tokens=runtime_num_speculative_tokens,
     )
@@ -120,7 +118,7 @@ def test_dynamic_sd_requires_schedule_config():
         ValueError, match="num_speculative_tokens_per_batch_size is required"
     ):
         DynamicSpeculativeDecodingManager(
-            DynamicSpeculativeConfig(),
+            None,
             vllm_max_batch_size=256,
             vllm_num_speculative_tokens=3,
         )

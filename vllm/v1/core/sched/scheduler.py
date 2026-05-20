@@ -10,7 +10,6 @@ from typing import Any
 from vllm import envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig
-from vllm.config.speculative import DynamicSpeculativeConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorMetadata,
     ECConnectorRole,
@@ -216,11 +215,7 @@ class Scheduler(SchedulerInterface):
             self.num_spec_tokens = speculative_config.num_speculative_tokens
             if speculative_config.num_speculative_tokens_per_batch_size:
                 self.dynamic_sd_manager = DynamicSpeculativeDecodingManager(
-                    DynamicSpeculativeConfig(
-                        num_speculative_tokens_per_batch_size=(
-                            speculative_config.num_speculative_tokens_per_batch_size
-                        )
-                    ),
+                    speculative_config.num_speculative_tokens_per_batch_size,
                     self.scheduler_config.max_num_seqs,
                     self.num_spec_tokens,
                 )

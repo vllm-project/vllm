@@ -3,8 +3,6 @@
 
 import regex as re
 
-from vllm.config.speculative import DynamicSpeculativeConfig
-
 
 class DynamicSpeculativeDecodingManager:
     """Chooses speculative-token counts from a batch-size schedule."""
@@ -14,15 +12,14 @@ class DynamicSpeculativeDecodingManager:
 
     def __init__(
         self,
-        dynamic_config: DynamicSpeculativeConfig,
+        num_speculative_tokens_per_batch_size: dict[str, int] | None,
         vllm_max_batch_size: int,
         vllm_num_speculative_tokens: int,
     ):
-        self.dynamic_config = dynamic_config
         self.vllm_max_batch_size = vllm_max_batch_size
         self.vllm_num_speculative_tokens = vllm_num_speculative_tokens
 
-        if dynamic_config.num_speculative_tokens_per_batch_size is None:
+        if num_speculative_tokens_per_batch_size is None:
             raise ValueError(
                 "num_speculative_tokens_per_batch_size is required for "
                 "dynamic speculative decoding."
@@ -32,9 +29,7 @@ class DynamicSpeculativeDecodingManager:
         if vllm_num_speculative_tokens <= 0:
             raise ValueError("vllm_num_speculative_tokens must be > 0.")
 
-        self._schedule = self._parse_schedule(
-            dynamic_config.num_speculative_tokens_per_batch_size
-        )
+        self._schedule = self._parse_schedule(num_speculative_tokens_per_batch_size)
         self._optimal_num_speculative_tokens = self._build_dense_schedule()
 
     def step(self, batch_size: int) -> int:
@@ -51,6 +46,11 @@ class DynamicSpeculativeDecodingManager:
         )
 
     def _parse_schedule(self, schedule: dict[str, int]) -> list[tuple[int, int, int]]:
+        """Validate and normalize schedule ranges into sorted integer tuples.
+
+        Accepts keys like ``"16"`` or ``"1-16"`` and returns
+        ``(range_start, range_end, num_speculative_tokens)`` entries.
+        """
         parsed_schedule: list[tuple[int, int, int]] = []
 
         for batch_size_range, num_speculative_tokens in schedule.items():
@@ -101,6 +101,13 @@ class DynamicSpeculativeDecodingManager:
         return parsed_schedule
 
     def _build_dense_schedule(self) -> dict[int, int]:
+        """Expand parsed ranges into per-batch-size values up to the runtime max.
+
+        Gaps between configured ranges inherit the previous K so lookups can use
+        a dense ``batch_size -> num_speculative_tokens`` map at runtime. For
+        example, ``{"1-16": 3, "32-128": 2}`` maps batch sizes ``17-31`` to
+        ``3``.
+        """
         dense_schedule: dict[int, int] = {}
         next_batch_size = 1
         last_num_speculative_tokens: int | None = None

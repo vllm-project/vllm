@@ -71,21 +71,6 @@ DraftSampleMethod = Literal["greedy", "probabilistic"]
 
 
 @config
-class DynamicSpeculativeConfig:
-    """Batch-size schedule for dynamic speculative decoding."""
-
-    num_speculative_tokens_per_batch_size: dict[str, int] | None = None
-    """Inclusive batch-size ranges mapped to speculative-token counts.
-
-    Keys can be either a single batch size, such as ``"16"``, or an inclusive
-    range such as ``"1-16"``. Ranges are applied in ascending order. Any gap
-    between two configured ranges inherits the previous range's value, so a
-    compact schedule like ``{"1-16": 3, "32-128": 2, "256-2048": 0}`` is
-    valid.
-    """
-
-
-@config
 class SpeculativeConfig:
     """Configuration for speculative decoding."""
 
