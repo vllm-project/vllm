@@ -102,6 +102,7 @@ from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+from vllm.v1.worker.utils import add_kv_sharing_layers_to_kv_cache_groups
 
 logger = init_logger(__name__)
 
@@ -247,6 +248,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Expert parallelism load balancer.
         self.eplb = EPLBController(self.parallel_config, self.device)
 
+        # Maps KV-sharing layers to their target layers.
+        # If an Attention layer `layer_name` is in the keys of this dict, it
+        # means this layer will perform attention using the keys and values
+        # from the KV cache of `shared_kv_cache_layers[layer_name]`.
+        self.shared_kv_cache_layers: dict[str, str] = {}
+
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
         self.req_states.max_model_len = max_model_len
@@ -354,11 +361,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return torch.cuda.current_stream(self.device)
 
     def get_kv_cache_spec(self):
-        return get_kv_cache_spec(self.vllm_config)
+        kv_cache_spec, self.shared_kv_cache_layers = get_kv_cache_spec(self.vllm_config)
+        return kv_cache_spec
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
+
+        # KV-sharing layers don't own their own KV cache, and so are added
+        # to their target layer's KV cache group so that they are assigned
+        # attention metadata.
+        if self.shared_kv_cache_layers is not None:
+            add_kv_sharing_layers_to_kv_cache_groups(
+                self.shared_kv_cache_layers, kv_cache_config.kv_cache_groups
+            )
 
         block_table_max_model_len = self.max_model_len
         if self.is_encoder_decoder:
@@ -393,7 +409,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_blocks_per_group.append(max_num_blocks)
 
         (self.attn_backends, self.attn_groups, attn_cg_support, kernel_block_sizes) = (
-            init_attn_backend(self.kv_cache_config, self.vllm_config, self.device)
+            init_attn_backend(
+                self.kv_cache_config,
+                self.vllm_config,
+                self.device,
+                shared_kv_cache_layers=self.shared_kv_cache_layers,
+            )
         )
 
         self.block_tables = BlockTables(
@@ -445,6 +466,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.device,
             self.cache_config.cache_dtype,
             kernel_block_sizes,
+            shared_kv_cache_layers=self.shared_kv_cache_layers,
         )
         self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
 

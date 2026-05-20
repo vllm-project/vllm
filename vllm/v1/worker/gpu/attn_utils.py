@@ -35,15 +35,23 @@ class AttentionCGSupportInfo:
     min_cg_attn_backend: str | None = None
 
 
-def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
+def get_kv_cache_spec(
+    vllm_config: VllmConfig
+) -> tuple[dict[str, KVCacheSpec], dict[str, str]]:
     kv_cache_spec: dict[str, KVCacheSpec] = {}
+    shared_kv_cache_layers: dict[str, str] = {}
     layer_type = cast(type[Any], AttentionLayerBase)
     attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
     for layer_name, attn_module in attn_layers.items():
+        shared_layer = getattr(attn_module, "kv_sharing_target_layer_name", None)
+        # Skip KV-sharing layers.
+        if shared_layer is not None:
+            shared_kv_cache_layers[layer_name] = shared_layer
+            continue
         # Skip modules that don't need KV cache (eg encoder-only attention)
         if spec := attn_module.get_kv_cache_spec(vllm_config):
             kv_cache_spec[layer_name] = spec
-    return kv_cache_spec
+    return kv_cache_spec, shared_kv_cache_layers
 
 
 def init_attn_backend(
@@ -51,6 +59,7 @@ def init_attn_backend(
     vllm_config: VllmConfig,
     device: torch.device,
     active_layer_names: set[str] | None = None,
+    shared_kv_cache_layers: dict[str, str] | None = None,
 ) -> tuple[
     dict[str, type[AttentionBackend]],
     list[list[AttentionGroup]],
@@ -80,7 +89,14 @@ def init_attn_backend(
 
             layer_kv_cache_spec: KVCacheSpec = kv_cache_group_spec.kv_cache_spec
             if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
-                layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
+                if (shared_kv_cache_layers is not None
+                    and layer_name in shared_kv_cache_layers):
+                    # KV-sharing layers do not have their own KV cache tensors.
+                    # Get the target layer's KV cache spec.
+                    target_layer_name = shared_kv_cache_layers[layer_name]
+                    layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[target_layer_name]
+                else:
+                    layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
 
             key = (attn_backend.full_cls_name(), layer_kv_cache_spec)
             if key not in group_map:
@@ -143,7 +159,11 @@ def init_attn_backend(
     )
 
 
-def _allocate_kv_cache(kv_cache_config: KVCacheConfig, device: torch.device):
+def _allocate_kv_cache(
+    kv_cache_config: KVCacheConfig,
+    device: torch.device,
+    shared_layer_names: set[str] | None = None,
+):
     kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
         tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=device)
@@ -153,6 +173,11 @@ def _allocate_kv_cache(kv_cache_config: KVCacheConfig, device: torch.device):
     layer_names = set()
     for group in kv_cache_config.kv_cache_groups:
         for layer_name in group.layer_names:
+            if (shared_layer_names is not None
+                and layer_name in shared_layer_names):
+                # KV-sharing layers do not have their own KV cache tensors.
+                # They are later aliased to the target layer's tensor.
+                continue
             layer_names.add(layer_name)
     assert layer_names == set(kv_cache_raw_tensors.keys()), (
         "Some layers are not correctly initialized"
@@ -166,6 +191,7 @@ def _reshape_kv_cache(
     attn_backends: dict[str, type[AttentionBackend]],
     cache_dtype: str,
     kernel_block_sizes: list[int],
+    shared_layer_names: set[str] | None = None,
 ) -> dict[str, Any]:
     kv_caches: dict[str, Any] = {}
     has_attn, has_mamba = False, False
@@ -173,6 +199,12 @@ def _reshape_kv_cache(
         kv_cache_config.kv_cache_groups
     ):
         for layer_name in kv_cache_group_spec.layer_names:
+            if (shared_layer_names is not None
+                and layer_name in shared_layer_names):
+                # KV-sharing layers do not have their own KV cache tensors.
+                # They are later aliased to the target layer's tensor.
+                continue
+
             kv_cache_spec = kv_cache_group_spec.kv_cache_spec
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
                 kv_cache_spec = kv_cache_spec.kv_cache_specs[layer_name]
@@ -268,7 +300,7 @@ def _reshape_kv_cache(
                 )
 
     if has_attn and has_mamba:
-        _update_hybrid_attention_layout(kv_caches, kv_cache_config)
+        _update_hybrid_attention_layout(kv_caches, kv_cache_config, shared_layer_names)
 
     return kv_caches
 
@@ -276,9 +308,15 @@ def _reshape_kv_cache(
 def _update_hybrid_attention_layout(
     kv_caches: dict[str, Any],
     kv_cache_config: KVCacheConfig,
+    shared_layer_names: set[str] | None = None,
 ) -> None:
     for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
         for layer_name in kv_cache_group_spec.layer_names:
+            if (shared_layer_names is not None
+                and layer_name in shared_layer_names):
+                # KV-sharing layers do not have their own KV cache tensors.
+                # They are later aliased to the target layer's tensor.
+                continue
             kv_cache_spec = kv_cache_group_spec.kv_cache_spec
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
                 kv_cache_spec = kv_cache_spec.kv_cache_specs[layer_name]
@@ -308,15 +346,28 @@ def init_kv_cache(
     device: torch.device,
     cache_dtype: str,
     kernel_block_sizes: list[int],
+    shared_kv_cache_layers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    kv_cache_raw_tensors = _allocate_kv_cache(kv_cache_config, device)
+    shared_layer_names = set(shared_kv_cache_layers or {})
+    kv_cache_raw_tensors = _allocate_kv_cache(
+        kv_cache_config,
+        device,
+        shared_layer_names,
+    )
     kv_caches = _reshape_kv_cache(
         kv_cache_config,
         kv_cache_raw_tensors,
         attn_backends,
         cache_dtype,
         kernel_block_sizes,
+        shared_layer_names,
     )
+
+    # Point KV-sharing layers to their target layer's KV cache tensor.
+    if shared_kv_cache_layers is not None:
+        for layer_name, target in shared_kv_cache_layers.items():
+            kv_caches[layer_name] = kv_caches[target]
+    
     bind_kv_cache(kv_caches, forward_context, runner_kv_caches)
     return kv_caches
 
