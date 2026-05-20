@@ -874,6 +874,77 @@ class TestFlashInferDistributionMatch:
         )
 
 
+@pytest.mark.parametrize("top_p", [0.5, 0.9, 0.95, 0.99])
+def test_apply_top_k_top_p_cpu_boundary_ties(top_p):
+    """CPU kernel must satisfy the top-p semantic contract with tied logits.
+
+    Quantises a vocab to 8 discrete levels so the cutoff always lands on a
+    repeated value, stressing the boundary duplicate-keep logic.  The cpu
+    kernel uses binary-search threshold selection (not sorted cumsum), so the
+    exact set of kept boundary tokens can differ from pytorch.  We therefore
+    verify the semantic invariant directly: sum(softmax(kept logits)) >= top_p.
+    """
+    torch.manual_seed(0)
+    batch_size = 8
+    vocab_size = 32000
+    levels = torch.linspace(-3.0, 3.0, 8)
+    # assign each token to one of 8 levels at random
+    idx = torch.randint(0, 8, (batch_size, vocab_size))
+    logits = levels[idx]
+
+    p = torch.full((batch_size,), top_p)
+
+    out = apply_top_k_top_p_cpu(logits.clone(), None, p)
+
+    assert not torch.isnan(out).any(), f"top_p={top_p}: NaN in cpu output"
+
+    out_kept = (out != -float("inf")).sum(-1)
+    assert (out_kept >= 1).all(), f"top_p={top_p}: some rows have no survivors"
+
+    # Check semantic invariant: cumulative prob of kept tokens >= top_p.
+    probs = logits.softmax(dim=-1)
+    kept_mask = out != -float("inf")
+    kept_prob_sum = (probs * kept_mask.float()).sum(dim=-1)
+    assert (kept_prob_sum >= top_p - 1e-4).all(), (
+        f"top_p={top_p}: kept probability {kept_prob_sum.tolist()} < {top_p}"
+    )
+
+
+@pytest.mark.parametrize("mask_frac", [0.5, 0.9])
+@pytest.mark.parametrize("top_p", [0.9, 0.95])
+def test_apply_top_k_top_p_cpu_with_neg_inf(mask_frac, top_p):
+    """No NaN in output and survivor count matches reference when logits
+    contain -inf PAD entries. Verifies the sentinel-blend in vectorised Pass 1.
+    """
+    torch.manual_seed(1)
+    batch_size = 8
+    vocab_size = 32000
+    logits = torch.randn(batch_size, vocab_size)
+
+    # Mask out mask_frac of tokens with -inf
+    pad_mask = torch.rand(batch_size, vocab_size) < mask_frac
+    logits[pad_mask] = -float("inf")
+
+    p = torch.full((batch_size,), top_p)
+
+    ref = apply_top_k_top_p_pytorch(logits.clone(), None, p, allow_cpu_sync=True)
+    out = apply_top_k_top_p_cpu(logits.clone(), None, p)
+
+    assert not torch.isnan(out).any(), "NaN in cpu output with -inf PAD tokens"
+
+    ref_kept = (ref != -float("inf")).sum(-1)
+    out_kept = (out != -float("inf")).sum(-1)
+
+    max_diff = (ref_kept - out_kept).abs().max().item()
+    max_kept = ref_kept.max().item()
+    if max_kept > 0 and max_diff > 3:
+        diff_pct = max_diff / max_kept * 100
+        assert diff_pct < 0.5, (
+            f"mask_frac={mask_frac} top_p={top_p}: survivor count differs by "
+            f"{diff_pct:.2f}% ({max_diff} out of {max_kept})"
+        )
+
+
 @pytest.mark.parametrize("batch_size", [1, 8, 64])
 @pytest.mark.parametrize("vocab_size", [32000, 128256])
 @pytest.mark.parametrize("top_k", [40, None])
