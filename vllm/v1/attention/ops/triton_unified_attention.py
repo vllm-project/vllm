@@ -659,8 +659,8 @@ def unified_attention(
     )
 
     # ROCm-specific optimizations for 2D path
-    num_warps_2d = None
-    num_stages_2d = None
+    num_warps = None
+    num_stages = None
     waves_per_eu = None
     if not use_3d and current_platform.is_rocm():
         element_size = q.element_size()
@@ -668,26 +668,26 @@ def unified_attention(
 
         # Default ROCm config for decode
         if ALL_DECODE:
-            num_warps_2d = 4
+            num_warps = 4
             # Cap num_stages based on head_size to avoid register pressure
             max_num_stages = 4
             if head_size > 128:
                 max_num_stages = 2
             if current_platform.is_navi() and head_size > 256:
                 max_num_stages = 1
-            num_stages_2d = min(3, max_num_stages)
+            num_stages = min(3, max_num_stages)
             waves_per_eu = 2
         # Default ROCm config for prefill (short contexts)
         else:
-            num_warps_2d = 4
-            num_stages_2d = 1
+            num_warps = 4
+            num_stages = 1
             waves_per_eu = 2
 
         # Long context prefill optimization
         if max_seqlen_q >= 256:
             # Strix Halo (gfx1151) tuning from systematic experiments
             if current_platform.is_gfx1151():
-                num_stages_2d = 3
+                num_stages = 3
                 if head_size >= 80:
                     BLOCK_M = 64
                     waves_per_eu = 6
@@ -696,7 +696,7 @@ def unified_attention(
                     waves_per_eu = 4
             else:
                 BLOCK_M = 128
-                num_stages_2d = 1
+                num_stages = 1
 
             # Navi memory optimization: Cap BLOCK_M to fit Q tile in 64KB LDS
             q_tile_bytes = BLOCK_M * head_size * element_size
@@ -706,9 +706,10 @@ def unified_attention(
                 BLOCK_M = min(BLOCK_M, max_block_m - max_block_m % 16)
 
             # Long context uses more warps
-            num_warps_2d = 4
+            num_warps = 4
 
             # Recalculate derived values
+            BLOCK_M = max(BLOCK_M, triton.next_power_of_2(num_queries_per_kv))
             BLOCK_Q = BLOCK_M // num_queries_per_kv
             total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
 
@@ -736,7 +737,6 @@ def unified_attention(
     segm_output_ptr = softmax_segm_output if use_3d else out
     segm_max_ptr = softmax_segm_max if use_3d else out
     segm_expsum_ptr = softmax_segm_expsum if use_3d else out
-    num_segments = num_par_softmax_segments if use_3d else 1
 
     grid: tuple[Any, ...]
     config = {}
@@ -749,13 +749,6 @@ def unified_attention(
         else:
             grid = (total_num_q_blocks, num_kv_heads)
         tile_size = TILE_SIZE_PREFILL
-        # Add ROCm-specific config for prefill path
-        if waves_per_eu is not None:
-            config["waves_per_eu"] = waves_per_eu
-        if num_warps_2d is not None:
-            config["num_warps"] = num_warps_2d
-        if num_stages_2d is not None:
-            config["num_stages"] = num_stages_2d
     else:
         tile_size = TILE_SIZE_DECODE
 
@@ -764,6 +757,7 @@ def unified_attention(
             is_small_head_or_mqa = head_size <= 64 or num_kv_heads == 1
 
             BLOCK_M = 64 if is_large_mha else 16
+            BLOCK_M = max(BLOCK_M, triton.next_power_of_2(num_queries_per_kv))
             BLOCK_Q = BLOCK_M // num_queries_per_kv
             total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
 
@@ -773,16 +767,19 @@ def unified_attention(
                 num_par_softmax_segments = 32
             else:
                 num_par_softmax_segments = 16
-            num_segments = num_par_softmax_segments
 
+            num_warps = 4
             num_stages = 4 if is_large_mha else (1 if num_kv_heads == 1 else 3)
             waves_per_eu = 6 if is_large_mha else (2 if is_small_head_or_mqa else 4)
 
-            config["num_warps"] = 4
-            config["num_stages"] = num_stages
-            config["waves_per_eu"] = waves_per_eu
-
         grid = (total_num_q_blocks, num_kv_heads, num_par_softmax_segments)
+
+    if waves_per_eu is not None:
+        config["waves_per_eu"] = waves_per_eu
+    if num_warps is not None:
+        config["num_warps"] = num_warps
+    if num_stages is not None:
+        config["num_stages"] = num_stages
 
     kernel_unified_attention[grid](
         output_ptr=out,
@@ -843,7 +840,7 @@ def unified_attention(
         BLOCK_Q=BLOCK_Q,
         num_seqs=num_seqs,
         BLOCK_M=BLOCK_M,
-        NUM_SEGMENTS_PER_SEQ=num_segments,
+        NUM_SEGMENTS_PER_SEQ=(num_par_softmax_segments if use_3d else 1),
         USE_FP8=output_scale is not None,
         IS_3D=use_3d,
         KV_QUANT_MODE=kv_quant_mode,
