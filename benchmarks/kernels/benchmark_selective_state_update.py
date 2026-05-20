@@ -313,14 +313,16 @@ def tune_dstate(
     verbose: bool,
     effective_batches: list[int] | None = None,
     state_dtype: torch.dtype | None = None,
-) -> dict[int, dict]:
+) -> tuple[dict[int, dict], dict[int, dict[tuple[int, int], float]]]:
     """For each effective_batch, sweep (BLOCK_SIZE_M, num_warps) and return
-    {effective_batch: best_config}. effective_batch is factored into
-    (batch, nheads) by `_factor_effective_batch`.
+    ({effective_batch: best_config}, {effective_batch: {(bsm, nw): us}}).
+    The second map is the full timing grid, used downstream so we don't
+    re-measure the same config in the comparison phase.
     """
     active = _resolve_effective_batches(effective_batches, ngroups)
 
     best_per_eb: dict[int, dict] = {}
+    timings: dict[int, dict[tuple[int, int], float]] = {}
 
     print(f"\n{'=' * 74}")
     effective_state_dtype = state_dtype if state_dtype is not None else dtype
@@ -340,6 +342,7 @@ def tune_dstate(
     for eb, batch, nheads in active:
         best_time = float("inf")
         best_cfg: dict = {}
+        eb_timings: dict[tuple[int, int], float] = {}
 
         for bsm, nw in product(bsm_choices, NUM_WARPS_CHOICES):
             t = benchmark_config(
@@ -356,6 +359,7 @@ def tune_dstate(
             )
             if t is None:
                 continue
+            eb_timings[(bsm, nw)] = t
             is_best = t < best_time
             if is_best:
                 best_time = t
@@ -363,6 +367,8 @@ def tune_dstate(
             if verbose:
                 marker = " <-- best" if is_best else ""
                 print(f"{eb:>8} | {bsm:>7} | {nw:>5} | {t:>10.2f} |{marker}")
+
+        timings[eb] = eb_timings
 
         if not best_cfg:
             print(
@@ -379,7 +385,7 @@ def tune_dstate(
 
         best_per_eb[eb] = best_cfg
 
-    return best_per_eb
+    return best_per_eb, timings
 
 
 # ---------------------------------------------------------------------------
@@ -531,6 +537,7 @@ def compare_heuristic_vs_tuned(
     headdim: int,
     ngroups: int,
     tuned: dict[int, dict],
+    timings: dict[int, dict[tuple[int, int], float]],
     dtype: torch.dtype,
     num_iters: int,
     is_blackwell: bool,
@@ -539,6 +546,7 @@ def compare_heuristic_vs_tuned(
 ):
     active = _resolve_effective_batches(effective_batches, ngroups)
     heur_cfg = current_heuristic(dstate, is_blackwell)
+    heur_key = (heur_cfg["BLOCK_SIZE_M"], heur_cfg["num_warps"])
 
     print(f"\n{'=' * 74}")
     print(
@@ -558,33 +566,30 @@ def compare_heuristic_vs_tuned(
     print("-" * len(hdr))
 
     for eb, batch, nheads in active:
-        t_h = benchmark_config(
-            batch=batch,
-            nheads=nheads,
-            dim=headdim,
-            dstate=dstate,
-            ngroups=ngroups,
-            block_size_m=heur_cfg["BLOCK_SIZE_M"],
-            num_warps_val=heur_cfg["num_warps"],
-            dtype=dtype,
-            state_dtype=state_dtype,
-            num_iters=num_iters,
-        )
+        eb_timings = timings.get(eb, {})
+
+        # Heuristic timing: reuse the tuning measurement if the heuristic
+        # config was in the swept grid; otherwise measure it once.
+        t_h = eb_timings.get(heur_key)
+        if t_h is None:
+            t_h = benchmark_config(
+                batch=batch,
+                nheads=nheads,
+                dim=headdim,
+                dstate=dstate,
+                ngroups=ngroups,
+                block_size_m=heur_cfg["BLOCK_SIZE_M"],
+                num_warps_val=heur_cfg["num_warps"],
+                dtype=dtype,
+                state_dtype=state_dtype,
+                num_iters=num_iters,
+            )
+
         # `tuned[eb]` may be missing if all configs failed in tune_dstate;
         # in that case fall back to the heuristic so the table still prints.
         best = tuned.get(eb) or heur_cfg
-        t_t = benchmark_config(
-            batch=batch,
-            nheads=nheads,
-            dim=headdim,
-            dstate=dstate,
-            ngroups=ngroups,
-            block_size_m=best["BLOCK_SIZE_M"],
-            num_warps_val=best["num_warps"],
-            dtype=dtype,
-            state_dtype=state_dtype,
-            num_iters=num_iters,
-        )
+        t_t = eb_timings.get((best["BLOCK_SIZE_M"], best["num_warps"]))
+
         if t_h is None or t_t is None:
             print(f"{eb:>8} | {'N/A':>10} | {'N/A':>10} | {'N/A':>8} |")
             continue
@@ -744,7 +749,7 @@ def main():
         dstates = ALL_DSTATES if args.all_dstates else [args.dstate]
 
         for dstate in dstates:
-            tuned = tune_dstate(
+            tuned, timings = tune_dstate(
                 dstate=dstate,
                 headdim=args.headdim,
                 ngroups=args.ngroups,
@@ -756,11 +761,13 @@ def main():
             )
 
             if args.compare:
+                # Use the measurements from tune_dstate
                 compare_heuristic_vs_tuned(
                     dstate=dstate,
                     headdim=args.headdim,
                     ngroups=args.ngroups,
                     tuned=tuned,
+                    timings=timings,
                     dtype=dtype,
                     num_iters=args.num_iters,
                     is_blackwell=is_blackwell,
