@@ -50,6 +50,7 @@ def run_vllm(
     engine_args: EngineArgs,
     do_profile: bool,
     disable_detokenize: bool = False,
+    prequeue_requests: bool = False,
 ) -> tuple[float, list[RequestOutput] | None]:
     from vllm import LLM, SamplingParams
 
@@ -94,12 +95,29 @@ def run_vllm(
 
     outputs = None
     if not use_beam_search:
+        if prequeue_requests:
+            llm.sleep(level=0, mode="abort")
+
         start = time.perf_counter()
         if do_profile:
             llm.start_profile()
-        outputs = llm.generate(
-            prompts, sampling_params, lora_request=lora_requests, use_tqdm=True
-        )
+
+        if prequeue_requests:
+            try:
+                llm.enqueue(
+                    prompts,
+                    sampling_params,
+                    lora_request=lora_requests,
+                    use_tqdm=True,
+                )
+            finally:
+                llm.wake_up(tags=["scheduling"])
+            outputs = llm.wait_for_completion(output_type=RequestOutput, use_tqdm=True)
+        else:
+            outputs = llm.generate(
+                prompts, sampling_params, lora_request=lora_requests, use_tqdm=True
+            )
+
         if do_profile:
             llm.stop_profile()
         end = time.perf_counter()
@@ -133,6 +151,7 @@ def run_vllm_chat(
     engine_args: EngineArgs,
     do_profile: bool,
     disable_detokenize: bool = False,
+    prequeue_requests: bool = False,
 ) -> tuple[float, list[RequestOutput]]:
     """
     Run vLLM chat benchmark. This function is recommended ONLY for benchmarking
@@ -166,12 +185,25 @@ def run_vllm_chat(
                 detokenize=not disable_detokenize,
             )
         )
+    if prequeue_requests:
+        llm.sleep(level=0, mode="abort")
+
     start = time.perf_counter()
     if do_profile:
         llm.start_profile()
-    outputs = llm.chat(prompts, sampling_params, use_tqdm=True)
+
+    if prequeue_requests:
+        try:
+            llm.enqueue_chat(prompts, sampling_params, use_tqdm=True)
+        finally:
+            llm.wake_up(tags=["scheduling"])
+        outputs = llm.wait_for_completion(output_type=RequestOutput, use_tqdm=True)
+    else:
+        outputs = llm.chat(prompts, sampling_params, use_tqdm=True)
+
     if do_profile:
         llm.stop_profile()
+
     end = time.perf_counter()
     return end - start, outputs
 
@@ -543,6 +575,10 @@ def validate_args(args):
     valid_backends = {"vllm", "hf", "mii", "vllm-chat"}
     if args.backend not in valid_backends:
         raise ValueError(f"Unsupported backend: {args.backend}")
+    if args.prequeue_requests and args.backend not in {"vllm", "vllm-chat"}:
+        raise ValueError("--prequeue-requests requires --backend vllm or vllm-chat")
+    if args.prequeue_requests and args.async_engine:
+        raise ValueError("--prequeue-requests is not supported with --async-engine")
 
     # === Dataset Configuration ===
     if (
@@ -790,6 +826,20 @@ def add_cli_args(parser: argparse.ArgumentParser):
         help="Use vLLM async engine rather than LLM class.",
     )
     parser.add_argument(
+        "--prequeue-requests",
+        action="store_true",
+        default=False,
+        help=(
+            "For the vLLM backends, enqueue all requests before allowing the "
+            "scheduler to process them. This can improve benchmark "
+            "reproducibility by removing overlap between request rendering "
+            "and engine scheduling, but may reduce measured throughput. "
+            "Request rendering is typically fast relative to scheduling and "
+            "processing; the intended use case of this flag is multimodal "
+            "benchmarks with time-consuming image rendering."
+        ),
+    )
+    parser.add_argument(
         "--disable-detokenize",
         action="store_true",
         help=(
@@ -942,6 +992,7 @@ def main(args: argparse.Namespace):
                 EngineArgs.from_cli_args(args),
                 disable_detokenize=args.disable_detokenize,
                 do_profile=args.profile,
+                prequeue_requests=args.prequeue_requests,
             )
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
@@ -965,6 +1016,7 @@ def main(args: argparse.Namespace):
             EngineArgs.from_cli_args(args),
             disable_detokenize=args.disable_detokenize,
             do_profile=args.profile,
+            prequeue_requests=args.prequeue_requests,
         )
     else:
         raise ValueError(f"Unknown backend: {args.backend}")

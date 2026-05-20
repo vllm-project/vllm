@@ -13,7 +13,6 @@ from mistral_common.protocol.instruct.request import (
 from mistral_common.protocol.instruct.request import (
     ReasoningEffort,
 )
-from mistral_common.protocol.instruct.tool_calls import Function, Tool
 from mistral_common.protocol.instruct.validator import ValidationMode
 from mistral_common.tokens.tokenizers.base import (
     SpecialTokenPolicy,
@@ -66,36 +65,6 @@ def _pop_unallowed_keys_and_warn(
                 f"for {err_dict_name}. It has been popped from the "
                 "object."
             )
-
-
-# TODO(juliendenize): remove this once OpenAI API is better supported by
-# `mistral-common`.
-def adapt_inplace_to_mistral_tool(
-    tool: dict[str, Any],
-) -> dict[str, Any]:
-    tools_fields = set(Tool.model_fields.keys())
-    function_fields = set(Function.model_fields.keys())
-
-    # The Mistral client, in comparison to the OpenAI client, requires the
-    # "parameters" dict and the "description" string to be present
-    # even if they are empty.
-    if function := tool.get("function"):
-        if function.get("parameters") is None:
-            function["parameters"] = {}
-        if function.get("description") is None:
-            function["description"] = ""
-
-        _pop_unallowed_keys_and_warn(
-            dictionary=function,
-            allowed_keys=function_fields,
-            err_dict_name="function",
-        )
-
-    _pop_unallowed_keys_and_warn(
-        dictionary=tool, allowed_keys=tools_fields, err_dict_name="tools"
-    )
-
-    return tool
 
 
 def maybe_serialize_tool_calls(request: "MistralChatCompletionRequest"):
@@ -167,12 +136,11 @@ def truncate_tool_call_ids(request: "MistralChatCompletionRequest"):
                 request.messages[i]["tool_call_id"] = tool_call_id
 
 
-def _prepare_apply_chat_template_tools_and_messages(
+def _validate_apply_chat_template_args(
     messages: list["ChatCompletionMessageParam"],
-    tools: list[dict[str, Any]] | None = None,
     continue_final_message: bool = False,
     add_generation_prompt: bool = False,
-) -> tuple[list["ChatCompletionMessageParam"], list[dict[str, Any]] | None]:
+) -> None:
     if add_generation_prompt and continue_final_message:
         raise ValueError(
             "Cannot set both `add_generation_prompt` and "
@@ -195,21 +163,6 @@ def _prepare_apply_chat_template_tools_and_messages(
             "Cannot set `continue_final_message` to True when "
             "the last message is not from the assistant."
         )
-
-    # mistral-common requires AssistantMessage content to be string [1].
-    #
-    # [1]: https://github.com/mistralai/mistral-common/blob/f4a06998b75ed78bbf5aaf569590b772ea26c9f6/src/mistral_common/protocol/instruct/messages.py#L80
-    for message in messages:
-        # Remove reasoning as unsupported by Mistral
-        _ = message.pop("reasoning", None)  # type: ignore
-
-    tools = (
-        [adapt_inplace_to_mistral_tool(tool=tool) for tool in tools]
-        if tools is not None
-        else None
-    )
-
-    return messages, tools
 
 
 def validate_request_params(request: "ChatCompletionRequest"):
@@ -449,8 +402,8 @@ class MistralTokenizer(TokenizerLike):
         if self.version >= 15:
             version_kwargs["reasoning_effort"] = kwargs.get("reasoning_effort")
 
-        messages, tools = _prepare_apply_chat_template_tools_and_messages(
-            messages, tools, continue_final_message, add_generation_prompt
+        _validate_apply_chat_template_args(
+            messages, continue_final_message, add_generation_prompt
         )
 
         return self.transformers_tokenizer.apply_chat_template(

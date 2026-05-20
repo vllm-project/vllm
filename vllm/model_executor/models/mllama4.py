@@ -739,7 +739,6 @@ class Llama4ForConditionalGeneration(
     }
 
     supports_encoder_tp_data = True
-    supports_encoder_cudagraph = True
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -889,8 +888,8 @@ class Llama4ForConditionalGeneration(
         mm_kwargs: dict[str, object],
     ) -> list[int]:
         patches_per_chunk = self.get_image_patches_per_chunk()
-        patches_per_image = mm_kwargs["patches_per_image"]
-        return [n * patches_per_chunk for n in patches_per_image.tolist()]
+        chunks_per_image = mm_kwargs["patches_per_image"]
+        return [n * patches_per_chunk for n in chunks_per_image.tolist()]
 
     def get_encoder_cudagraph_per_item_input_sizes(
         self,
@@ -904,26 +903,26 @@ class Llama4ForConditionalGeneration(
         indices: list[int],
     ) -> dict[str, object]:
         pixel_values = mm_kwargs["pixel_values"]
-        patches_per_image = mm_kwargs["patches_per_image"]
+        chunks_per_image = mm_kwargs["patches_per_image"]
 
         if len(indices) == 0:
             return {
                 "pixel_values": pixel_values[:0],
-                "patches_per_image": patches_per_image[:0],
+                "patches_per_image": chunks_per_image[:0],
             }
 
-        cum_patches = [0]
-        for num_patches in patches_per_image.tolist():
-            cum_patches.append(cum_patches[-1] + num_patches)
+        cum_chunks = [0]
+        for num_chunks in chunks_per_image.tolist():
+            cum_chunks.append(cum_chunks[-1] + num_chunks)
 
         selected_pixel_values = torch.cat(
-            [pixel_values[cum_patches[i] : cum_patches[i + 1]] for i in indices],
+            [pixel_values[cum_chunks[i] : cum_chunks[i + 1]] for i in indices],
             dim=0,
         )
 
         return {
             "pixel_values": selected_pixel_values,
-            "patches_per_image": patches_per_image[indices],
+            "patches_per_image": chunks_per_image[indices],
         }
 
     def prepare_encoder_cudagraph_capture_inputs(

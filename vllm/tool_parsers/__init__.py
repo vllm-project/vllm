@@ -94,6 +94,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "jamba_tool_parser",
         "JambaToolParser",
     ),
+    "lfm2": (
+        "lfm2_tool_parser",
+        "Lfm2ToolParser",
+    ),
     "kimi_k2": (
         "kimi_k2_tool_parser",
         "KimiK2ToolParser",
@@ -181,6 +185,10 @@ _TOOL_PARSERS_TO_REGISTER = {
     "gemma4": (
         "gemma4_tool_parser",
         "Gemma4ToolParser",
+    ),
+    "apertus": (
+        "apertus_tool_parser",
+        "ApertusToolParser",
     ),
 }
 
