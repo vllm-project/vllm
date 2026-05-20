@@ -6,6 +6,10 @@ import torch
 
 import vllm._custom_ops as ops
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.model_executor.layers.fused_moe.fused_topk_weight_reduce import (
+    _use_fused_topk_reduce,
+    fused_topk_reduce,
+)
 
 
 class TopKWeightAndReduceDelegate(mk.TopKWeightAndReduce):
@@ -117,7 +121,12 @@ class TopKWeightAndReduceContiguous(mk.TopKWeightAndReduce):
             f"Expected output size {(m, k)}. But got {output.size()}"
         )
 
-        ops.moe_sum(fused_expert_output, output)
+        # Use fused Triton kernel for topk > 4 (the range where ops.moe_sum
+        # falls back to the slow generic at::sum_out ATen kernel).
+        if num_topk > 4 and _use_fused_topk_reduce():
+            fused_topk_reduce(fused_expert_output, output)
+        else:
+            ops.moe_sum(fused_expert_output, output)
         return output
 
 
