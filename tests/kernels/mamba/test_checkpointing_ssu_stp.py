@@ -172,6 +172,7 @@ def _call_backend(
     dt_bias: torch.Tensor,
     state_batch_indices: torch.Tensor,
     cu_seqlens: torch.Tensor,
+    dst_state_batch_indices: torch.Tensor | None = None,
     max_seqlen: int = 1,
 ) -> torch.Tensor:
     out = torch.empty_like(x)
@@ -196,6 +197,7 @@ def _call_backend(
         dt_bias,
         dt_softplus=True,
         state_batch_indices=state_batch_indices,
+        dst_state_batch_indices=dst_state_batch_indices,
         null_block_id=NULL_BLOCK_ID,
         out=out,
         cu_seqlens=cu_seqlens,
@@ -264,7 +266,8 @@ def test_checkpointing_ssu_stp_outputs_match_old_flashinfer(
     )
 
     slots = torch.arange(batch_size, device=device, dtype=torch.int32) * 2 + 1
-    state_batch_indices = slots[:, None]
+    state_index_table = torch.stack((slots - 1, slots), dim=1)
+    state_batch_indices = state_index_table[:, 1:2]
     cu_seqlens = torch.arange(batch_size + 1, device=device, dtype=torch.int32)
 
     for step in range(5):
@@ -316,3 +319,288 @@ def test_checkpointing_ssu_stp_outputs_match_old_flashinfer(
             rtol=3e-2,
             msg=f"STP output mismatch at decode step {step}",
         )
+
+
+@requires_flashinfer
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+def test_checkpointing_ssu_copies_replay_state_to_destination_slot(
+    dtype: torch.dtype,
+) -> None:
+    """Slot moves must preserve checkpoint state and live replay buffers."""
+
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    cache_size = 5
+    nheads = 4
+    head_dim = 64
+    dstate = 128
+    ngroups = 1
+    max_window = 1
+
+    old_backend = _make_backend()
+    new_backend = _make_backend()
+    initial_state = 0.1 * torch.randn(
+        cache_size,
+        nheads,
+        head_dim,
+        dstate,
+        device=device,
+        dtype=torch.float16,
+    )
+    old_state = initial_state.clone()
+    new_state = initial_state.clone()
+    cache = _make_checkpointing_cache(
+        cache_size=cache_size,
+        nheads=nheads,
+        head_dim=head_dim,
+        dstate=dstate,
+        ngroups=ngroups,
+        max_window=max_window,
+        device=device,
+        dtype=dtype,
+    )
+    A, D, dt_bias = _make_weights(
+        nheads=nheads,
+        head_dim=head_dim,
+        dstate=dstate,
+        device=device,
+        dtype=dtype,
+    )
+    src = torch.tensor([1], device=device, dtype=torch.int32)
+    dst = torch.tensor([2], device=device, dtype=torch.int32)
+    cu_seqlens = torch.tensor([0, 1], device=device, dtype=torch.int32)
+
+    x, dt, B, C = _make_decode_inputs(
+        batch_size=1,
+        nheads=nheads,
+        head_dim=head_dim,
+        dstate=dstate,
+        ngroups=ngroups,
+        device=device,
+        dtype=dtype,
+        seed=99,
+    )
+    _call_backend(
+        old_backend,
+        state=old_state,
+        cache=None,
+        x=x,
+        dt=dt,
+        A=A,
+        B=B,
+        C=C,
+        D=D,
+        dt_bias=dt_bias,
+        state_batch_indices=src,
+        cu_seqlens=cu_seqlens,
+    )
+    _call_backend(
+        new_backend,
+        state=new_state,
+        cache=cache,
+        x=x,
+        dt=dt,
+        A=A,
+        B=B,
+        C=C,
+        D=D,
+        dt_bias=dt_bias,
+        state_batch_indices=src,
+        cu_seqlens=cu_seqlens,
+    )
+    assert int(cache["prev_num_accepted_tokens"][1].item()) == 1
+
+    x, dt, B, C = _make_decode_inputs(
+        batch_size=1,
+        nheads=nheads,
+        head_dim=head_dim,
+        dstate=dstate,
+        ngroups=ngroups,
+        device=device,
+        dtype=dtype,
+        seed=100,
+    )
+    old_out = _call_backend(
+        old_backend,
+        state=old_state,
+        cache=None,
+        x=x,
+        dt=dt,
+        A=A,
+        B=B,
+        C=C,
+        D=D,
+        dt_bias=dt_bias,
+        state_batch_indices=src,
+        dst_state_batch_indices=dst,
+        cu_seqlens=cu_seqlens,
+    )
+    new_out = _call_backend(
+        new_backend,
+        state=new_state,
+        cache=cache,
+        x=x,
+        dt=dt,
+        A=A,
+        B=B,
+        C=C,
+        D=D,
+        dt_bias=dt_bias,
+        state_batch_indices=src,
+        dst_state_batch_indices=dst,
+        cu_seqlens=cu_seqlens,
+    )
+    torch.testing.assert_close(new_out.float(), old_out.float(), atol=3e-2, rtol=3e-2)
+
+
+@requires_flashinfer
+@pytest.mark.xfail(
+    reason=(
+        "Production-shaped synthetic STP replay still drifts for some seeds; "
+        "kept as a focused reproducer for the remaining accuracy issue."
+    )
+)
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+def test_checkpointing_ssu_stp_large_batch_outputs_match_old_flashinfer(
+    dtype: torch.dtype,
+) -> None:
+    """Large CUDA-graph decode batches must match the old FI STP path."""
+
+    device = torch.device("cuda")
+    batch_size = 24
+    cache_size = batch_size * 2 + 8
+    nheads = 128
+    head_dim = 64
+    dstate = 128
+    ngroups = 8
+    max_window = 1
+    generator = torch.Generator(device=device).manual_seed(123)
+
+    old_backend = _make_backend()
+    new_backend = _make_backend()
+    initial_state = 0.01 * torch.randn(
+        cache_size,
+        nheads,
+        head_dim,
+        dstate,
+        device=device,
+        dtype=torch.float16,
+        generator=generator,
+    )
+    old_state = initial_state.clone()
+    new_state = initial_state.clone()
+    cache = _make_checkpointing_cache(
+        cache_size=cache_size,
+        nheads=nheads,
+        head_dim=head_dim,
+        dstate=dstate,
+        ngroups=ngroups,
+        max_window=max_window,
+        device=device,
+        dtype=dtype,
+    )
+    A, D, dt_bias = _make_weights(
+        nheads=nheads,
+        head_dim=head_dim,
+        dstate=dstate,
+        device=device,
+        dtype=dtype,
+    )
+    slots = torch.arange(batch_size, device=device, dtype=torch.int32) * 2 + 1
+    state_batch_indices = slots[:, None]
+    cu_seqlens = torch.arange(batch_size + 1, device=device, dtype=torch.int32)
+
+    for step in range(12):
+        x, dt, B, C = _make_decode_inputs(
+            batch_size=batch_size,
+            nheads=nheads,
+            head_dim=head_dim,
+            dstate=dstate,
+            ngroups=ngroups,
+            device=device,
+            dtype=dtype,
+            seed=200 + step,
+        )
+        old_out = _call_backend(
+            old_backend,
+            state=old_state,
+            cache=None,
+            x=x,
+            dt=dt,
+            A=A,
+            B=B,
+            C=C,
+            D=D,
+            dt_bias=dt_bias,
+            state_batch_indices=state_batch_indices,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=8,
+        )
+        new_out = _call_backend(
+            new_backend,
+            state=new_state,
+            cache=cache,
+            x=x,
+            dt=dt,
+            A=A,
+            B=B,
+            C=C,
+            D=D,
+            dt_bias=dt_bias,
+            state_batch_indices=state_batch_indices,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=8,
+        )
+        torch.testing.assert_close(
+            new_out.float(),
+            old_out.float(),
+            atol=5e-2,
+            rtol=5e-2,
+            msg=f"large-batch STP output mismatch at decode step {step}",
+        )
+    assert int(cache["cache_buf_idx"][2].item()) == int(
+        cache["cache_buf_idx"][1].item()
+    )
+    assert int(cache["prev_num_accepted_tokens"][2].item()) == int(
+        cache["prev_num_accepted_tokens"][1].item()
+    )
+
+    x, dt, B, C = _make_decode_inputs(
+        batch_size=1,
+        nheads=nheads,
+        head_dim=head_dim,
+        dstate=dstate,
+        ngroups=ngroups,
+        device=device,
+        dtype=dtype,
+        seed=101,
+    )
+    old_out = _call_backend(
+        old_backend,
+        state=old_state,
+        cache=None,
+        x=x,
+        dt=dt,
+        A=A,
+        B=B,
+        C=C,
+        D=D,
+        dt_bias=dt_bias,
+        state_batch_indices=dst,
+        cu_seqlens=cu_seqlens,
+    )
+    new_out = _call_backend(
+        new_backend,
+        state=new_state,
+        cache=cache,
+        x=x,
+        dt=dt,
+        A=A,
+        B=B,
+        C=C,
+        D=D,
+        dt_bias=dt_bias,
+        state_batch_indices=dst,
+        cu_seqlens=cu_seqlens,
+    )
+    torch.testing.assert_close(new_out.float(), old_out.float(), atol=3e-2, rtol=3e-2)

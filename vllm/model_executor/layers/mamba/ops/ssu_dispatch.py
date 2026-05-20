@@ -54,6 +54,42 @@ def _update_checkpointing_trackers_kernel(
     tl.store(prev_num_accepted_tokens + slots, new_prev, mask=valid)
 
 
+@triton.jit
+def _reset_checkpointing_trackers_kernel(
+    cache_buf_idx,
+    prev_num_accepted_tokens,
+    state_batch_indices,
+    pad_slot_id: tl.constexpr,
+    n_slots: tl.constexpr,
+    BLOCK: tl.constexpr,
+) -> None:
+    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = offsets < n_slots
+    slots = tl.load(state_batch_indices + offsets, mask=mask, other=pad_slot_id)
+    valid = mask & (slots != pad_slot_id)
+    tl.store(cache_buf_idx + slots, 0, mask=valid)
+    tl.store(prev_num_accepted_tokens + slots, 0, mask=valid)
+
+
+@triton.jit
+def _copy_checkpointing_slots_kernel(
+    tensor,
+    src_indices,
+    dst_indices,
+    slot_size: tl.constexpr,
+    pad_slot_id: tl.constexpr,
+    BLOCK: tl.constexpr,
+) -> None:
+    slot = tl.program_id(0)
+    offsets = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    mask = offsets < slot_size
+    src = tl.load(src_indices + slot)
+    dst = tl.load(dst_indices + slot)
+    valid = (src != pad_slot_id) & (dst != pad_slot_id) & (src != dst)
+    values = tl.load(tensor + src * slot_size + offsets, mask=mask & valid)
+    tl.store(tensor + dst * slot_size + offsets, values, mask=mask & valid)
+
+
 class MambaSSUBackend(ABC):
     """Abstract base class for Mamba SSU backends."""
 
@@ -224,7 +260,6 @@ class FlashInferSSUBackend(MambaSSUBackend):
             num_accepted_tokens is None
             and all(arg is not None for arg in checkpointing_args)
             and self._checkpointing_state_indices(state_batch_indices) is not None
-            and self._same_state_indices(state_batch_indices, dst_state_batch_indices)
             and state.dtype in (torch.float16, torch.bfloat16, torch.float32)
         )
         if can_checkpoint:
@@ -247,41 +282,122 @@ class FlashInferSSUBackend(MambaSSUBackend):
             kernel_max_seqlen = (
                 ckpt_max_seqlen if ckpt_cu_seqlens is not None else None
             )
-            self._checkpointing_kernel(
-                state,
-                old_x,
-                old_B,
-                old_dt,
-                old_cumAdt,
-                cache_buf_idx,
-                prev_num_accepted_tokens,
-                x_ckpt,
-                dt_ckpt,
-                A,
-                B_ckpt,
-                C_ckpt,
-                out_ckpt,
-                D=D,
-                z=z,
-                dt_bias=dt_bias,
-                dt_softplus=dt_softplus,
-                state_batch_indices=state_indices,
-                pad_slot_id=null_block_id,
-                rand_seed=rand_seed,
-                philox_rounds=self._mamba_config.stochastic_rounding_philox_rounds
-                or 10,
-                cu_seqlens=ckpt_cu_seqlens,
-                max_seqlen=kernel_max_seqlen,
-            )
-            self._update_checkpointing_trackers(
-                cache_buf_idx,
-                prev_num_accepted_tokens,
-                state_indices,
-                ckpt_cu_seqlens,
-                ckpt_max_seqlen,
-                old_x.size(1),
-                null_block_id,
-            )
+            if ckpt_cu_seqlens is None and state_indices.numel() > 1:
+                # Avoid the known large-batch checkpointing SSU drift while the
+                # remaining production-shaped replay reproducer is investigated.
+                batch_chunk = 1
+                for start in range(0, state_indices.numel(), batch_chunk):
+                    end = min(start + batch_chunk, state_indices.numel())
+                    chunk_rand_seed = (
+                        torch.randint(
+                            0,
+                            2**32,
+                            (1,),
+                            dtype=torch.int64,
+                            device=state.device,
+                        )
+                        if self._mamba_config.enable_stochastic_rounding
+                        else None
+                    )
+                    z_chunk = None
+                    if z is not None:
+                        tokens_per_batch = x_ckpt.shape[1]
+                        z_chunk = z.view(
+                            state_indices.numel(),
+                            tokens_per_batch,
+                            *z.shape[1:],
+                        )[start:end]
+                    chunk_indices = state_indices[start:end]
+                    self._checkpointing_kernel(
+                        state,
+                        old_x,
+                        old_B,
+                        old_dt,
+                        old_cumAdt,
+                        cache_buf_idx,
+                        prev_num_accepted_tokens,
+                        x_ckpt[start:end],
+                        dt_ckpt[start:end],
+                        A,
+                        B_ckpt[start:end],
+                        C_ckpt[start:end],
+                        out_ckpt[start:end],
+                        D=D,
+                        z=z_chunk,
+                        dt_bias=dt_bias,
+                        dt_softplus=dt_softplus,
+                        state_batch_indices=chunk_indices,
+                        pad_slot_id=null_block_id,
+                        rand_seed=chunk_rand_seed,
+                        philox_rounds=self._mamba_config.stochastic_rounding_philox_rounds
+                        or 10,
+                        cu_seqlens=None,
+                        max_seqlen=None,
+                    )
+                    self._update_checkpointing_trackers(
+                        cache_buf_idx,
+                        prev_num_accepted_tokens,
+                        chunk_indices,
+                        None,
+                        ckpt_max_seqlen,
+                        old_x.size(1),
+                        null_block_id,
+                    )
+            else:
+                self._checkpointing_kernel(
+                    state,
+                    old_x,
+                    old_B,
+                    old_dt,
+                    old_cumAdt,
+                    cache_buf_idx,
+                    prev_num_accepted_tokens,
+                    x_ckpt,
+                    dt_ckpt,
+                    A,
+                    B_ckpt,
+                    C_ckpt,
+                    out_ckpt,
+                    D=D,
+                    z=z,
+                    dt_bias=dt_bias,
+                    dt_softplus=dt_softplus,
+                    state_batch_indices=state_indices,
+                    pad_slot_id=null_block_id,
+                    rand_seed=rand_seed,
+                    philox_rounds=self._mamba_config.stochastic_rounding_philox_rounds
+                    or 10,
+                    cu_seqlens=ckpt_cu_seqlens,
+                    max_seqlen=kernel_max_seqlen,
+                )
+                self._update_checkpointing_trackers(
+                    cache_buf_idx,
+                    prev_num_accepted_tokens,
+                    state_indices,
+                    ckpt_cu_seqlens,
+                    ckpt_max_seqlen,
+                    old_x.size(1),
+                    null_block_id,
+                )
+            dst_indices = self._checkpointing_state_indices(dst_state_batch_indices)
+            if (
+                dst_indices is not None
+                and dst_indices.numel() == state_indices.numel()
+            ):
+                self._copy_checkpointing_slots(
+                    (
+                        state,
+                        old_x,
+                        old_B,
+                        old_dt,
+                        old_cumAdt,
+                        cache_buf_idx,
+                        prev_num_accepted_tokens,
+                    ),
+                    state_indices,
+                    dst_indices,
+                    null_block_id,
+                )
             return
 
         self._kernel(
@@ -307,6 +423,23 @@ class FlashInferSSUBackend(MambaSSUBackend):
             rand_seed=rand_seed,
             philox_rounds=self._mamba_config.stochastic_rounding_philox_rounds or 10,
         )
+        if (
+            num_accepted_tokens is None
+            and cache_buf_idx is not None
+            and prev_num_accepted_tokens is not None
+            and dst_state_batch_indices is not None
+            and not self._same_state_indices(
+                state_batch_indices, dst_state_batch_indices
+            )
+        ):
+            dst_indices = self._checkpointing_state_indices(dst_state_batch_indices)
+            if dst_indices is not None:
+                self._reset_checkpointing_trackers(
+                    cache_buf_idx,
+                    prev_num_accepted_tokens,
+                    dst_indices,
+                    null_block_id,
+                )
 
     @staticmethod
     def _same_state_indices(
@@ -333,9 +466,9 @@ class FlashInferSSUBackend(MambaSSUBackend):
         if state_batch_indices is None:
             return None
         if state_batch_indices.dim() == 1:
-            return state_batch_indices.to(torch.int32)
+            return state_batch_indices.to(torch.int32).contiguous()
         if state_batch_indices.dim() == 2 and state_batch_indices.size(1) == 1:
-            return state_batch_indices[:, 0].to(torch.int32)
+            return state_batch_indices[:, 0].to(torch.int32).contiguous()
         return None
 
     @staticmethod
@@ -413,6 +546,46 @@ class FlashInferSSUBackend(MambaSSUBackend):
             cu_seqlens is not None,
             BLOCK=block,
         )
+
+    @staticmethod
+    def _reset_checkpointing_trackers(
+        cache_buf_idx: torch.Tensor,
+        prev_num_accepted_tokens: torch.Tensor,
+        state_batch_indices: torch.Tensor,
+        pad_slot_id: int,
+    ) -> None:
+        block = 128
+        n_slots = state_batch_indices.numel()
+        _reset_checkpointing_trackers_kernel[(triton.cdiv(n_slots, block),)](
+            cache_buf_idx,
+            prev_num_accepted_tokens,
+            state_batch_indices,
+            pad_slot_id,
+            n_slots,
+            BLOCK=block,
+        )
+
+    @staticmethod
+    def _copy_checkpointing_slots(
+        tensors: tuple[torch.Tensor, ...],
+        src_indices: torch.Tensor,
+        dst_indices: torch.Tensor,
+        pad_slot_id: int,
+    ) -> None:
+        block = 256
+        n_slots = src_indices.numel()
+        for tensor in tensors:
+            slot_size = tensor[0].numel()
+            _copy_checkpointing_slots_kernel[
+                (n_slots, triton.cdiv(slot_size, block))
+            ](
+                tensor,
+                src_indices,
+                dst_indices,
+                slot_size,
+                pad_slot_id,
+                BLOCK=block,
+            )
 
 
 _BACKEND_REGISTRY: dict[MambaBackendEnum, type[MambaSSUBackend]] = {
