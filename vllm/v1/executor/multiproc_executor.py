@@ -423,7 +423,7 @@ class MultiprocExecutor(Executor):
         active_procs = lambda: [proc for proc in worker_procs if proc.is_alive()]
         # Give processes time to clean themselves up properly first
         logger.debug("Worker Termination: allow workers to gracefully shutdown")
-        shutdown_timeout = max(self.vllm_config.shutdown_timeout or 0, 4)
+        shutdown_timeout = max(self.vllm_config.shutdown_timeout, 4)
         if wait_for_termination(active_procs(), shutdown_timeout):
             return
 
