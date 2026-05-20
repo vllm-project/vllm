@@ -364,7 +364,8 @@ class CutlassExpertsFp8Base(mk.FusedMoEExpertsModular):
             topk_ids,
             activation,
             global_num_experts,
-            expert_map,  # XXXXXXXXX None
+            # the fp8 cutlass experts use their own expert map.
+            None,
             self.w1_scale,
             self.w2_scale,
             a1q_scale,
