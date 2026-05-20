@@ -320,6 +320,11 @@ class ReqMeta:
     remote_engine_id: str
     tp_size: int
     remote_dp_size: int
+    # Ordered list of all prefill-instance host IPs for multi-node TP.
+    # Each decode worker picks remote_hosts[tp_rank // ranks_per_node] as its
+    # actual peer host for handshake + post-transfer notify. None or len<=1
+    # falls back to single-host behaviour (remote_host).
+    remote_hosts: list[str] | None = None
 
 
 class MoRIIOConnectorMetadata(KVConnectorMetadata):
@@ -370,6 +375,7 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
                 kv_transfer_params.get("remote_tp_size", 1),
             ),
             remote_dp_size=kv_transfer_params.get("remote_dp_size", 1),
+            remote_hosts=kv_transfer_params.get("remote_hosts"),
         )
         if write_mode:
             self.reqs_to_save[request_id] = _req

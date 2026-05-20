@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import logging
 import math
+import os
 import queue
 import threading
 import time
@@ -252,10 +253,26 @@ class MoRIIOConnectorScheduler:
         self.engine_id: EngineId = engine_id
         self.mode = get_moriio_mode()
         self.host_ip = get_ip()
+        # Multi-node TP: VLLM_MORIIO_NODE_HOSTS holds the ordered list of host
+        # IPs in this engine's TP group (rank 0 first). Surfaced to the peer
+        # side via request_finished's kv_transfer_params so the consumer
+        # workers can dial the correct producer host for their tp_rank. For
+        # single-node TP, falls back to [host_ip].
+        node_hosts_env = os.environ.get("VLLM_MORIIO_NODE_HOSTS", "").strip()
+        if node_hosts_env:
+            self.node_hosts: list[str] = [
+                h.strip() for h in node_hosts_env.split(",") if h.strip()
+            ]
+        else:
+            self.node_hosts = [self.host_ip]
         self.handshake_port = self.kv_transfer_config.kv_connector_extra_config[
             "handshake_port"
         ]
-        logger.info("Initializing MoRIIO Scheduler engine_id = %s", engine_id)
+        logger.info(
+            "Initializing MoRIIO Scheduler engine_id = %s node_hosts = %s",
+            engine_id,
+            self.node_hosts,
+        )
 
         self.side_notify_port = self.kv_transfer_config.kv_connector_extra_config[
             "notify_port"
@@ -602,6 +619,10 @@ class MoRIIOConnectorScheduler:
             remote_engine_id=self.engine_id,
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
             transfer_id=params["transfer_id"],
+            # Multi-node TP: list of all prefill-instance host IPs in this
+            # engine's TP group (rank 0 first). Decode workers use this to
+            # pick the correct producer host per their tp_rank.
+            remote_hosts=self.node_hosts,
         )
 
 
@@ -1072,6 +1093,25 @@ class MoRIIOConnectorWorker:
 
         return {remote_agent_name}
 
+    def _pick_remote_host(self, meta: ReqMeta) -> str:
+        """Resolve the per-worker peer host for multi-node TP prefill-decode.
+
+        For TP=16 sym 1P1D (2 prefill nodes + 2 decode nodes), the prefill KV
+        cache for ranks [0..7] lives on prefill-head and for [8..15] lives on
+        prefill-worker. Each decode worker has a fixed self.tp_rank and must
+        dial the prefill node that owns its half of the KV.
+
+        meta.remote_hosts is the ordered prefill-side host list (rank 0
+        first). If unset or length 1, falls back to meta.remote_host
+        (single-host behaviour, preserves TP=8 and monolithic correctness).
+        """
+        if meta.remote_hosts and len(meta.remote_hosts) > 1:
+            ranks_per_node = max(1, int(meta.tp_size) // len(meta.remote_hosts))
+            node_idx = self.tp_rank // ranks_per_node
+            if 0 <= node_idx < len(meta.remote_hosts):
+                return meta.remote_hosts[node_idx]
+        return meta.remote_host
+
     def _background_moriio_handshake(
         self, req_id: ReqId, remote_engine_id: EngineId, meta: ReqMeta
     ):
@@ -1080,7 +1120,9 @@ class MoRIIOConnectorWorker:
         if remote_engine_id is not None:
             fut = self._handshake_futures.get(remote_engine_id)
         if fut is None:
-            host = meta.remote_host
+            # Multi-node TP: pick the producer host for this worker's tp_rank.
+            # For single-node TP this returns meta.remote_host unchanged.
+            host = self._pick_remote_host(meta)
             port = int(meta.remote_handshake_port)
             tp_size = int(meta.tp_size)
             remote_dp_size = int(meta.remote_dp_size)
@@ -1394,12 +1436,19 @@ class MoRIIOConnectorWorker:
             meta.remote_engine_id,
             req_id,
         )
+        # Multi-node TP: remote_host here is used by _read_blocks to record the
+        # post-transfer notify callback address (so prefill can free its KV
+        # blocks). For multi-node prefill the notify must go to the prefill
+        # node that actually owns this worker's KV slice, not the prefill
+        # head. _pick_remote_host returns meta.remote_host unchanged for
+        # single-host setups, preserving TP=8 / monolithic behaviour.
+        actual_remote_host = self._pick_remote_host(meta)
         self._read_blocks(
             request_id=req_id,
             dst_engine_id=meta.remote_engine_id,
             local_block_ids=meta.local_block_ids,
             remote_block_ids=meta.remote_block_ids,
-            remote_host=meta.remote_host,
+            remote_host=actual_remote_host,
             remote_notify_port=meta.remote_notify_port,
         )
 
