@@ -703,7 +703,7 @@ class EplbState:
 
     def _write_load_to_file(
         self,
-        save_path: str,
+        save_path: Path,
         global_expert_load_windows: list[torch.Tensor],
     ) -> None:
         for (name, _), global_load in zip(
@@ -715,7 +715,7 @@ class EplbState:
             else:
                 self.cumulative_logical_load[name] = load_cpu.clone()
         if get_ep_group().device_group.rank() == 0:
-            self._save_logical_load(self.cumulative_logical_load, Path(save_path))
+            self._save_logical_load(self.cumulative_logical_load, save_path)
             logger.info("Saved EPLB cumulative logical load to %s.", save_path)
 
     def rearrange(
