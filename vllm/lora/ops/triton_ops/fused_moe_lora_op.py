@@ -355,7 +355,7 @@ def _run_fused_moe_lora_one_shot(
 
     num_experts = A0.shape[1]
     naive = sorted_token_ids is None
-    if naive:
+    if sorted_token_ids is None:
         EM_grid = topk_weights.numel()
         BLOCK_M = 16
         stride_tl_ = 0
