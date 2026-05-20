@@ -553,7 +553,11 @@ class ModelConfig:
             architectures, self.runner_type, self.convert
         )
 
-        if is_pooling_model and not is_generative_model and self.runner_type in ("draft", "generate"):
+        if (
+            is_pooling_model
+            and not is_generative_model
+            and self.runner_type in ("draft", "generate")
+        ):
             raise ValueError(
                 f"Embedding models do not support `--runner {self.runner_type}`. "
                 "Use `--runner pooling` or `--runner auto` for embedding models."
