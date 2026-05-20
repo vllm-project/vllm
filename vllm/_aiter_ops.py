@@ -1016,6 +1016,150 @@ def _fused_mla_dual_rms_norm_fake(
     return (torch.empty_like(x1), torch.empty_like(x2))
 
 
+# Cache check for aiter's fused_qk_norm_mrope_3d_cache_pts_quant_shuffle
+_AITER_HAS_FUSED_QK_NORM_MROPE_KVCACHE: bool | None = None
+
+
+def check_aiter_fused_qk_norm_mrope_kvcache() -> bool:
+    """Check if aiter provides fused_qk_norm_mrope_3d_cache_pts_quant_shuffle."""
+    global _AITER_HAS_FUSED_QK_NORM_MROPE_KVCACHE
+    if _AITER_HAS_FUSED_QK_NORM_MROPE_KVCACHE is None:
+        try:
+            from aiter.ops.fused_qk_norm_mrope_cache_quant import (  # noqa: F401
+                fused_qk_norm_mrope_3d_cache_pts_quant_shuffle,
+            )
+
+            _AITER_HAS_FUSED_QK_NORM_MROPE_KVCACHE = True
+        except (ImportError, ModuleNotFoundError, AttributeError):
+            _AITER_HAS_FUSED_QK_NORM_MROPE_KVCACHE = False
+    return _AITER_HAS_FUSED_QK_NORM_MROPE_KVCACHE
+
+
+# Module-level scratch tensors for the per-tensor scales aiter requires.
+# In our usage kv_cache_dtype matches qkv dtype, so the kernel does not
+# actually quantize; the scales are unused but the binding still expects
+# CPU-resident float32 tensors (per the aiter test reference).
+_AITER_QKNORM_MROPE_K_SCALE = torch.tensor(1.0, dtype=torch.float32)
+_AITER_QKNORM_MROPE_V_SCALE = torch.tensor(1.0, dtype=torch.float32)
+
+
+def _aiter_fused_qk_norm_mrope_kvcache_impl(
+    qkv: torch.Tensor,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
+    q_out: torch.Tensor,
+    k_out: torch.Tensor,
+    v_out: torch.Tensor,
+    num_heads_q: int,
+    num_heads_k: int,
+    num_heads_v: int,
+    head_size: int,
+    is_neox_style: bool,
+    mrope_section_t: int,
+    mrope_section_h: int,
+    mrope_section_w: int,
+    is_interleaved: bool,
+    eps: float,
+) -> None:
+    """Aiter fused Q-RMSNorm + K-RMSNorm + 3D MRotary, returning K and V outputs.
+
+    The kv-cache writeback is intentionally skipped here (slot_mapping is all
+    -1) because vLLM's paged kv_cache is laid out as
+    [num_blocks, 2, block_size, num_kv_heads, head_size] which makes the
+    K-only and V-only views non-contiguous; the aiter kernel requires a
+    contiguous k_cache/v_cache.  Instead we ask the kernel to materialise
+    k_out and v_out, and let vLLM's existing reshape_and_cache write them
+    into the paged cache (one extra small kernel per layer; still net win
+    because we eliminate three triton norm/mrope kernels).
+
+    Args:
+        qkv: [num_tokens, (Hq + Hk + Hv) * head_size] - flat per-token QKV.
+        q_weight, k_weight: [head_size] - RMSNorm gains for Q and K.
+        cos_sin_cache: [max_positions, head_size] - precomputed cos||sin.
+        positions: [3, num_tokens] long - mrope T/H/W positions.
+        q_out: [num_tokens, num_heads_q, head_size] - rotated, normalized Q.
+        k_out: [num_tokens, num_heads_k, head_size] - rotated, normalized K.
+        v_out: [num_tokens, num_heads_v, head_size] - unrotated V (passthrough).
+    """
+    from aiter.ops.fused_qk_norm_mrope_cache_quant import (
+        fused_qk_norm_mrope_3d_cache_pts_quant_shuffle,
+    )
+
+    num_tokens = qkv.size(0)
+    mrope_section = [mrope_section_t, mrope_section_h, mrope_section_w]
+    # The kernel writes to BOTH k_cache (at slot_mapping[i]) and k_out (at i)
+    # in the same store — and skips both on negative slots.  We don't have a
+    # contiguous view of vLLM's paged kv-cache, so we point slot_mapping at
+    # a per-call scratch buffer that is exactly num_tokens wide.  The cost
+    # is one redundant per-head vec store; far cheaper than copying the
+    # entire paged cache.
+    slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=qkv.device)
+    dummy_k_cache = torch.empty(
+        (num_tokens, num_heads_k, head_size),
+        dtype=qkv.dtype,
+        device=qkv.device,
+    )
+    dummy_v_cache = torch.empty(
+        (num_tokens, num_heads_v, head_size),
+        dtype=qkv.dtype,
+        device=qkv.device,
+    )
+
+    fused_qk_norm_mrope_3d_cache_pts_quant_shuffle(
+        qkv,
+        q_weight,
+        k_weight,
+        cos_sin_cache,
+        positions,
+        num_tokens,
+        num_heads_q,
+        num_heads_k,
+        num_heads_v,
+        head_size,
+        is_neox_style,
+        mrope_section,
+        is_interleaved,
+        eps,
+        q_out,
+        dummy_k_cache,
+        dummy_v_cache,
+        slot_mapping,
+        _AITER_QKNORM_MROPE_K_SCALE,
+        _AITER_QKNORM_MROPE_V_SCALE,
+        k_out,
+        v_out,
+        True,  # return_kv -> populate k_out / v_out
+        False,  # use_shuffle_layout
+        0,  # block_size
+        0,  # x
+    )
+
+
+def _aiter_fused_qk_norm_mrope_kvcache_fake(
+    qkv: torch.Tensor,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
+    q_out: torch.Tensor,
+    k_out: torch.Tensor,
+    v_out: torch.Tensor,
+    num_heads_q: int,
+    num_heads_k: int,
+    num_heads_v: int,
+    head_size: int,
+    is_neox_style: bool,
+    mrope_section_t: int,
+    mrope_section_h: int,
+    mrope_section_w: int,
+    is_interleaved: bool,
+    eps: float,
+) -> None:
+    return None
+
+
 def _rocm_aiter_gemm_a8wfp4_impl(
     x: torch.Tensor,
     w: torch.Tensor,
@@ -1601,6 +1745,10 @@ class rocm_aiter_ops:
     @staticmethod
     def get_fused_mla_dual_rms_norm_op() -> OpOverload:
         return torch.ops.vllm.fused_mla_dual_rms_norm.default
+
+    @staticmethod
+    def get_fused_qk_norm_mrope_kvcache_op() -> OpOverload:
+        return torch.ops.vllm.aiter_fused_qk_norm_mrope_kvcache.default
 
     @staticmethod
     def rms_norm(
@@ -2287,3 +2435,17 @@ class rocm_aiter_ops:
 
 
 rocm_aiter_ops.register_ops_once()
+
+
+# Register the fused qk-norm + mrope op unconditionally on ROCm (it works on
+# RDNA3/3.5 too, not only mi3xx).  The op_func itself raises ImportError if
+# aiter is not installed, so the op being registered is safe even on systems
+# where aiter is absent — callers gate on check_aiter_fused_qk_norm_mrope_kvcache().
+if current_platform.is_rocm() and IS_AITER_FOUND:
+    direct_register_custom_op(
+        op_name="aiter_fused_qk_norm_mrope_kvcache",
+        op_func=_aiter_fused_qk_norm_mrope_kvcache_impl,
+        mutates_args=["q_out", "k_out", "v_out"],
+        fake_impl=_aiter_fused_qk_norm_mrope_kvcache_fake,
+        dispatch_key=current_platform.dispatch_key,
+    )
