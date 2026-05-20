@@ -1,16 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
-
-import json
-from collections.abc import Callable
-from functools import partial
-from typing import Literal, cast
-
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from typing_extensions import assert_never
 
-from vllm.entrypoints.openai.engine.protocol import UsageInfo
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
 from vllm.tasks import SupportedTask
@@ -21,14 +13,15 @@ from ..base.serving import PoolingServingBase
 from ..factories import init_pooling_io_processors
 from ..typing import AnyPoolingRequest, PoolingServeContext
 from ..utils import (
-    encode_pooling_bytes,
-    encode_pooling_output_base64,
-    encode_pooling_output_float,
+    BytesEncodingFormat,
+    JsonEncodingFormat,
+    build_pooling_bytes_streaming_response,
     get_json_response_cls,
+    get_pooling_output_encoder,
+    get_pooling_usage,
 )
 from .protocol import (
     IOProcessorRequest,
-    PoolingBytesResponse,
     PoolingRequest,
     PoolingResponse,
     PoolingResponseData,
@@ -141,47 +134,32 @@ class ServingPooling(PoolingServingBase):
         request_id: str,
         created_time: int,
         model_name: str,
-        encoding_format: Literal["float", "base64"],
+        encoding_format: JsonEncodingFormat,
         embed_dtype: EmbedDType,
         endianness: Endianness,
     ) -> JSONResponse:
-        encode_fn = cast(
-            Callable[[PoolingRequestOutput], list[float] | str],
-            (
-                encode_pooling_output_float
-                if encoding_format == "float"
-                else partial(
-                    encode_pooling_output_base64,
-                    embed_dtype=embed_dtype,
-                    endianness=endianness,
-                )
-            ),
+        encode_fn = get_pooling_output_encoder(
+            encoding_format=encoding_format,
+            embed_dtype=embed_dtype,
+            endianness=endianness,
         )
 
         items: list[PoolingResponseData] = []
-        num_prompt_tokens = 0
 
         for idx, final_res in enumerate(final_res_batch):
             item = PoolingResponseData(
                 index=idx,
                 data=encode_fn(final_res),
             )
-            prompt_token_ids = final_res.prompt_token_ids
 
             items.append(item)
-            num_prompt_tokens += len(prompt_token_ids)
-
-        usage = UsageInfo(
-            prompt_tokens=num_prompt_tokens,
-            total_tokens=num_prompt_tokens,
-        )
 
         response = PoolingResponse(
             id=request_id,
             created=created_time,
             model=model_name,
             data=items,
-            usage=usage,
+            usage=get_pooling_usage(final_res_batch),
         )
         return self.json_response_cls(content=response.model_dump())
 
@@ -191,36 +169,16 @@ class ServingPooling(PoolingServingBase):
         request_id: str,
         created_time: int,
         model_name: str,
-        encoding_format: Literal["bytes", "bytes_only"],
+        encoding_format: BytesEncodingFormat,
         embed_dtype: EmbedDType,
         endianness: Endianness,
     ) -> StreamingResponse:
-        content, items, usage = encode_pooling_bytes(
+        return build_pooling_bytes_streaming_response(
             pooling_outputs=final_res_batch,
+            request_id=request_id,
+            created_time=created_time,
+            model_name=model_name,
+            encoding_format=encoding_format,
             embed_dtype=embed_dtype,
             endianness=endianness,
-        )
-
-        headers = (
-            None
-            if encoding_format == "bytes_only"
-            else {
-                "metadata": json.dumps(
-                    {
-                        "id": request_id,
-                        "created": created_time,
-                        "model": model_name,
-                        "data": items,
-                        "usage": usage,
-                    }
-                )
-            }
-        )
-
-        response = PoolingBytesResponse(content=content, headers=headers)
-
-        return StreamingResponse(
-            content=response.content,
-            headers=response.headers,
-            media_type=response.media_type,
         )

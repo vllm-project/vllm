@@ -13,7 +13,7 @@ from vllm.multimodal.video import (
     VideoLoader,
 )
 
-from .utils import create_video_from_image
+from .utils import create_long_gop_video, create_video_from_image
 
 pytestmark = pytest.mark.cpu_test
 
@@ -362,6 +362,49 @@ def test_pyav_dynamic_backend_loads_frames(
         assert frames.shape[0] > 0
         assert frames.shape[0] == len(metadata["frames_indices"])
         assert metadata["video_backend"] == "pyav_dynamic"
+
+
+def test_pyav_backend_returns_target_frames_not_keyframes():
+    """Regression test: PyAV must decode forward past the seek keyframe.
+
+    container.seek() snaps backward to the nearest keyframe. With a long GOP
+    (here: one keyframe at frame 0), a decoder that does not advance forward
+    to the target PTS collapses every sampled slot onto the keyframe. This
+    test encodes a per-frame marker on the green channel and verifies the
+    returned frames are distinct, ordered, and match the requested indices.
+    """
+    num_frames = 50
+    num_sampled = 4
+    height, width = 64, 64
+
+    video_bytes = create_long_gop_video(
+        num_frames=num_frames, width=width, height=height
+    )
+
+    loader = VIDEO_LOADER_REGISTRY.load("opencv")
+    frames, metadata = loader.load_bytes(
+        video_bytes, num_frames=num_sampled, backend="pyav"
+    )
+    assert frames.shape == (num_sampled, height, width, 3)
+
+    requested = list(metadata["frames_indices"])
+    assert len(requested) == num_sampled
+
+    actual = [int(f[height // 2, width // 2, 1]) for f in frames]
+
+    assert len(set(actual)) == num_sampled, (
+        f"PyAV returned only {len(set(actual))} distinct frames for "
+        f"{num_sampled} requested indices: markers={actual}, "
+        f"requested={requested}. Keyframe-snap regression."
+    )
+
+    assert actual == sorted(actual), f"Returned frames out of order: markers={actual}"
+
+    for marker, want_idx in zip(actual, requested):
+        assert abs(marker - want_idx) <= 10, (
+            f"Frame mismatch: requested index {want_idx}, "
+            f"got marker {marker} (tolerance ±10)"
+        )
 
 
 @pytest.mark.parametrize(

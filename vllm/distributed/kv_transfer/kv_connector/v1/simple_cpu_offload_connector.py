@@ -165,7 +165,6 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
 
     # --- Scheduler-side methods ---
 
-    # NOTE: New API only for SimpleCPUOffloadConnector.
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
         if self.scheduler_manager is not None:
             self.scheduler_manager.bind_gpu_block_pool(gpu_block_pool)

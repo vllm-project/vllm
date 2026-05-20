@@ -155,15 +155,16 @@ class CoreEngineProcManager:
 
         try:
             for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
-                # Adjust device control in DP for non-CUDA platforms
-                # as well as external and ray launchers
-                # For CUDA platforms, we use torch.accelerator.set_device_index()()
+                # Adjust device control in DP for platforms that cannot rely
+                # on torch.accelerator.set_device_index(), and for Ray launchers.
                 device_control_context: contextlib.AbstractContextManager[None] = (
                     contextlib.nullcontext()
                 )
+                needs_device_env_isolation = not (
+                    current_platform.is_cuda_alike() or current_platform.is_xpu()
+                )
                 if is_dp and (
-                    not current_platform.is_cuda_alike()
-                    or vllm_config.parallel_config.use_ray
+                    needs_device_env_isolation or vllm_config.parallel_config.use_ray
                 ):
                     device_control_context = set_device_control_env_var(
                         vllm_config, local_dp_rank
