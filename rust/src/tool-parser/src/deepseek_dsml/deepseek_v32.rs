@@ -60,11 +60,11 @@ impl ToolParser for DeepSeekV32ToolParser {
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
+    use thiserror_ext::AsReport;
 
     use super::DeepSeekV32ToolParser;
     use crate::ToolParser;
     use crate::test_utils::{collect_stream, split_by_chars, test_tools};
-    use thiserror_ext::AsReport;
 
     fn build_tool_call(function_name: &str, params: &[(&str, &str)]) -> String {
         let params = params
