@@ -255,37 +255,28 @@ class TestFusedDeepseekV4QnormRopeKvInsert(torch.nn.Module):
     """
     Test for DeepSeek-V4 fused_qnorm_rope_kv_rope_quant_insert op.
     This op mutates q and k_cache in-place.
-    
+
     Real kernel signature:
         fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
             Tensor! q, Tensor kv, Tensor! k_cache,
             Tensor slot_mapping, Tensor position_ids, Tensor cos_sin_cache,
             float eps, int cache_block_size) -> ()
+
+    Shape requirements (from kernel code):
+        q:        [N, num_heads, HEAD_DIM=512]
+        kv:       [N, HEAD_DIM=512]
+        k_cache:  [N, 576]  (448 fp8 + 128 bf16 per token)
     """
 
     OP_REGISTERED = False
 
     def __init__(self):
         super().__init__()
-        self.register_test_custom_op()
+        self.register_fake_impl()
 
     @classmethod
-    def register_test_custom_op(cls):
+    def register_fake_impl(cls):
         if not cls.OP_REGISTERED:
-
-            def fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert_impl(
-                q: torch.Tensor,
-                kv: torch.Tensor,
-                k_cache: torch.Tensor,
-                slot_mapping: torch.Tensor,
-                position_ids: torch.Tensor,
-                cos_sin_cache: torch.Tensor,
-                eps: float,
-                cache_block_size: int,
-            ) -> None:
-                # Simulate in-place mutation of q and k_cache
-                q.mul_(0.5)
-                k_cache.mul_(0.5)
 
             def fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert_fake(
                 q: torch.Tensor,
@@ -299,30 +290,24 @@ class TestFusedDeepseekV4QnormRopeKvInsert(torch.nn.Module):
             ) -> None:
                 pass
 
-            direct_register_custom_op(
-                op_name="fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert",
-                op_func=fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert_impl,
-                mutates_args=["q", "k_cache"],
-                fake_impl=fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert_fake,
+            torch.library.register_fake(
+                "_C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert",
+                fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert_fake,
             )
 
             cls.OP_REGISTERED = True
 
     def forward(
-        self, q: torch.Tensor, k_cache: torch.Tensor
+        self, q: torch.Tensor, kv: torch.Tensor, k_cache: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # Create dummy inputs that the real kernel would use (but we mock)
-        # q shape: [N, H, HEAD_DIM=512]
         num_slots = q.shape[0]
-        num_heads = q.shape[1]
-        kv = torch.empty_like(q)
-        slot_mapping = torch.zeros(num_slots, dtype=torch.long, device=q.device)
-        position_ids = torch.arange(num_slots, device=q.device)
+        position_ids = torch.arange(num_slots, dtype=torch.int32, device=q.device)
+        slot_mapping = position_ids.clone()
         # cos_sin_cache shape: [max_positions, rope_dim=64]
-        cos_sin_cache = torch.zeros(4096, 64, dtype=q.dtype, device=q.device)
+        cos_sin_cache = torch.zeros(4096, 64, dtype=torch.float32, device=q.device)
         eps = 1e-5
         cache_block_size = 16
-        
+
         torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
             q, kv, k_cache, slot_mapping, position_ids, cos_sin_cache,
             eps, cache_block_size
@@ -331,10 +316,13 @@ class TestFusedDeepseekV4QnormRopeKvInsert(torch.nn.Module):
 
     def example_inputs(self, num_slots=32, num_heads=1):
         # q shape: [N, H, HEAD_DIM=512]
+        # kv shape: [N, HEAD_DIM=512]
+        # k_cache shape: [N, 576]  (block_size=16: 448+128 per token)
         head_dim = 512
         return (
             torch.randn(num_slots, num_heads, head_dim),
-            torch.randn(num_slots, num_heads, head_dim),
+            torch.randn(num_slots, head_dim),
+            torch.randn(num_slots, 576),
         )
 
     def ops_in_model(self, do_fusion):
