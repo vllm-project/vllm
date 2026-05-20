@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
+import time
 from typing import TYPE_CHECKING, Any
 from weakref import ref as weakref_ref
 
@@ -223,8 +224,8 @@ class MoRIIOWriter:
         # Prepare transfer plan
         plan = self._prepare_transfer_plan(task, request_info, remote_moriio_meta)
 
-        # Execute transfer
-        self._do_layer_write(plan, sessions)
+        # Execute transfer (also accumulates per-request telemetry on request_info)
+        self._do_layer_write(plan, sessions, request_info)
 
         # Finalize if all layers complete
         self._finalize_if_complete(task, request_info)
@@ -271,13 +272,23 @@ class MoRIIOWriter:
             use_batch=True,
         )
 
-    def _do_layer_write(self, plan: LayerTransferPlan, sessions: list) -> None:
+    def _do_layer_write(
+        self,
+        plan: LayerTransferPlan,
+        sessions: list,
+        request_info: RemoteAllocInfo,
+    ) -> None:
         """Perform the actual layer write.
 
         Args:
             plan: The transfer plan
             sessions: List of transfer sessions
+            request_info: Per-request state; updated with telemetry totals.
         """
+        if request_info.post_start_ns is None:
+            request_info.post_start_ns = time.perf_counter_ns()
+
+        post_layer_start_ns = time.perf_counter_ns()
         if plan.use_batch:
             self.worker.moriio_wrapper.write_remote_data(
                 plan.transfer_sizes,
@@ -293,6 +304,9 @@ class MoRIIOWriter:
                     plan.transfer_remote_offsets[i],
                     plan.sess_idx,
                 )
+        request_info.total_post_ns += time.perf_counter_ns() - post_layer_start_ns
+        request_info.total_bytes += sum(plan.transfer_sizes)
+        request_info.total_descriptors += len(plan.transfer_local_offsets)
 
     def _finalize_if_complete(
         self, task: WriteTask, request_info: RemoteAllocInfo
@@ -307,7 +321,28 @@ class MoRIIOWriter:
 
         if request_info.writes_done >= self.worker.num_layers:
             # Wait for transfer to complete
-            self.worker.moriio_wrapper.waiting_for_transfer_complete()
+            transfer_failed = False
+            try:
+                self.worker.moriio_wrapper.waiting_for_transfer_complete()
+            except Exception:
+                logger.exception(
+                    "waiting_for_transfer_complete failed for transfer %s",
+                    task.transfer_id,
+                )
+                transfer_failed = True
+
+            if transfer_failed:
+                self.worker.xfer_stats.record_failed_transfer()
+            elif request_info.post_start_ns is not None:
+                xfer_duration_s = (
+                    time.perf_counter_ns() - request_info.post_start_ns
+                ) / 1e9
+                self.worker.xfer_stats.record_transfer(
+                    transfer_duration_s=xfer_duration_s,
+                    post_duration_s=request_info.total_post_ns / 1e9,
+                    bytes_transferred=request_info.total_bytes,
+                    num_descriptors=request_info.total_descriptors,
+                )
 
             remote_port = task.remote_notify_port + get_port_offset(
                 request_info.decode_dp_rank, self.worker.tp_rank
@@ -317,9 +352,16 @@ class MoRIIOWriter:
             # Consider including the first gen token from prefill in the notification
 
             # Send completion notification
-            self.worker.moriio_wrapper.send_notify(
-                task.transfer_id, task.remote_ip, remote_port
-            )
+            try:
+                self.worker.moriio_wrapper.send_notify(
+                    task.transfer_id, task.remote_ip, remote_port
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to send completion notification for transfer %s",
+                    task.transfer_id,
+                )
+                self.worker.xfer_stats.record_failed_notification()
             # mark request as done, then we can free the blocks
             with self.worker.moriio_wrapper.lock:
                 self.worker.moriio_wrapper.done_req_ids.append(task.request_id)
