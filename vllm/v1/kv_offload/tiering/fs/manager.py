@@ -33,8 +33,7 @@ from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool
 from vllm.v1.kv_offload.tiering.fs.io import store_block, load_block
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
-    from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.kv_offload.base import OffloadingSpec
 
 logger = init_logger(__name__)
 
@@ -54,11 +53,10 @@ class FileSystemTierManager(SecondaryTierManager):
 
     def __init__(
         self,
-        vllm_config: "VllmConfig",
+        offloading_spec: "OffloadingSpec",
         primary_kv_view: memoryview,
         tier_type: str,
         root_dir: str,
-        kv_cache_config: "KVCacheConfig | None" = None,
         gpu_blocks_per_file: int = 1,
         n_read_threads: int = 16,
         n_write_threads: int = 16,
@@ -75,34 +73,17 @@ class FileSystemTierManager(SecondaryTierManager):
             n_read_threads: Number of read-priority I/O threads.
             n_write_threads: Number of write-priority I/O threads.
         """
-        super().__init__(vllm_config, primary_kv_view, tier_type)
+        super().__init__(offloading_spec, primary_kv_view, tier_type)
 
         # Extract block size from primary view
         assert primary_kv_view.strides is not None, "primary_kv_view.strides cannot be None"
         self._block_size: int = primary_kv_view.strides[0]
 
         # Create file mapper
-
-        # TODO: Remove this patch once kv_cache_config is properly passed from manager
-        if kv_cache_config is None:
-            # Create a minimal KVCacheConfig with empty kv_cache_groups as a temporary patch
-            from dataclasses import dataclass
-            
-            @dataclass
-            class _MinimalKVCacheConfig:
-                """Temporary minimal config until proper KVCacheConfig is passed"""
-                kv_cache_groups: list = None
-                
-                def __post_init__(self):
-                    if self.kv_cache_groups is None:
-                        self.kv_cache_groups = []
-            
-            kv_cache_config = _MinimalKVCacheConfig()
-        
         self.file_mapper = FileMapper.from_vllm_config(
             root_dir=root_dir,
-            vllm_config=vllm_config,
-            kv_cache_config=kv_cache_config,
+            vllm_config=offloading_spec.vllm_config,
+            kv_cache_config=offloading_spec.kv_cache_config,
             gpu_blocks_per_file=gpu_blocks_per_file,
         )
         

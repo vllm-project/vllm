@@ -31,7 +31,6 @@ _BLOCK_ELEMENTS = 512 * 1024  # 2 MB per block (float32 × 512K = 2MB)
 _DTYPE = torch.float32
 _CTX = ReqContext(req_id="test")
 
-# Create proper mocks for vLLM config
 _MOCK_VLLM_CONFIG = MagicMock()
 _MOCK_VLLM_CONFIG.model_config.model = "test-model"
 _MOCK_VLLM_CONFIG.cache_config.block_size = 16
@@ -44,6 +43,10 @@ _MOCK_VLLM_CONFIG.parallel_config.rank = 0
 
 _MOCK_KV_CACHE_CONFIG = MagicMock()
 _MOCK_KV_CACHE_CONFIG.kv_cache_groups = []
+
+_MOCK_OFFLOADING_SPEC = MagicMock()
+_MOCK_OFFLOADING_SPEC.vllm_config = _MOCK_VLLM_CONFIG
+_MOCK_OFFLOADING_SPEC.kv_cache_config = _MOCK_KV_CACHE_CONFIG
 
 def key(n: int) -> OffloadKey:
     return make_offload_key(n.to_bytes(8, "big"), 0)
@@ -94,11 +97,10 @@ def fs_tier(tmp_path):
     tensor = torch.zeros((4, _BLOCK_ELEMENTS), dtype=_DTYPE)
     mock_view = memoryview(tensor.numpy())
     return FileSystemTierManager(
-        vllm_config=_MOCK_VLLM_CONFIG,
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
         primary_kv_view=mock_view,
         tier_type="fs_python",
         root_dir=str(tmp_path),
-        kv_cache_config=_MOCK_KV_CACHE_CONFIG,
         n_read_threads=4,
         n_write_threads=4,
     )
@@ -153,11 +155,10 @@ def test_invalid_path_raises_at_construction():
 
     with pytest.raises(OSError):
         FileSystemTierManager(
-            vllm_config=_MOCK_VLLM_CONFIG,
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
             primary_kv_view=mock_view,
             tier_type="fs_python",
             root_dir="/dev/null/invalid_path",
-            kv_cache_config=_MOCK_KV_CACHE_CONFIG,
         )
 
 
@@ -203,11 +204,10 @@ def test_shutdown_discards_pending_tasks(tmp_path):
     mock_view = memoryview(tensor.numpy())
 
     tier = FileSystemTierManager(
-        vllm_config=_MOCK_VLLM_CONFIG,
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
         primary_kv_view=mock_view,
         tier_type="fs_python",
         root_dir=str(tmp_path),
-        kv_cache_config=_MOCK_KV_CACHE_CONFIG,
         n_read_threads=2,
         n_write_threads=2,
     )
@@ -230,11 +230,10 @@ def test_store_load_data_integrity(tmp_path):
     mock_view = memoryview(tensor.numpy())
 
     tier = FileSystemTierManager(
-        vllm_config=_MOCK_VLLM_CONFIG,
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
         primary_kv_view=mock_view,
         tier_type="fs_python",
         root_dir=str(tmp_path),
-        kv_cache_config=_MOCK_KV_CACHE_CONFIG,
         n_read_threads=4,
         n_write_threads=4,
     )
