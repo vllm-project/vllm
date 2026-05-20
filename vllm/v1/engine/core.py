@@ -237,7 +237,6 @@ class EngineCore:
         start = time.time()
 
         # register all kvcache specs in enginecore process.
-
         register_all_kvcache_specs(vllm_config)
 
         # Get all kv cache needed by the model

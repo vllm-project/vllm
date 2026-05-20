@@ -23,6 +23,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     get_kv_quant_mode,
 )
+from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 logger = init_logger(__name__)
 
@@ -232,8 +233,6 @@ class CrossAttention(Attention):
         )
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
-
         return KVCacheSpecRegistry.create(
             kvcache_spec_cls=CrossAttentionSpec,
             block_size=vllm_config.cache_config.block_size,

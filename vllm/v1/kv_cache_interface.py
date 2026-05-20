@@ -17,7 +17,7 @@ from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import get_dtype_size, nvfp4_kv_cache_full_dim
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.kv_cache_registry import KVCacheSpecRegistry
+from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -713,7 +713,7 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
         # Check if all specs have the same grouping base spec
         for spec in kv_cache_specs.values():
             try:
-                if KVCacheSpecRegistry.get_uniform_type_base_spec(spec) != base_spec:
+                if spec.uniform_type_base_spec != base_spec:
                     return False
             except ValueError as error:
                 raise NotImplementedError(
@@ -725,25 +725,25 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
         # requires not only the same type.
         # NOTE: Check subclasses before parent classes since isinstance()
         # returns True for subclasses.
-        if one_spec == SlidingWindowMLASpec:
+        if isinstance(one_spec, SlidingWindowMLASpec):
             # SlidingWindowMLASpec is uniform if all specs are SlidingWindowMLASpec
             # with the same sliding_window size.
             return all(
                 spec.sliding_window == one_spec.sliding_window  # type: ignore[attr-defined]
                 for spec in kv_cache_specs.values()
             )
-        elif base_spec == SlidingWindowSpec:
+        elif isinstance(one_spec, SlidingWindowSpec):
             # All sliding window specs must have the same window size
             return all(
                 spec.sliding_window == one_spec.sliding_window  # type: ignore[attr-defined]
                 for spec in kv_cache_specs.values()
             )
-        elif base_spec == ChunkedLocalAttentionSpec:
+        elif isinstance(one_spec, ChunkedLocalAttentionSpec):
             return all(
                 spec.attention_chunk_size == one_spec.attention_chunk_size  # type: ignore[attr-defined]
                 for spec in kv_cache_specs.values()
             )
-        elif base_spec == MambaSpec:
+        elif isinstance(one_spec, MambaSpec):
             return all(
                 spec.num_speculative_blocks == one_spec.num_speculative_blocks  # type: ignore[attr-defined]
                 for spec in kv_cache_specs.values()

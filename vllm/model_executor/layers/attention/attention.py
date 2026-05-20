@@ -44,6 +44,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     get_kv_quant_mode,
 )
+from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.attention import MLAAttention
@@ -566,7 +567,6 @@ class Attention(nn.Module, AttentionLayerBase):
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
         # Block size may get updated after model loading, refresh it
         block_size = vllm_config.cache_config.block_size
-        from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
         # Should not be called for enc-dec or encoder-only attention.
         assert self.attn_type == AttentionType.DECODER
@@ -594,7 +594,8 @@ class Attention(nn.Module, AttentionLayerBase):
             tq_config = TurboQuantConfig.from_cache_dtype(
                 self.kv_cache_dtype, self.head_size
             )
-            return TQFullAttentionSpec(
+            return KVCacheSpecRegistry.create(
+                kvcache_spec_cls=TQFullAttentionSpec,
                 block_size=block_size,
                 num_kv_heads=self.num_kv_heads,
                 head_size=self.head_size,

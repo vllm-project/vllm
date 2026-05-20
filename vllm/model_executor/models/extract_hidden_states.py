@@ -37,6 +37,7 @@ from vllm.v1.kv_cache_interface import (
     HiddenStateCacheSpec,
     KVCacheSpec,
 )
+from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 ########## Custom Ops ########
 
@@ -322,8 +323,6 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         # Re-read block_size: hybrid models may bump it after __init__.
-        from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
-
         return KVCacheSpecRegistry.create(
             kvcache_spec_cls=HiddenStateCacheSpec,
             block_size=self.block_size,
