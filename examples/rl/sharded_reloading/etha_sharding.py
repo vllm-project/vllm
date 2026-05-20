@@ -51,6 +51,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 import torch.distributed as dist
+from etha_chunk import Chunk, map_to_chunk_ops
 from torch.distributed import DeviceMesh
 from torch.distributed.distributed_c10d import (
     _get_default_group,
@@ -61,8 +62,6 @@ from torch.distributed.tensor import distribute_tensor
 from torch.distributed.tensor.placement_types import Placement, Replicate, Shard
 
 from vllm.logger import init_logger
-
-from etha_chunk import Chunk, map_to_chunk_ops
 
 if TYPE_CHECKING:
     from vllm.config.parallel import ParallelConfig
@@ -337,8 +336,8 @@ def get_m2m_map(
     all_m2m_maps: list[Any] = [None] * group_world_size
     dist.all_gather_object(all_m2m_maps, m2m_map_regular, group=group)
 
-    merged: defaultdict[int, defaultdict[tuple, list[tuple[int, tuple]]]] = (
-        defaultdict(lambda: defaultdict(list))
+    merged: defaultdict[int, defaultdict[tuple, list[tuple[int, tuple]]]] = defaultdict(
+        lambda: defaultdict(list)
     )
     for rank_map in all_m2m_maps:
         if rank_map is not None:
@@ -572,7 +571,10 @@ class EthaShardingStrategy(ABC):
                 mesh_cache: dict[tuple, DeviceMesh] = {}
 
                 def _get_mesh(mesh_tensor: torch.Tensor) -> DeviceMesh:
-                    key = (tuple(mesh_tensor.shape), tuple(mesh_tensor.flatten().tolist()))
+                    key = (
+                        tuple(mesh_tensor.shape),
+                        tuple(mesh_tensor.flatten().tolist()),
+                    )
                     if key not in mesh_cache:
                         mesh_cache[key] = DeviceMesh("cpu", mesh_tensor)
                         meshes_to_destroy.append(mesh_cache[key])
@@ -655,9 +657,7 @@ class EthaShardingStrategy(ABC):
 # ============================================================================
 
 
-def _vllm_dptp_mesh(
-    dp_size: int, tp_size: int, base_rank: int
-) -> torch.Tensor:
+def _vllm_dptp_mesh(dp_size: int, tp_size: int, base_rank: int) -> torch.Tensor:
     return torch.arange(base_rank, base_rank + dp_size * tp_size).view(dp_size, tp_size)
 
 
@@ -669,9 +669,7 @@ def _trainer_att_mesh(dp_replicate: int, dp_shard: int) -> torch.Tensor:
     return torch.arange(dp_replicate * dp_shard).view(dp_replicate, dp_shard)
 
 
-def _trainer_moe_mesh(
-    dp_replicate: int, dp_shard: int, ep: int
-) -> torch.Tensor:
+def _trainer_moe_mesh(dp_replicate: int, dp_shard: int, ep: int) -> torch.Tensor:
     return torch.arange(dp_replicate * dp_shard * ep).view(dp_replicate, dp_shard, ep)
 
 
@@ -778,9 +776,7 @@ class VllmEthaShardingStrategy(EthaShardingStrategy):
         pair_table: dict[str, PairSpec] = {}
         for handler, tensors in by_pair.items():
             mesh_kind, table_placements = VLLM_HANDLER_PLACEMENTS[handler]
-            expected_mesh = (
-                ep_mesh if mesh_kind == "ep" else dptp_mesh
-            )
+            expected_mesh = ep_mesh if mesh_kind == "ep" else dptp_mesh
             if expected_mesh is None:
                 raise RuntimeError(
                     f"Handler {handler!r} needs ep_mesh but no FusedMoE found "
@@ -823,9 +819,7 @@ class VllmEthaShardingStrategy(EthaShardingStrategy):
 
             # Peer (trainer) side comes from the static trainer table.
             trainer_placements = TRAINER_HANDLER_PLACEMENTS[handler]
-            trainer_mesh = (
-                trainer_moe if handler in MOE_HANDLERS else trainer_att
-            )
+            trainer_mesh = trainer_moe if handler in MOE_HANDLERS else trainer_att
 
             pair_table[handler] = PairSpec(
                 handler=handler,

@@ -87,6 +87,7 @@ def map_to_chunk_ops(
     Fan-out broadcasts (one source chunk going to multiple destinations)
     are emitted as N separate P2P sends. This is the MVP shortcut.
     """
+
     def _build_slicers(
         tensor: torch.Tensor | None, num_slicers: list[int]
     ) -> list[tuple[slice, ...]] | None:

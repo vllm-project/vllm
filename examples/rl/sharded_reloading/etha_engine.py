@@ -47,6 +47,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Self
 
 import torch
+from etha_chunk import Chunk
+from etha_sharding import (
+    TrainerEthaShardingStrategy,
+    VllmEthaShardingStrategy,
+)
 
 from vllm.config.parallel import ParallelConfig
 from vllm.config.weight_transfer import WeightTransferConfig
@@ -57,12 +62,6 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferUpdateInfo,
 )
 from vllm.logger import init_logger
-
-from etha_chunk import Chunk
-from etha_sharding import (
-    TrainerEthaShardingStrategy,
-    VllmEthaShardingStrategy,
-)
 
 if TYPE_CHECKING:
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
@@ -258,8 +257,7 @@ class EthaWeightTransferEngine(
 
         # 1. Rendezvous (same shape as NCCLWeightTransferEngine).
         worker_rank = (
-            self.parallel_config.data_parallel_index
-            * self.parallel_config.world_size
+            self.parallel_config.data_parallel_index * self.parallel_config.world_size
             + self.parallel_config.rank
         )
         rank = worker_rank + init_info.rank_offset
@@ -306,13 +304,13 @@ class EthaWeightTransferEngine(
         if self.pynccl is None:
             raise RuntimeError("Etha engine not initialized")
         t0 = time.monotonic()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         chunk_comm(
             self._recv_chunks,
             self.pynccl,
             label=f"recv rank={self.rank} v={update_info.version}",
         )
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         logger.info(
             "Etha receive_weights rank=%d v=%d wall=%.3fs",
             self.rank,
@@ -433,11 +431,9 @@ class EthaTrainerWeightTransferEngine:
         tensor views — callers mutate the underlying tensors in place
         between rounds, no re-registration needed."""
         t0 = time.monotonic()
-        torch.cuda.synchronize()
-        chunk_comm(
-            self.send_chunks, self.pynccl, label=f"send rank={self.rank}"
-        )
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
+        chunk_comm(self.send_chunks, self.pynccl, label=f"send rank={self.rank}")
+        torch.accelerator.synchronize()
         logger.info(
             "Etha trainer send_weights rank=%d wall=%.3fs",
             self.rank,

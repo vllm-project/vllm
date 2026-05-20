@@ -31,21 +31,14 @@ instead of rank-0 gather + broadcast.
 
 import asyncio
 import os
-import re
 import sys
 import time
 import uuid
 from dataclasses import asdict
 from pathlib import Path
 
-# Etha lives next to this script. Put its directory on sys.path so the
-# local `etha_*` modules import cleanly here AND in any Ray actor that
-# inherits this runtime_env (we forward PYTHONPATH below).
-_EXAMPLE_DIR = str(Path(__file__).resolve().parent)
-if _EXAMPLE_DIR not in sys.path:
-    sys.path.insert(0, _EXAMPLE_DIR)
-
 import ray
+import regex as re
 import torch
 import torch.distributed.checkpoint as dcp
 from huggingface_hub import snapshot_download
@@ -64,11 +57,17 @@ from vllm.distributed.weight_transfer.base import (
 from vllm.utils.network_utils import get_ip, get_open_port
 from vllm.v1.executor import Executor
 
-# Local etha modules. Importing `etha_engine` here also registers "etha"
-# as a weight-transfer backend in this process (see the bottom of that
-# file). Workers register the backend on their own when they import
-# `etha_engine.EthaWorkerExtension` via the `worker_extension_cls`
-# we pass to AsyncEngineArgs below.
+# Etha lives next to this script. Put its directory on sys.path so the
+# local `etha_*` modules import cleanly here AND in any Ray actor that
+# inherits this runtime_env (we forward PYTHONPATH below). The local
+# `etha_engine` import below also registers "etha" as a weight-transfer
+# backend in this process; workers register it on their own when they
+# import `etha_engine.EthaWorkerExtension` via the `worker_extension_cls`
+# we pass to AsyncEngineArgs.
+_EXAMPLE_DIR = str(Path(__file__).resolve().parent)
+if _EXAMPLE_DIR not in sys.path:
+    sys.path.insert(0, _EXAMPLE_DIR)
+
 from etha_engine import (  # noqa: E402
     EthaTrainerWeightTransferEngine,
     EthaWeightTransferInitInfo,
@@ -187,7 +186,7 @@ class EthaTrainerActor:
 
         os.environ["MASTER_ADDR"] = master_addr
         os.environ["MASTER_PORT"] = str(master_port)
-        torch.cuda.set_device(0)  # Ray gave us one GPU
+        torch.accelerator.set_device_index(0)  # Ray gave us one GPU
         # Multi-backend PG: NCCL for tensor collectives, gloo for the
         # object collectives that dcp.load uses internally. Pure-NCCL
         # crashes inside gather_object during planning.
@@ -342,8 +341,8 @@ async def main():
         k: v for k, v in os.environ.items() if k.startswith("NCCL_")
     }
     existing_pp = os.environ.get("PYTHONPATH", "")
-    env_vars["PYTHONPATH"] = (
-        _EXAMPLE_DIR + (os.pathsep + existing_pp if existing_pp else "")
+    env_vars["PYTHONPATH"] = _EXAMPLE_DIR + (
+        os.pathsep + existing_pp if existing_pp else ""
     )
     runtime_env["env_vars"] = env_vars
     ray.init(runtime_env=runtime_env or None)
