@@ -346,6 +346,7 @@ class DraftModelSpeculator:
         from vllm.compilation.backends import set_model_tag
 
         spec = self.speculative_config
+        assert spec is not None
         draft_vllm_config = replace(
             self.vllm_config,
             model_config=self.draft_model_config,
@@ -383,7 +384,7 @@ class DraftModelSpeculator:
     ) -> None:
         self.model_state = model_state
         self.kv_cache_config = kv_cache_config
-        _, self.attn_groups, _ = init_attn_backend(
+        _, self.attn_groups, *_ = init_attn_backend(
             kv_cache_config,
             self.vllm_config,
             self.device,
@@ -504,7 +505,6 @@ class DraftModelSpeculator:
     ) -> torch.Tensor:
         assert self.model is not None
 
-        num_tokens = input_batch.num_tokens_after_padding
         num_reqs = input_batch.num_reqs
         skip_attn = dummy_run and skip_attn_for_dummy_run
 
@@ -535,6 +535,11 @@ class DraftModelSpeculator:
             self.last_token_indices[:num_reqs] = qsl[:num_reqs] + adjusted_lens - 1
             hidden_states = self.run_model(src_tokens, None, None, num_tokens_across_dp)
         else:
+            block_tables = self.block_tables
+            kv_cache_config = self.kv_cache_config
+            assert block_tables is not None
+            assert kv_cache_config is not None
+
             # V2-native kernel: expanded buffer + correction injection.
             total_expanded = prepare_draft_model_step0_inputs(
                 input_buffers=self.input_buffers,
@@ -552,7 +557,7 @@ class DraftModelSpeculator:
             # Slot mappings for the expanded buffer.
             # input_buffers.query_start_loc now holds the expanded values;
             # expanded_positions holds positions for all expanded slots.
-            step0_slot_mappings = self.block_tables.compute_slot_mappings(
+            step0_slot_mappings = block_tables.compute_slot_mappings(
                 input_batch.idx_mapping,
                 self.input_buffers.query_start_loc[: num_reqs + 1],
                 self.expanded_positions[:total_expanded],
@@ -563,7 +568,7 @@ class DraftModelSpeculator:
             step0_slot_mappings[:, is_rejected] = PAD_SLOT_ID
 
             step0_slot_maps_by_layer = build_slot_mappings_by_layer(
-                step0_slot_mappings, self.kv_cache_config
+                step0_slot_mappings, kv_cache_config
             )
 
             # CPU query_start_loc for build_attn_metadata (no D2H sync).
@@ -578,9 +583,7 @@ class DraftModelSpeculator:
             qsl_np_reqs = qsl_np[: num_reqs + 1]
             max_query_len = int((qsl_np_reqs[1:] - qsl_np_reqs[:-1]).max()) + 1
 
-            block_tables_step0 = [
-                x[:num_reqs] for x in self.block_tables.input_block_tables
-            ]
+            block_tables_step0 = [x[:num_reqs] for x in block_tables.input_block_tables]
             attn_md_0 = build_attn_metadata(
                 attn_groups=self.attn_groups,
                 num_reqs=num_reqs,
@@ -592,7 +595,7 @@ class DraftModelSpeculator:
                 max_seq_len=self.max_model_len,
                 block_tables=block_tables_step0,
                 slot_mappings=step0_slot_mappings,
-                kv_cache_config=self.kv_cache_config,
+                kv_cache_config=kv_cache_config,
             )
 
             # Step-0 forward with expanded input_ids and positions.
@@ -684,14 +687,17 @@ class DraftModelSpeculator:
                     num_reqs, None, None, num_tokens_across_dp
                 )
             else:
-                assert self.kv_cache_config is not None
+                block_tables = self.block_tables
+                kv_cache_config = self.kv_cache_config
+                assert block_tables is not None
+                assert kv_cache_config is not None
                 q_start = self.input_buffers.query_start_loc[: num_reqs + 1]
                 positions = self.input_buffers.positions[:num_reqs]
-                step_slot_mappings = self.block_tables.compute_slot_mappings(
+                step_slot_mappings = block_tables.compute_slot_mappings(
                     idx_mapping, q_start, positions, num_reqs
                 )
                 step_slot_maps_by_layer = build_slot_mappings_by_layer(
-                    step_slot_mappings, self.kv_cache_config
+                    step_slot_mappings, kv_cache_config
                 )
                 decode_attn_md = self._build_decode_attn_metadata(num_reqs, num_reqs)
                 hidden_states = self.run_model(
