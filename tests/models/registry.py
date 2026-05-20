@@ -239,7 +239,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         trust_remote_code=True,
     ),
     "Cohere2MoeForCausalLM": _HfExamplesInfo(
-        "/host/engines/cohere-moe",
+        "CohereLabs/command-a-plus-05-2026",
         trust_remote_code=True,
         is_available_online=False,
     ),
