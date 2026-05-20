@@ -13,6 +13,21 @@ from vllm.utils.torch_utils import is_quantized_kv_cache
 
 FP8_MIN, FP8_MAX = get_fp8_min_max()
 
+# Native KV-cache dtypes are valid cache storage modes for this Triton
+# update path. This matters for ModelOpt NVFP4 on Ampere (A100/SM80 and
+# RTX 30xx/SM86): those checkpoints may request FP8 KV cache from their
+# ModelOpt metadata, but users can explicitly select BF16 KV cache to keep
+# the KV-store path native while still running NVFP4 weights. The wrapper
+# must not reject explicit native cache dtype strings before reaching the
+# non-FP8 store path below.
+_NATIVE_KV_CACHE_DTYPES = {"auto", "float16", "bfloat16", "float32", "half", "float"}
+
+
+def _is_supported_kv_cache_dtype(kv_cache_dtype: str) -> bool:
+    return kv_cache_dtype in _NATIVE_KV_CACHE_DTYPES or is_quantized_kv_cache(
+        kv_cache_dtype
+    )
+
 
 @triton.jit
 def reshape_and_cache_kernel_flash(
@@ -350,7 +365,7 @@ def triton_reshape_and_cache_flash(
     block_stride = key_cache.stride()[0]
     page_stride = key_cache.stride()[1]
 
-    assert kv_cache_dtype == "auto" or is_quantized_kv_cache(kv_cache_dtype), (
+    assert _is_supported_kv_cache_dtype(kv_cache_dtype), (
         f"unsupported kv_cache_dtype (str), got {kv_cache_dtype}."
     )
     kv_cache_torch_dtype = (
@@ -529,7 +544,7 @@ def triton_reshape_and_cache_flash_diffkv(
     block_stride = kv_cache.stride()[0]
     page_stride = kv_cache.stride()[1]
 
-    assert kv_cache_dtype == "auto" or is_quantized_kv_cache(kv_cache_dtype), (
+    assert _is_supported_kv_cache_dtype(kv_cache_dtype), (
         f"unsupported kv_cache_dtype (str), got {kv_cache_dtype}."
     )
     kv_cache_torch_dtype = (
