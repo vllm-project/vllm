@@ -822,52 +822,66 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def check_system_message_content_type(cls, data):
-        """Warn if system messages contain non-text content.
+    def check_multimodal_message_content_types(cls, data):
+        """Validate and allow multimodal content in system and tool messages.
 
-        According to OpenAI API spec, system messages can only be of type
-        'text'. We log a warning instead of rejecting to avoid breaking
-        users who intentionally send multimodal system messages.
-        See: https://platform.openai.com/docs/api-reference/chat/create#chat_create-messages-system_message
+        System messages: warn if they contain non-text content, as the OpenAI
+        API spec specifies they should only contain text. However, we don't
+        reject them to avoid breaking users who intentionally send multimodal
+        system messages.
+
+        Tool messages: explicitly allow multimodal content (image_url, audio_url,
+        video_url, etc.) for vision-capable models. This enables scenarios where
+        tools return images or other media for the model to process.
+
+        See: https://platform.openai.com/docs/api-reference/chat/create
         """
         if not isinstance(data, dict):
             return data
         messages = data.get("messages", [])
         for msg in messages:
-            # Check if this is a system message
-            if isinstance(msg, dict) and msg.get("role") == "system":
-                content = msg.get("content")
+            if not isinstance(msg, dict):
+                continue
 
-                # If content is a list (multimodal format)
-                if isinstance(content, list):
-                    for part in content:
-                        if isinstance(part, dict):
-                            part_type = part.get("type")
-                            # Infer type when 'type' field is not explicit
-                            if part_type is None:
-                                if "image_url" in part or "image_pil" in part:
-                                    part_type = "image_url"
-                                elif "image_embeds" in part:
-                                    part_type = "image_embeds"
-                                elif "audio_url" in part:
-                                    part_type = "audio_url"
-                                elif "input_audio" in part:
-                                    part_type = "input_audio"
-                                elif "audio_embeds" in part:
-                                    part_type = "audio_embeds"
-                                elif "video_url" in part:
-                                    part_type = "video_url"
+            role = msg.get("role")
+            content = msg.get("content")
 
-                            # Warn about non-text content in system messages
-                            if part_type and part_type != "text":
-                                logger.warning_once(
-                                    "System messages should only contain text "
-                                    "content according to the OpenAI API spec. "
-                                    "Found content type: '%s'.",
-                                    part_type,
-                                )
+            # Skip if content is not a list (multimodal format)
+            if not isinstance(content, list):
+                continue
+
+            # Check content parts for non-text types
+            for part in content:
+                if isinstance(part, dict):
+                    part_type = part.get("type")
+                    # Infer type when 'type' field is not explicit
+                    if part_type is None:
+                        if "image_url" in part or "image_pil" in part:
+                            part_type = "image_url"
+                        elif "image_embeds" in part:
+                            part_type = "image_embeds"
+                        elif "audio_url" in part:
+                            part_type = "audio_url"
+                        elif "input_audio" in part:
+                            part_type = "input_audio"
+                        elif "audio_embeds" in part:
+                            part_type = "audio_embeds"
+                        elif "video_url" in part:
+                            part_type = "video_url"
+
+                    # Warn about non-text content in system messages only
+                    if role == "system" and part_type and part_type != "text":
+                        logger.warning_once(
+                            "System messages should only contain text "
+                            "content according to the OpenAI API spec. "
+                            "Found content type: '%s'.",
+                            part_type,
+                        )
+                    # Tool messages with multimodal content are explicitly allowed
+                    # No warning or error for tool role with non-text content
 
         return data
+
 
 
 class BatchChatCompletionRequest(OpenAIBaseModel):
