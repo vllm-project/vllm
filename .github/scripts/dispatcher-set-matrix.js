@@ -148,6 +148,9 @@ function setMatrixOutput({ core, inputs }) {
   if (features === "vision" || features === "all") {
     featureTests.push("vision");
   }
+  if (features === "asr" || features === "all") {
+    featureTests.push("asr");
+  }
   // Handle feature tests
   for (const tg of featureTests) {
     const labels = table[tg];

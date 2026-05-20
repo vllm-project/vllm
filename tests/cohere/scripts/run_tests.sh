@@ -633,6 +633,21 @@ run_vision() {
     fi
 }
 
+run_asr() {
+    echo "Running ASR tests..."
+    cd "${VLLM_WORKSPACE}"
+
+    local errors=0
+    export VLLM_WORKER_MULTIPROC_METHOD=spawn
+
+    time pytest -sv tests/cohere/test_asr.py::test_cohere_transcribe_wer_correctness || errors=1
+
+    pytest -sv tests/entrypoints/openai/speech_to_text/test_transcription_inter_chunk_spacing.py || errors=1
+    pytest -sv tests/entrypoints/openai/speech_to_text/test_speech_to_text_cancellation.py || errors=1
+
+    return $errors
+}
+
 run_model_arch_c5_3a30t_checks() {
     echo "Running model architecture c5 checks..."
 
@@ -753,7 +768,7 @@ run_c4_sanity_check() {
 run_tests() {
     if [[ -z "${TEST_GROUP:-}" ]]; then
         echo "Error: TEST_GROUP environment variable is not set"
-        echo "Available test groups: cpu_check, fast_check, model_arch, model_arch_logits, model_arch_reward, model_arch_c5_3a30t, model_arch_c5_lora, quantization, quantization_32bit_logits, GG, guided_generation, thinking_budget, bee_sample_tb_check, lm_eval, bee_eval, bee_samples, performance, speculative_decoding, vision, c4_sanity_check"
+        echo "Available test groups: cpu_check, fast_check, model_arch, model_arch_logits, model_arch_reward, model_arch_c5_3a30t, model_arch_c5_lora, quantization, quantization_32bit_logits, GG, guided_generation, thinking_budget, bee_sample_tb_check, lm_eval, bee_eval, bee_samples, performance, speculative_decoding, vision, asr, c4_sanity_check"
         exit 1
     fi
 
@@ -809,12 +824,15 @@ run_tests() {
         vision)
             run_vision
             ;;
+        asr)
+            run_asr
+            ;;
         c4_sanity_check)
             run_c4_sanity_check
             ;;
         *)
             echo "Unknown test group: $TEST_GROUP"
-            echo "Available test groups: cpu_check, fast_check, model_arch, model_arch_logits, model_arch_reward, model_arch_c5_3a30t, model_arch_c5_lora, quantization, quantization_32bit_logits, GG, guided_generation, thinking_budget, bee_sample_tb_check, lm_eval, bee_eval, bee_samples, performance, speculative_decoding, vision, c4_sanity_check"
+            echo "Available test groups: cpu_check, fast_check, model_arch, model_arch_logits, model_arch_reward, model_arch_c5_3a30t, model_arch_c5_lora, quantization, quantization_32bit_logits, GG, guided_generation, thinking_budget, bee_sample_tb_check, lm_eval, bee_eval, bee_samples, performance, speculative_decoding, vision, asr, c4_sanity_check"
             exit 1
             ;;
     esac

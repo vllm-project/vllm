@@ -4,6 +4,7 @@
   },
   "h100": {
     "fast_check":                  ["cohere-ubuntu-cw-h100-1-model-efficiency"],
+    "asr":                         ["cohere-ubuntu-cw-h100-1-model-efficiency"],
     "quantization_32bit_logits":   ["cohere-ubuntu-cw-h100-1-model-efficiency"],
     "model_arch_c5_3a30t":   ["cohere-ubuntu-cw-h100-1-model-efficiency"],
     "model_arch_c5_lora":    ["cohere-ubuntu-cw-h100-1-model-efficiency"],

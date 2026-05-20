@@ -3,7 +3,7 @@
 ## TL;DR
 
 - we have entry workflows [build-and-test](https://github.com/cohere-ai/vllm-cohere/actions/workflows/build-and-test.yaml) (feature tests), [build-and-eval](https://github.com/cohere-ai/vllm-cohere/actions/workflows/build-and-eval.yaml) (`lm_eval` / `bee_eval`), and [build-and-bench](https://github.com/cohere-ai/vllm-cohere/actions/workflows/build-and-bench.yaml) (perf benchmarks) to build docker images against a commit and run tests with those images
-- the testing groups are: `cpu`, `fast_check`, `model_arch`, `quantization` (expands to `quantization_32bit_logits`), `GG` (expands to `guided_generation`), `thinking_budget` (expands to `thinking_budget`, `bee_sample_tb_check`), `lm_eval`, `bee_eval`, `performance`, `speculative_decoding`, `vision` (details below)
+- the testing groups are: `cpu`, `fast_check`, `model_arch`, `quantization` (expands to `quantization_32bit_logits`), `GG` (expands to `guided_generation`), `thinking_budget` (expands to `thinking_budget`, `bee_sample_tb_check`), `lm_eval`, `bee_eval`, `performance`, `speculative_decoding`, `vision`, `asr` (details below)
 - `fast_check` and `all` also trigger CPU tests in parallel on a `ubuntu-latest` runner
 - CPU tests also run automatically on every PR to `cohere` via `pr-cpu-tests.yaml`
 - to kick off tests, you can use the GitHub Actions UI -> `build-and-test` / `build-and-eval` / `build-and-bench` -> new workflow, or use `gh cli`
@@ -53,7 +53,7 @@ NOTE: if you specify a branch in `--ref`, the workflow may fail if you make chan
    - This allows testing local source code changes while using optimized compiled extensions
    - Hardware profiles are applied automatically at engine boot via [`vllm/cohere/auto_config.py`](../../../vllm/cohere/auto_config.py) when `VLLM_ENABLE_COHERE_AUTO_CONFIG=1` is set; CI shells export it once at the top of [`run_tests.sh`](../../../tests/cohere/scripts/run_tests.sh) (and friends), and standalone Python entry points set it via `os.environ.setdefault`. See [Hardware Profiles](#hardware-profiles) below.
 
-2. **Download model checkpoints** (optional, only needed for eval/performance/guided_generation/speculative_decoding/vision tests):
+2. **Download model checkpoints** (optional, only needed for eval/performance/guided_generation/speculative_decoding/vision/asr tests):
 
    ```bash
    # Set environment variables
@@ -147,6 +147,17 @@ cd tests
 CUDA_VISIBLE_DEVICES=2 TEST_GROUP=fast_check bash cohere/scripts/run_tests.sh
 ```
 
+**Run ASR tests with the predownloaded Cohere ASR checkpoint:**
+
+```bash
+cd tests
+ENGINES_DIR=/host/engines bash cohere/scripts/download_checkpoints.sh asr
+ENGINES_DIR=/host/engines \
+VLLM_WORKSPACE=/host/vllm-cohere \
+TEST_GROUP=asr \
+bash cohere/scripts/run_tests.sh
+```
+
 ## Test Documentation
 
 Test planning and compatibility tracking live in three connected documents:
@@ -176,6 +187,7 @@ compatibility.
 | `speculative_decoding` | ~15m | EAGLE speculative decoding tests, validates mean acceptance length metrics. |
 | `performance` | ~1.5h | Serving benchmarks for CR7B (TP=1) or Command A (TP=2+). Configurable via `TP_SIZE` and `MODELS`. |
 | `vision` | ~10m | Vision model tests with Command-A Vision, verifies multi-image input handling. |
+| `asr` | ~2m | Speech-to-text regression bucket for Cohere ASR. Downloads `cohere-transcribe-03-2026`, runs the Cohere-only WER correctness wrapper in `tests/cohere/test_asr.py`, plus transcription spacing and cancellation endpoint tests. |
 | `model_arch` | ~10m | Model architecture regression bucket combining reward model checks and C5 sanity checks. |
 | `quantization` | ~20m | Quantization regression bucket. Expands into `quantization_32bit_logits` (LM-head fp32 microbenchmark and C5 fp32 logits consistency). |
 | ↳ `quantization_32bit_logits` | ~20m | *(internal group, use `quantization` or `all`)* LM-head fp32 microbenchmark (`test_logits_processor.py`) and full C5 fp32 logits consistency check (`test_c5_fp32_logits.py`). Runs on H100, A100, B200, GB200; not supported on MI300x. |
