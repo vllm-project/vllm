@@ -415,8 +415,7 @@ class DPSupervisor:
         - if the probe fails, we will shut down
         """
         probe_task = asyncio.create_task(
-            self._probe_all_children(),
-            name="dp-health-probe",
+            self._probe_all_children(), name="dp-health-probe"
         )
 
         try:
