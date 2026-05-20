@@ -5,12 +5,14 @@ import importlib.util
 import pytest
 import torch
 
+from vllm.model_executor.layers.quantization.torchao import torchao_version_at_least
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
 
 DTYPE = ["bfloat16"]
 
 TORCHAO_AVAILABLE = importlib.util.find_spec("torchao") is not None
+TORCHAO_VERSION_AT_LEAST_0_17_0 = torchao_version_at_least("0.17.0")
 
 
 @pytest.mark.skipif(
@@ -395,6 +397,65 @@ def test_opt_125m_int4wo_model_running_preshuffled_kernel_online_quant(
         output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
 
         assert output
+
+
+@pytest.mark.skipif(
+    not TORCHAO_AVAILABLE or not TORCHAO_VERSION_AT_LEAST_0_17_0,
+    reason="torchao>=0.17.0 is not available",
+)
+def test_process_weights_after_loading_skips_zentorch_attrs_when_op_unavailable(
+    monkeypatch,
+):
+    from vllm.model_executor.layers.quantization import torchao as torchao_module
+    from vllm.model_executor.layers.quantization import (
+        zentorch_torchao as zentorch_torchao_module,
+    )
+    from vllm.model_executor.layers.quantization.torchao import (
+        TorchAOConfig,
+        TorchAOLinearMethod,
+    )
+
+    torchao_module._load_platform_optimizer.cache_clear()
+    monkeypatch.setattr(zentorch_torchao_module, "has_zentorch_op", lambda *_: False)
+    monkeypatch.setattr(
+        zentorch_torchao_module.current_platform, "is_zen_cpu", lambda: True
+    )
+
+    config = TorchAOConfig.__new__(TorchAOConfig)
+    config.torchao_config = object()
+    config.skip_modules = []
+    config.is_checkpoint_torchao_serialized = True
+    base_method = TorchAOLinearMethod(config)
+    linear_method = (
+        torchao_module._get_platform_optimized_method(base_method, config)
+        or base_method
+    )
+
+    from torchao.quantization import PerRow
+    from torchao.quantization.quantize_.workflows import Int8Tensor
+    from torchao.quantization.quantize_.workflows.int8.int8_tensor import (
+        QuantizeTensorToInt8Kwargs,
+    )
+
+    layer = torch.nn.Module()
+    qdata = torch.zeros((8, 16), dtype=torch.int8)
+    scale = torch.zeros((8, 1), dtype=torch.bfloat16)
+    weight = Int8Tensor(
+        qdata=qdata,
+        scale=scale,
+        block_size=[1, 16],
+        dtype=torch.bfloat16,
+        act_quant_kwargs=QuantizeTensorToInt8Kwargs(granularity=PerRow()),
+    )
+    layer.register_parameter(
+        "weight",
+        torch.nn.Parameter(weight, requires_grad=False),
+    )
+
+    linear_method.process_weights_after_loading(layer)
+
+    assert not hasattr(layer, "_zentorch_dynamic_qlinear_weight")
+    assert not hasattr(layer, "_zentorch_dynamic_qlinear_scales")
 
 
 if __name__ == "__main__":

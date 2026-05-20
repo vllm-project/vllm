@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import importlib
+import importlib.metadata
 import json
 import types
+from functools import lru_cache
 from importlib.util import find_spec
 from typing import Any
 
@@ -12,7 +13,6 @@ import torch.nn.functional as F
 from packaging import version
 from torch.nn.parameter import Parameter
 
-from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -25,7 +25,17 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.utils import set_weight_attrs
 
-logger = init_logger(__name__)
+
+def torchao_version_at_least(torchao_version: str) -> bool:
+    if find_spec("torchao"):
+        try:
+            if version.parse(importlib.metadata.version("torchao")) >= version.parse(
+                torchao_version
+            ):
+                return True
+        except (ImportError, version.InvalidVersion):
+            return False
+    return False
 
 
 def _bond_method_to_cls(func, obj):
@@ -61,18 +71,6 @@ def _restore_weight_attrs(param, recorded_weight_attr):
             setattr(param, attr_name, _bond_method_to_cls(attr, param))
 
 
-def torchao_version_at_least(torchao_version: str) -> bool:
-    if find_spec("torchao"):
-        try:
-            if version.parse(importlib.metadata.version("torchao")) >= version.parse(
-                torchao_version
-            ):
-                return True
-        except (ImportError, version.InvalidVersion):
-            return False
-    return False
-
-
 def should_skip(prefix: str, skip_modules: list[str]) -> bool:
     """
     Robust skipping logic:
@@ -97,6 +95,28 @@ if torchao_version_at_least("0.15.0"):
     )
 else:
     convert_to_packed_tensor_based_on_current_hardware = lambda t: t
+
+
+@lru_cache(maxsize=1)
+def _load_platform_optimizer():
+    """Load optional platform optimizer resolver once."""
+    try:
+        from vllm.model_executor.layers.quantization.zentorch_torchao import (
+            get_optimized_method,
+        )
+        return get_optimized_method
+    except ModuleNotFoundError as exc:
+        if exc.name != "vllm.model_executor.layers.quantization.zentorch_torchao":
+            raise
+        return None
+
+
+def _get_platform_optimized_method(method, config):
+    """Return platform-optimized method wrapper, if available."""
+    resolver = _load_platform_optimizer()
+    if resolver is None:
+        return None
+    return resolver(method, config)
 
 
 class TorchAOConfig(QuantizationConfig):
@@ -245,11 +265,16 @@ class TorchAOConfig(QuantizationConfig):
                 current_torchao_config = TorchAOConfig(
                     c, self.skip_modules, self.is_checkpoint_torchao_serialized
                 )
-                return TorchAOLinearMethod(current_torchao_config)
+                method = TorchAOLinearMethod(current_torchao_config)
+                return (
+                    _get_platform_optimized_method(method, current_torchao_config)
+                    or method
+                )
             else:
                 return UnquantizedLinearMethod()
 
-        return TorchAOLinearMethod(self)
+        method = TorchAOLinearMethod(self)
+        return _get_platform_optimized_method(method, self) or method
 
     def get_scaled_act_names(self) -> list[str]:
         return []
@@ -342,25 +367,27 @@ class TorchAOLinearMethod(LinearMethodBase):
             # recover later
             recorded_weight_attr = _get_weight_attrs(layer.weight)
 
-            layer.weight = Parameter(
-                convert_to_packed_tensor_based_on_current_hardware(layer.weight),
-                requires_grad=layer.weight.requires_grad,
+            layer.register_parameter(
+                "weight",
+                Parameter(
+                    convert_to_packed_tensor_based_on_current_hardware(layer.weight),
+                    requires_grad=layer.weight.requires_grad,
+                ),
             )
 
             _restore_weight_attrs(layer.weight, recorded_weight_attr)
-            return
+        else:
+            # online quantize the weight if the checkpoint is not already
+            # quantized by torchao
+            recorded_weight_attr = _get_weight_attrs(layer.weight)
 
-        # online quantize the weight if the checkpoint is not already
-        # quantized by torchao
-        recorded_weight_attr = _get_weight_attrs(layer.weight)
+            weight = torchao_quantize_param_data(
+                layer.weight, self.quant_config.torchao_config
+            )
+            weight = torch.nn.Parameter(
+                convert_to_packed_tensor_based_on_current_hardware(weight),
+                weight.requires_grad,
+            )
 
-        weight = torchao_quantize_param_data(
-            layer.weight, self.quant_config.torchao_config
-        )
-        weight = torch.nn.Parameter(
-            convert_to_packed_tensor_based_on_current_hardware(weight),
-            weight.requires_grad,
-        )
-
-        _restore_weight_attrs(weight, recorded_weight_attr)
-        layer.register_parameter("weight", weight)
+            _restore_weight_attrs(weight, recorded_weight_attr)
+            layer.register_parameter("weight", weight)
