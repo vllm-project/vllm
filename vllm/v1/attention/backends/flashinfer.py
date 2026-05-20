@@ -1148,12 +1148,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 qo_indptr_cpu[prefill_start:] - qo_indptr_cpu[prefill_start]
             )
             assert qo_indptr_prefill_cpu.shape[0] == num_prefills + 1
-            # FlashInfer plan() expects int32 host qo_indptr. DFlash may pass
-            # int64 query_start_loc_cpu, which the scheduler can misread.
-            if qo_indptr_prefill_cpu.dtype != torch.int32:
-                qo_indptr_prefill_cpu = qo_indptr_prefill_cpu.to(
-                    torch.int32
-                ).contiguous()
 
             if prefill_use_trtllm:
                 # Create GPU versions
