@@ -19,6 +19,7 @@ from torch.distributed import (
     batch_isend_irecv,
 )
 
+import vllm.distributed.nixl_utils as nixl_utils
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.distributed.device_communicators.pynccl_wrapper import (
     ncclDataTypeEnum,
@@ -37,9 +38,7 @@ logger = init_logger(__name__)
 
 def has_nixl() -> bool:
     """Whether the optional NIXL / RIXL package is available."""
-    from vllm.distributed.nixl_utils import NixlWrapper
-
-    return NixlWrapper is not None
+    return nixl_utils.NixlWrapper is not None
 
 
 class EplbCommunicator(ABC):
@@ -233,10 +232,9 @@ class NixlEplbCommunicator(EplbCommunicator):
         expert_weights: Sequence[torch.Tensor],
         cuda_stream: torch.cuda.Stream | None = None,
     ) -> None:
-        from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config
-
         assert expert_weights, "NixlEplbCommunicator requires non-empty expert_weights."
-        if NixlWrapper is None:
+        nixl_wrapper_cls = nixl_utils.NixlWrapper
+        if nixl_wrapper_cls is None:
             raise RuntimeError("NIXL/ RIXL is unavailable.")
         self._cpu_group = cpu_group
         self._cuda_stream = cuda_stream
@@ -254,12 +252,13 @@ class NixlEplbCommunicator(EplbCommunicator):
                 f"expected={self._device}, got={tensor.device}"
             )
 
+        nixl_agent_config = nixl_utils.nixl_agent_config
         config = (
             nixl_agent_config(capture_telemetry=False)
             if nixl_agent_config is not None
             else None
         )
-        self._nixl_wrapper = NixlWrapper(self._make_agent_name(), config)
+        self._nixl_wrapper = nixl_wrapper_cls(self._make_agent_name(), config)
         self._nixl_memory_type = "VRAM"
         self._registered_desc: object | None = None
         self._remote_agents: dict[int, str] = {}

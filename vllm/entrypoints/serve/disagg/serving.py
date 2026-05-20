@@ -3,10 +3,13 @@
 
 
 import asyncio
+import io
 import time
 from collections.abc import AsyncGenerator
 from collections.abc import Sequence as GenericSequence
 
+import numpy as np
+import pybase64 as base64
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
@@ -34,7 +37,7 @@ from vllm.entrypoints.serve.disagg.protocol import (
     GenerateStreamResponse,
 )
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
-from vllm.entrypoints.utils import should_include_usage
+from vllm.entrypoints.utils import get_max_tokens, should_include_usage
 from vllm.inputs import EngineInput, mm_input
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
@@ -80,6 +83,18 @@ class ServingTokens(OpenAIServing):
                 "Tokens-only mode is enabled, skipping detokenization "
                 "step for incoming requests."
             )
+
+        # Mirrors ``OpenAIServingChat`` so we can apply server-side
+        # ``max_tokens`` defaulting when the client omits it. Without this,
+        # ``SamplingParams.max_tokens`` falls back to its dataclass default
+        # of 16 and silently truncates every generation.
+        self.default_sampling_params = self.model_config.get_diff_sampling_param()
+        mc = self.model_config
+        self.override_max_tokens = (
+            self.default_sampling_params.get("max_tokens")
+            if mc.generation_config not in ("auto", "vllm")
+            else getattr(mc, "override_generation_config", {}).get("max_new_tokens")
+        )
 
     async def serve_tokens(
         self,
@@ -150,6 +165,20 @@ class ServingTokens(OpenAIServing):
         # Schedule the request and get the result generator.
         result_generator: AsyncGenerator[RequestOutput, None] | None = None
         sampling_params = request.sampling_params
+
+        # Apply server-side ``max_tokens`` defaulting when the client did
+        # not set it, matching the OpenAI-compat endpoints. ``SamplingParams``
+        # defaults ``max_tokens`` to 16, which would otherwise silently cap
+        # every generation that omits the field.
+        if not request.is_sampling_param_provided("max_tokens"):
+            sampling_params.max_tokens = get_max_tokens(
+                max_model_len=self.model_config.max_model_len,
+                max_tokens=None,
+                input_length=self._extract_prompt_len(engine_input),
+                default_sampling_params=self.default_sampling_params,
+                override_max_tokens=self.override_max_tokens,
+            )
+
         if self.force_no_detokenize:
             sampling_params.detokenize = False
         if request.stream:
@@ -168,6 +197,9 @@ class ServingTokens(OpenAIServing):
             else await self._get_trace_headers(raw_request.headers)
         )
 
+        # Extract data_parallel_rank from header (router can inject it)
+        data_parallel_rank = self._get_data_parallel_rank(raw_request)
+
         result_generator = self.engine_client.generate(
             engine_input,
             sampling_params,
@@ -175,6 +207,7 @@ class ServingTokens(OpenAIServing):
             lora_request=lora_request,
             trace_headers=trace_headers,
             priority=request.priority,
+            data_parallel_rank=data_parallel_rank,
         )
 
         assert result_generator is not None
@@ -229,11 +262,24 @@ class ServingTokens(OpenAIServing):
             else:
                 logprobs = None
 
+            # Encode routed_experts for transport. JSON can't carry raw
+            # bytes, so we write the ndarray as a ``.npy`` byte stream
+            # and base64-encode it. ``pybase64`` is ~3x faster than the
+            # stdlib ``base64`` on large payloads thanks to SIMD.
+            # This is the only base64 hop in the pipeline -- the
+            # engine<->API-server link is binary msgpack + zmq.
+            routed_experts_b64 = None
+            if output.routed_experts is not None:
+                buf = io.BytesIO()
+                np.save(buf, output.routed_experts)
+                routed_experts_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+
             choice_data = GenerateResponseChoice(
                 index=output.index,
                 logprobs=logprobs,
                 finish_reason=output.finish_reason if output.finish_reason else "stop",
                 token_ids=as_list(output.token_ids),
+                routed_experts=routed_experts_b64,
             )
 
             choices.append(choice_data)
@@ -418,10 +464,12 @@ class ServingTokens(OpenAIServing):
                         logprob=max(step_token.logprob, -9999.0),
                         top_logprobs=[
                             ChatCompletionLogProb(
-                                token=token,
-                                logprob=max(p[1].logprob, -9999.0),
+                                token=f"token_id:{token_id}",
+                                logprob=max(logprob.logprob, -9999.0),
                             )
-                            for i, p in enumerate(step_top_logprobs.items())
+                            for i, (token_id, logprob) in enumerate(
+                                step_top_logprobs.items()
+                            )
                             if num_output_top_logprobs is not None
                             and i < max(num_output_top_logprobs, 1)
                         ],

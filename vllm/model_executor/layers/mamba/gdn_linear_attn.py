@@ -64,6 +64,7 @@ from vllm.utils.torch_utils import (
     direct_register_custom_op,
 )
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 # Optional ROCm AITER Triton kernels for the GDN decode fast-path.
 # Availability is checked centrally via rocm_aiter_ops; the actual function
@@ -80,6 +81,49 @@ if GDN_AITER_TRITON_AVAILABLE:
     )
 
 logger = init_logger(__name__)
+
+
+def _should_use_flashinfer_gdn_prefill(backend: str, head_k_dim: int | None) -> bool:
+    """Whether to use FlashInfer's GDN prefill kernel instead of the
+    Triton/FLA fallback.
+
+    Requirements:
+    * ``requested in ["flashinfer", "auto"]``;
+    * ``platform == cuda``;
+    * one of the following:
+      - Hopper (SM90) — no further constraints;
+      - Blackwell (SM10.x) with ``head_k_dim == 128`` and ``cuda_runtime >= 13``.
+    """
+    if backend not in ["flashinfer", "auto"]:
+        return False
+    if not current_platform.is_cuda():
+        return False
+    if current_platform.is_device_capability(90):
+        return True  # Hopper — no further constraints.
+    if not current_platform.is_device_capability_family(100):
+        return False  # Neither Hopper nor Blackwell.
+    if head_k_dim != 128:
+        return False
+    return current_platform.get_cuda_runtime_major() >= 13
+
+
+def _log_gdn_backend_decision(
+    backend: str, head_k_dim: int | None, use_flashinfer: bool
+) -> None:
+    """Log the GDN prefill backend choice in the attention-selector style."""
+    chosen = "FlashInfer" if use_flashinfer else "Triton/FLA"
+    logger.info_once(
+        "Using %s GDN prefill kernel (requested=%s, head_k_dim=%s).",
+        chosen,
+        backend,
+        head_k_dim,
+    )
+    # JIT-compiled cutlass path is only used on SM90 (Hopper).
+    if use_flashinfer and current_platform.is_device_capability(90):
+        logger.warning_once(
+            "FlashInfer GDN prefill is JIT-compiled; first run may take a "
+            "while. Set --gdn-prefill-backend triton to skip JIT.",
+        )
 
 
 def fi_chunk_gated_delta_rule(
@@ -133,39 +177,21 @@ def fi_chunk_gated_delta_rule(
 
 @CustomOp.register("chunk_gated_delta_rule")
 class ChunkGatedDeltaRule(CustomOp):
-    def __init__(self) -> None:
+    def __init__(self, head_k_dim: int | None = None) -> None:
         super().__init__()
         additional_config = get_current_vllm_config().additional_config
         assert isinstance(additional_config, dict)
         backend_cfg = additional_config.get("gdn_prefill_backend", "auto")
         backend = str(backend_cfg).strip().lower()
 
-        supports_flashinfer = (
-            current_platform.is_cuda() and current_platform.is_device_capability(90)
-        )
-
-        if backend == "flashinfer":
-            use_flashinfer = supports_flashinfer
-            if not use_flashinfer:
-                logger.warning_once(
-                    "GDN prefill backend 'flashinfer' is selected but "
-                    "cannot use this kernel on the current platform. "
-                    "Falling back to Triton/FLA."
-                )
-        elif backend == "triton":
-            use_flashinfer = False
-        else:
-            use_flashinfer = supports_flashinfer
-
-        if use_flashinfer:
-            logger.info_once("Using FlashInfer GDN prefill kernel")
-            logger.info_once(
-                "FlashInfer GDN prefill kernel is JIT-compiled; first run may "
-                "take a while to compile. Set `--gdn-prefill-backend triton` to "
-                "avoid JIT compile time.",
+        use_flashinfer = _should_use_flashinfer_gdn_prefill(backend, head_k_dim)
+        if backend == "flashinfer" and not use_flashinfer:
+            logger.warning_once(
+                "GDN prefill backend 'flashinfer' is selected but "
+                "cannot use this kernel on the current platform. "
+                "Falling back to Triton/FLA."
             )
-        else:
-            logger.info_once("Using Triton/FLA GDN prefill kernel")
+        _log_gdn_backend_decision(backend, head_k_dim, use_flashinfer)
 
         self._forward_method = (
             self.forward_cuda if use_flashinfer else self.forward_native
@@ -265,8 +291,8 @@ class ChunkGatedDeltaRule(CustomOp):
 @PluggableLayer.register("gated_delta_net_attention")
 class GatedDeltaNetAttention(PluggableLayer, MambaBase):
     @property
-    def mamba_type(self) -> str:
-        return "gdn_attention"
+    def mamba_type(self) -> MambaAttentionBackendEnum:
+        return MambaAttentionBackendEnum.GDN_ATTN
 
     def get_state_dtype(self) -> tuple[torch.dtype, torch.dtype]:
         return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
@@ -291,7 +317,6 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         config: Qwen3NextConfig,
         vllm_config: VllmConfig,
         prefix: str = "",
-        create_in_proj_qkvz: bool = True,
         gqa_interleaved_layout=False,
     ) -> None:
         super().__init__()
@@ -351,32 +376,14 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         # we need to create qkvz_proj adaptively here.
         # When create_in_proj_qkvz is False (e.g. LoRA enabled in Qwen3.5),
         # in_proj_qkv and in_proj_z are created separately instead.
-        self.has_lora_projections = not create_in_proj_qkvz
-        if create_in_proj_qkvz:
-            self.in_proj_qkvz = self.create_qkvz_proj(
-                hidden_size=self.hidden_size,
-                key_dim=self.key_dim,
-                value_dim=self.value_dim,
-                quant_config=quant_config,
-                prefix=f"{prefix}.in_proj_qkvz",
-            )
-        else:
-            # LoRA case (Qwen3.5 only): keep q/k/v and z as separate modules
-            # so that LoRA adapters can be applied independently.
-            self.in_proj_qkv = MergedColumnParallelLinear(
-                input_size=self.hidden_size,
-                output_sizes=[self.key_dim, self.key_dim, self.value_dim],
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.in_proj_qkv",
-            )
-            self.in_proj_z = ColumnParallelLinear(
-                input_size=self.hidden_size,
-                output_size=self.value_dim,
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.in_proj_z",
-            )
+        self.in_proj_qkvz = self.create_qkvz_proj(
+            hidden_size=self.hidden_size,
+            key_dim=self.key_dim,
+            value_dim=self.value_dim,
+            quant_config=quant_config,
+            prefix=f"{prefix}.in_proj_qkvz",
+        )
+
         # ba_proj doesn't support blockwise fp8 quantization.
         # Qwen3-Next and Qwen3.5 have different in_proj_ba checkpoint
         # layouts, so we use a factory method to create the projection.
@@ -442,7 +449,8 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             prefix=f"{prefix}.out_proj",
         )
 
-        self.chunk_gated_delta_rule = ChunkGatedDeltaRule()
+        self.chunk_gated_delta_rule = ChunkGatedDeltaRule(head_k_dim=self.head_k_dim)
+        self._prefill_kernels_warmed_up = False
         self.enable_packed_recurrent_decode = (
             envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
         )
@@ -665,7 +673,6 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
 
         return mixed_qkv_out, z_out, b_out, a_out
 
-    @torch.compile(fullgraph=True)
     def rearrange_mixed_qkv(self, mixed_qkv):
         """Split packed qkv into contiguous (1, seq, heads, dim) tensors.
 
@@ -726,7 +733,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         z = z.reshape(-1, z.shape[-1])
         core_attn_out = self.norm(core_attn_out, z)
         core_attn_out = core_attn_out.reshape(z_shape_og)
-        core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
+        core_attn_out = core_attn_out.flatten(-2)  # ... h d -> ... (h d)
         output[:num_tokens], _ = self.out_proj(core_attn_out)
 
     def forward_hip(
@@ -736,7 +743,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
     ):
         """ROCm forward using AITER Triton fused projection+attention when
         available, otherwise falling back to the generic CUDA path."""
-        if not self.has_lora_projections and GDN_AITER_TRITON_AVAILABLE:
+        if GDN_AITER_TRITON_AVAILABLE:
             num_tokens = hidden_states.size(0)
             projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
             projected_states_ba, _ = self.in_proj_ba(hidden_states)
@@ -781,37 +788,27 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
-        if self.has_lora_projections:
-            # LoRA path (Qwen3.5 only): separate in_proj_qkv and in_proj_z
-            mixed_qkv, _ = self.in_proj_qkv(hidden_states)
-            ba, _ = self.in_proj_ba(hidden_states)
-            z, _ = self.in_proj_z(hidden_states)
+        mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
+        ba, _ = self.in_proj_ba(hidden_states)
+
+        if self.gqa_interleaved_layout:
+            # Qwen3-Next: unpack the interleaved GQA layout
+            query, key, value, z, b, a = self.fix_query_key_value_ordering(
+                mixed_qkvz, ba
+            )
+            query, key, value = map(
+                lambda x: rearrange(x, "l p d -> l (p d)"), (query, key, value)
+            )
+            mixed_qkv = torch.cat((query, key, value), dim=-1)
+        else:
+            # Qwen3.5: weights are already in [q, k, v, z] and [b, a] order
+            qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
+            z_size = self.value_dim // self.tp_size
+            mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
             z = z.reshape(z.size(0), -1, self.head_v_dim)
             b, a = ba.chunk(2, dim=-1)
             b = b.contiguous()
             a = a.contiguous()
-        else:
-            mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
-            ba, _ = self.in_proj_ba(hidden_states)
-
-            if self.gqa_interleaved_layout:
-                # Qwen3-Next: unpack the interleaved GQA layout
-                query, key, value, z, b, a = self.fix_query_key_value_ordering(
-                    mixed_qkvz, ba
-                )
-                query, key, value = map(
-                    lambda x: rearrange(x, "l p d -> l (p d)"), (query, key, value)
-                )
-                mixed_qkv = torch.cat((query, key, value), dim=-1)
-            else:
-                # Qwen3.5: weights are already in [q, k, v, z] and [b, a] order
-                qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
-                z_size = self.value_dim // self.tp_size
-                mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
-                z = z.reshape(z.size(0), -1, self.head_v_dim)
-                b, a = ba.chunk(2, dim=-1)
-                b = b.contiguous()
-                a = a.contiguous()
 
         # ============================================================
         # Part 2: Core Attention (Custom Op)
@@ -851,8 +848,6 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         """
         num_tokens = hidden_states.size(0)
 
-        assert not self.has_lora_projections, "lora isn't supported on XPU."
-
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
@@ -886,7 +881,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         z = z.reshape(-1, z.shape[-1])
         core_attn_out = self.norm(core_attn_out, z)
         core_attn_out = core_attn_out.reshape(z_shape_og)
-        core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
+        core_attn_out = core_attn_out.flatten(-2)  # ... h d -> ... (h d)
         output[:num_tokens], _ = self.out_proj(core_attn_out)
 
     def forward_cpu(
@@ -936,7 +931,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         z = z.reshape(-1, z.shape[-1])
         core_attn_out = self.norm(core_attn_out, z)
         core_attn_out = core_attn_out.reshape(z_shape_og)
-        core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
+        core_attn_out = core_attn_out.flatten(-2)  # ... h d -> ... (h d)
         output[:num_tokens], _ = self.out_proj(core_attn_out)
 
     def _warmup_prefill_kernels(self, qkv_or_qkvz: torch.Tensor, v_dim: int) -> None:
@@ -964,7 +959,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         which has fixed kernel parameters (no autotuning), so only the
         prefill (chunked) path needs warming up.
         """
-        if hasattr(self, "_prefill_kernels_warmed_up"):
+        if self._prefill_kernels_warmed_up:
             return
         self._prefill_kernels_warmed_up = True
 
@@ -1053,9 +1048,9 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         """ROCm AITER fast path: conv1d + recurrent attention from packed
         qkvz/ba layout.
 
-        For decode-only (no spec, no prefill), dispatches directly to
-        ``_forward_core_decode_fast``.  Otherwise unpacks the packed
-        layout and falls through to ``_forward_core``.
+        For decode-only (no spec, no prefill) interleaved-GQA layouts,
+        dispatches directly to ``_forward_core_decode_fast``. Otherwise unpacks
+        the packed layout and falls through to ``_forward_core``.
 
         Args:
             qkvz: packed [q, k, v, z] projection (num_tokens, qkvz_dim)
@@ -1076,8 +1071,12 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         attn_metadata = attn_metadata_raw[self.prefix]  # type: ignore[index]
         assert isinstance(attn_metadata, GDNAttentionMetadata)
 
+        # The AITER fused reshape/conv kernel expects Qwen3-Next's interleaved
+        # GQA layout. Qwen3.5 uses a non-interleaved q/k/v/z layout and must use
+        # the generic path below to split/rearrange inputs correctly.
         if (
-            attn_metadata.spec_sequence_masks is None
+            self.gqa_interleaved_layout
+            and attn_metadata.spec_sequence_masks is None
             and attn_metadata.num_prefills == 0
             and attn_metadata.num_decodes > 0
         ):
