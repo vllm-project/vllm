@@ -9,7 +9,11 @@ from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
 
 
-class EagleSpeculator(AutoRegressiveSpeculator):
+class MTPSpeculator(AutoRegressiveSpeculator):
+    @property
+    def model_returns_tuple(self) -> bool:
+        return False
+
     def load_draft_model(
         self,
         target_model: nn.Module,
