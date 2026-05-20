@@ -604,7 +604,15 @@ class LoRAModelManager:
                 subloras: list[LoRALayerWeights | None] = []
                 # HACK: overrides replacements for qkvz = qkv + z case.
                 # Any better methods to handle this case?
-                if n_slices != len(replacements):
+                # Skip for FusedMoEWithLoRA: the trim above already aligns
+                # ``replacements`` with the per-slot length of
+                # ``lora_a_stacked``; re-expanding to ``n_slices`` here drives
+                # ``module.lora_a_stacked[i]`` past its actual length and
+                # raises IndexError during dummy LoRA warmup.
+                if (
+                    n_slices != len(replacements)
+                    and module.__class__.__name__ != "FusedMoEWithLoRA"
+                ):
                     replacements = [f"slice_{i}" for i in range(n_slices)]
                 for i, r in enumerate(replacements):
                     lora = LoRALayerWeights.create_dummy_lora_weights(
