@@ -7,6 +7,7 @@ from typing import ClassVar, Final
 
 import torch
 
+import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
@@ -154,6 +155,12 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
 
         self.compilation_config = vllm_config.compilation_config
         self.decode_attn_out_dtype = vllm_config.model_config.dtype
+
+        # Cache the gfx942 MAF workaround flag at builder init so the hot
+        # `_build_decode` path doesn't do an `os.getenv` lookup per batch.
+        # See VLLM_AITER_MLA_PERSISTENT_METADATA in vllm.envs for the
+        # MAF context.
+        self._use_persistent_metadata: bool = envs.VLLM_AITER_MLA_PERSISTENT_METADATA
 
         # Store the kernel block size from the spec. When kernel_block_size=1
         # (no spec-dec), behavior is identical to the original. When > 1
@@ -483,8 +490,17 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # We track whether persistent metadata was successfully computed
         # so forward_mqa can skip passing it (falling back to the kernel
         # computing its own metadata internally, like v0.18.0).
+        # MAF H1 WORKAROUND: forcibly skip the persistent-metadata fast path.
+        # On gfx942 with DP=8 (each rank has full nhead=128), the persistent
+        # qh128 MLA ASM kernel (`mla_a8w8_qh128_m32x4_n16x2_msk0_ps`) faults
+        # with "Write access to a read-only page" during warmup. With the
+        # env flag off, the kernel computes metadata internally (v0.18.0
+        # path) — slightly slower but stable. Re-enable by setting
+        # VLLM_AITER_MLA_PERSISTENT_METADATA=1. We resolve via vllm.envs
+        # (`_use_persistent_metadata` cached at class scope) rather than
+        # `os.getenv` here because this builder runs once per decode batch.
         has_persistent_metadata = False
-        if max_qo_len == 1:
+        if max_qo_len == 1 and self._use_persistent_metadata:
             from aiter import get_mla_metadata_v1
 
             get_mla_metadata_v1(

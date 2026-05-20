@@ -115,6 +115,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
+    VLLM_AITER_MLA_PERSISTENT_METADATA: bool = False
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
@@ -1043,6 +1044,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MLA": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MLA", "True").lower() in ("true", "1")
+    ),
+    # Whether to take the persistent qh128 MLA metadata fast path. Off by
+    # default because on gfx942 the persistent
+    # mla_a8w8_qh128_m32x4_n16x2_msk0_ps ASM kernel faults with
+    # "Write access to a read-only page" during warmup. Opt in by setting
+    # VLLM_AITER_MLA_PERSISTENT_METADATA=1 once the regression is verified
+    # fixed in your deployment.
+    "VLLM_AITER_MLA_PERSISTENT_METADATA": lambda: (
+        os.getenv("VLLM_AITER_MLA_PERSISTENT_METADATA", "False").lower()
+        in ("true", "1")
     ),
     # Whether to use aiter mha ops.
     # By default is enabled.
