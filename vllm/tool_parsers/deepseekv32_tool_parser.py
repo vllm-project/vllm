@@ -26,7 +26,12 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
-from vllm.tool_parsers.utils import partial_tag_overlap
+from vllm.tool_parsers.utils import (
+    coerce_to_schema_type,
+    extract_types_from_schema,
+    find_tool_properties,
+    partial_tag_overlap,
+)
 
 logger = init_logger(__name__)
 
@@ -109,41 +114,6 @@ class DeepSeekV32ToolParser(ToolParser):
             param_dict[param_name] = (param_val, string_attr)
         return param_dict
 
-    def _convert_param_value_checked(self, value: str, param_type: str) -> Any:
-        """Convert parameter value to the correct type."""
-        if value.lower() == "null":
-            return None
-
-        param_type = param_type.lower()
-        if param_type in ["string", "str", "text"]:
-            return value
-        elif param_type in ["integer", "int"]:
-            return int(value)
-        elif param_type in ["number", "float"]:
-            val = float(value)
-            return val if val != int(val) else int(val)
-        elif param_type in ["boolean", "bool"]:
-            value = value.strip()
-            if value.lower() not in ["false", "0", "true", "1"]:
-                raise ValueError("Invalid boolean value")
-            return value.lower() in ["true", "1"]
-        elif param_type in ["object", "array"]:
-            return json.loads(value)
-        else:
-            return json.loads(value)
-
-    def _convert_param_value(self, value: str, param_type: str | list[str]) -> Any:
-        """Convert parameter value to the correct type."""
-        if not isinstance(param_type, list):
-            param_type = [param_type]
-        for current_type in param_type:
-            try:
-                return self._convert_param_value_checked(value, current_type)
-            except Exception:
-                continue
-        # return value as fallback
-        return value
-
     @staticmethod
     def _repair_param_dict(
         param_dict: dict[str, Any],
@@ -172,18 +142,7 @@ class DeepSeekV32ToolParser(ToolParser):
         param_dict: dict[str, tuple[str, str]],
     ) -> dict[str, Any]:
         """Convert raw string param values using the tool schema types."""
-        param_config: dict = {}
-        if self.tools:
-            for tool in self.tools:
-                if (
-                    hasattr(tool, "function")
-                    and tool.function.name == function_name
-                    and hasattr(tool.function, "parameters")
-                ):
-                    schema = tool.function.parameters
-                    if isinstance(schema, dict) and "properties" in schema:
-                        param_config = schema["properties"]
-                    break
+        param_config = find_tool_properties(self.tools, function_name)
 
         converted: dict[str, Any] = {}
         for name, (value, string_attr) in param_dict.items():
@@ -191,10 +150,8 @@ class DeepSeekV32ToolParser(ToolParser):
                 converted[name] = value
                 continue
 
-            param_type = "string"
-            if name in param_config and isinstance(param_config[name], dict):
-                param_type = param_config[name].get("type", "string")
-            converted[name] = self._convert_param_value(value, param_type)
+            param_types = extract_types_from_schema(param_config.get(name, {}))
+            converted[name] = coerce_to_schema_type(value, param_types)
         return self._repair_param_dict(converted, param_config)
 
     def extract_tool_calls(
