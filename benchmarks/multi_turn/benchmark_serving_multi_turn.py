@@ -526,6 +526,7 @@ async def send_turn(
 async def poisson_sleep(mean_interval: float, verbose_header: str = None) -> None:
     # Generate a random time interval from the Poisson distribution
     if mean_interval <= 0:
+        await asyncio.sleep(0)
         return
 
     interval = np.random.exponential(mean_interval)
