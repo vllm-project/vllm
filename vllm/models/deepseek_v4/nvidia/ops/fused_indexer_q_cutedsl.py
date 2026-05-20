@@ -9,11 +9,12 @@ from cuda.bindings.driver import CUstream
 from cutlass import BFloat16, Float32, Int64, Uint8, Uint32, const_expr
 from quack.compile_utils import make_fake_tensor
 
-from vllm.v1.attention.ops.deepseek_v4_ops.cutedsl_utils import (
+from vllm.models.deepseek_v4.nvidia.ops.cutedsl_utils import (
     _bf16x2_abs,
     _bf16x2_max,
     _bf16x2_to_fp32,
     _fp32x2_to_bf16x2,
+    _fp32x4_to_fp8x4,
     _fp32x8_to_fp4x8,
     _recast_val,
 )
@@ -65,8 +66,48 @@ def fused_indexer_q_rope_quant_mxfp4_cutedsl(
     )
 
 
-class IndexerQMxFp4Kernel:
-    """Eight-thread subwarps process one ``(token, head)`` row."""
+def fused_indexer_q_rope_quant_fp8_cutedsl(
+    positions: torch.Tensor,
+    index_q: torch.Tensor,
+    index_q_cos_sin_cache: torch.Tensor,
+    index_weights: torch.Tensor,
+    index_weights_softmax_scale: float,
+    index_weights_head_scale: float,
+    index_q_fp8: torch.Tensor,
+    index_weights_out: torch.Tensor,
+) -> None:
+    num_tokens, num_heads, head_dim = index_q.shape
+    rope_dim = index_q_cos_sin_cache.shape[-1]
+    rope_type = _TORCH_TO_CUTE[index_q_cos_sin_cache.dtype]
+
+    for coarsen in (1, 4):
+        IndexerQFp8Kernel.compile(head_dim, rope_dim, num_heads, rope_type, coarsen)
+
+    coarsen = 1 if num_tokens < 512 else 4
+    compiled = IndexerQFp8Kernel.compile(
+        head_dim, rope_dim, num_heads, rope_type, coarsen
+    )
+    scale = float(index_weights_softmax_scale * index_weights_head_scale)
+    # The cute kernel treats the FP8 buffer as raw bytes (Uint8).
+    compiled(
+        positions,
+        index_q,
+        index_q_cos_sin_cache,
+        index_weights,
+        index_q_fp8.view(torch.uint8),
+        index_weights_out,
+        scale,
+    )
+
+
+class IndexerQRopeQuantKernel:
+    """Shared infrastructure for indexer-Q RoPE+quant fused kernels.
+
+    Subclasses implement ``kernel`` for a particular Q quantization scheme
+    (MXFP4, FP8 e4m3, …). The base class owns the launch geometry and the
+    common preamble: thread/token addressing, the BF16 Q load, and the
+    interleaved-RoPE pass over the trailing ``rope_dim`` lanes.
+    """
 
     def __init__(
         self,
@@ -94,47 +135,27 @@ class IndexerQMxFp4Kernel:
         self.threads_per_token = (self.num_heads // self.coarsen) * self.subwarp_size
 
     @cute.jit
-    def __call__(
+    def _load_q_and_rope(
         self,
         positions: cute.Tensor,
         q: cute.Tensor,
         cos_sin_cache: cute.Tensor,
-        weights: cute.Tensor,
-        q_fp4: cute.Tensor,
-        q_scale: cute.Tensor,
-        weights_out: cute.Tensor,
-        scale: Float32,
-        stream: CUstream,
     ):
-        total_threads = q.shape[0] * self.threads_per_token
-        grid = (cute.ceil_div(total_threads, self.tb_size), 1, 1)
-        self.kernel(
-            positions,
-            q,
-            cos_sin_cache,
-            weights,
-            q_fp4,
-            q_scale,
-            weights_out,
-            scale,
-        ).launch(grid=grid, block=(self.tb_size, 1, 1), stream=stream)
+        """Compute thread indices, load Q (BF16), and apply interleaved RoPE.
 
-    @cute.kernel
-    def kernel(
-        self,
-        positions: cute.Tensor,
-        q: cute.Tensor,
-        cos_sin_cache: cute.Tensor,
-        weights: cute.Tensor,
-        q_fp4: cute.Tensor,
-        q_scale: cute.Tensor,
-        weights_out: cute.Tensor,
-        scale: Float32,
-    ):
+        Returns a tuple
+            (q_bf16x2, tid, global_tid, sublane, token_id, head_tile_id,
+             head_start, in_bounds, num_token_heads)
+        where ``q_bf16x2`` is a (coarsen, 8) rmem tile of Uint32 packed
+        bf16x2 pairs covering the 16 BF16 lanes owned by this thread for
+        each of ``coarsen`` heads. RoPE is applied in place to the
+        trailing ``rope_dim`` lanes; the leading nope lanes pass through.
+        """
         block_id, _, _ = cute.arch.block_idx()
         tid, _, _ = cute.arch.thread_idx()
 
-        num_token_heads = q.shape[0] * self.num_heads
+        num_tokens = q.shape[0]
+        num_token_heads = num_tokens * self.num_heads
         global_tid = block_id * self.tb_size + tid
 
         global_subwarp_id = global_tid // self.subwarp_size
@@ -150,7 +171,7 @@ class IndexerQMxFp4Kernel:
         # must_in_bounds is constexpr, True when 1 threadblock fit within 1 token
         # position. the compiler will remove bounds check when that happens.
         must_in_bounds = cutlass.const_expr(self.tb_size % self.threads_per_token == 0)
-        in_bounds = must_in_bounds or (token_id < q.shape[0])
+        in_bounds = must_in_bounds or (token_id < num_tokens)
 
         cp_op = cute.nvgpu.CopyUniversalOp()
 
@@ -219,9 +240,77 @@ class IndexerQMxFp4Kernel:
                     # convert back to BF16 to match numerics
                     q_bf16x2[i, j] = _fp32x2_to_bf16x2(rot0, rot1)
 
+        return (
+            q_bf16x2,
+            tid,
+            global_tid,
+            sublane,
+            token_id,
+            head_tile_id,
+            head_start,
+            in_bounds,
+            num_token_heads,
+        )
+
+
+class IndexerQMxFp4Kernel(IndexerQRopeQuantKernel):
+    """Eight-thread subwarps process one ``(token, head)`` row."""
+
+    @cute.jit
+    def __call__(
+        self,
+        positions: cute.Tensor,
+        q: cute.Tensor,
+        cos_sin_cache: cute.Tensor,
+        weights: cute.Tensor,
+        q_quant: cute.Tensor,
+        q_scale: cute.Tensor,
+        weights_out: cute.Tensor,
+        scale: Float32,
+        stream: CUstream,
+    ):
+        total_threads = q.shape[0] * self.threads_per_token
+        grid = (cute.ceil_div(total_threads, self.tb_size), 1, 1)
+        self.kernel(
+            positions,
+            q,
+            cos_sin_cache,
+            weights,
+            q_quant,
+            q_scale,
+            weights_out,
+            scale,
+        ).launch(grid=grid, block=(self.tb_size, 1, 1), stream=stream)
+
+    @cute.kernel
+    def kernel(
+        self,
+        positions: cute.Tensor,
+        q: cute.Tensor,
+        cos_sin_cache: cute.Tensor,
+        weights: cute.Tensor,
+        q_quant: cute.Tensor,
+        q_scale: cute.Tensor,
+        weights_out: cute.Tensor,
+        scale: Float32,
+    ):
+        (
+            q_bf16x2,
+            tid,
+            global_tid,
+            sublane,
+            token_id,
+            head_tile_id,
+            head_start,
+            in_bounds,
+            num_token_heads,
+        ) = self._load_q_and_rope(positions, q, cos_sin_cache)
+
+        cp_op = cute.nvgpu.CopyUniversalOp()
+
         # layout: [coarsen, 8]
         q_fp4_tile = cute.local_tile(
-            q_fp4[token_id, None, None],
+            q_quant[token_id, None, None],
             tiler=(self.coarsen, 8),
             coord=(head_tile_id, sublane),
         )
@@ -332,6 +421,191 @@ class IndexerQMxFp4Kernel:
             weights,
             q_fp4,
             q_scale,
+            weights_out,
+            Float32(0.0),
+            stream,
+            options="--enable-tvm-ffi",
+        )
+
+
+class IndexerQFp8Kernel(IndexerQRopeQuantKernel):
+    """Eight-thread subwarps process one ``(token, head)`` row and emit
+    float8 e4m3fn with a single per-(token, head) scalar scale folded
+    into the per-token weight (mirrors ``_fused_indexer_q_rope_quant_kernel``).
+    """
+
+    def __init__(
+        self,
+        head_dim: int = 128,
+        rope_dim: int = 64,
+        num_heads: int = 64,
+        cos_sin_dtype: type[cutlass.Numeric] = Float32,
+        coarsen: int = 4,
+    ):
+        super().__init__(head_dim, rope_dim, num_heads, cos_sin_dtype, coarsen)
+        # Each subwarp owns `coarsen` heads; we use the first `coarsen`
+        # threads of the subwarp to write the per-head weights using the
+        # fp8 scale computed in the matching loop iteration.
+        assert self.coarsen <= self.subwarp_size, (
+            f"FP8 kernel requires coarsen ({self.coarsen}) <= "
+            f"subwarp_size ({self.subwarp_size}) for the weight-fold step"
+        )
+
+    @cute.jit
+    def __call__(
+        self,
+        positions: cute.Tensor,
+        q: cute.Tensor,
+        cos_sin_cache: cute.Tensor,
+        weights: cute.Tensor,
+        q_fp8: cute.Tensor,
+        weights_out: cute.Tensor,
+        scale: Float32,
+        stream: CUstream,
+    ):
+        total_threads = q.shape[0] * self.threads_per_token
+        grid = (cute.ceil_div(total_threads, self.tb_size), 1, 1)
+        self.kernel(
+            positions,
+            q,
+            cos_sin_cache,
+            weights,
+            q_fp8,
+            weights_out,
+            scale,
+        ).launch(grid=grid, block=(self.tb_size, 1, 1), stream=stream)
+
+    @cute.kernel
+    def kernel(
+        self,
+        positions: cute.Tensor,
+        q: cute.Tensor,
+        cos_sin_cache: cute.Tensor,
+        weights: cute.Tensor,
+        q_fp8: cute.Tensor,
+        weights_out: cute.Tensor,
+        scale: Float32,
+    ):
+        (
+            q_bf16x2,
+            _tid,
+            _global_tid,
+            sublane,
+            token_id,
+            head_tile_id,
+            head_start,
+            in_bounds,
+            _num_token_heads,
+        ) = self._load_q_and_rope(positions, q, cos_sin_cache)
+
+        cp_op = cute.nvgpu.CopyUniversalOp()
+
+        # layout: [coarsen, 16] bytes (one e4m3fn per element).
+        q_fp8_tile = cute.local_tile(
+            q_fp8[token_id, None, None],
+            tiler=(self.coarsen, 16),
+            coord=(head_tile_id, sublane),
+        )
+
+        for i in cutlass.range_constexpr(self.coarsen):
+            # Reduce amax across the full head_dim: each thread already holds
+            # the max over its 16 lanes; a width=subwarp_size warp shuffle
+            # spreads the head-wide max to every lane in the subwarp.
+            amax_bf16x2 = _bf16x2_abs(q_bf16x2[i, 0])
+            for j in cutlass.range_constexpr(1, 8):
+                amax_bf16x2 = _bf16x2_max(amax_bf16x2, _bf16x2_abs(q_bf16x2[i, j]))
+            amax_bf16x2 = cute_utils.warp_reduce(
+                amax_bf16x2,
+                _bf16x2_max,
+                width=self.subwarp_size,
+            )
+            amax_pair = _bf16x2_to_fp32(amax_bf16x2)
+            amax = cute_utils.fmax(amax_pair[0], amax_pair[1])
+
+            # scale = max(amax, eps) / fp8_max, then rounded UP to the next
+            # power of two. Adding the mantissa mask before shifting out the
+            # mantissa bumps the exponent whenever s isn't a pure pow2.
+            fp32_scale = cute_utils.fmax(amax, Float32(1e-4)) * Float32(1.0 / 448.0)
+            bits = _recast_val(fp32_scale, Uint32)
+            scale_exp = cute_utils.shr_u32(
+                bits + Uint32(0x7FFFFF), Uint32(23)
+            ) & Uint32(0xFF)
+
+            # rounded scale = 2^(scale_exp - 127); bit pattern is scale_exp << 23
+            fp8_scale_bits = scale_exp << Uint32(23)
+            fp8_scale = _recast_val(fp8_scale_bits, Float32)
+            # inverse = 2^-(scale_exp - 127); bit pattern is (254 - scale_exp) << 23
+            inv_scale_bits = (Uint32(254) - scale_exp) << Uint32(23)
+            inv_fp8_scale = _recast_val(inv_scale_bits, Float32)
+
+            # Weight fold: weights_out = weights * q_scale * scale_combined.
+            # All threads in the subwarp share the same fp8_scale after the
+            # warp_reduce above, so we let thread `sublane == i` write the
+            # weight for head `head_start + i`.
+            if in_bounds and sublane == i:
+                head_id = head_start + i
+                weights_out[token_id, head_id] = (
+                    weights[token_id, head_id].to(Float32) * scale * fp8_scale
+                )
+
+            if in_bounds:
+                # 16 BF16 → 16 e4m3 bytes per thread, packed into 4 b32s
+                # (one cp.async-shaped 128-bit store per row).
+                packed = cute.make_rmem_tensor((4,), Uint32)
+                for j in cutlass.range_constexpr(4):
+                    q0, q1 = _bf16x2_to_fp32(q_bf16x2[i, j * 2])
+                    q2, q3 = _bf16x2_to_fp32(q_bf16x2[i, j * 2 + 1])
+                    packed[j] = _fp32x4_to_fp8x4(
+                        q0 * inv_fp8_scale,
+                        q1 * inv_fp8_scale,
+                        q2 * inv_fp8_scale,
+                        q3 * inv_fp8_scale,
+                    )
+
+                dst = q_fp8_tile[i, None]
+                cp_u32x4 = cute.make_copy_atom(cp_op, Uint32, num_bits_per_copy=128)
+                cute.copy(cp_u32x4, packed, cute.recast_tensor(dst, Uint32))
+
+    @cache
+    @staticmethod
+    def compile(
+        head_dim: int = 128,
+        rope_dim: int = 64,
+        num_heads: int = 64,
+        cos_sin_dtype: type[cutlass.Numeric] = Float32,
+        coarsen: int = 4,
+    ):
+        num_tokens = cute.sym_int()
+        max_pos = cute.sym_int()
+
+        q = make_fake_tensor(
+            BFloat16, (num_tokens, num_heads, head_dim), divisibility=16
+        )
+        positions = make_fake_tensor(Int64, (num_tokens,), divisibility=1)
+        cos_sin_cache = make_fake_tensor(
+            cos_sin_dtype,
+            (max_pos, rope_dim),
+            divisibility=8,
+        )
+        weights = make_fake_tensor(BFloat16, (num_tokens, num_heads), divisibility=8)
+        q_fp8 = make_fake_tensor(
+            Uint8,
+            (num_tokens, num_heads, head_dim),
+            divisibility=16,
+        )
+        weights_out = make_fake_tensor(Float32, (num_tokens, num_heads), divisibility=4)
+
+        kernel = IndexerQFp8Kernel(
+            head_dim, rope_dim, num_heads, cos_sin_dtype, coarsen
+        )
+        stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
+        return cute.compile(
+            kernel,
+            positions,
+            q,
+            cos_sin_cache,
+            weights,
+            q_fp8,
             weights_out,
             Float32(0.0),
             stream,

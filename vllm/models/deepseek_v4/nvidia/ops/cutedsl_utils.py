@@ -118,6 +118,39 @@ def _fp8x4_to_bf16x4(x: Uint32, *, loc=None, ip=None) -> cute.TensorSSA:
 
 
 @dsl_user_op
+def _fp32x4_to_fp8x4(
+    a0: Float32,
+    a1: Float32,
+    a2: Float32,
+    a3: Float32,
+    *,
+    loc=None,
+    ip=None,
+) -> Uint32:
+    # Pack four FP32 values into one b32 of four e4m3 bytes, byte order
+    # {a0, a1, a2, a3} from low to high address.
+    out = llvm.inline_asm(
+        T.i32(),
+        [
+            a0.ir_value(loc=loc, ip=ip),
+            a1.ir_value(loc=loc, ip=ip),
+            a2.ir_value(loc=loc, ip=ip),
+            a3.ir_value(loc=loc, ip=ip),
+        ],
+        "{\n\t"
+        ".reg .b16 t0, t1;\n\t"
+        "cvt.rn.satfinite.e4m3x2.f32 t0, $2, $1;\n\t"
+        "cvt.rn.satfinite.e4m3x2.f32 t1, $4, $3;\n\t"
+        "mov.b32 $0, {t0, t1};\n\t"
+        "}\n",
+        "=r,f,f,f,f",
+        has_side_effects=False,
+        is_align_stack=False,
+    )
+    return Uint32(out)
+
+
+@dsl_user_op
 def _fp32x8_to_fp4x8(
     vals: cute.Tensor,
     offset: cutlass.Constexpr[int],
