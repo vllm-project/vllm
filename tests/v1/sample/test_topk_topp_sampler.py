@@ -5,7 +5,10 @@ import torch
 from torch import Generator
 
 from vllm.platforms import current_platform
-from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p_pytorch
+from vllm.v1.sample.ops.topk_topp_sampler import (
+    apply_top_k_top_p_cpu,
+    apply_top_k_top_p_pytorch,
+)
 
 DEVICE_TYPE = current_platform.device_type
 
@@ -869,3 +872,46 @@ class TestFlashInferDistributionMatch:
             f"{label}: distribution differs from theoretical: "
             f"chi2={chi2:.2f} p_value={p_value:.2e} alpha={self.ALPHA}"
         )
+
+
+@pytest.mark.parametrize("batch_size", [1, 8, 64])
+@pytest.mark.parametrize("vocab_size", [32000, 128256])
+@pytest.mark.parametrize("top_k", [40, None])
+@pytest.mark.parametrize("top_p", [0.9, 1.0, None])
+def test_apply_top_k_top_p_cpu_equivalence(batch_size, vocab_size, top_k, top_p):
+    """Survivor count from cpu kernel must match pytorch reference."""
+    if top_k is None and top_p is None:
+        pytest.skip("both None is a no-op")
+    torch.manual_seed(42)
+    logits = torch.randn(batch_size, vocab_size)
+
+    k = None
+    if top_k is not None:
+        k = torch.full((batch_size,), top_k, dtype=torch.int32)
+        disable = torch.rand(batch_size) < 0.25
+        k[disable] = vocab_size
+
+    p = torch.full((batch_size,), top_p) if top_p is not None else None
+
+    ref = apply_top_k_top_p_pytorch(logits.clone(), k, p, allow_cpu_sync=True)
+    out = apply_top_k_top_p_cpu(logits.clone(), k, p)
+
+    ref_kept = (ref != -float("inf")).sum(-1)
+    out_kept = (out != -float("inf")).sum(-1)
+
+    if top_p is None or top_p >= 1.0:
+        # top-k only or no-op: must be exact
+        assert torch.equal(ref != -float("inf"), out != -float("inf")), (
+            "Survivor sets must match exactly when top-p is disabled"
+        )
+    else:
+        # top-p involved: allow small differences due to float32 boundary rounding.
+        # Matches TestTritonTopkTopp tolerance: ≤3 tokens OR < 0.5% of max_kept.
+        max_diff = (ref_kept - out_kept).abs().max().item()
+        max_kept = ref_kept.max().item()
+        if max_kept > 0 and max_diff > 3:
+            diff_pct = max_diff / max_kept * 100
+            assert diff_pct < 0.5, (
+                f"Survivor count differs by {diff_pct:.2f}% "
+                f"({max_diff} values out of {max_kept})"
+            )

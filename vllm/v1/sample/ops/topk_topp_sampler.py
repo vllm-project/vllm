@@ -16,6 +16,13 @@ from vllm.triton_utils import HAS_TRITON
 if HAS_TRITON:
     from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
 
+try:
+    from vllm._custom_ops import cpu_topp_sampling as _cpu_topp_sampling_op
+
+    _HAS_CPU_TOPP_OP = True
+except (ImportError, AttributeError):
+    _HAS_CPU_TOPP_OP = False
+
 logger = init_logger(__name__)
 
 
@@ -168,7 +175,7 @@ class TopKTopPSampler(nn.Module):
 
         The logits tensor may be updated in-place.
         """
-        logits = apply_top_k_top_p_pytorch(logits, k, p, allow_cpu_sync=True)
+        logits = apply_top_k_top_p_cpu(logits, k, p)
         logits_to_return = None
         if self.logprobs_mode == "processed_logits":
             logits_to_return = logits
@@ -385,6 +392,37 @@ def apply_top_k_only(logits: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
     # Handle non-topk rows.
     top_k_mask.masked_fill_(no_top_k_mask.unsqueeze(1), -float("inf"))
     return logits.masked_fill_(logits < top_k_mask, -float("inf"))
+
+
+def apply_top_k_top_p_cpu(
+    logits: torch.Tensor,
+    k: torch.Tensor | None,
+    p: torch.Tensor | None,
+) -> torch.Tensor:
+    """CPU-optimized top-k + top-p. Uses C++ ternary-search kernel for top-p."""
+    if p is None and k is None:
+        return logits
+    if p is None:
+        return apply_top_k_only(logits, k)
+
+    # For joint k+p: apply top-k first so top-p cumsum operates over top-k survivors.
+    if k is not None:
+        logits = apply_top_k_only(logits, k)
+
+    if _HAS_CPU_TOPP_OP:
+        # C++ kernel operates in-place; clone to avoid mutating caller's tensor.
+        out = logits.contiguous().clone()
+        _cpu_topp_sampling_op(out, p.float())
+        return out
+
+    # Fallback: sort-based top-p (original path)
+    logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
+    probs_sort = logits_sort.softmax(dim=-1)
+    probs_sum = torch.cumsum(probs_sort, dim=-1, out=probs_sort)
+    top_p_mask = probs_sum <= 1 - p.unsqueeze(dim=1)
+    top_p_mask[:, -1] = False
+    logits_sort.masked_fill_(top_p_mask, -float("inf"))
+    return logits.scatter_(dim=-1, index=logits_idx, src=logits_sort)
 
 
 def random_sample(

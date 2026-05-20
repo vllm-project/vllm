@@ -425,6 +425,11 @@ def rotary_embedding(
         )
 
 
+def cpu_topp_sampling(logits: torch.Tensor, p: torch.Tensor) -> None:
+    """In-place top-p masking using the C++ ternary-search kernel (CPU only)."""
+    torch.ops._C.cpu_topp_sampling(logits, p)
+
+
 # layer norm ops
 def rms_norm(
     out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, epsilon: float
