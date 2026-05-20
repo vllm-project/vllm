@@ -145,7 +145,7 @@ class ReasoningConfig:
                         f"({parser_end_str!r}) as a token subsequence. "
                         f"The parser would never recognize the configured "
                         f"end of reasoning on a `thinking_token_budget` "
-                        f"overrunEnsure `reasoning_end_str` ends "
+                        f"overrun. Ensure `reasoning_end_str` ends "
                         f"with (or otherwise contains) {parser_end_str!r}."
                     )
                 self._parser_reasoning_end_token_ids = parser_end_ids
