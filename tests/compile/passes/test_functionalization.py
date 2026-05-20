@@ -317,12 +317,12 @@ class TestFusedDeepseekV4QnormRopeKvInsert(torch.nn.Module):
     def example_inputs(self, num_slots=32, num_heads=1):
         # q shape: [N, H, HEAD_DIM=512]
         # kv shape: [N, HEAD_DIM=512]
-        # k_cache shape: [N, 576]  (block_size=16: 448+128 per token)
+        # k_cache shape: [N, 576] uint8 (448 fp8 + 128 bf16 per token)
         head_dim = 512
         return (
             torch.randn(num_slots, num_heads, head_dim),
             torch.randn(num_slots, head_dim),
-            torch.randn(num_slots, 576),
+            torch.zeros(num_slots, 576, dtype=torch.uint8),
         )
 
     def ops_in_model(self, do_fusion):
