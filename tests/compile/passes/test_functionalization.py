@@ -255,6 +255,12 @@ class TestFusedDeepseekV4QnormRopeKvInsert(torch.nn.Module):
     """
     Test for DeepSeek-V4 fused_qnorm_rope_kv_rope_quant_insert op.
     This op mutates q and k_cache in-place.
+    
+    Real kernel signature:
+        fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
+            Tensor! q, Tensor kv, Tensor! k_cache,
+            Tensor slot_mapping, Tensor position_ids, Tensor cos_sin_cache,
+            float eps, int cache_block_size) -> ()
     """
 
     OP_REGISTERED = False
@@ -269,19 +275,29 @@ class TestFusedDeepseekV4QnormRopeKvInsert(torch.nn.Module):
 
             def fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert_impl(
                 q: torch.Tensor,
+                kv: torch.Tensor,
                 k_cache: torch.Tensor,
-            ) -> torch.Tensor:
+                slot_mapping: torch.Tensor,
+                position_ids: torch.Tensor,
+                cos_sin_cache: torch.Tensor,
+                eps: float,
+                cache_block_size: int,
+            ) -> None:
                 # Simulate in-place mutation of q and k_cache
                 q.mul_(0.5)
                 k_cache.mul_(0.5)
-                # Return a tensor (simulating the attention output)
-                return torch.empty_like(q)
 
             def fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert_fake(
                 q: torch.Tensor,
+                kv: torch.Tensor,
                 k_cache: torch.Tensor,
-            ) -> torch.Tensor:
-                return torch.empty_like(q)
+                slot_mapping: torch.Tensor,
+                position_ids: torch.Tensor,
+                cos_sin_cache: torch.Tensor,
+                eps: float,
+                cache_block_size: int,
+            ) -> None:
+                pass
 
             direct_register_custom_op(
                 op_name="fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert",
@@ -294,11 +310,21 @@ class TestFusedDeepseekV4QnormRopeKvInsert(torch.nn.Module):
 
     def forward(
         self, q: torch.Tensor, k_cache: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        ret = torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
-            q, k_cache
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # Create dummy inputs that the real kernel would use (but we mock)
+        batch_size = q.shape[0]
+        kv = torch.empty_like(q)
+        slot_mapping = torch.zeros(batch_size, dtype=torch.long, device=q.device)
+        position_ids = torch.arange(batch_size, device=q.device)
+        cos_sin_cache = torch.zeros(4096, 64, dtype=q.dtype, device=q.device)
+        eps = 1e-5
+        cache_block_size = 16
+        
+        torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
+            q, kv, k_cache, slot_mapping, position_ids, cos_sin_cache,
+            eps, cache_block_size
         )
-        return q, k_cache, ret
+        return q, k_cache
 
     def example_inputs(self, num_tokens=32, hidden_size=128):
         return (
