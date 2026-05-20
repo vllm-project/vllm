@@ -2141,32 +2141,16 @@ class Scheduler(SchedulerInterface):
         # KV Connector:: update recv and send status from last step.
         for req_id in kv_connector_output.finished_recving or ():
             logger.debug("Finished recving KV transfer for request %s", req_id)
-            if req_id not in self.requests:
-                # Request was removed (finished/aborted) before the async
-                # RDMA completion was reported. Nothing left to do.
-                logger.debug("Request %s no longer tracked, skipping recv", req_id)
-                continue
+            assert req_id in self.requests
             req = self.requests[req_id]
             if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                 self.finished_recving_kv_req_ids.add(req_id)
-            elif RequestStatus.is_finished(req.status):
-                self._free_blocks(req)
             else:
-                # Connectors that poll for transfer completion asynchronously
-                # (rather than completing within the same scheduler step) can
-                # report finished_recving after the request has already
-                # advanced past WAITING_FOR_REMOTE_KVS. Blocks will be freed
-                # when the request finishes normally.
-                logger.debug(
-                    "Request %s recv finished in status=%s, skipping block free",
-                    req_id,
-                    req.status.name,
-                )
+                assert RequestStatus.is_finished(req.status)
+                self._free_blocks(self.requests[req_id])
         for req_id in kv_connector_output.finished_sending or ():
             logger.debug("Finished sending KV transfer for request %s", req_id)
-            if req_id not in self.requests:
-                logger.debug("Request %s no longer tracked, skipping send", req_id)
-                continue
+            assert req_id in self.requests
             self._free_blocks(self.requests[req_id])
 
     def _update_requests_with_invalid_blocks(
