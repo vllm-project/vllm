@@ -17,9 +17,7 @@ lm_eval[api]
 modelscope
 
 # --- Audio Processing ---
-av
 librosa
-scipy
 audioread
 soxr
 pooch
