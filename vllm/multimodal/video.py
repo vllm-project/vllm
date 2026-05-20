@@ -588,9 +588,8 @@ class DynamicVideoBackend(VideoBackend):
         duration = source.duration
         original_fps = source.original_fps
         max_duration = target.max_duration
-        fps = target.fps
+        fps = kwargs.get("fps", target.fps)
         max_frame_idx = source.total_frames_num - 1
-        fps = kwargs.get("fps", fps)
 
         # Refer to:
         # https://github.com/huggingface/transformers/blob/v4.55.4/src/transformers/models/glm4v/video_processing_glm4v.py#L103-L140
