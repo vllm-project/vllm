@@ -870,9 +870,19 @@ class OffloadingConnectorScheduler:
         # TODO(orozery): possibly kickoff offload for last block
         # which may have been deferred due to async scheduling
         req_status = self._req_status.get(request.request_id)
+
+        req_context = (
+            req_status.req_context
+            if req_status
+            else ReqContext(
+                req_id=request.request_id,
+                kv_transfer_params=request.kv_transfer_params,
+            )
+        )
+        self.manager.request_finished(req_context)
+
         if req_status is None:
             return False, None
-        self.manager.request_finished(req_status.req_context)
         if not req_status.transfer_jobs:
             del self._req_status[request.request_id]
             return False, None
