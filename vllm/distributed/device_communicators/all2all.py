@@ -742,6 +742,10 @@ class MoriAll2AllManager(All2AllManagerBase):
             kernel_type=kernel_type,
             rdma_block_num=rdma_block_num,
             gpu_per_node=min(8, num_ep_ranks),
+            # Match SGLang config — vLLM was relying on mori defaults for
+            # these two fields, which may not be what mori expects on gfx942.
+            num_qp_per_pe=2,
+            quant_type="fp8_direct_cast" if scale_dim > 0 else "none",
         )
 
     def _make_handle(self, **kwargs):
