@@ -518,9 +518,19 @@ def _get_tile_size(
             tile_size = 32
         else:
             tile_size = triton.next_power_of_2(block_size)
-        # Cap TILE_SIZE to 128 when head_size > 128 to fit in 64KB LDS
-        # and avoid 30+ min LLVM compilation times
-        if head_size > 128:
+        # Cap TILE_SIZE to fit in 64KB LDS on Navi.  Each K (and V) tile
+        # consumes `tile_size * head_size * element_size` bytes per
+        # software-pipeline stage; the post-refactor kernel also implicitly
+        # double-buffers the load.  Budget table (head_size, element_size=2):
+        #   head_size=128, TILE_SIZE=128 → 2*128*128*2 = 64 KB just for K+V
+        #                                 (overflows once Q/S/double-buffer
+        #                                 add ≈ 67 KB → reported 131 KB)
+        #   head_size=128, TILE_SIZE=64  → 2*64*128*2  = 32 KB ← fits
+        # The is_gfx1151+is_prefill branch above already pins tile_size=32,
+        # so this cap only narrows the decode and the non-gfx1151-Navi paths.
+        if head_size >= 128:
+            tile_size = min(tile_size, 64)
+        elif head_size > 64:
             tile_size = min(tile_size, 128)
 
     return tile_size
@@ -675,6 +685,13 @@ def unified_attention(
                 max_num_stages = 2
             if current_platform.is_navi() and head_size > 256:
                 max_num_stages = 1
+            # Navi (gfx11) decode at head_size>=80 with TILE_SIZE rounded up
+            # to the next power-of-2 of block_size (often 1024–2048) and
+            # 3-stage K/V software pipelining overflows the 64KB LDS budget.
+            # Force a single stage when the head is wide enough for K/V tiles
+            # to dominate; the smaller-head case keeps the default 3 stages.
+            if current_platform.is_navi() and head_size >= 80:
+                max_num_stages = 1
             num_stages = min(3, max_num_stages)
             waves_per_eu = 2
         # Default ROCm config for prefill (short contexts)
@@ -708,6 +725,27 @@ def unified_attention(
                 max_block_m = 65536 // (head_size * element_size)
                 # Reserve headroom for K/V tiles
                 BLOCK_M = min(BLOCK_M, max_block_m - max_block_m % 16)
+
+            # Navi memory: cap num_stages so K/V software pipelining fits
+            # alongside Q+S in 64KB LDS.  Without this, gfx1151 prefill at
+            # head_size>=80 + num_stages=3 overflows for head_size=128
+            # (Qwen3.5-style) since each pipeline stage holds independent
+            # K and V tiles.  Layout per stage:
+            #   Q tile (1×): BLOCK_M × head_size × element_size
+            #   S accum:     BLOCK_M × tile_size × 4  (fp32)
+            #   K + V (N×):  2 × tile_size × head_size × element_size
+            if current_platform.is_navi() and num_stages is not None:
+                lds_budget = 65536
+                tile_size_prefill = TILE_SIZE_PREFILL
+                q_bytes = BLOCK_M * head_size * element_size
+                s_bytes = BLOCK_M * tile_size_prefill * 4
+                kv_bytes_per_stage = 2 * tile_size_prefill * head_size * element_size
+                remaining = lds_budget - q_bytes - s_bytes
+                if kv_bytes_per_stage > 0 and remaining > 0:
+                    max_stages = max(1, remaining // kv_bytes_per_stage)
+                    num_stages = min(num_stages, max_stages)
+                else:
+                    num_stages = 1
 
             # Long context uses more warps
             num_warps = 4
