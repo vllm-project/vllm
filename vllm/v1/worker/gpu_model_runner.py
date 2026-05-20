@@ -3467,6 +3467,7 @@ class GPUModelRunner(
         self,
         logits: torch.Tensor | None,
         spec_decode_metadata: SpecDecodeMetadata | None,
+        scheduler_output: "SchedulerOutput | None" = None,
     ) -> SamplerOutput:
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
@@ -3486,11 +3487,39 @@ class GPUModelRunner(
             self.input_batch.update_async_spec_token_ids(draft_token_ids_cpu)
 
         draft_probs = self._get_spec_decode_draft_probs(spec_decode_metadata)
+
+        # Relaxed acceptance (PR #22238). Only build the thinking_states tensor
+        # when the feature is enabled in speculative_config. Falls back to
+        # strict path inside the sampler if tensor not provided.
+        relaxed_thinking = False
+        relax_ratio = 1.0
+        relax_top_k = 1
+        thinking_states_tensor: torch.Tensor | None = None
+        if self.speculative_config is not None and getattr(
+            self.speculative_config, "relaxed_thinking", False
+        ):
+            relaxed_thinking = True
+            relax_ratio = self.speculative_config.relax_ratio
+            relax_top_k = self.speculative_config.relax_top_k
+            if (
+                scheduler_output is not None
+                and scheduler_output.scheduled_cached_reqs.thinking_states
+            ):
+                thinking_states_tensor = torch.tensor(
+                    scheduler_output.scheduled_cached_reqs.thinking_states,
+                    dtype=torch.bool,
+                    device=self.device,
+                )
+
         sampler_output = self.rejection_sampler(
             spec_decode_metadata,
             draft_probs,
             logits,
             sampling_metadata,
+            relaxed_thinking=relaxed_thinking,
+            relax_ratio=relax_ratio,
+            relax_top_k=relax_top_k,
+            thinking_states=thinking_states_tensor,
         )
         return sampler_output
 
@@ -4330,7 +4359,9 @@ class GPUModelRunner(
             )
 
         with record_function_or_nullcontext("gpu_model_runner: sample"):
-            sampler_output = self._sample(logits, spec_decode_metadata)
+            sampler_output = self._sample(
+                logits, spec_decode_metadata, scheduler_output
+            )
 
         self._update_states_after_model_execute(
             sampler_output.sampled_token_ids, scheduler_output
