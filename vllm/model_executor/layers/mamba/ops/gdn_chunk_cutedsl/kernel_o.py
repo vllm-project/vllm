@@ -142,7 +142,7 @@ class Sm100ChunkOKernel:
     ):
         tid, _, _ = cute.arch.thread_idx()
         bid, v_head_id, _ = cute.arch.block_idx()
-        grid_chunks, _, _ = cute.arch.grid_dim()
+        grid_x, _, _ = cute.arch.grid_dim()
         warp_id = cute.arch.make_warp_uniform(tid // 32)
         lane_id = tid % 32
 
@@ -211,7 +211,7 @@ class Sm100ChunkOKernel:
             stage_id = 0
             parity = 1
 
-            for global_chunk_id in range(bid, num_global_chunks, grid_chunks):
+            for global_chunk_id in range(bid, num_global_chunks, grid_x):
                 seq_id = chunk_indices[global_chunk_id, 0]
                 chunk_id = chunk_indices[global_chunk_id, 1]
                 bos = cu_seqlens[seq_id]
@@ -279,7 +279,7 @@ class Sm100ChunkOKernel:
             tma_parity = 0
             mask_parity = 0
 
-            for global_chunk_id in range(bid, num_global_chunks, grid_chunks):
+            for global_chunk_id in range(bid, num_global_chunks, grid_x):
                 qaddr = sQ[None, None, stage_id].iterator.toint()
                 kaddr = sK[None, None, stage_id].iterator.toint()
                 haddr = sH[None, None, stage_id].iterator.toint()
@@ -357,7 +357,7 @@ class Sm100ChunkOKernel:
             col_indices[1] = (lane_id % 4) * 2 + 1
             col_indices = col_indices.load().reshape((2, 1))
 
-            for global_chunk_id in range(bid, num_global_chunks, grid_chunks):
+            for global_chunk_id in range(bid, num_global_chunks, grid_x):
                 if tid_ < BT:
                     seq_id = chunk_indices[global_chunk_id, 0]
                     chunk_id = chunk_indices[global_chunk_id, 1]
@@ -426,7 +426,7 @@ class Sm100ChunkOKernel:
             )
             # select lane: [total_seq_len, 2, WIDTH/8, V_DIM/WIDTH]
             o_view = o_view[None, ((None, lane_id % 4, None), None)]
-            for global_chunk_id in range(bid, num_global_chunks, grid_chunks):
+            for global_chunk_id in range(bid, num_global_chunks, grid_x):
                 seq_id = chunk_indices[global_chunk_id, 0]
                 chunk_id = chunk_indices[global_chunk_id, 1]
                 bos = cu_seqlens[seq_id]

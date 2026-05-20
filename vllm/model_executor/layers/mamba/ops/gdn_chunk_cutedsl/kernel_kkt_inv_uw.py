@@ -91,7 +91,7 @@ class Sm100ChunkUWKernel:
         U_args = self._make_tma_args(U, self.V_dim, 1, tma_s2g)
         W_args = self._make_tma_args(W, self.K_dim, 1, tma_s2g)
 
-        grid = (self.Hv, num_sms // self.Hv, 1)
+        grid = (num_sms // self.Hv, self.Hv, 1)
         block = (self.num_warps * 32, 1, 1)
         self.kernel(
             K_args,
@@ -121,8 +121,8 @@ class Sm100ChunkUWKernel:
         total_chunks: cute.Tensor,
     ):
         tid, _, _ = cute.arch.thread_idx()
-        head_id, bid, _ = cute.arch.block_idx()
-        _, grid_y, _ = cute.arch.grid_dim()
+        bid, head_id, _ = cute.arch.block_idx()
+        grid_x, _, _ = cute.arch.grid_dim()
 
         warp_id = cute.arch.make_warp_uniform(tid // 32)
         lane_id = tid % 32
@@ -203,7 +203,7 @@ class Sm100ChunkUWKernel:
             stage_id = 0
             parity = 1
 
-            for global_chunk_id in range(bid, num_global_chunks, grid_y):
+            for global_chunk_id in range(bid, num_global_chunks, grid_x):
                 seq_id = chunk_indices[global_chunk_id, 0]
                 chunk_id = chunk_indices[global_chunk_id, 1]
                 bos = cu_seqlens[seq_id]
@@ -251,7 +251,7 @@ class Sm100ChunkUWKernel:
             # LBO=BT*128 is ignored for K-major
             sdesc_template = _tcgen05.make_sdesc_128B_swizzle(BT * 128)
 
-            for global_chunk_id in range(bid, num_global_chunks, grid_y):
+            for global_chunk_id in range(bid, num_global_chunks, grid_x):
                 U_tmem = U_tmem_base + V_dim * stage_id
                 W_tmem = U_tmem | (16 << 16)
                 Ab_tmem = Ab_tmem_base + (BT // 2) * stage_id
@@ -344,7 +344,7 @@ class Sm100ChunkUWKernel:
             col_indices[1, 0, 1] = (lane_id % 4) * 2 + 9
             col_indices = col_indices.load()
 
-            for global_chunk_id in range(bid, num_global_chunks, grid_y):
+            for global_chunk_id in range(bid, num_global_chunks, grid_x):
                 seq_id = chunk_indices[global_chunk_id, 0]
                 chunk_id = chunk_indices[global_chunk_id, 1]
                 bos = cu_seqlens[seq_id]
@@ -680,7 +680,7 @@ class Sm100ChunkUWKernel:
             sW_view = sW_view[(None, lane_id // 16), None]
             sU_view = sU_view[(None, lane_id // 16), None]
 
-            for global_chunk_id in range(bid, num_global_chunks, grid_y):
+            for global_chunk_id in range(bid, num_global_chunks, grid_x):
                 # wait for W MMA + previous TMA store to finish
                 U_tmem = U_tmem_base + V_dim * stage_id
                 if warp_id == 0:
