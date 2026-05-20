@@ -160,6 +160,18 @@ Using the parameters of the underlying normal distribution:
 
 * `alpha` - expected value (λ). Also the variance of the distribution.
 
+#### exponential
+
+```json
+{
+    "distribution": "exponential",
+    "scale": 10,
+    "max": 30
+}
+```
+
+* `scale` - the expected value (λ).
+
 ## ShareGPT Conversations
 
 To run with the ShareGPT data, download the following ShareGPT dataset:

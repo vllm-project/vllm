@@ -201,6 +201,21 @@ class LognormalDistribution(Distribution):
         return f"LognormalDistribution[{self.mean}, {self.sigma}, {self.max_val}]"
 
 
+class ExponentialDistribution(Distribution):
+    def __init__(self, scale, max_val: int | None = None) -> None:
+        self.scale = scale
+        self.max_val = max_val
+
+    def sample(self, size: int = 1) -> np.ndarray:
+        samples = np.random.exponential(self.scale, size=size)
+        if self.max_val:
+            samples = np.minimum(samples, self.max_val)
+        return samples
+
+    def __repr__(self) -> str:
+        return f"ExponentialDistribution[{self.scale}]"
+
+
 class GenConvArgs(NamedTuple):
     num_conversations: int
     text_files: list[str]
@@ -286,6 +301,12 @@ def get_random_distribution(
 
         is_integer = isinstance(min_value, int) and isinstance(max_value, int)
         return UniformDistribution(min_value, max_value, is_integer)
+
+    elif distribution == "exponential":
+        verify_field_exists(conf, "scale", section, subsection)
+        max_val = conf.get("max", None)
+        return ExponentialDistribution(conf["scale"], max_val=max_val)
+
     else:
         raise ValueError(f"Unknown distribution: {distribution}")
 
