@@ -8,21 +8,14 @@ launch per MoE layer; at 40 layers × 8 topk × BS=8 this is 360 launches/step
 at ~2 µs each.  The Triton kernel accumulates in FP32 registers and writes
 the reduced output in the original dtype (BF16/FP16) in a single pass.
 
-Dispatch is guarded by ``VLLM_FUSED_MOE_SUM`` (default: enabled) and only
-fires when ``topk > 4`` — the range where ``ops.moe_sum`` falls back to the
-slow path.  Models with ``topk <= 4`` continue to use the optimised C++
-path unchanged.
+Fires unconditionally whenever ``topk > 4`` — the range where ``ops.moe_sum``
+falls back to the slow path.  Models with ``topk <= 4`` continue to use the
+optimised C++ path unchanged.
 """
 
 import torch
 import triton
 import triton.language as tl
-
-import vllm.envs as envs
-
-
-def _use_fused_topk_reduce() -> bool:
-    return envs.VLLM_FUSED_MOE_SUM
 
 
 @triton.jit

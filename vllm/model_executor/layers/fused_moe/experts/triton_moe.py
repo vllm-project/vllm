@@ -28,7 +28,6 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
 from vllm.model_executor.layers.fused_moe.fused_topk_weight_reduce import (
-    _use_fused_topk_reduce,
     fused_topk_reduce,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
@@ -367,9 +366,9 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         self.moe_sum(intermediate_cache3, output)
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
-        # For topk > 4, ops.moe_sum falls back to the generic at::sum_out.
-        # Use the specialized Triton kernel instead for better performance.
-        if input.ndim == 3 and input.shape[1] > 4 and _use_fused_topk_reduce():
+        # For topk > 4, ops.moe_sum falls back to the slow generic at::sum_out.
+        # Use the fused Triton kernel instead.
+        if input.ndim == 3 and input.shape[1] > 4:
             fused_topk_reduce(input, output)
         else:
             ops.moe_sum(input, output)
