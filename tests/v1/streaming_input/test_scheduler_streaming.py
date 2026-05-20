@@ -573,3 +573,104 @@ class TestStreamingScheduler(unittest.TestCase):
             cached_state_cycle1["prompt_token_ids"]
             is not cached_state_cycle3["prompt_token_ids"]
         ), "Cached states from different cycles should be independent objects."
+
+
+class TestTruncateRequest(unittest.TestCase):
+    """Unit tests for Scheduler.truncate_request."""
+
+    def _make_waiting_streaming_request(
+        self,
+        scheduler: Scheduler,
+        prompt_len: int,
+        num_computed: int,
+        output_tokens: list[int] | None = None,
+    ) -> Request:
+        """Construct a Request directly in WAITING_FOR_STREAMING_REQ
+        and register it with the scheduler. Bypasses the prefill path
+        so we can control internal state precisely. Also installs a
+        mock on ``kv_cache_manager.truncate_to_tokens`` so call args
+        can be asserted."""
+        req = DummyRequest(
+            request_id="req",
+            prompt_token_ids=list(range(prompt_len)),
+        )
+        req.status = RequestStatus.WAITING_FOR_STREAMING_REQ
+        req.num_computed_tokens = num_computed
+        if output_tokens:
+            req._output_token_ids.extend(output_tokens)
+            req._all_token_ids.extend(output_tokens)
+        req.block_hashes = [object()]  # sentinel; truncate should clear
+        scheduler.requests[req.request_id] = req
+        scheduler.kv_cache_manager.truncate_to_tokens = MagicMock(return_value=None)
+        return req
+
+    def test_truncate_request_basic(self):
+        """Happy path: truncates _all_token_ids, refreshes
+        prompt_token_ids, clears _output_token_ids, clamps
+        num_computed_tokens, clears block_hashes, and calls the
+        kv_cache_manager with the right args."""
+        scheduler = create_scheduler()
+        req = self._make_waiting_streaming_request(
+            scheduler,
+            prompt_len=10,
+            num_computed=20,
+            output_tokens=[100, 101, 102, 103, 104],
+        )
+        assert len(req._all_token_ids) == 15
+
+        scheduler.truncate_request(req.request_id, target_num_tokens=8)
+
+        assert req._all_token_ids == [0, 1, 2, 3, 4, 5, 6, 7]
+        assert req.prompt_token_ids == [0, 1, 2, 3, 4, 5, 6, 7]
+        assert req.prompt_token_ids is not req._all_token_ids
+        assert list(req._output_token_ids) == []
+        assert req.num_computed_tokens == 8
+        assert req.block_hashes == []
+        scheduler.kv_cache_manager.truncate_to_tokens.assert_called_once_with(
+            req.request_id, 8
+        )
+
+    def test_truncate_request_clamps_num_computed_only_when_higher(self):
+        """If num_computed_tokens is already below target, it stays put."""
+        scheduler = create_scheduler()
+        req = self._make_waiting_streaming_request(
+            scheduler, prompt_len=10, num_computed=5
+        )
+        scheduler.truncate_request(req.request_id, target_num_tokens=8)
+        assert req.num_computed_tokens == 5
+
+    def test_truncate_request_noop_for_wrong_status(self):
+        """Request in any state other than WAITING_FOR_STREAMING_REQ is
+        left untouched and the kv_cache_manager is not called."""
+        scheduler = create_scheduler()
+        req = self._make_waiting_streaming_request(
+            scheduler, prompt_len=10, num_computed=8
+        )
+        req.status = RequestStatus.WAITING
+        pre_tokens = list(req._all_token_ids)
+        scheduler.truncate_request(req.request_id, target_num_tokens=3)
+        assert req._all_token_ids == pre_tokens
+        assert req.num_computed_tokens == 8
+        scheduler.kv_cache_manager.truncate_to_tokens.assert_not_called()
+
+    def test_truncate_request_noop_for_unknown_id(self):
+        """An unknown request_id is silently ignored."""
+        scheduler = create_scheduler()
+        scheduler.kv_cache_manager.truncate_to_tokens = MagicMock(return_value=None)
+        scheduler.truncate_request("nonexistent", target_num_tokens=3)
+        scheduler.kv_cache_manager.truncate_to_tokens.assert_not_called()
+
+    def test_truncate_request_noop_for_out_of_range_target(self):
+        """target_num_tokens that is negative or >= current length is a no-op."""
+        scheduler = create_scheduler()
+        req = self._make_waiting_streaming_request(
+            scheduler, prompt_len=10, num_computed=10
+        )
+        pre_tokens = list(req._all_token_ids)
+        scheduler.truncate_request(req.request_id, target_num_tokens=10)
+        assert req._all_token_ids == pre_tokens
+        scheduler.truncate_request(req.request_id, target_num_tokens=100)
+        assert req._all_token_ids == pre_tokens
+        scheduler.truncate_request(req.request_id, target_num_tokens=-1)
+        assert req._all_token_ids == pre_tokens
+        scheduler.kv_cache_manager.truncate_to_tokens.assert_not_called()

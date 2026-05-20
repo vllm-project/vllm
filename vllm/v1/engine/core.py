@@ -1314,6 +1314,9 @@ class EngineCoreProc(EngineCore):
                 (client_idx, EngineCoreOutputs(utility_output=out))
             )
             self._invoke_utility_method(method_name, get_result, output, enqueue_output)
+        elif request_type == EngineCoreRequestType.TRUNCATE:
+            request_id, target_num_tokens = request
+            self.scheduler.truncate_request(request_id, target_num_tokens)
         elif request_type == EngineCoreRequestType.EXECUTOR_FAILED:
             raise RuntimeError("Executor failed.")
         else:

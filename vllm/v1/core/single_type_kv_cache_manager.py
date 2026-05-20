@@ -318,6 +318,28 @@ class SingleTypeKVCacheManager(ABC):
         self.block_pool.free_blocks(ordered_blocks)
         self.num_cached_block.pop(request_id, None)
 
+    def truncate_to_tokens(self, request_id: str, num_tokens: int) -> None:
+        """Free KV cache blocks for ``request_id`` beyond ``num_tokens``.
+
+        Keeps the first ``ceil(num_tokens / block_size)`` blocks and frees
+        the tail in reverse order (matching the discipline of ``free``).
+        Drops the cached block count for the request so subsequent
+        re-allocations do not stale-reuse prior accounting. No-op if the
+        request is unknown or no tail blocks would be freed.
+        """
+        req_blocks = self.req_to_blocks.get(request_id)
+        if not req_blocks:
+            return
+        num_blocks_to_keep = cdiv(num_tokens, self.block_size)
+        if num_blocks_to_keep >= len(req_blocks):
+            return
+        blocks_to_free = req_blocks[num_blocks_to_keep:]
+        self.block_pool.free_blocks(reversed(blocks_to_free))
+        self.req_to_blocks[request_id] = req_blocks[:num_blocks_to_keep]
+        # Reset the cached-block count: prior count covered the now-freed
+        # tail. allocate_new_blocks will recompute it on next allocation.
+        self.num_cached_block.pop(request_id, None)
+
     @abstractmethod
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         """

@@ -900,6 +900,24 @@ class AsyncLLM(EngineClient):
         if self.errored:
             raise self.dead_error
 
+    async def truncate_session(
+        self,
+        request_id: str,
+        target_num_tokens: int,
+    ) -> None:
+        """Shrink a streaming session's KV cache to target_num_tokens.
+
+        For use with resumable streaming sessions
+        (``RequestStatus.WAITING_FOR_STREAMING_REQ``). Frees KV cache blocks
+        beyond ``target_num_tokens`` and clears any generated output tokens
+        past that point. Surviving tokens keep their original positions, so
+        this is safe for all attention/positional-encoding schemes.
+
+        No-op if the request is not in a streaming-waiting state, or if
+        ``target_num_tokens`` is out of range.
+        """
+        await self.engine_core.truncate_request_async(request_id, target_num_tokens)
+
     async def start_profile(self, profile_prefix: str | None = None) -> None:
         coros = [self.engine_core.profile_async(True, profile_prefix)]
         if self.profiler is not None:

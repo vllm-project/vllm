@@ -401,6 +401,44 @@ def test_evictable_cached_blocks_not_double_allocated():
     assert len(manager.req_to_blocks[request_id]) == 2
 
 
+def test_truncate_to_tokens():
+    """SlidingWindowManager.truncate_to_tokens frees tail blocks."""
+    block_size = 4
+    sliding_window_spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=8,
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=100, enable_caching=False, hash_block_size=block_size
+    )
+    manager = get_sliding_window_manager(sliding_window_spec, block_pool)
+
+    # Allocate 5 blocks for a 20-token request.
+    blocks = [block_pool.blocks[i] for i in range(5)]
+    for b in blocks:
+        b.ref_cnt = 1
+    manager.req_to_blocks["req"] = list(blocks)
+
+    # Truncate to 12 tokens -> keep ceil(12/4)=3 blocks, free 2.
+    manager.truncate_to_tokens("req", 12)
+    assert len(manager.req_to_blocks["req"]) == 3
+    assert [b.block_id for b in manager.req_to_blocks["req"]] == [0, 1, 2]
+
+    # Truncate to 5 tokens -> keep ceil(5/4)=2 blocks, free 1.
+    manager.truncate_to_tokens("req", 5)
+    assert len(manager.req_to_blocks["req"]) == 2
+
+    # Target larger than current length -> no-op.
+    manager.truncate_to_tokens("req", 100)
+    assert len(manager.req_to_blocks["req"]) == 2
+
+    # Unknown request -> no-op (no exception).
+    manager.truncate_to_tokens("nonexistent", 5)
+
+
 def test_chunked_local_attention_get_num_blocks_to_allocate():
     block_size = 2
     attention_spec = ChunkedLocalAttentionSpec(

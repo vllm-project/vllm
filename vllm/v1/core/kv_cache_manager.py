@@ -457,6 +457,14 @@ class KVCacheManager:
         """
         self.block_pool.evict_blocks(block_ids)
 
+    def truncate_to_tokens(self, request_id: str, num_tokens: int) -> None:
+        """Free KV cache blocks for a request beyond ``num_tokens``.
+
+        Used by streaming sessions to shrink a session's KV cache in place
+        when the caller decides to drop a generated suffix.
+        """
+        self.coordinator.truncate_to_tokens(request_id, num_tokens)
+
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
         flows to invalidate prefix caching after the weights are updated,

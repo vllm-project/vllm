@@ -996,6 +996,39 @@ class Scheduler(SchedulerInterface):
         if self.log_stats:
             session.record_event(EngineCoreEventType.QUEUED)
 
+    def truncate_request(
+        self,
+        request_id: str,
+        target_num_tokens: int,
+    ) -> None:
+        """Truncate a streaming session's token count and free KV blocks
+        beyond ``target_num_tokens``.
+
+        Only acts on requests in ``WAITING_FOR_STREAMING_REQ`` state.
+        No-op if the request is unknown, not in that state, or
+        ``target_num_tokens`` is out of range (negative or >= current
+        length).
+        """
+        request = self.requests.get(request_id)
+        if request is None or (
+            request.status != RequestStatus.WAITING_FOR_STREAMING_REQ
+        ):
+            return
+        if target_num_tokens < 0 or target_num_tokens >= request.num_tokens:
+            return
+        del request._all_token_ids[target_num_tokens:]
+        request.prompt_token_ids = request._all_token_ids.copy()
+        request._output_token_ids.clear()
+        request.num_computed_tokens = min(
+            request.num_computed_tokens, target_num_tokens
+        )
+        self.kv_cache_manager.truncate_to_tokens(request_id, target_num_tokens)
+        # Invalidate cached block hashes: freed tail blocks no longer back
+        # any hash, and the surviving boundary block may now have partial
+        # content that does not match its previously-computed hash. The
+        # scheduler will recompute hashes on the next allocation.
+        request.block_hashes = []
+
     def _make_cached_request_data(
         self,
         running_reqs: list[Request],

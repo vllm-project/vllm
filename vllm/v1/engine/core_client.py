@@ -207,6 +207,16 @@ class EngineCoreClient(ABC):
     async def scale_elastic_ep(self, new_data_parallel_size: int) -> None:
         raise NotImplementedError
 
+    async def truncate_request_async(
+        self, request_id: str, target_num_tokens: int
+    ) -> None:
+        """Truncate a streaming session's KV cache to target_num_tokens."""
+        if not self.resources.engine_dead:
+            await self._send_input(
+                EngineCoreRequestType.TRUNCATE,
+                (request_id, target_num_tokens),
+            )
+
     async def get_output_async(self) -> EngineCoreOutputs:
         raise NotImplementedError
 
