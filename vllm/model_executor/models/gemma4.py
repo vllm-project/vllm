@@ -1536,6 +1536,8 @@ class Gemma4ForCausalLM(
             "up_proj",
         ],
     }
+    # Gemma4 MoE LoRA weights are 3D-packed (all experts in one tensor)
+    is_3d_moe_weight: bool = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = _get_text_config(vllm_config.model_config.hf_config)
@@ -1592,6 +1594,16 @@ class Gemma4ForCausalLM(
         self.num_expert_groups = 1
         self.num_shared_experts = 0
         self.num_redundant_experts = 0
+
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        num_experts = getattr(self.config, "num_experts", None) or 0
+        return fused_moe_make_expert_params_mapping(
+            self,
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=num_experts,
+        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
