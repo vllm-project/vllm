@@ -120,9 +120,3 @@ WeightTransferEngineFactory.register_engine(
     "vllm.distributed.weight_transfer.ipc_engine",
     "IPCWeightTransferEngine",
 )
-
-WeightTransferEngineFactory.register_engine(
-    "etha",
-    "vllm.distributed.weight_transfer.etha_engine",
-    "EthaWeightTransferEngine",
-)

@@ -32,10 +32,18 @@ instead of rank-0 gather + broadcast.
 import asyncio
 import os
 import re
+import sys
 import time
 import uuid
 from dataclasses import asdict
 from pathlib import Path
+
+# Etha lives next to this script. Put its directory on sys.path so the
+# local `etha_*` modules import cleanly here AND in any Ray actor that
+# inherits this runtime_env (we forward PYTHONPATH below).
+_EXAMPLE_DIR = str(Path(__file__).resolve().parent)
+if _EXAMPLE_DIR not in sys.path:
+    sys.path.insert(0, _EXAMPLE_DIR)
 
 import ray
 import torch
@@ -53,18 +61,24 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
 )
-from vllm.distributed.weight_transfer.etha_engine import (
+from vllm.utils.network_utils import get_ip, get_open_port
+from vllm.v1.executor import Executor
+
+# Local etha modules. Importing `etha_engine` here also registers "etha"
+# as a weight-transfer backend in this process (see the bottom of that
+# file). Workers register the backend on their own when they import
+# `etha_engine.EthaWorkerExtension` via the `worker_extension_cls`
+# we pass to AsyncEngineArgs below.
+from etha_engine import (  # noqa: E402
     EthaTrainerWeightTransferEngine,
     EthaWeightTransferInitInfo,
     EthaWeightTransferUpdateInfo,
 )
-from vllm.distributed.weight_transfer.etha_sharding import (
+from etha_sharding import (  # noqa: E402
     MOE_HANDLERS,
     TRAINER_HANDLER_PLACEMENTS,
     get_handler_name,
 )
-from vllm.utils.network_utils import get_ip, get_open_port
-from vllm.v1.executor import Executor
 
 MODEL_NAME = "Qwen/Qwen3-30B-A3B-Instruct-2507"
 
@@ -318,13 +332,20 @@ async def main():
     # If a Ray cluster is already up but the workers can't import our
     # venv, point them at our interpreter via runtime_env. Also forward
     # NCCL env knobs to actors (Ray doesn't propagate env vars by default).
+    # Forward PYTHONPATH so trainer and vLLM Ray actors find the local
+    # `etha_*` modules without needing them to be installed.
     runtime_env: dict = {}
     venv_python = os.environ.get("VLLM_VENV_PYTHON")
     if venv_python:
         runtime_env["py_executable"] = venv_python
-    nccl_env = {k: v for k, v in os.environ.items() if k.startswith("NCCL_")}
-    if nccl_env:
-        runtime_env["env_vars"] = nccl_env
+    env_vars: dict[str, str] = {
+        k: v for k, v in os.environ.items() if k.startswith("NCCL_")
+    }
+    existing_pp = os.environ.get("PYTHONPATH", "")
+    env_vars["PYTHONPATH"] = (
+        _EXAMPLE_DIR + (os.pathsep + existing_pp if existing_pp else "")
+    )
+    runtime_env["env_vars"] = env_vars
     ray.init(runtime_env=runtime_env or None)
 
     snapshot_download(MODEL_NAME)
@@ -349,6 +370,12 @@ async def main():
     print(f"[init] trainer state_dicts loaded: {counts[0]} tensors per rank")
 
     # Launch vLLM AsyncLLMEngine.
+    # `worker_extension_cls` is the per-worker registration hook: vLLM's
+    # worker_base resolves this qualname via importlib, and importing
+    # `etha_engine` runs the WeightTransferEngineFactory.register_engine("etha", ...)
+    # call at the bottom of that module — so the worker's factory sees
+    # the backend before it constructs the engine. PYTHONPATH set above
+    # makes the bare module name resolvable in the Ray actor.
     engine = create_async_engine(
         model=MODEL_NAME,
         enforce_eager=True,
@@ -358,6 +385,7 @@ async def main():
         distributed_executor_backend="ray",
         data_parallel_backend="ray",
         weight_transfer_config=WeightTransferConfig(backend="etha"),
+        worker_extension_cls="etha_engine.EthaWorkerExtension",
         load_format="dummy",
         gpu_memory_utilization=0.7,
     )

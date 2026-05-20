@@ -60,8 +60,9 @@ from torch.distributed.distributed_c10d import (
 from torch.distributed.tensor import distribute_tensor
 from torch.distributed.tensor.placement_types import Placement, Replicate, Shard
 
-from vllm.distributed.weight_transfer.etha_chunk import Chunk, map_to_chunk_ops
 from vllm.logger import init_logger
+
+from etha_chunk import Chunk, map_to_chunk_ops
 
 if TYPE_CHECKING:
     from vllm.config.parallel import ParallelConfig

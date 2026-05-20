@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Etha-style M-to-N weight transfer engine.
 
-Independent re-implementation of the ideas in
-https://github.com/cmriat/Etha 's `comm/` module: declarative
+Using code from Etha's `comm/` module
+(https://github.com/cmriat/Etha): declarative
 `(DeviceMesh, Placement)` on both sides, compute one M-to-N chunk plan
 per pair at init time, then move bytes straight from each source
 rank's local shard into each target rank's local shard.
@@ -56,12 +56,13 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferInitInfo,
     WeightTransferUpdateInfo,
 )
-from vllm.distributed.weight_transfer.etha_chunk import Chunk
-from vllm.distributed.weight_transfer.etha_sharding import (
+from vllm.logger import init_logger
+
+from etha_chunk import Chunk
+from etha_sharding import (
     TrainerEthaShardingStrategy,
     VllmEthaShardingStrategy,
 )
-from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
@@ -445,3 +446,31 @@ class EthaTrainerWeightTransferEngine:
 
     def shutdown(self) -> None:
         self.send_chunks = []
+
+
+# ============================================================================
+# Worker-side registration hook
+# ============================================================================
+#
+# vLLM worker processes (gpu_worker) each import the factory module and only
+# see backends registered in their own interpreter. The factory ships nccl +
+# ipc by default; "etha" lives in this example tree, so we register it here
+# and rely on a worker_extension_cls=`etha_engine.EthaWorkerExtension` lookup
+# in the worker to import this module (the import side-effect performs the
+# registration). The example's PYTHONPATH wiring puts this directory on
+# sys.path for both the driver and the Ray actors.
+
+from vllm.distributed.weight_transfer import WeightTransferEngineFactory  # noqa: E402
+
+if "etha" not in WeightTransferEngineFactory._registry:
+    WeightTransferEngineFactory.register_engine("etha", EthaWeightTransferEngine)
+
+
+class EthaWorkerExtension:
+    """Empty marker class — importing it registers the etha backend.
+
+    Pass as `worker_extension_cls="etha_engine.EthaWorkerExtension"` when
+    constructing AsyncEngineArgs so each vLLM worker imports this module
+    (and thereby runs the registration above) before it creates its weight
+    transfer engine.
+    """
