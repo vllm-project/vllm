@@ -3,6 +3,8 @@
 
 from typing import Any
 
+import helion
+import helion.language as hl
 import regex as re
 import torch
 
@@ -11,7 +13,7 @@ from vllm.utils.import_utils import has_helion
 
 if not has_helion():
     raise ImportError(
-        "silu_mul_fp8 Helion kernel requires helion to be installed. "
+        "MLA Decode Helion kernels requires helion to be installed. "
         "Install it with: pip install helion"
     )
 
@@ -88,13 +90,39 @@ def pick_mla_decode_kv_split_config(
 
     return f"intermediate_{best_isize}_numtokens_{best_ntokens}"
 
+    # we want each thread block to handle a token's single head with a part of kv cache
+    """
+    the ides is to load a query's head per thread block
+    ie kernel launch grid = (batch, head, kv_split)
+    each thread block computes partial attention over a query's single head
+    over a piece of latent kv cache
+    the query is loaded once in thread block,
+    then latent vector will be loaded in a loop.
+    """
 
+
+@helion.kernel
 def mla_decode_kv_split(
-    q_absorbed: torch.Tensor,
-    latent_kv: torch.Tensor,
-    kv_scale: torch.Tensor,
-    Req_to_Tokens: torch.Tensor,
-    NUM_KV_SPLITS: torch.Tensor,
-    PAGE_SIZE: int,
+    q_absorbed: torch.Tensor,  # query (batch, heads, d_model)
+    latent_kv: torch.Tensor,  # latent kv vector (batch,seq_len,latent_dim+rope_dim)
+    attn_out: torch.Tensor,  # output (batch, heads, d_model)
+    kv_dequant: torch.Tensor,  # scale to dequant fp8 latent kv cache
+    scale: torch.Tensor,  # normalising scale for attention product
+    B_seq_len: torch.Tensor,  # seq_len of each request (batch,)
+    Req_to_Tokens: torch.Tensor,  # page table
+    NUM_KV_SPLITS: int,  # no. of splits of kv_cache; determines -1 dim of launch grid
+    PAGE_SIZE: int,  # page size: 16
+    latent_dim: int,  # 512
+    rope_dim: int,  # 64
 ):
-    pass
+    assert q_absorbed.ndim == 3
+    assert latent_kv.ndim == 3 and latent_kv.dtype == torch.float8_e4m3fn
+    batch = q_absorbed.shape[0]
+    heads = q_absorbed.shape[1]
+
+    grid = (batch, heads, NUM_KV_SPLITS)
+
+    for seq, head, split in hl.tile(grid, block_size=[1, 1, None]):
+        # q = q_absorbed[seq, head, :latent_dim]
+        # q_rope = q_absorbed[seq, head, latent_dim:rope_dim]
+        pass
