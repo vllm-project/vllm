@@ -308,6 +308,15 @@ class TrtLlmNvFp4ExpertsMonolithic(
             and self.routing_method_type != RoutingMethodType.Llama4
         )
 
+        routing_method_type = self.routing_method_type
+        if routing_method_type == RoutingMethodType.Renormalize:
+            # vLLM's fused_topk_softmax(..., renormalize=True) semantics are
+            # softmax -> topk -> renormalize. FlashInfer TRTLLM names that
+            # path RenormalizeNaive; Renormalize means topk -> softmax. Using
+            # Renormalize here selects a different router path in the fused
+            # monolithic kernel and can quickly diverge into repetitive text.
+            routing_method_type = RoutingMethodType.RenormalizeNaive
+
         # Currently FI requires bfloat16 routing bias.
         # https://github.com/flashinfer-ai/flashinfer/issues/2909
         if e_score_correction_bias is not None:
@@ -343,7 +352,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
             local_expert_offset=self.ep_rank * self.local_num_experts,
             local_num_experts=self.local_num_experts,
             routed_scaling_factor=routed_scaling_factor,
-            routing_method_type=self.routing_method_type,
+            routing_method_type=int(routing_method_type),
             do_finalize=True,
             activation_type=activation_to_flashinfer_int(activation),
         )[0]
