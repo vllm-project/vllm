@@ -14,16 +14,15 @@ import vllm.ir.ops
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
-from .matcher_utils import MatcherRotaryEmbedding
 from .rms_quant_fusion import empty_bf16, empty_fp32, empty_i64
 
 logger = init_logger(__name__)
 
 FUSED_QK_ROPE_OP = torch.ops._C.fused_qk_norm_rope.default
+FLASHINFER_ROTARY_OP = torch.ops.vllm.flashinfer_rotary_embedding.default
 
 P = ParamSpec("P")
 
@@ -67,13 +66,6 @@ class QkNormRopePattern:
         self.eps = eps
         self.is_neox = is_neox
         self.rope_flashinfer = rope_flashinfer
-        self.rope_matcher = MatcherRotaryEmbedding(
-            is_neox=is_neox,
-            head_size=self.head_dim,
-            num_heads=self.num_heads,
-            num_kv_heads=self.num_kv_heads,
-            use_flashinfer=self.rope_flashinfer,
-        )
 
     def get_inputs(self) -> list[torch.Tensor]:
         # Sample inputs to help pattern tracing
@@ -140,7 +132,29 @@ class QkNormRopePattern:
             k_flat = k_normed_by_head.view(k.shape)
 
             # RoPE: apply to flattened q/k
-            q_rope, k_rope = self.rope_matcher(positions, q_flat, k_flat, cos_sin_cache)
+            if self.rope_flashinfer:
+                rope_result = auto_functionalized(
+                    FLASHINFER_ROTARY_OP,
+                    positions=positions,
+                    query=q_flat,
+                    key=k_flat,
+                    head_size=self.head_dim,
+                    cos_sin_cache=cos_sin_cache,
+                    is_neox=self.is_neox,
+                )
+                q_rope = rope_result[1]
+                k_rope = rope_result[2]
+            else:
+                q_rope, k_rope = vllm.ir.ops.rotary_embedding(
+                    positions,
+                    q_flat,
+                    k_flat,
+                    self.head_dim,
+                    self.head_dim,
+                    cos_sin_cache,
+                    self.is_neox,
+                )
+
             return q_rope, k_rope, v
 
         def replacement(
@@ -215,23 +229,14 @@ class QKNormRoPEFusionPass(VllmPatternMatcherPass):
 
         for epsilon in [1e-5, 1e-6]:
             for neox in [True, False]:
-                if RotaryEmbedding.enabled():
-                    for rope_flashinfer in [False, True]:
-                        QkNormRopePattern(
-                            head_dim=layer.head_size,
-                            num_heads=layer.num_heads,
-                            num_kv_heads=layer.num_kv_heads,
-                            eps=epsilon,
-                            is_neox=neox,
-                            rope_flashinfer=rope_flashinfer,
-                        ).register(self.patterns)
-                else:
+                for rope_flashinfer in [False, True]:
                     QkNormRopePattern(
                         head_dim=layer.head_size,
                         num_heads=layer.num_heads,
                         num_kv_heads=layer.num_kv_heads,
                         eps=epsilon,
                         is_neox=neox,
+                        rope_flashinfer=rope_flashinfer,
                     ).register(self.patterns)
 
         self.dump_patterns(config, self.patterns)
