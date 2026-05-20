@@ -58,7 +58,3 @@ def triton_sparse_mla_matmul_decode_enabled() -> bool:
     if configured is not None:
         return configured
     return current_platform.is_device_capability_family(120)
-
-
-def triton_sparse_mla_splitkv_decode_enabled() -> bool:
-    return envs.VLLM_TRITON_MLA_SPARSE_SPLITKV_DECODE
