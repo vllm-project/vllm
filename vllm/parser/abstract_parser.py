@@ -634,6 +634,13 @@ class DelegatingParser(Parser):
             return False
         return self._reasoning_parser.is_reasoning_end(input_ids)
 
+    def is_reasoning_end_streaming(
+        self, input_ids: list[int], delta_ids: list[int]
+    ) -> bool:
+        if self._reasoning_parser is None:
+            return False
+        return self._reasoning_parser.is_reasoning_end_streaming(input_ids, delta_ids)
+
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         if self._reasoning_parser is None:
             return input_ids
@@ -667,11 +674,11 @@ class DelegatingParser(Parser):
 
         current_text = state.previous_text + delta_text
         current_token_ids = state.previous_token_ids + delta_token_ids
-        delta_message: DeltaMessage | None = None
+        reasoning_delta: DeltaMessage | None = None
 
         # Reasoning extraction
         if self._in_reasoning_phase(state):
-            delta_message = self.extract_reasoning_streaming(
+            reasoning_delta = self.extract_reasoning_streaming(
                 previous_text=state.previous_text,
                 current_text=current_text,
                 delta_text=delta_text,
@@ -679,17 +686,21 @@ class DelegatingParser(Parser):
                 current_token_ids=current_token_ids,
                 delta_token_ids=delta_token_ids,
             )
-            # Hand off remaining content to tool parser
-            if self._tool_parser and self.is_reasoning_end(delta_token_ids):
+            # Hand off remaining content to tool parser or content
+            if self.is_reasoning_end_streaming(current_token_ids, delta_token_ids):
                 state.reasoning_ended = True
                 current_token_ids = self.extract_content_ids(delta_token_ids)
-                if delta_message and delta_message.content:
-                    current_text = delta_message.content
-                    delta_message.content = None
+                if reasoning_delta and reasoning_delta.content:
+                    current_text = reasoning_delta.content
+                    if self._tool_parser:
+                        reasoning_delta.content = None
                 else:
                     current_text = ""
+                delta_text = current_text
+                delta_token_ids = current_token_ids
 
         # Tool call extraction
+        tool_delta: DeltaMessage | None = None
         if self._in_tool_call_phase(state):
             if not state.tool_call_text_started:
                 state.tool_call_text_started = True
@@ -698,7 +709,7 @@ class DelegatingParser(Parser):
                 delta_text = current_text
                 delta_token_ids = current_token_ids
 
-            delta_message, state.function_name_returned = (
+            tool_delta, state.function_name_returned = (
                 self._extract_tool_calls_streaming(
                     previous_text=state.previous_text,
                     current_text=current_text,
@@ -713,11 +724,24 @@ class DelegatingParser(Parser):
                 )
             )
             if (
-                delta_message
-                and delta_message.tool_calls
-                and delta_message.tool_calls[0].id is not None
+                tool_delta
+                and tool_delta.tool_calls
+                and tool_delta.tool_calls[0].id is not None
             ):
                 state.history_tool_call_cnt += 1
+
+        delta_message: DeltaMessage | None = None
+        if tool_delta is not None:
+            delta_message = tool_delta
+            if reasoning_delta is not None:
+                if reasoning_delta.reasoning:
+                    delta_message.reasoning = reasoning_delta.reasoning
+                if delta_message.content is None and reasoning_delta.content:
+                    delta_message.content = reasoning_delta.content
+                if delta_message.role is None and reasoning_delta.role:
+                    delta_message.role = reasoning_delta.role
+        else:
+            delta_message = reasoning_delta
 
         # No phase active: pass through as content
         if (

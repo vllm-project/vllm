@@ -163,3 +163,38 @@ def test_parse_delta_reasoning_only_thinking_disabled(tokenizer, request_obj):
     assert "Hello" in content
     assert "assist" in content
     assert len(tool_calls) == 0
+
+
+def test_parse_delta_transition_chunk(tokenizer, request_obj):
+    parser = make_parser(tokenizer, reasoning=True, tool=True)
+
+    # Step 1: initial reasoning chunk
+    res1 = parser.parse_delta(
+        delta_text="<think>let me think",
+        delta_token_ids=tokenizer.encode(
+            "<think>let me think", add_special_tokens=False
+        ),
+        request=request_obj,
+        prompt_token_ids=[],
+    )
+    assert res1 is not None
+    assert "let me think" in res1.reasoning
+    assert len(res1.tool_calls) == 0
+
+    # Step 2: transition chunk containing both the end of reasoning and the tool call
+    transition_text = (
+        " about this</think>"
+        '<tool_call>\n{"name": "get_weather", '
+        '"arguments": {"city": "Dallas"}}\n</tool_call>'
+    )
+    res2 = parser.parse_delta(
+        delta_text=transition_text,
+        delta_token_ids=tokenizer.encode(transition_text, add_special_tokens=False),
+        request=request_obj,
+    )
+    assert res2 is not None
+    # Verify that the reasoning component is NOT overwritten and lost!
+    assert "about this" in res2.reasoning
+    # Verify that the tool call component is also captured!
+    assert len(res2.tool_calls) > 0
+    assert res2.tool_calls[0].function.name == "get_weather"
