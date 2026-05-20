@@ -6359,6 +6359,7 @@ class GPUModelRunner(
         class AttentionGroupKey(NamedTuple):
             attn_backend: type[AttentionBackend]
             kv_cache_spec: KVCacheSpec
+            metadata_group_key: tuple[Any, ...]
 
         def get_attn_backends_for_group(
             kv_cache_group_spec: KVCacheGroupSpec,
@@ -6387,9 +6388,12 @@ class GPUModelRunner(
                 layer_kv_cache_spec = kv_cache_group_spec.kv_cache_spec
                 if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
                     layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
-                key = (full_cls_name, layer_kv_cache_spec)
+                metadata_group_key = attn_backend.get_metadata_group_key(
+                    layers[layer_name]
+                )
+                key = (full_cls_name, layer_kv_cache_spec, metadata_group_key)
                 attn_backends[key] = AttentionGroupKey(
-                    attn_backend, layer_kv_cache_spec
+                    attn_backend, layer_kv_cache_spec, metadata_group_key
                 )
                 attn_backend_layers[key].append(layer_name)
             return (
@@ -6402,11 +6406,11 @@ class GPUModelRunner(
             kv_cache_group_id: int,
         ) -> list[AttentionGroup]:
             attn_groups: list[AttentionGroup] = []
-            for (attn_backend, kv_cache_spec), layer_names in attn_backends_map.items():
+            for group_key, layer_names in attn_backends_map.items():
                 attn_group = AttentionGroup(
-                    attn_backend,
+                    group_key.attn_backend,
                     layer_names,
-                    kv_cache_spec,
+                    group_key.kv_cache_spec,
                     kv_cache_group_id,
                 )
 

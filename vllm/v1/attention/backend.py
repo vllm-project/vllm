@@ -151,6 +151,11 @@ class AttentionBackend(ABC):
         return (cls.__module__, cls.__qualname__)
 
     @classmethod
+    def get_metadata_group_key(cls, attn_layer: Any) -> tuple[Any, ...]:
+        """Return extra layer attributes that require separate metadata builders."""
+        return ()
+
+    @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return []
 
