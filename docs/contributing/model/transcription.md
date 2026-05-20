@@ -66,7 +66,7 @@ This is for controlling general behavior of the API when serving your model:
 
 See [Audio preprocessing and chunking](#audio-preprocessing-and-chunking) for what each field controls.
 
-Implement the prompt construction via [get_generation_prompt][vllm.model_executor.models.interfaces.SupportsTranscription.get_generation_prompt]. The server passes you the resampled waveform and task parameters; you return a valid [PromptType][vllm.inputs.llm.PromptType]. There are two common patterns:
+Implement the prompt construction via [get_generation_prompt][vllm.model_executor.models.interfaces.SupportsTranscription.get_generation_prompt]. The server builds a [SpeechToTextParams][vllm.config.speech_to_text.SpeechToTextParams] object that bundles the resampled waveform, task parameters, and request-specific options. Your model receives this single object and returns a valid [PromptType][vllm.inputs.llm.PromptType]. There are two common patterns:
 
 #### Multimodal LLM with audio embeddings (e.g., Voxtral, Gemma3n)
 
@@ -75,21 +75,20 @@ Return a dict containing `multi_modal_data` with the audio, and either a `prompt
 ??? code "get_generation_prompt()"
 
     ```python
+    from vllm.config.speech_to_text import SpeechToTextParams
+
     class YourASRModel(nn.Module, SupportsTranscription):
         ...
 
         @classmethod
         def get_generation_prompt(
             cls,
-            audio: np.ndarray,
-            stt_config: SpeechToTextConfig,
-            model_config: ModelConfig,
-            language: str | None,
-            task_type: Literal["transcribe", "translate"],
-            request_prompt: str,
-            to_language: str | None,
+            stt_params: SpeechToTextParams,
         ) -> PromptType:
-            # Example with a free-form instruction prompt
+            audio = stt_params.audio
+            stt_config = stt_params.stt_config
+            task_type = stt_params.task_type
+
             task_word = "Transcribe" if task_type == "transcribe" else "Translate"
             prompt = (
                 "<start_of_turn>user\n"
@@ -112,20 +111,22 @@ Return a dict with separate `encoder_prompt` and `decoder_prompt` entries:
 ??? code "get_generation_prompt()"
 
     ```python
+    from vllm.config.speech_to_text import SpeechToTextParams
+
     class YourASRModel(nn.Module, SupportsTranscription):
         ...
 
         @classmethod
         def get_generation_prompt(
             cls,
-            audio: np.ndarray,
-            stt_config: SpeechToTextConfig,
-            model_config: ModelConfig,
-            language: str | None,
-            task_type: Literal["transcribe", "translate"],
-            request_prompt: str,
-            to_language: str | None,
+            stt_params: SpeechToTextParams,
         ) -> PromptType:
+            audio = stt_params.audio
+            stt_config = stt_params.stt_config
+            language = stt_params.language
+            task_type = stt_params.task_type
+            request_prompt = stt_params.request_prompt
+
             if language is None:
                 raise ValueError("Language must be specified")
 
@@ -213,15 +214,13 @@ Relevant server logic:
         chunks = [y] if not do_split_audio else self._split_audio(y, int(sr))
         prompts = []
         for chunk in chunks:
-            prompt = self.model_cls.get_generation_prompt(
+            stt_params = request.build_stt_params(
                 audio=chunk,
                 stt_config=self.asr_config,
                 model_config=self.model_config,
-                language=language,
                 task_type=self.task_type,
-                request_prompt=request.prompt,
-                to_language=to_language,
             )
+            prompt = self.model_cls.get_generation_prompt(stt_params)
             prompts.append(prompt)
         return prompts, duration
     ```
