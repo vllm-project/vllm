@@ -2232,6 +2232,27 @@ class EngineArgs:
                 UsageContext.OPENAI_API_SERVER: 256,
             }
 
+        # gfx11 (RDNA3/RDNA3.5) consumer/APU parts: pin
+        # max_num_batched_tokens to 2048 regardless of reported VRAM. Strix
+        # Halo and similar APUs can expose >70 GiB of unified memory, which
+        # would otherwise trigger the large-GPU defaults above and regress
+        # throughput on these much smaller compute parts.
+        # Addresses a ~25% TTFT regression observed with:
+        #   --model trymirai/SmolLM2-1.7B-Instruct-AWQ --num-prompts 10
+        #   --max-model-len 8192 --ready-check-timeout-sec 1800
+        #   --input-len 8000 --output-len 128 --dtype float16
+        #   --target-gpu-memory-gb 10 --max-num-seqs 1
+        #   -e TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1
+        #   -e FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx11
+
+            if on_gfx11():
+                default_max_num_batched_tokens = {
+                    UsageContext.LLM_CLASS: 2048,
+                    UsageContext.OPENAI_API_SERVER: 2048,
+                }
+
         # tpu specific default values.
         if current_platform.is_tpu():
             chip_name = current_platform.get_device_name()
