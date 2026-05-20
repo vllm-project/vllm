@@ -37,10 +37,11 @@ class AsyncScheduler(Scheduler):
     def _update_request_with_output(
         self, request: Request, new_token_ids: list[int]
     ) -> tuple[list[int], bool]:
-        if request.discard_latest_async_tokens:
-            # If the request is force preempted in reset_prefix_cache, we
-            # should discard the latest async token.
-            request.discard_latest_async_tokens = False
+        if request.async_tokens_to_discard > 0:
+            # The request was force-preempted in reset_prefix_cache; drop one
+            # stale in-flight async output frame per call until the counter
+            # is drained.
+            request.async_tokens_to_discard -= 1
             return [], False
 
         status_before_update = request.status
