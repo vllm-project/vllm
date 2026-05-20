@@ -229,9 +229,6 @@ class FrontendArgs(BaseFrontendArgs):
     """Host name."""
     port: int = 8000
     """Port number."""
-    data_parallel_multi_port_external_lb: bool = False
-    """Run a node-local supervisor that launches one external-LB API server per
-    local data parallel rank and exposes aggregated health on a supervisor port."""
     data_parallel_supervisor_port: int = 9256
     """HTTP port for aggregated health endpoints in multi-port external LB
     mode."""

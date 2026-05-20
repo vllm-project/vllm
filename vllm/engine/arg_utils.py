@@ -473,6 +473,7 @@ class EngineArgs:
     data_parallel_rpc_port: int | None = None
     data_parallel_hybrid_lb: bool = False
     data_parallel_external_lb: bool = False
+    data_parallel_multi_port_external_lb: bool = False
     data_parallel_backend: DataParallelBackend = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     enable_ep_weight_filter: bool = ParallelConfig.enable_ep_weight_filter
@@ -1031,6 +1032,15 @@ class EngineArgs:
             "--data-parallel-external-lb",
             "-dpe",
             **parallel_kwargs["data_parallel_external_lb"],
+        )
+        parallel_group.add_argument(
+            "--data-parallel-multi-port-external-lb",
+            "-dpm",
+            action="store_true",
+            default=False,
+            help="Run a node-local supervisor that launches one external-LB API "
+            "server per local data parallel rank and exposes aggregated health on "
+            "a supervisor port.",
         )
         parallel_group.add_argument(
             "--enable-expert-parallel",
