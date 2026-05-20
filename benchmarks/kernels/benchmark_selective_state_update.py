@@ -10,7 +10,7 @@ saves the best config per effective_batch to JSON. Generated configs are picked
 up by selective_state_update at runtime.
 
 Usage:
-    python benchmarks/kernels/benchmark_selective_state_update.py \
+    python -m benchmarks.kernels.benchmark_selective_state_update \
         --all-dstates --save-configs --compare
 """
 
@@ -26,10 +26,13 @@ from unittest.mock import patch
 import torch
 
 import vllm.model_executor.layers.mamba.ops.mamba_ssm as mamba_ssm_module
+from tests.kernels.mamba.test_mamba_ssm import selective_state_update_ref
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
+    _get_default_ssm_launch_config,
+    get_ssm_config_file_name,
+    get_ssm_device_name,
     selective_state_update,
 )
-from vllm.platforms import current_platform
 from vllm.triton_utils import triton
 
 # MambaDType subset: bf16 is excluded (not commonly used)
@@ -107,12 +110,8 @@ DEFAULT_NGROUPS = 8
 
 
 # ---------------------------------------------------------------------------
-# Config file naming (mirrors fused_moe pattern)
+# Config file naming
 # ---------------------------------------------------------------------------
-
-
-def get_device_name() -> str:
-    return current_platform.get_device_name().replace(" ", "_")
 
 
 def get_ssm_configs_dir() -> str:
@@ -388,56 +387,6 @@ def tune_dstate(
 # ---------------------------------------------------------------------------
 
 
-def _selective_state_update_ref(
-    state: torch.Tensor,
-    x: torch.Tensor,
-    dt: torch.Tensor,
-    A: torch.Tensor,
-    B: torch.Tensor,
-    C: torch.Tensor,
-    D: torch.Tensor,
-    dt_bias: torch.Tensor,
-) -> torch.Tensor:
-    """
-    Pure-PyTorch CPU reference for selective_state_update (dt_softplus=True).
-
-    Shapes (all moved to CPU float32 internally):
-        state  : (batch, nheads, dim, dstate)
-        x      : (batch, nheads, dim)
-        dt     : (batch, nheads, dim)
-        A      : (nheads, dim, dstate)
-        B      : (batch, ngroups, dstate)
-        C      : (batch, ngroups, dstate)
-        D      : (nheads, dim)
-        dt_bias: (nheads, dim)
-    Returns:
-        out    : (batch, nheads, dim)  in the original dtype
-    """
-    orig_dtype = x.dtype
-    state = state.clone().cpu().float()
-    x = x.cpu().float()
-    dt = dt.cpu().float()
-    A = A.cpu().float()
-    B = B.cpu().float()
-    C = C.cpu().float()
-    D = D.cpu().float()
-    dt = dt + dt_bias.cpu().float()
-    dt = torch.nn.functional.softplus(dt)  # (batch, nheads, dim)
-
-    nheads, _, _ = A.shape
-    ngroups = B.shape[1]
-
-    dA = torch.exp(dt.unsqueeze(-1) * A.unsqueeze(0))  # (batch, nheads, dim, dstate)
-    B_exp = B.repeat_interleave(nheads // ngroups, dim=1)  # (batch, nheads, dstate)
-    C_exp = C.repeat_interleave(nheads // ngroups, dim=1)
-    dB = dt.unsqueeze(-1) * B_exp.unsqueeze(2)  # (batch, nheads, dim, dstate)
-
-    state_new = state * dA + dB * x.unsqueeze(-1)
-    out = (state_new * C_exp.unsqueeze(2)).sum(-1)  # (batch, nheads, dim)
-    out = out + x * D.unsqueeze(0)
-    return out.to(orig_dtype)
-
-
 def validate_configs(
     dstate: int,
     headdim: int,
@@ -502,8 +451,10 @@ def validate_configs(
         torch.accelerator.synchronize()
         gpu_out = out.detach().cpu()
 
-        # CPU reference uses the original (unmodified) state
-        ref_out = _selective_state_update_ref(state_ref, x, dt, A, B, C, D, dt_bias)
+        # Reference uses the original (unmodified) state
+        ref_out = selective_state_update_ref(
+            state_ref, x, dt, A, B, C, D=D, dt_bias=dt_bias, dt_softplus=True
+        ).cpu()
 
         passed = torch.allclose(gpu_out.float(), ref_out.float(), atol=atol, rtol=rtol)
         max_err = (gpu_out.float() - ref_out.float()).abs().max().item()
@@ -533,9 +484,7 @@ def save_configs(
     os.makedirs(base_dir, exist_ok=True)
     file_path = os.path.join(
         base_dir,
-        mamba_ssm_module.get_ssm_config_file_name(
-            headdim, dstate, cache_dtype, get_device_name()
-        ),
+        get_ssm_config_file_name(headdim, dstate, cache_dtype, get_ssm_device_name()),
     )
     # triton_version is informational only, the loader ignores it
     payload: dict[str, Any] = {
@@ -554,19 +503,8 @@ def save_configs(
 
 def current_heuristic(dstate: int, is_blackwell: bool = False) -> dict:
     """Return the current hard-coded BLOCK_SIZE_M / num_warps for dstate."""
-    if dstate <= 16:
-        return {"BLOCK_SIZE_M": 32, "num_warps": 4}
-    elif dstate <= 32:
-        return {"BLOCK_SIZE_M": 16, "num_warps": 4}
-    elif dstate <= 64:
-        return {"BLOCK_SIZE_M": 8, "num_warps": 4}
-    else:
-        if is_blackwell:
-            return {"BLOCK_SIZE_M": 32, "num_warps": 8}
-        elif dstate <= 128:
-            return {"BLOCK_SIZE_M": 4, "num_warps": 4}
-        else:
-            return {"BLOCK_SIZE_M": 4, "num_warps": 8}
+    bsm, nw = _get_default_ssm_launch_config(dstate, is_blackwell)
+    return {"BLOCK_SIZE_M": bsm, "num_warps": nw}
 
 
 def compare_heuristic_vs_tuned(
@@ -648,9 +586,8 @@ def compare_heuristic_vs_tuned(
 def save_results(device_name: str, output: str, results_file: str | None = None) -> str:
     """Save the full benchmark output to a results text file."""
     if results_file is None:
-        safe_name = device_name.replace(" ", "_")
         results_file = os.path.join(
-            _RESULTS_DIR, f"ssm_benchmark_results_{safe_name}.txt"
+            _RESULTS_DIR, f"ssm_benchmark_results_{device_name}.txt"
         )
     with open(results_file, "w") as f:
         f.write(output)
@@ -757,7 +694,7 @@ def main():
 
     dtype = torch.bfloat16 if args.dtype == "bfloat16" else torch.float16
     state_dtype = _SSM_CACHE_DTYPE_MAP[args.mamba_ssm_cache_dtype]
-    device_name = current_platform.get_device_name()
+    device_name = get_ssm_device_name()
     cap = torch.cuda.get_device_capability()
     is_blackwell = cap[0] >= 10
 
