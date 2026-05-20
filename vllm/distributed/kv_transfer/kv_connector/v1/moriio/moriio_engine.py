@@ -76,7 +76,7 @@ class MoRIIOWriter:
         self._write_worker_started = False
         self._write_worker_lock = threading.Lock()
         self._deferred_tasks: list[WriteTask] = []
-        self._defer_timeout = envs.VLLM_MORIIO_DEFER_TIMEOUT
+        self._defer_timeout = worker.moriio_config.defer_timeout
 
     @property
     def worker(self) -> "MoRIIOConnectorWorker":
@@ -384,6 +384,7 @@ class MoRIIOWrapper:
         moriio_engine: "IOEngine | None" = None,
         tp_rank: int = 0,
         dp_rank: int = 0,
+        transfer_timeout: float = MoRIIOConstants.DEFAULT_TRANSFER_TIMEOUT,
     ):
         self.tp_rank = tp_rank
         self.dp_rank = dp_rank
@@ -398,7 +399,7 @@ class MoRIIOWrapper:
         self.done_req_ids: list[str] = []
         self.done_remote_allocate_req_dict: dict[TransferId, RemoteAllocInfo] = {}
         self.done_write_cache_req_ids: list[str] = []
-        self._transfer_timeout = envs.VLLM_MORIIO_TRANSFER_TIMEOUT
+        self._transfer_timeout = transfer_timeout
         self._qp_per_transfer = envs.VLLM_MORIIO_QP_PER_TRANSFER
         self._post_batch_size = envs.VLLM_MORIIO_POST_BATCH_SIZE
         self._num_worker_threads = envs.VLLM_MORIIO_NUM_WORKERS
@@ -540,7 +541,7 @@ class MoRIIOWrapper:
                     errors.append(
                         f"RDMA transfer timed out after {timeout:.0f}s. "
                         f"Check NIC queue depth or reduce concurrency; "
-                        f"adjust with VLLM_MORIIO_TRANSFER_TIMEOUT."
+                        f"adjust with kv_connector_extra_config.transfer_timeout."
                     )
                 else:
                     still_waiting.append(status)

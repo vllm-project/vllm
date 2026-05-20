@@ -189,6 +189,8 @@ class MoRIIOConfig:
     dp_rank: int
     dp_size: int
     tp_size: int
+    transfer_timeout: float
+    defer_timeout: float
 
     @classmethod
     def from_vllm_config(cls, vllm_config: VllmConfig) -> "MoRIIOConfig":
@@ -227,6 +229,14 @@ class MoRIIOConfig:
             dp_rank=dp_rank,
             dp_size=dp_size,
             tp_size=tp_size,
+            transfer_timeout=float(
+                extra_config.get(
+                    "transfer_timeout", MoRIIOConstants.DEFAULT_TRANSFER_TIMEOUT
+                )
+            ),
+            defer_timeout=float(
+                extra_config.get("defer_timeout", MoRIIOConstants.DEFAULT_DEFER_TIMEOUT)
+            ),
         )
 
 
@@ -246,6 +256,14 @@ class MoRIIOConstants:
     DEFAULT_NOTIFY_PORT = "61005"
 
     VLLM_MORI_READ_ABORT_REQUEST_TIMEOUT = 3600
+
+    # Timeout (seconds) for waiting_for_transfer_complete before raising TransferError.
+    # Overridable via kv_connector_extra_config["transfer_timeout"].
+    DEFAULT_TRANSFER_TIMEOUT = 30.0
+    # Timeout (seconds) before a deferred send with no finished_sending
+    # notification is reaped and its blocks force-freed.
+    # Overridable via kv_connector_extra_config["defer_timeout"].
+    DEFAULT_DEFER_TIMEOUT = 60.0
 
 
 # The router embeds both zmq_addresses in the request_id (similar to P2pNcclConnector):

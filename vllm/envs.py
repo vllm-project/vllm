@@ -213,8 +213,6 @@ if TYPE_CHECKING:
     VLLM_MORIIO_QP_PER_TRANSFER: int = 1
     VLLM_MORIIO_POST_BATCH_SIZE: int = -1
     VLLM_MORIIO_NUM_WORKERS: int = 1
-    VLLM_MORIIO_TRANSFER_TIMEOUT: float = 30.0
-    VLLM_MORIIO_DEFER_TIMEOUT: float = 60.0
     VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT: int = 480
     VLLM_ENABLE_CUDAGRAPH_GC: bool = False
     VLLM_LOOPBACK_IP: str = ""
@@ -1519,14 +1517,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Controls the number of workers for Mori operations for the Mori-IO connector
     "VLLM_MORIIO_NUM_WORKERS": lambda: int(os.getenv("VLLM_MORIIO_NUM_WORKERS", "1")),
-    # Timeout (seconds) for waiting_for_transfer_complete before raising TransferError
-    "VLLM_MORIIO_TRANSFER_TIMEOUT": lambda: float(
-        os.getenv("VLLM_MORIIO_TRANSFER_TIMEOUT", "30.0")
-    ),
-    # Timeout (seconds) before a deferred WriteTask with no remote blocks is dropped
-    "VLLM_MORIIO_DEFER_TIMEOUT": lambda: float(
-        os.getenv("VLLM_MORIIO_DEFER_TIMEOUT", "60.0")
-    ),
     # Timeout (in seconds) for MooncakeConnector in PD disaggregated setup.
     "VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT": lambda: int(
         os.getenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "480")
