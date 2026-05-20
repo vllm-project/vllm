@@ -10,6 +10,9 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     slice_nvfp4_output,
     swizzle_blockscale,
 )
+from vllm.model_executor.layers.quantization.utils.quant_fusion import (
+    QuantizedActivation,
+)
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import flashinfer_scaled_fp4_mm, has_flashinfer
 
@@ -52,19 +55,24 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
     def apply_weights(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
+        x: torch.Tensor | QuantizedActivation,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         output_size = layer.output_size_per_partition
-        output_dtype = x.dtype
-        output_shape = [*x.shape[:-1], output_size]
 
-        x_fp4, x_blockscale = scaled_fp4_quant(
-            x,
-            layer.input_global_scale_inv,
-            is_sf_swizzled_layout=True,
-            backend="flashinfer-cutlass",
-        )
+        if isinstance(x, QuantizedActivation):
+            x_fp4, x_blockscale = x.data, x.scale
+            output_dtype = x.orig_dtype
+            output_shape = [*x.orig_shape[:-1], output_size]
+        else:
+            output_dtype = x.dtype
+            output_shape = [*x.shape[:-1], output_size]
+            x_fp4, x_blockscale = scaled_fp4_quant(
+                x,
+                layer.input_global_scale_inv,
+                is_sf_swizzled_layout=True,
+                backend="flashinfer-cutlass",
+            )
 
         x_fp4 = pad_nvfp4_activation_for_cutlass(
             x_fp4, getattr(layer, "weights_padding_cols", 0)

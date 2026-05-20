@@ -43,7 +43,7 @@ from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLine
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.quant_fusion import (
-    rms_norm_input_quant,
+    FusedAllReduceRMSQuant,
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
@@ -217,6 +217,16 @@ class Qwen3DecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
+        self.fused_input_norm = FusedAllReduceRMSQuant(
+            self.input_layernorm,
+            self.self_attn.qkv_proj,
+            prev_linear=self.mlp.down_proj,
+        )
+        self.fused_post_attn_norm = FusedAllReduceRMSQuant(
+            self.post_attention_layernorm,
+            self.mlp.gate_up_proj,
+            prev_linear=self.self_attn.o_proj,
+        )
 
     def forward(
         self,
@@ -224,25 +234,13 @@ class Qwen3DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        hidden_states, residual = rms_norm_input_quant(
-            self.input_layernorm,
-            hidden_states,
-            residual,
-            self.self_attn.qkv_proj,
-            prev_linear=self.mlp.down_proj,
-        )
+        hidden_states, residual = self.fused_input_norm(hidden_states, residual)
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
 
-        hidden_states, residual = rms_norm_input_quant(
-            self.post_attention_layernorm,
-            hidden_states,
-            residual,
-            self.mlp.gate_up_proj,
-            prev_linear=self.self_attn.o_proj,
-        )
+        hidden_states, residual = self.fused_post_attn_norm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 

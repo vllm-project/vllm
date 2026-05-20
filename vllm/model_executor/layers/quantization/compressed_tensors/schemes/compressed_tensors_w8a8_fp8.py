@@ -146,6 +146,12 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             module_name=self.__class__.__name__,
         )
 
+        if (
+            self.is_static_input_scheme
+            and self.activation_quant_key == kFp8StaticTensorSym
+        ):
+            layer.input_quant_key = kFp8StaticTensorSym
+
     def process_weights_after_loading(self, layer) -> None:
         if self.strategy == QuantizationStrategy.TENSOR:
             weight, weight_scale, input_scale = process_fp8_weight_tensor_strategy(
@@ -190,15 +196,6 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
 
         if hasattr(self, "fp8_linear"):
             self.fp8_linear.process_weights_after_loading(layer)
-
-        if (
-            self.is_static_input_scheme
-            and self.activation_quant_key == kFp8StaticTensorSym
-        ):
-            layer.input_quant_key = kFp8StaticTensorSym
-            layer.fused_ar_max_token_num = (
-                get_current_vllm_config().scheduler_config.max_num_batched_tokens
-            )
 
     def apply_weights(
         self,

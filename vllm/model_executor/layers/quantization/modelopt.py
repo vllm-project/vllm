@@ -1189,6 +1189,8 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
 
         layer.register_parameter("weight_scale", weight_scale)
 
+        layer.input_quant_key = kNvfp4Dynamic
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if (
             torch.unique(layer.input_scale).numel() != 1
