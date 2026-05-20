@@ -1540,6 +1540,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "VLLM_NVFP4_GEMM_BACKEND",
         None,
         [
+            "flashinfer-b12x",
             "flashinfer-cudnn",
             "flashinfer-trtllm",
             "flashinfer-cutlass",
