@@ -205,7 +205,6 @@ class SingleTypeKVCacheManager(ABC):
         )
         num_skipped_tokens = self.get_num_skipped_tokens(num_total_computed_tokens)
         num_skipped_blocks = num_skipped_tokens // self.block_size
-        # Capture before slicing: only real prefix-hit blocks count as cached.
         num_computed_blocks = len(new_computed_blocks)
         if num_skipped_blocks > 0:
             # It is possible that all new computed blocks are skipped when
@@ -229,9 +228,7 @@ class SingleTypeKVCacheManager(ABC):
         req_blocks.extend([self._null_block] * num_skipped_blocks)
         # Add the remaining computed blocks.
         req_blocks.extend(new_computed_blocks)
-        # Only count actual prefix-hit blocks as cached. Null blocks from
-        # Mamba align-mode or SWA skipping must NOT be counted here —
-        # otherwise cache_blocks() will early-return before hashing them.
+        # Count real prefix-hit blocks before skipping.
         self.num_cached_block[request_id] = num_computed_blocks
 
         if num_external_computed_tokens > 0:
@@ -1058,7 +1055,6 @@ class MambaManager(SingleTypeKVCacheManager):
         super().cache_blocks(request, num_tokens)
         num_cached_blocks_after = self.num_cached_block.get(request.request_id, 0)
         if num_cached_blocks_after > num_cached_blocks_before:
-            # Resolve block hashes at this manager's block_size granularity.
             if self.block_size == self.block_pool.hash_block_size:
                 block_hashes: BlockHashList = request.block_hashes
             else:
@@ -1071,14 +1067,9 @@ class MambaManager(SingleTypeKVCacheManager):
             for i in range(num_cached_blocks_before, num_cached_blocks_after):
                 blk = req_blocks[i]
                 if blk.is_null:
-                    # Register hash -> null_block so find_longest_cache_hit
-                    # can discover these positions. Mamba state is cumulative:
-                    # only the last block holds data, but earlier positions
-                    # must be in the hash map for the right-to-left search to
-                    # identify the hit length. The null_block singleton's
-                    # block_hash stays None, so these entries won't be evicted
-                    # via _maybe_evict_cached_block; they are cleared on
-                    # reset_prefix_cache().
+                    # find_longest_cache_hit searches right-to-left through hashes.
+                    # When null-block positions are not in the hash map, the search
+                    # misses and hit_length drops to 0 (mamba caching specific).
                     block_hash_with_gid = make_block_hash_with_group_id(
                         block_hashes[i], self.kv_cache_group_id
                     )
