@@ -538,14 +538,36 @@ class EthaShardingStrategy(ABC):
         t_plan = time.monotonic()
         try:
             with _temporary_default_pg(cross_pg):
-                # Build each unique mesh tensor exactly once. Recreating
-                # the same mesh per pair causes _world.group_count drift
-                # between ranks of cross_pg (ranks outside a subgroup early-
-                # return from new_group without blocking, so they advance
-                # faster than in-group ranks blocked on ProcessGroupGloo
-                # construction). The next pair then attempts new_group with
-                # a different counter value on each rank, prefix-store keys
-                # diverge, and the gloo connect hangs.
+                # Build each unique mesh tensor exactly once.
+                #
+                # WARNING: do not move this inside the per-pair loop. Recreating
+                # the same mesh per pair triggers a deadlock inside gloo's
+                # broadcast path during DTensor's mesh_broadcast for all-Replicate
+                # placements (e.g. the `layernorm` and `router` pairs). py-spy at
+                # hang time showed: trainer-side ranks at different stages of
+                # get_m2m_map for the same pair — half at `broadcast` inside
+                # distribute_tensor, half at `all_gather_object` at the end —
+                # with matching group_names on both sides of the [2,3] subgroup
+                # PGG, so it is NOT a counter-drift / store-prefix mismatch.
+                # The deadlock appears to be inside gloo when multiple live PGGs
+                # share the same rank composition (in the broken pattern, by
+                # pair 4 the composition `[2,3]` exists in 3 distinct PGGs:
+                # one from pair 1's trainer_att, one from pair 2/3's trainer_moe
+                # dim-2 subgroups, one from pair 4's trainer_att). Caching
+                # avoids creating duplicate PGGs for the same rank composition.
+                #
+                # Residual risk: this fix works for any topology where the
+                # unique meshes used in the pair table have disjoint
+                # dim-subgroup rank compositions. If a future topology
+                # introduces two distinct meshes whose dim-subgroups happen
+                # to share a rank set (e.g. a 3D trainer mesh whose dim-1
+                # subgroups overlap with a 2D mesh's dim-0 subgroups), the
+                # same gloo deadlock could re-emerge. If that happens, the
+                # gloo broadcast hang inside `distribute_tensor` is where to
+                # look — minimal repro: build a gloo cross-PG, create 3+
+                # DeviceMesh instances under it whose dim subgroups overlap
+                # on the same rank pairs, then call `distribute_tensor` with
+                # all-Replicate placements on a later one.
                 mesh_cache: dict[tuple, DeviceMesh] = {}
 
                 def _get_mesh(mesh_tensor: torch.Tensor) -> DeviceMesh:
