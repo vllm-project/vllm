@@ -1347,6 +1347,7 @@ def test_toctou_cpu_hit_evicted_between_phases_no_crash() -> None:
     assert len(meta_b.load_gpu_blocks) == 2
     assert len(meta_b.load_cpu_blocks) == 2
 
+
 # ---------------------------------------------------------------------------
 # Test 12: Reset with pending eager stores releases block refs
 # ---------------------------------------------------------------------------
