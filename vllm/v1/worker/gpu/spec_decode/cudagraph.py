@@ -18,8 +18,8 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
 
 
-class PrefillEagleCudaGraphManager(CudaGraphManager):
-    """Eagle CudaGraphManager for prefill, using pre-built attention states
+class PrefillSpeculatorCudaGraphManager(CudaGraphManager):
+    """CudaGraphManager for draft prefill, using pre-built attention states
     from the target model's capture."""
 
     def capture(
@@ -53,9 +53,9 @@ class PrefillEagleCudaGraphManager(CudaGraphManager):
         super().capture(create_forward_fn, progress_bar_desc)
 
 
-class DecodeEagleCudaGraphManager(CudaGraphManager):
-    """Eagle CudaGraphManager for decode draft generation, building its own
-    attention metadata from scratch."""
+class DecodeSpeculatorCudaGraphManager(CudaGraphManager):
+    """CudaGraphManager for draft decode, building its own attention metadata
+    from scratch."""
 
     def capture(
         self,
