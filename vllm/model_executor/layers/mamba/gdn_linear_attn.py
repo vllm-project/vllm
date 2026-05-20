@@ -83,6 +83,49 @@ if GDN_AITER_TRITON_AVAILABLE:
 logger = init_logger(__name__)
 
 
+def _should_use_flashinfer_gdn_prefill(backend: str, head_k_dim: int | None) -> bool:
+    """Whether to use FlashInfer's GDN prefill kernel instead of the
+    Triton/FLA fallback.
+
+    Requirements:
+    * ``requested in ["flashinfer", "auto"]``;
+    * ``platform == cuda``;
+    * one of the following:
+      - Hopper (SM90) — no further constraints;
+      - Blackwell (SM10.x) with ``head_k_dim == 128`` and ``cuda_runtime >= 13``.
+    """
+    if backend not in ["flashinfer", "auto"]:
+        return False
+    if not current_platform.is_cuda():
+        return False
+    if current_platform.is_device_capability(90):
+        return True  # Hopper — no further constraints.
+    if not current_platform.is_device_capability_family(100):
+        return False  # Neither Hopper nor Blackwell.
+    if head_k_dim != 128:
+        return False
+    return current_platform.get_cuda_runtime_major() >= 13
+
+
+def _log_gdn_backend_decision(
+    backend: str, head_k_dim: int | None, use_flashinfer: bool
+) -> None:
+    """Log the GDN prefill backend choice in the attention-selector style."""
+    chosen = "FlashInfer" if use_flashinfer else "Triton/FLA"
+    logger.info_once(
+        "Using %s GDN prefill kernel (requested=%s, head_k_dim=%s).",
+        chosen,
+        backend,
+        head_k_dim,
+    )
+    # JIT-compiled cutlass path is only used on SM90 (Hopper).
+    if use_flashinfer and current_platform.is_device_capability(90):
+        logger.warning_once(
+            "FlashInfer GDN prefill is JIT-compiled; first run may take a "
+            "while. Set --gdn-prefill-backend triton to skip JIT.",
+        )
+
+
 def fi_chunk_gated_delta_rule(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -134,39 +177,21 @@ def fi_chunk_gated_delta_rule(
 
 @CustomOp.register("chunk_gated_delta_rule")
 class ChunkGatedDeltaRule(CustomOp):
-    def __init__(self) -> None:
+    def __init__(self, head_k_dim: int | None = None) -> None:
         super().__init__()
         additional_config = get_current_vllm_config().additional_config
         assert isinstance(additional_config, dict)
         backend_cfg = additional_config.get("gdn_prefill_backend", "auto")
         backend = str(backend_cfg).strip().lower()
 
-        supports_flashinfer = (
-            current_platform.is_cuda() and current_platform.is_device_capability(90)
-        )
-
-        if backend == "flashinfer":
-            use_flashinfer = supports_flashinfer
-            if not use_flashinfer:
-                logger.warning_once(
-                    "GDN prefill backend 'flashinfer' is selected but "
-                    "cannot use this kernel on the current platform. "
-                    "Falling back to Triton/FLA."
-                )
-        elif backend == "triton":
-            use_flashinfer = False
-        else:
-            use_flashinfer = supports_flashinfer
-
-        if use_flashinfer:
-            logger.info_once("Using FlashInfer GDN prefill kernel")
-            logger.info_once(
-                "FlashInfer GDN prefill kernel is JIT-compiled; first run may "
-                "take a while to compile. Set `--gdn-prefill-backend triton` to "
-                "avoid JIT compile time.",
+        use_flashinfer = _should_use_flashinfer_gdn_prefill(backend, head_k_dim)
+        if backend == "flashinfer" and not use_flashinfer:
+            logger.warning_once(
+                "GDN prefill backend 'flashinfer' is selected but "
+                "cannot use this kernel on the current platform. "
+                "Falling back to Triton/FLA."
             )
-        else:
-            logger.info_once("Using Triton/FLA GDN prefill kernel")
+        _log_gdn_backend_decision(backend, head_k_dim, use_flashinfer)
 
         self._forward_method = (
             self.forward_cuda if use_flashinfer else self.forward_native
@@ -396,7 +421,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             prefix=f"{prefix}.out_proj",
         )
 
-        self.chunk_gated_delta_rule = ChunkGatedDeltaRule()
+        self.chunk_gated_delta_rule = ChunkGatedDeltaRule(head_k_dim=self.head_k_dim)
         self._prefill_kernels_warmed_up = False
         self.enable_packed_recurrent_decode = (
             envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
@@ -995,9 +1020,9 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         """ROCm AITER fast path: conv1d + recurrent attention from packed
         qkvz/ba layout.
 
-        For decode-only (no spec, no prefill), dispatches directly to
-        ``_forward_core_decode_fast``.  Otherwise unpacks the packed
-        layout and falls through to ``_forward_core``.
+        For decode-only (no spec, no prefill) interleaved-GQA layouts,
+        dispatches directly to ``_forward_core_decode_fast``. Otherwise unpacks
+        the packed layout and falls through to ``_forward_core``.
 
         Args:
             qkvz: packed [q, k, v, z] projection (num_tokens, qkvz_dim)
@@ -1018,8 +1043,12 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         attn_metadata = attn_metadata_raw[self.prefix]  # type: ignore[index]
         assert isinstance(attn_metadata, GDNAttentionMetadata)
 
+        # The AITER fused reshape/conv kernel expects Qwen3-Next's interleaved
+        # GQA layout. Qwen3.5 uses a non-interleaved q/k/v/z layout and must use
+        # the generic path below to split/rearrange inputs correctly.
         if (
-            attn_metadata.spec_sequence_masks is None
+            self.gqa_interleaved_layout
+            and attn_metadata.spec_sequence_masks is None
             and attn_metadata.num_prefills == 0
             and attn_metadata.num_decodes > 0
         ):
