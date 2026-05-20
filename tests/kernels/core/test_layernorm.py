@@ -190,3 +190,31 @@ def test_gemma_rms_norm_mixed_input_weight_dtype(default_vllm_config) -> None:
 
     assert out.dtype == x.dtype
     torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+@torch.inference_mode()
+def test_gemma_rms_norm_residual_dtype(default_vllm_config, dtype) -> None:
+    """Verify that GemmaRMSNorm returns residual in the original dtype.
+
+    Regression test for a bug where the fp16 path upcasted x+residual to fp32
+    but never cast the residual back, leaking fp32 tensors downstream.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+
+    device = CUDA_DEVICES[0]
+    num_tokens, hidden_size = 32, 1024
+
+    layer = GemmaRMSNorm(hidden_size, eps=1e-6).to(device=device)
+    layer.weight.data.normal_(mean=0.0, std=0.1)
+
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
+    residual = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
+
+    out, residual_out = layer(x, residual)
+
+    assert out.dtype == dtype, f"out dtype {out.dtype} != expected {dtype}"
+    assert residual_out.dtype == dtype, (
+        f"residual dtype {residual_out.dtype} != expected {dtype}"
+    )

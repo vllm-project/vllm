@@ -167,7 +167,9 @@ class GemmaRMSNorm(CustomOp):
         # ir.ops.rms_norm handles fp32 upcast internally
         out = ir.ops.rms_norm(x, weight, self.variance_epsilon)
         return (
-            out.to(orig_dtype) if residual is None else (out.to(orig_dtype), residual)
+            out.to(orig_dtype)
+            if residual is None
+            else (out.to(orig_dtype), residual.to(orig_dtype))
         )
 
     def forward_cuda(
