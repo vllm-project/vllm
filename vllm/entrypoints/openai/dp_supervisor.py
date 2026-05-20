@@ -431,9 +431,7 @@ class DPSupervisor:
                 if probe_task.done():
                     # Extract exception if it crashed, or log failure
                     exc = (
-                        probe_task.exception()
-                        if probe_task.cancelled() is False
-                        else None
+                        probe_task.exception() if not probe_task.cancelled() else None
                     )
                     logger.info("DPSupervisor probe task stopped. Exception: %s", exc)
                     break
