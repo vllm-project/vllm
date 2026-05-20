@@ -384,9 +384,6 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             return
 
         self._setup_kernel(layer, w13, w2, w13_scale, w2_scale, w13_bias, w2_bias)
-        del w13, w2, w13_scale, w2_scale, w13_bias, w2_bias
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
 
     def get_fused_moe_quant_config(
         self, layer: RoutedExperts
@@ -721,9 +718,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             return
 
         self._setup_kernel(layer, w13, w2, w13_scale, w2_scale, w13_bias, w2_bias)
-        del w13, w2, w13_scale, w2_scale, w13_bias, w2_bias
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
 
     def get_fused_moe_quant_config(
         self,

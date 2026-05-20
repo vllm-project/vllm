@@ -310,13 +310,6 @@ def maybe_convert_int(value: str | None) -> int | None:
     return int(value)
 
 
-def maybe_convert_int_list(value: str | None) -> list[int] | None:
-    if value is None:
-        return None
-    values = [int(item.strip()) for item in value.split(",") if item.strip()]
-    return values or None
-
-
 def maybe_convert_bool(value: str | None) -> bool | None:
     if value is None:
         return None
