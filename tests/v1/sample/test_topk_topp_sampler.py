@@ -973,12 +973,6 @@ class TestCpuTopkTopp:
     @pytest.mark.parametrize("vocab_size", [1024, 32000, 128256])
     def test_topk_and_topp(self, batch_size: int, vocab_size: int):
         """Test combined top-k and top-p."""
-        # When top-k pre-masks all but ~50 logits to -inf, the kernel's
-        # Pass-0 mean/std sample over the row (most entries PAD) leaves
-        # the PATH-A outlier search noisy at small vocab. Triton's
-        # ternary search handles this regime; the CPU kernel does not
-        # yet. Skip the small-vocab combined cases until the Pass-0
-        # PAD-skip refinement lands.
         logits = torch.randn(
             batch_size, vocab_size, generator=self.generator, dtype=torch.float32
         )

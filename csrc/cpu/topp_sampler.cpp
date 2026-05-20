@@ -143,16 +143,7 @@ __attribute__((always_inline)) static inline int count_within_tol(
     const float* row, int V, float center, float tol) {
   int n = 0;
   int i = 0;
-#if defined(__AVX512F__)
-  const __m512 c = _mm512_set1_ps(center);
-  const __m512 t = _mm512_set1_ps(tol);
-  for (; i + 16 <= V; i += 16) {
-    __m512 v = _mm512_loadu_ps(row + i);
-    __m512 a = _mm512_abs_ps(_mm512_sub_ps(v, c));
-    __mmask16 m = _mm512_cmp_ps_mask(a, t, _CMP_LT_OQ);
-    n += _mm_popcnt_u32((unsigned)m);
-  }
-#elif defined(__AVX2__)
+#if defined(__AVX2__)
   const __m256 c = _mm256_set1_ps(center);
   const __m256 t = _mm256_set1_ps(tol);
   const __m256 sign_mask = _mm256_set1_ps(-0.0f);
@@ -176,15 +167,7 @@ __attribute__((always_inline)) static inline int count_within_tol(
 __attribute__((always_inline)) static inline void mask_write_below(
     float* row, int V, float threshold, float fill) {
   int i = 0;
-#if defined(__AVX512F__)
-  const __m512 thr = _mm512_set1_ps(threshold);
-  const __m512 f = _mm512_set1_ps(fill);
-  for (; i + 16 <= V; i += 16) {
-    __m512 v = _mm512_loadu_ps(row + i);
-    __mmask16 keep = _mm512_cmp_ps_mask(v, thr, _CMP_GT_OQ);
-    _mm512_storeu_ps(row + i, _mm512_mask_blend_ps(keep, f, v));
-  }
-#elif defined(__AVX2__)
+#if defined(__AVX2__)
   const __m256 thr = _mm256_set1_ps(threshold);
   const __m256 f = _mm256_set1_ps(fill);
   for (; i + 16 <= V; i += 16) {
@@ -205,17 +188,20 @@ __attribute__((always_inline)) static inline void mask_write_below(
 // Binary search on a pre-computed probability buffer.
 static float binary_search_buffer(const float* buf, int n, float p_val,
                                   float lo, float hi, double* sum_above_out) {
+  // sum_gt(buf, n, max_prob) == 0 (nothing exceeds the maximum probability).
+  double s_hi = 0.0;
   for (int iter = 0; iter < kBsearchMaxIters; ++iter) {
     float mid = lo + (hi - lo) * 0.5f;
     if (mid == lo || mid == hi) break;
     double s = sum_gt_to_double(buf, n, mid);
-    if (s >= (double)p_val)
+    if (s >= (double)p_val) {
       lo = mid;
-    else
+    } else {
       hi = mid;
+      s_hi = s;
+    }
   }
-  double s = sum_gt_to_double(buf, n, hi);
-  *sum_above_out = s;
+  *sum_above_out = s_hi;
   return hi;
 }
 
