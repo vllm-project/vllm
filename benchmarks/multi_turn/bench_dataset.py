@@ -202,7 +202,9 @@ class LognormalDistribution(Distribution):
 
 
 class ExponentialDistribution(Distribution):
-    def __init__(self, scale, max_val: int | None = None) -> None:
+    def __init__(self, scale: float, max_val: int | None = None) -> None:
+        if scale <= 0:
+            raise ValueError("Exponential distribution scale must be positive.")
         self.scale = scale
         self.max_val = max_val
 
