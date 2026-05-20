@@ -74,3 +74,53 @@ def test_fused_shared_expert_gate_fallback_on_unsupported_shape():
 
     assert actual.shape == expected.shape
     torch.testing.assert_close(actual, expected, atol=3.125e-2, rtol=2e-2)
+
+
+def test_fused_shared_expert_gate_handles_sliced_row_stride():
+    """Non-K row stride (column slice) with unit inner stride hits the kernel.
+
+    Regression test for the gemini-code-assist review on #43190: ensures the
+    kernel indexes rows by the actual `stride(0)` rather than assuming
+    `row * K`, so that views over a wider allocation still produce correct
+    results instead of silently corrupting data.
+    """
+    torch.manual_seed(0)
+    device = "cuda"
+    dtype = torch.bfloat16
+    K = 2048
+    N = 64
+    x_base = torch.randn((N, 2 * K), device=device, dtype=dtype)
+    out_base = torch.randn((N, 2 * K), device=device, dtype=dtype)
+    x = x_base[:, :K]
+    out = out_base[:, :K]
+    weight = torch.randn((1, K), device=device, dtype=dtype)
+    assert x.stride() == (2 * K, 1)
+    assert out.stride() == (2 * K, 1)
+    assert not x.is_contiguous()
+
+    expected = _reference(x, weight, out)
+    actual = fused_shared_expert_gate(x, weight, out)
+
+    assert actual.shape == expected.shape
+    torch.testing.assert_close(actual, expected, atol=3.125e-2, rtol=2e-2)
+
+
+def test_fused_shared_expert_gate_falls_back_on_non_unit_inner_stride():
+    """Non-unit inner stride must trigger the PyTorch fallback path."""
+    torch.manual_seed(0)
+    device = "cuda"
+    dtype = torch.bfloat16
+    K = 1024
+    N = 32
+    x_base = torch.randn((N, 2 * K), device=device, dtype=dtype)
+    out_base = torch.randn((N, 2 * K), device=device, dtype=dtype)
+    x = x_base[:, ::2]
+    out = out_base[:, ::2]
+    weight = torch.randn((1, K), device=device, dtype=dtype)
+    assert x.stride(1) == 2
+
+    expected = _reference(x, weight, out)
+    actual = fused_shared_expert_gate(x, weight, out)
+
+    assert actual.shape == expected.shape
+    torch.testing.assert_close(actual, expected, atol=3.125e-2, rtol=2e-2)
