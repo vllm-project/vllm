@@ -40,7 +40,7 @@ def _fused_topk_reduce_kernel(
     k_mask = k_off < K
 
     acc = tl.zeros([BLOCK_K], dtype=tl.float32)
-    base = pid_m * stride_im
+    base = pid_m.to(tl.int64) * stride_im
     for t in tl.static_range(topk):
         ptr = base + t * stride_it + k_off * stride_ik
         acc += tl.load(input_ptr + ptr, mask=k_mask, other=0.0).to(tl.float32)
