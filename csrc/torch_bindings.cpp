@@ -137,6 +137,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("gelu_quick(Tensor! out, Tensor input) -> ()");
   ops.impl("gelu_quick", torch::kCUDA, &gelu_quick);
 
+  // relu(x)^2 activation from https://arxiv.org/abs/2109.08668v2
+  ops.def("relu_squared(Tensor! out, Tensor input) -> ()");
+  ops.impl("relu_squared", torch::kCUDA, &relu_squared);
+
   // Layernorm
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
   ops.def(

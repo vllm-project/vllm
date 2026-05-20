@@ -166,6 +166,8 @@ void gelu_fast(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_quick(torch::Tensor& out, torch::Tensor& input);
 
+void relu_squared(torch::Tensor& out, torch::Tensor& input);
+
 void cutlass_mla_decode(torch::Tensor const& out, torch::Tensor const& q_nope,
                         torch::Tensor const& q_pe,
                         torch::Tensor const& kv_c_and_k_pe_cache,
