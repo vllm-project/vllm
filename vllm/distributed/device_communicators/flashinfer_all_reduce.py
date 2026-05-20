@@ -19,6 +19,8 @@ from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
+# The empirical value for small batch
+PDL_ADVANCE_LAUNCH_TOKENS = 16
 
 fi_ar_available = False
 try:
@@ -325,8 +327,7 @@ class FlashInferAllReduce:
             input=input_tensor,
             workspace=workspace,
             pattern=flashinfer_comm.AllReduceFusionPattern.kAllReduce,
-            # The empirical value for small batch
-            trigger_completion_at_end=num_tokens > 16,
+            trigger_completion_at_end=num_tokens > PDL_ADVANCE_LAUNCH_TOKENS,
         )
 
     def destroy(self):
