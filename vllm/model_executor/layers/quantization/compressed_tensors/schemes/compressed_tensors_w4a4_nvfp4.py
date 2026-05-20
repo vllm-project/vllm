@@ -3,17 +3,15 @@
 from collections.abc import Callable
 
 import torch
-from torch.nn.parameter import Parameter
 
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import init_nvfp4_linear_kernel
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
-from vllm.model_executor.parameter import (
-    GroupQuantScaleParameter,
-    ModelWeightParameter,
-    PerTensorScaleParameter,
+from vllm.model_executor.layers.quantization.compressed_tensors.schemes.nvfp4_builders import (  # noqa: E501
+    NvFp4DynamicActivationBuilder,
+    NvFp4StaticWeightBuilder,
 )
 
 logger = init_logger(__name__)
@@ -25,7 +23,9 @@ __all__ = ["CompressedTensorsW4A4Fp4"]
 class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
     def __init__(self):
         self.kernel = init_nvfp4_linear_kernel()
-        self.group_size = 16
+        self.weight_builder = NvFp4StaticWeightBuilder()
+        self.activation_builder = NvFp4DynamicActivationBuilder()
+        self.group_size = self.weight_builder.group_size
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -45,51 +45,25 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
 
-        # Weight
-        weight = ModelWeightParameter(
-            data=torch.empty(
-                sum(output_partition_sizes),
-                input_size_per_partition // 2,
-                dtype=torch.uint8,
-            ),
-            input_dim=1,
-            output_dim=0,
+        self.weight_builder.create(
+            layer=layer,
+            output_partition_sizes=output_partition_sizes,
+            input_size_per_partition=input_size_per_partition,
+            params_dtype=params_dtype,
             weight_loader=weight_loader,
-        )
-        layer.register_parameter("weight_packed", weight)
-
-        # Global Weight Scale
-        weight_global_scale = PerTensorScaleParameter(
-            data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
-            weight_loader=weight_loader,
-        )
-        layer.register_parameter("weight_global_scale", weight_global_scale)
-
-        # Per Group Weight Scale
-        weight_scale = GroupQuantScaleParameter(
-            data=torch.empty(
-                sum(output_partition_sizes),
-                input_size_per_partition // self.group_size,
-                dtype=torch.float8_e4m3fn,
-            ),
-            input_dim=1,
-            output_dim=0,
-            weight_loader=weight_loader,
+            **kwargs,
         )
 
-        layer.register_parameter("weight_scale", weight_scale)
-
-        input_global_scale = PerTensorScaleParameter(
-            data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
+        self.activation_builder.create(
+            layer=layer,
+            output_partition_sizes=output_partition_sizes,
+            input_size_per_partition=input_size_per_partition,
+            params_dtype=params_dtype,
             weight_loader=weight_loader,
+            **kwargs,
         )
-        layer.register_parameter("input_global_scale", input_global_scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # Rename CT checkpoint names to standardized names
-        layer.weight = layer.weight_packed
-        del layer.weight_packed
-
         if (
             torch.unique(layer.input_global_scale).numel() != 1
             or torch.unique(layer.weight_global_scale).numel() != 1
@@ -102,25 +76,8 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
                 " scale for fused layers."
             )
 
-        # Process global scales (CT stores as divisors, i.e. 1/scale)
-        input_global_scale_inv = layer.input_global_scale.max().to(torch.float32)
-        layer.input_global_scale = Parameter(
-            (1.0 / input_global_scale_inv).to(torch.float32), requires_grad=False
-        )
-        weight_global_scale = layer.weight_global_scale.max().to(torch.float32)
-        layer.weight_global_scale = Parameter(
-            1.0 / weight_global_scale, requires_grad=False
-        )
-
-        # Pre-compute alpha and inverse for runtime quantization
-        layer.input_global_scale_inv = Parameter(
-            input_global_scale_inv, requires_grad=False
-        )
-        layer.alpha = Parameter(
-            layer.input_global_scale * layer.weight_global_scale, requires_grad=False
-        )
-
-        # Convert layer to NVFP4 linear kernel format
+        self.weight_builder.post_load(layer)
+        self.activation_builder.post_load(layer)
         self.kernel.process_weights_after_loading(layer)
 
     def apply_weights(

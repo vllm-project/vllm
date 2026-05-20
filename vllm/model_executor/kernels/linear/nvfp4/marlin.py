@@ -31,6 +31,7 @@ class MarlinNvFp4LinearKernel(NvFp4LinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        self._set_alpha_after_loading(layer)
         logger.warning_once(
             "Your GPU does not have native support for FP4 computation but "
             "FP4 quantization is being used. Weight-only FP4 compression "

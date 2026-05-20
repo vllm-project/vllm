@@ -26,6 +26,7 @@ class EmulationNvFp4LinearKernel(NvFp4LinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        self._set_alpha_after_loading(layer)
         # Move the E2M1 lookup table to the device now, because
         # `.to(device)` is not allowed during CUDA graph capture.
         kE2M1ToFloat_handle.val = kE2M1ToFloat_handle.val.to(layer.weight.device)

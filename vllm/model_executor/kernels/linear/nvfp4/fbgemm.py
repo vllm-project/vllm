@@ -29,6 +29,7 @@ class FbgemmNvFp4LinearKernel(NvFp4LinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        self._set_alpha_after_loading(layer)
         swizzled = swizzle_blockscale(layer.weight_scale.data)
         layer.weight_scale = torch.nn.Parameter(
             swizzled.view(-1).view(torch.uint8), requires_grad=False
