@@ -4,8 +4,13 @@
 """Triple-fused (kkt ∘ solve_tril ∘ recompute_w_u) kernel.
 
 Builds on wy_fast_fused.py by additionally absorbing the upstream
-``chunk_scaled_dot_kkt_fwd`` kernel.  Saves the A writeback (~3.85 MB
-at the trace shape), the A readback, plus one launch.
+``chunk_scaled_dot_kkt_fwd`` kernel.  Saves the A writeback, the A
+readback, and one launch.  The 10 strict-lower 16×16 blocks of
+(β·k)·kᵀ are accumulated directly in registers, skipping both the
+[64,64]→main-memory→10×[16,16] round-trip that would otherwise be
+needed to extract sub-blocks (Triton has no static slicing of reshaped
+tensors) and the 6 upper-triangular MFMAs that would be computed only
+to be masked away (≈37.5% FLOP reduction in the KKT phase).
 
 Inputs:
     k, v, beta, g_cumsum   — same as the unfused chain
@@ -52,7 +57,6 @@ def kkt_solve_tril_recompute_w_u_kernel(
     g,  # g_cumsum [B,T,H]
     w,  # output [B,T,H,K]
     u,  # output [B,T,H,V]
-    A_scratch,  # fp32 scratch [B,T,H,BT] for in-kernel kkt round-trip
     cu_seqlens,
     chunk_indices,
     T,
@@ -81,6 +85,13 @@ def kkt_solve_tril_recompute_w_u_kernel(
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
+
+    # ---------- Per-band row-validity masks (used by the per-block masks below) ----------
+    o_i = tl.arange(0, 16)
+    m_t0 = (i_t * BT + 0 + o_i) < T
+    m_t1 = (i_t * BT + 16 + o_i) < T
+    m_t2 = (i_t * BT + 32 + o_i) < T
+    m_t3 = (i_t * BT + 48 + o_i) < T
 
     # ---------- Load beta and g per [16] band ----------
     p_b0 = tl.make_block_ptr(
@@ -112,132 +123,157 @@ def kkt_solve_tril_recompute_w_u_kernel(
     p_g3 = tl.make_block_ptr(
         g + bos * H + i_h, (T,), (H,), (i_t * BT + 48,), (16,), (0,)
     )
+    # Raw g per band is saved separately: bg0..bg3 below fold it into β·exp(g)
+    # for the later w computation, but the KKT phase also needs the raw g for
+    # the outer-difference scale exp(g_i - g_j).
+    bg0_raw = tl.load(p_g0, boundary_check=(0,))
+    bg1_raw = tl.load(p_g1, boundary_check=(0,))
+    bg2_raw = tl.load(p_g2, boundary_check=(0,))
+    bg3_raw = tl.load(p_g3, boundary_check=(0,))
     # Match singly-fused: keep g as bf16 through exp, no explicit fp32 cast.
-    bg0 = bb0 * tl.exp(tl.load(p_g0, boundary_check=(0,)))
-    bg1 = bb1 * tl.exp(tl.load(p_g1, boundary_check=(0,)))
-    bg2 = bb2 * tl.exp(tl.load(p_g2, boundary_check=(0,)))
-    bg3 = bb3 * tl.exp(tl.load(p_g3, boundary_check=(0,)))
+    bg0 = bb0 * tl.exp(bg0_raw)
+    bg1 = bb1 * tl.exp(bg1_raw)
+    bg2 = bb2 * tl.exp(bg2_raw)
+    bg3 = bb3 * tl.exp(bg3_raw)
 
-    # ---------- KKT phase: single [BT, BT] matmul, exactly matching the
-    # unfused chunk_scaled_dot_kkt_fwd reduction order, then write b_A to
-    # an HBM scratch so the inversion code below can re-load 16×16 blocks
-    # via standard make_block_ptr (Triton 3.6 has no static indexing into
-    # reshaped tensors).  The scratch hits L2 since each program writes
-    # then immediately re-reads its own slice. ----------
-    o_t = i_t * BT + tl.arange(0, BT)
-    m_t = o_t < T
-    p_beta = tl.make_block_ptr(
-        beta + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,)
-    )
-    b_beta_full = tl.load(p_beta, boundary_check=(0,))
+    # ---------- KKT phase: build the 10 strict-lower [16,16] blocks of
+    # (β·k) @ kᵀ directly in registers.  Skips the 6 upper-triangular
+    # blocks of the [64,64] product (the unfused chain computes them
+    # only to mask them away) and avoids the main-memory round-trip
+    # that would be needed to extract 16×16 sub-blocks from a [64,64]
+    # tile (Triton has no static slicing of reshaped tensors).
+    # Reduction order per block matches the unfused chain exactly:
+    # sum over i_k of (β·k_band_i) · k_band_jᵀ. ----------
+    b_A_11 = tl.zeros([16, 16], dtype=tl.float32)
+    b_A_22 = tl.zeros([16, 16], dtype=tl.float32)
+    b_A_33 = tl.zeros([16, 16], dtype=tl.float32)
+    b_A_44 = tl.zeros([16, 16], dtype=tl.float32)
+    b_A_21 = tl.zeros([16, 16], dtype=tl.float32)
+    b_A_31 = tl.zeros([16, 16], dtype=tl.float32)
+    b_A_32 = tl.zeros([16, 16], dtype=tl.float32)
+    b_A_41 = tl.zeros([16, 16], dtype=tl.float32)
+    b_A_42 = tl.zeros([16, 16], dtype=tl.float32)
+    b_A_43 = tl.zeros([16, 16], dtype=tl.float32)
 
-    b_A = tl.zeros([BT, BT], dtype=tl.float32)
     k_off = (bos * Hg + i_h // (H // Hg)) * K
     for i_k in range(tl.cdiv(K, BK)):
-        p_k = tl.make_block_ptr(
-            k + k_off, (T, K), (Hg * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0)
+        pk0 = tl.make_block_ptr(
+            k + k_off, (T, K), (Hg * K, 1), (i_t * BT + 0, i_k * BK), (16, BK), (1, 0)
         )
-        b_k = tl.load(p_k, boundary_check=(0, 1))
-        b_kb = b_k * b_beta_full[:, None]
-        b_A += tl.dot(b_kb.to(b_k.dtype), tl.trans(b_k))
+        pk1 = tl.make_block_ptr(
+            k + k_off, (T, K), (Hg * K, 1), (i_t * BT + 16, i_k * BK), (16, BK), (1, 0)
+        )
+        pk2 = tl.make_block_ptr(
+            k + k_off, (T, K), (Hg * K, 1), (i_t * BT + 32, i_k * BK), (16, BK), (1, 0)
+        )
+        pk3 = tl.make_block_ptr(
+            k + k_off, (T, K), (Hg * K, 1), (i_t * BT + 48, i_k * BK), (16, BK), (1, 0)
+        )
+        k0 = tl.load(pk0, boundary_check=(0, 1))
+        k1 = tl.load(pk1, boundary_check=(0, 1))
+        k2 = tl.load(pk2, boundary_check=(0, 1))
+        k3 = tl.load(pk3, boundary_check=(0, 1))
+        kb0 = (k0 * bb0[:, None]).to(k0.dtype)
+        kb1 = (k1 * bb1[:, None]).to(k1.dtype)
+        kb2 = (k2 * bb2[:, None]).to(k2.dtype)
+        kb3 = (k3 * bb3[:, None]).to(k3.dtype)
+        # Diagonal blocks
+        b_A_11 += tl.dot(kb0, tl.trans(k0))
+        b_A_22 += tl.dot(kb1, tl.trans(k1))
+        b_A_33 += tl.dot(kb2, tl.trans(k2))
+        b_A_44 += tl.dot(kb3, tl.trans(k3))
+        # Strict-lower off-diagonal blocks (i > j in band indices)
+        b_A_21 += tl.dot(kb1, tl.trans(k0))
+        b_A_31 += tl.dot(kb2, tl.trans(k0))
+        b_A_32 += tl.dot(kb2, tl.trans(k1))
+        b_A_41 += tl.dot(kb3, tl.trans(k0))
+        b_A_42 += tl.dot(kb3, tl.trans(k1))
+        b_A_43 += tl.dot(kb3, tl.trans(k2))
 
-    # g-diff scaling and strict-lower mask, identical to the unfused kernel.
-    p_g_full = tl.make_block_ptr(
-        g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,)
+    # ---------- Per-block g-diff scaling and boundary/strict-lower masks ----------
+    # Equivalent to the unfused chain's full-tile mask + scale, sliced
+    # into 16×16 blocks.  Diagonal blocks need the in-block strict-lower
+    # triangle mask plus row/col boundary; off-diagonal blocks have rows
+    # strictly below all cols by construction so only the row/col
+    # boundary mask applies.
+    m_lower = o_i[:, None] > o_i[None, :]
+    b_A_11 = tl.where(
+        m_lower & (m_t0[:, None] & m_t0[None, :]),
+        b_A_11 * exp(bg0_raw[:, None] - bg0_raw[None, :]),
+        0,
     )
-    b_g_full = tl.load(p_g_full, boundary_check=(0,))
-    b_A = b_A * exp(b_g_full[:, None] - b_g_full[None, :])
-    m_A_full = (o_t[:, None] > o_t[None, :]) & (m_t[:, None] & m_t)
-    b_A = tl.where(m_A_full, b_A, 0)
+    b_A_22 = tl.where(
+        m_lower & (m_t1[:, None] & m_t1[None, :]),
+        b_A_22 * exp(bg1_raw[:, None] - bg1_raw[None, :]),
+        0,
+    )
+    b_A_33 = tl.where(
+        m_lower & (m_t2[:, None] & m_t2[None, :]),
+        b_A_33 * exp(bg2_raw[:, None] - bg2_raw[None, :]),
+        0,
+    )
+    b_A_44 = tl.where(
+        m_lower & (m_t3[:, None] & m_t3[None, :]),
+        b_A_44 * exp(bg3_raw[:, None] - bg3_raw[None, :]),
+        0,
+    )
+    b_A_21 = tl.where(
+        m_t1[:, None] & m_t0[None, :],
+        b_A_21 * exp(bg1_raw[:, None] - bg0_raw[None, :]),
+        0,
+    )
+    b_A_31 = tl.where(
+        m_t2[:, None] & m_t0[None, :],
+        b_A_31 * exp(bg2_raw[:, None] - bg0_raw[None, :]),
+        0,
+    )
+    b_A_32 = tl.where(
+        m_t2[:, None] & m_t1[None, :],
+        b_A_32 * exp(bg2_raw[:, None] - bg1_raw[None, :]),
+        0,
+    )
+    b_A_41 = tl.where(
+        m_t3[:, None] & m_t0[None, :],
+        b_A_41 * exp(bg3_raw[:, None] - bg0_raw[None, :]),
+        0,
+    )
+    b_A_42 = tl.where(
+        m_t3[:, None] & m_t1[None, :],
+        b_A_42 * exp(bg3_raw[:, None] - bg1_raw[None, :]),
+        0,
+    )
+    b_A_43 = tl.where(
+        m_t3[:, None] & m_t2[None, :],
+        b_A_43 * exp(bg3_raw[:, None] - bg2_raw[None, :]),
+        0,
+    )
 
-    # Store b_A to scratch as fp32 (matches solve_tril's input expectation).
-    p_A_store = tl.make_block_ptr(
-        A_scratch + (bos * H + i_h) * BT,
-        (T, BT),
-        (H * BT, 1),
-        (i_t * BT, 0),
-        (BT, BT),
-        (1, 0),
-    )
-    tl.store(p_A_store, b_A, boundary_check=(0, 1))
-
-    # Re-load per 16×16 block.  These hit L2 (just-written by us).
-    A_blk = A_scratch + (bos * H + i_h) * BT
-    p_A_11 = tl.make_block_ptr(
-        A_blk, (T, BT), (H * BT, 1), (i_t * BT, 0), (16, 16), (1, 0)
-    )
-    p_A_22 = tl.make_block_ptr(
-        A_blk, (T, BT), (H * BT, 1), (i_t * BT + 16, 16), (16, 16), (1, 0)
-    )
-    p_A_33 = tl.make_block_ptr(
-        A_blk, (T, BT), (H * BT, 1), (i_t * BT + 32, 32), (16, 16), (1, 0)
-    )
-    p_A_44 = tl.make_block_ptr(
-        A_blk, (T, BT), (H * BT, 1), (i_t * BT + 48, 48), (16, 16), (1, 0)
-    )
-    p_A_21 = tl.make_block_ptr(
-        A_blk, (T, BT), (H * BT, 1), (i_t * BT + 16, 0), (16, 16), (1, 0)
-    )
-    p_A_31 = tl.make_block_ptr(
-        A_blk, (T, BT), (H * BT, 1), (i_t * BT + 32, 0), (16, 16), (1, 0)
-    )
-    p_A_32 = tl.make_block_ptr(
-        A_blk, (T, BT), (H * BT, 1), (i_t * BT + 32, 16), (16, 16), (1, 0)
-    )
-    p_A_41 = tl.make_block_ptr(
-        A_blk, (T, BT), (H * BT, 1), (i_t * BT + 48, 0), (16, 16), (1, 0)
-    )
-    p_A_42 = tl.make_block_ptr(
-        A_blk, (T, BT), (H * BT, 1), (i_t * BT + 48, 16), (16, 16), (1, 0)
-    )
-    p_A_43 = tl.make_block_ptr(
-        A_blk, (T, BT), (H * BT, 1), (i_t * BT + 48, 32), (16, 16), (1, 0)
-    )
-    b_A_11 = tl.load(p_A_11, boundary_check=(0, 1))
-    b_A_22 = tl.load(p_A_22, boundary_check=(0, 1))
-    b_A_33 = tl.load(p_A_33, boundary_check=(0, 1))
-    b_A_44 = tl.load(p_A_44, boundary_check=(0, 1))
-    b_A_21 = tl.load(p_A_21, boundary_check=(0, 1))
-    b_A_31 = tl.load(p_A_31, boundary_check=(0, 1))
-    b_A_32 = tl.load(p_A_32, boundary_check=(0, 1))
-    b_A_41 = tl.load(p_A_41, boundary_check=(0, 1))
-    b_A_42 = tl.load(p_A_42, boundary_check=(0, 1))
-    b_A_43 = tl.load(p_A_43, boundary_check=(0, 1))
-
-    # ---------- Solve_tril: invert (I + A_lower) over the 4×4 grid -----------
-    o_i = tl.arange(0, 16)
-    m_A = o_i[:, None] > o_i[None, :]
+    # ---------- Solve_tril: invert (I + A_lower) over the 4×4 block grid -----------
     m_I = o_i[:, None] == o_i[None, :]
-
-    # Apply strict-lower mask to diagonal blocks (the original kkt kernel
-    # stores zeros above the diagonal, so row-select must see zeros there).
-    b_A_11 = tl.where(m_A, b_A_11, 0)
-    b_A_22 = tl.where(m_A, b_A_22, 0)
-    b_A_33 = tl.where(m_A, b_A_33, 0)
-    b_A_44 = tl.where(m_A, b_A_44, 0)
     b_Ai_11 = -b_A_11
     b_Ai_22 = -b_A_22
     b_Ai_33 = -b_A_33
     b_Ai_44 = -b_A_44
 
-    # Gauss-Jordan: re-load row i from scratch (matches singly-fused's HBM
-    # load pattern exactly — same data path so the inversion is bit-
-    # identical to the unfused chain through this point).
-    A_blk = A_scratch + (bos * H + i_h) * BT
+    # Gauss-Jordan inversion of each diagonal block.  Same algorithm as
+    # the unfused chain; row i of b_A_** is selected in-register via
+    # mask+sum (sums the masked tile along axis 0 to yield the single
+    # row), which produces the same 16 fp32 values an explicit row load
+    # would, so the inversion remains bit-equivalent.
     for i in range(2, min(16, T - i_t * BT)):
-        b_a_11 = -tl.load(A_blk + (i_t * BT + i) * H * BT + o_i)
+        b_a_11 = -tl.sum(tl.where((o_i == i)[:, None], b_A_11, 0.0), 0)
         b_a_11 += tl.sum(b_a_11[:, None] * b_Ai_11, 0)
         b_Ai_11 = tl.where((o_i == i)[:, None], b_a_11, b_Ai_11)
     for i in range(16 + 2, min(32, T - i_t * BT)):
-        b_a_22 = -tl.load(A_blk + (i_t * BT + i) * H * BT + o_i + 16)
+        b_a_22 = -tl.sum(tl.where((o_i == i - 16)[:, None], b_A_22, 0.0), 0)
         b_a_22 += tl.sum(b_a_22[:, None] * b_Ai_22, 0)
         b_Ai_22 = tl.where((o_i == i - 16)[:, None], b_a_22, b_Ai_22)
     for i in range(32 + 2, min(48, T - i_t * BT)):
-        b_a_33 = -tl.load(A_blk + (i_t * BT + i) * H * BT + o_i + 32)
+        b_a_33 = -tl.sum(tl.where((o_i == i - 32)[:, None], b_A_33, 0.0), 0)
         b_a_33 += tl.sum(b_a_33[:, None] * b_Ai_33, 0)
         b_Ai_33 = tl.where((o_i == i - 32)[:, None], b_a_33, b_Ai_33)
     for i in range(48 + 2, min(64, T - i_t * BT)):
-        b_a_44 = -tl.load(A_blk + (i_t * BT + i) * H * BT + o_i + 48)
+        b_a_44 = -tl.sum(tl.where((o_i == i - 48)[:, None], b_A_44, 0.0), 0)
         b_a_44 += tl.sum(b_a_44[:, None] * b_Ai_44, 0)
         b_Ai_44 = tl.where((o_i == i - 48)[:, None], b_a_44, b_Ai_44)
     b_Ai_11 += m_I
@@ -259,12 +295,11 @@ def kkt_solve_tril_recompute_w_u_kernel(
         tl.dot(b_A_41, b_Ai_11) + tl.dot(b_A_42, b_Ai_21) + tl.dot(b_A_43, b_Ai_31),
     )
 
-    # Cast Ai blocks to compute dtype with rtne rounding to match
-    # solve_tril's HBM store exactly (fp_downcast_rounding="rtne").  Without
-    # this the default truncation rounding produced enough drift in the
-    # bf16 Ai values that errors compounded across 24 GDN layers and
-    # broke end-to-end sanity on long-prefill inputs (e.g. the 1024×800
-    # image embedding bench).
+    # Cast Ai blocks to compute dtype with rtne rounding to match the
+    # unfused solve_tril's store exactly (fp_downcast_rounding="rtne").
+    # Default truncation rounding drifts in the bf16 Ai values enough to
+    # compound across 24 GDN layers and break end-to-end sanity on long-
+    # prefill inputs.
     out_dtype = w.dtype.element_ty
     b_Ai_11 = b_Ai_11.to(out_dtype, fp_downcast_rounding="rtne")
     b_Ai_22 = b_Ai_22.to(out_dtype, fp_downcast_rounding="rtne")
@@ -455,10 +490,6 @@ def fused_kkt_solve_tril_recompute_w_u_fwd(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     u = torch.empty_like(v)
     w = k.new_empty(B, T, H, K)
-    # fp32 scratch for the in-kernel kkt → solve_tril round-trip.  Per-program
-    # writes/reads land in L2 since the slice is small (B·T·H·BT·4 bytes,
-    # ≈3.85 MB at the trace shape) and the access pattern is per-program-local.
-    A_scratch = torch.empty(B, T, H, BT, dtype=torch.float32, device=k.device)
     extra = {"waves_per_eu": 2} if is_navi else {}
     kkt_solve_tril_recompute_w_u_kernel[(NT, B * H)](
         k=k,
@@ -467,7 +498,6 @@ def fused_kkt_solve_tril_recompute_w_u_fwd(
         g=g_cumsum,
         w=w,
         u=u,
-        A_scratch=A_scratch,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         T=T,
