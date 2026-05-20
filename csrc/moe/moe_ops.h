@@ -5,12 +5,12 @@
 void topk_softmax(torch::Tensor& topk_weights, torch::Tensor& topk_indices,
                   torch::Tensor& token_expert_indices,
                   torch::Tensor& gating_output, bool renormalize,
-                  std::optional<torch::Tensor> bias);
+                  std::optional<torch::Tensor> bias, bool enable_pdl);
 
 void topk_sigmoid(torch::Tensor& topk_weights, torch::Tensor& topk_indices,
                   torch::Tensor& token_expert_indices,
                   torch::Tensor& gating_output, bool renormalize,
-                  std::optional<torch::Tensor> bias);
+                  std::optional<torch::Tensor> bias, bool enable_pdl);
 
 void topk_softplus_sqrt(torch::Tensor& topk_weights,
                         torch::Tensor& topk_indices,
@@ -83,4 +83,8 @@ void dsv3_router_gemm(torch::Tensor& output, const torch::Tensor& mat_a,
 void dsv4_norm_router_gemm(at::Tensor& logits, at::Tensor& normed_x,
                            at::Tensor const& x, at::Tensor const& norm_weight,
                            at::Tensor const& gate_weight, double eps);
+
+// BF16/FP32 x FP32 -> FP32 router GEMM for H=3072, E=256, M<=32 (SM90+)
+void fp32_router_gemm(torch::Tensor& output, const torch::Tensor& mat_a,
+                      const torch::Tensor& mat_b);
 #endif

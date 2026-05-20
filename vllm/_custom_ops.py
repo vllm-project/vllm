@@ -2397,6 +2397,31 @@ def dsv4_norm_router_gemm(
     return normed_x, logits
 
 
+def fp32_router_gemm(
+    hidden_states: torch.Tensor,
+    router_weight: torch.Tensor,
+) -> torch.Tensor:
+    output = torch.empty(
+        hidden_states.shape[0],
+        router_weight.shape[0],
+        device=hidden_states.device,
+        dtype=torch.float32,
+    )
+    torch.ops._moe_C.fp32_router_gemm(output, hidden_states, router_weight)
+    return output
+
+
+if hasattr(torch.ops, "_moe_C") and hasattr(torch.ops._moe_C, "fp32_router_gemm"):
+
+    @register_fake("_moe_C::fp32_router_gemm")
+    def fp32_router_gemm_fake(
+        output: torch.Tensor,
+        mat_a: torch.Tensor,
+        mat_b: torch.Tensor,
+    ) -> None:
+        return
+
+
 def topk_softmax(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
@@ -2404,6 +2429,7 @@ def topk_softmax(
     gating_output: torch.Tensor,
     renormalize: bool = False,
     e_score_correction_bias: torch.Tensor | None = None,
+    enable_pdl: bool = False,
 ) -> None:
     torch.ops._moe_C.topk_softmax(
         topk_weights,
@@ -2412,6 +2438,7 @@ def topk_softmax(
         gating_output,
         renormalize,
         e_score_correction_bias,
+        enable_pdl,
     )
 
 
@@ -2422,6 +2449,7 @@ def topk_sigmoid(
     gating_output: torch.Tensor,
     renormalize: bool = False,
     e_score_correction_bias: torch.Tensor | None = None,
+    enable_pdl: bool = False,
 ) -> None:
     torch.ops._moe_C.topk_sigmoid(
         topk_weights,
@@ -2430,6 +2458,7 @@ def topk_sigmoid(
         gating_output,
         renormalize,
         e_score_correction_bias,
+        enable_pdl,
     )
 
 
