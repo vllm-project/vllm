@@ -13,7 +13,6 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     FunctionDefinition,
 )
 from vllm.entrypoints.openai.engine.protocol import FunctionCall, ToolCall
-from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.tokenizers import get_tokenizer
 from vllm.tool_parsers.glm4_moe_tool_parser import (
     Glm4MoeModelToolParser,
@@ -1367,14 +1366,12 @@ def test_stream_interval_content_between_tool_calls(
     assert args1 == {"city": "Shanghai"}
 
 
-def test_extract_tool_calls_with_responses_format_tools(glm4_moe_tokenizer):
-    """Test extract tool call with Responses API FunctionTool input.
+# ── FunctionTool (Responses API) tests ──────────────────────────────
 
-    The parser's _is_string_type reads self.tools (set at construction),
-    so we must pass FunctionTool via the constructor — not request.tools —
-    to actually exercise _extract_tool_info with FunctionTool objects.
-    """
-    responses_tools = [
+
+@pytest.fixture
+def function_tools():
+    return [
         FunctionTool(
             type="function",
             name="get_weather",
@@ -1382,87 +1379,107 @@ def test_extract_tool_calls_with_responses_format_tools(glm4_moe_tokenizer):
                 "type": "object",
                 "properties": {
                     "city": {"type": "string"},
+                    "unit": {"type": "string"},
                 },
             },
-        )
+        ),
+        FunctionTool(
+            type="function",
+            name="calculate",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "operation": {"type": "string"},
+                    "a": {"type": "number"},
+                    "b": {"type": "number"},
+                },
+            },
+        ),
     ]
 
-    # Key: parser constructed with FunctionTool so self.tools has FunctionTool
-    parser = Glm4MoeModelToolParser(glm4_moe_tokenizer, tools=responses_tools)
 
-    request = Mock(spec=ResponsesRequest)
-    request.tools = responses_tools
+@pytest.fixture
+def glm4_moe_parser_function_tools(glm4_moe_tokenizer, function_tools):
+    return Glm4MoeModelToolParser(glm4_moe_tokenizer, tools=function_tools)
 
+
+@pytest.fixture
+def mock_request_function_tools(function_tools) -> ChatCompletionRequest:
+    request = Mock(spec=ChatCompletionRequest)
+    request.tools = function_tools
+    return request
+
+
+def test_extract_tool_calls_with_function_tool(
+    glm4_moe_parser_function_tools, mock_request_function_tools
+):
     model_output = """<tool_call>get_weather
 <arg_key>city</arg_key>
-<arg_value>Beijing</arg_value>
+<arg_value>Dallas</arg_value>
+<arg_key>unit</arg_key>
+<arg_value>fahrenheit</arg_value>
 </tool_call>"""
 
-    extracted_tool_calls = parser.extract_tool_calls(model_output, request=request)
+    extracted = glm4_moe_parser_function_tools.extract_tool_calls(
+        model_output, request=mock_request_function_tools
+    )
+    assert extracted.tools_called
+    assert len(extracted.tool_calls) == 1
+    assert extracted.tool_calls[0].function.name == "get_weather"
+    args = json.loads(extracted.tool_calls[0].function.arguments)
+    assert args["city"] == "Dallas"
+    assert args["unit"] == "fahrenheit"
 
-    assert extracted_tool_calls.tools_called
-    assert len(extracted_tool_calls.tool_calls) == 1
-    assert extracted_tool_calls.tool_calls[0].function.name == "get_weather"
 
-    args = json.loads(extracted_tool_calls.tool_calls[0].function.arguments)
-
-    assert args["city"] == "Beijing"
-    assert isinstance(args["city"], str)
-
-
-def test_extract_tool_calls_with_responses_format_tools_streaming(
-    glm4_moe_tokenizer,
+def test_extract_tool_calls_with_function_tool_mixed_types(
+    glm4_moe_parser_function_tools, mock_request_function_tools
 ):
-    """Test streaming extract tool call with Responses API FunctionTool input.
+    model_output = """<tool_call>calculate
+<arg_key>operation</arg_key>
+<arg_value>add</arg_value>
+<arg_key>a</arg_key>
+<arg_value>42</arg_value>
+<arg_key>b</arg_key>
+<arg_value>3.14</arg_value>
+</tool_call>"""
 
-    Same as the non-streaming variant: parser must be constructed with
-    FunctionTool so self.tools contains FunctionTool objects, otherwise
-    _is_string_type never calls _extract_tool_info on FunctionTool.
-    """
-    responses_tools = [
-        FunctionTool(
-            type="function",
-            name="get_weather",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "city": {"type": "string"},
-                },
-            },
-        )
-    ]
+    extracted = glm4_moe_parser_function_tools.extract_tool_calls(
+        model_output, request=mock_request_function_tools
+    )
+    assert extracted.tools_called
+    args = json.loads(extracted.tool_calls[0].function.arguments)
+    assert args["operation"] == "add"
+    assert isinstance(args["a"], (int, float))
+    assert isinstance(args["b"], float)
 
-    # Key: parser constructed with FunctionTool so self.tools has FunctionTool
-    parser = Glm4MoeModelToolParser(glm4_moe_tokenizer, tools=responses_tools)
-    _reset_streaming_state(parser)
 
-    request = Mock(spec=ResponsesRequest)
-    request.tools = responses_tools
+def test_streaming_with_function_tool(
+    glm4_moe_parser_function_tools, mock_request_function_tools
+):
+    _reset_streaming_state(glm4_moe_parser_function_tools)
 
     chunks = [
-        "<tool_call>",
-        "get_weather\n",
+        "<tool_call>get_weather\n",
         "<arg_key>city</arg_key>",
-        "<arg_value>",
-        "Bei",
+        "<arg_value>Bei",
         "jing",
         "</arg_value>",
         "</tool_call>",
     ]
 
+    current_text = ""
     for chunk in chunks:
-        parser.extract_tool_calls_streaming(
+        current_text += chunk
+        glm4_moe_parser_function_tools.extract_tool_calls_streaming(
             previous_text="",
-            current_text="",
+            current_text=current_text,
             delta_text=chunk,
             previous_token_ids=[],
             current_token_ids=[],
             delta_token_ids=[],
-            request=request,
+            request=mock_request_function_tools,
         )
 
-    assert len(parser.streamed_args_for_tool) == 1
-    args = json.loads(parser.streamed_args_for_tool[0])
-
+    assert len(glm4_moe_parser_function_tools.prev_tool_call_arr) == 1
+    args = json.loads(glm4_moe_parser_function_tools.prev_tool_call_arr[0]["arguments"])
     assert args["city"] == "Beijing"
-    assert isinstance(args["city"], str)
