@@ -1288,6 +1288,8 @@ class Qwen2VLForConditionalGeneration(
         config: Qwen2VLConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
+
+        self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
         self.config = config
@@ -1470,21 +1472,16 @@ class Qwen2VLForConditionalGeneration(
                 "max_seqlen",
             ],
             out_hidden_size=self.visual.out_hidden_size,
+            max_frames_per_video=self.get_max_frames_per_video(
+                vllm_config=self.vllm_config,
+                image_only=False,
+            ),
         )
 
     def get_input_modality(self, mm_kwargs: dict[str, Any]) -> str:
         if "image_grid_thw" in mm_kwargs:
             return "image"
         return "video"
-
-    def get_max_frames_per_video(self) -> int:
-        mm_registry = MULTIMODAL_REGISTRY
-        info = mm_registry.get_processing_info(self.model_config)
-        max_frames_per_video = info.get_num_frames_with_most_features(
-            seq_len=self.model_config.max_model_len,
-            mm_counts={"video": self.multimodal_config.get_limit_per_prompt("video")},
-        )
-        return max_frames_per_video
 
     def get_encoder_cudagraph_budget_range(
         self,

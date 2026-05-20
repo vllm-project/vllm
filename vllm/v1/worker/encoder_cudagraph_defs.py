@@ -34,6 +34,11 @@ class EncoderCudaGraphConfig:
     """Output hidden dim of the vision encoder.
     Used for DP gather buffer allocation."""
 
+    max_frames_per_video: int = 1
+    """Maximum number of frames per video.
+    Only relevant when "video" is in ``modalities``.
+    Image-only models can use the default of 1."""
+
 
 @dataclass
 class EncoderCudaGraphCaptureInputs:

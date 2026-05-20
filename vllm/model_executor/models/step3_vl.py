@@ -516,6 +516,7 @@ class Step3VLForConditionalGeneration(
         config = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.multimodal_config
 
+        self.vllm_config = vllm_config
         self.config = config
         self.model_config = vllm_config.model_config
         self.multimodal_config = multimodal_config
@@ -705,6 +706,10 @@ class Step3VLForConditionalGeneration(
             input_key_by_modality={"image": "pixel_values"},
             buffer_keys=["patch_pixel_values"],
             out_hidden_size=self.config.hidden_size,
+            max_frames_per_video=self.get_max_frames_per_video(
+                vllm_config=self.vllm_config,
+                image_only=True,
+            ),
         )
 
     def get_input_modality(
@@ -712,11 +717,6 @@ class Step3VLForConditionalGeneration(
         mm_kwargs: dict[str, Any],
     ) -> str:
         return "image"
-
-    def get_max_frames_per_video(
-        self,
-    ) -> int:
-        return 0
 
     def get_encoder_cudagraph_budget_range(
         self,

@@ -1528,9 +1528,25 @@ class SupportsEncoderCudaGraph(Protocol):
 
     def get_max_frames_per_video(
         self,
+        vllm_config: "VllmConfig",
+        image_only: bool,
     ) -> int:
         """Return model-specific max frames per video."""
-        ...
+        from vllm.multimodal import MULTIMODAL_REGISTRY
+
+        mm_registry = MULTIMODAL_REGISTRY
+        model_config = vllm_config.model_config
+        multimodal_config = model_config.multimodal_config
+
+        if image_only:
+            return 1
+
+        info = mm_registry.get_processing_info(model_config)
+        max_frames_per_video = info.get_num_frames_with_most_features(
+            seq_len=model_config.max_model_len,
+            mm_counts={"video": multimodal_config.get_limit_per_prompt("video")},
+        )
+        return max_frames_per_video
 
     def get_encoder_cudagraph_budget_range(
         self,
