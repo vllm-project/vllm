@@ -62,7 +62,7 @@ from vllm.tracing import instrument
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.network_utils import is_valid_ipv6_address
-from vllm.utils.system_utils import set_ulimit
+from vllm.utils.system_utils import decorate_logs, set_ulimit
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -672,8 +672,7 @@ async def build_and_serve_renderer(
 async def run_server(args, **uvicorn_kwargs) -> None:
     """Run a single-worker API server."""
 
-    # Add process-specific prefix to stdout and stderr.
-    # decorate_logs("APIServer")
+    decorate_logs("APIServer", skip_if_decorated=True)
 
     listen_address, sock = setup_server(args)
     await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)
