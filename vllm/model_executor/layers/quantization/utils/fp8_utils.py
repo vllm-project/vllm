@@ -1032,6 +1032,17 @@ def deepgemm_post_process_fp8_weight_block(
         # ws: (g*r/128, d/128) -> (g, r/128, d/128)
         g = bmm_batch_size
         assert wq.ndim == 2 and ws.ndim == 2
+
+        # Guard against zero/negative batch size (can occur with TP+EP
+        # partitioning where certain ranks have no local groups assigned).
+        if g <= 0:
+            logger.warning_once(
+                "bmm_batch_size is %d, skipping DeepGEMM BMM reshape. "
+                "This can happen with TP+EP partitioning.",
+                g,
+            )
+            return wq, ws
+
         d = wq.size(1)
         r = wq.size(0) // g
         wq = wq.view(g, r, d)
