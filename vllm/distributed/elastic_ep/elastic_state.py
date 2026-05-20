@@ -409,7 +409,10 @@ class ElasticEPScalingState:
 
     def _send_reconfigure_finished(self):
         assert self.new_dp_group is not None
-        if self.new_dp_group.rank() == 0:
+        if (
+            self.new_dp_group.rank() == 0
+            or self.vllm_config.parallel_config.data_parallel_external_lb
+        ):
             self.engine_core._eep_send_engine_core_notification(
                 EEPNotificationType.RECONFIGURE_FINISHED
             )
