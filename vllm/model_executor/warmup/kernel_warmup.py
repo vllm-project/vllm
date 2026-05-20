@@ -122,6 +122,7 @@ def kernel_warmup(worker: "Worker"):
         block_table_shapes=block_table_shapes,
         max_num_decode_tokens=max_num_decode_tokens,
         model_dtype=worker.model_runner.dtype,
+        kv_caches=getattr(worker.model_runner, "kv_caches", None),
     )
 
     enable_flashinfer_autotune = (
