@@ -28,6 +28,7 @@ import torch
 import vllm.model_executor.layers.mamba.ops.mamba_ssm as mamba_ssm_module
 from tests.kernels.mamba.test_mamba_ssm import selective_state_update_ref
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
+    _canonical_cache_dtype,
     _get_default_ssm_launch_config,
     get_ssm_config_file_name,
     get_ssm_device_name,
@@ -35,10 +36,12 @@ from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
 )
 from vllm.triton_utils import triton
 
-# MambaDType subset: bf16 is excluded (not commonly used)
+# bf16 maps to float16
+# (same number of bits, same tuned config should work for both)
 _SSM_CACHE_DTYPE_MAP: dict[str, torch.dtype] = {
     "float32": torch.float32,
     "float16": torch.float16,
+    "bfloat16": torch.float16,
 }
 
 _RESULTS_DIR = os.path.dirname(os.path.realpath(__file__))
@@ -505,6 +508,9 @@ def save_configs(
     configs: dict[int, dict],
     save_dir: str | None = None,
 ) -> str:
+    # bf16 shares configs with fp16, use common filename for both
+    cache_dtype = _canonical_cache_dtype(cache_dtype)
+
     base_dir = save_dir if save_dir else get_ssm_configs_dir()
     os.makedirs(base_dir, exist_ok=True)
     file_path = os.path.join(

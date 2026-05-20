@@ -51,6 +51,12 @@ def get_ssm_device_name() -> str:
     return current_platform.get_device_name().replace(" ", "_")
 
 
+def _canonical_cache_dtype(cache_dtype: str) -> str:
+    """Canonical key for config lookup. bf16 and fp16 share the same tuned
+    configs because the kernel only sees bit width when accessing state."""
+    return "float16" if cache_dtype == "bfloat16" else cache_dtype
+
+
 @functools.cache
 def get_ssm_configs(
     headdim: int, dstate: int, cache_dtype: str
@@ -63,6 +69,7 @@ def get_ssm_configs(
     They can be generated with:
         benchmarks/kernels/benchmark_selective_state_update.py --save-configs
     """
+    cache_dtype = _canonical_cache_dtype(cache_dtype)
     device_name = get_ssm_device_name()
     json_file_name = get_ssm_config_file_name(headdim, dstate, cache_dtype, device_name)
 
