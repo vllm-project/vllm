@@ -30,7 +30,7 @@ void launch_persistent_topk(const torch::stable::Tensor& logits,
   if (num_sms == 0) {
     const cudaDeviceProp* device_prop = get_device_prop();
     num_sms = device_prop->multiProcessorCount;
-    max_smem_per_block = device_prop->sharedMemPerBlockOption;
+    max_smem_per_block = device_prop->sharedMemPerBlockOptin;
   }
 
   if (num_rows > 32 && max_smem_per_block >= 128 * 1024) {

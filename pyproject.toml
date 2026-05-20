@@ -141,6 +141,7 @@ bbc5b7ede = "bbc5b7ede"
 NOOPs = "NOOPs"
 nin_shortcut = "nin_shortcut"
 cudaDevAttrMaxSharedMemoryPerBlockOptin = "cudaDevAttrMaxSharedMemoryPerBlockOptin"
+sharedMemPerBlockOptin = "sharedMemPerBlockOptin"
 
 depthwise_seperable_out_channel = "depthwise_seperable_out_channel"
 pard_token = "pard_token"
