@@ -199,9 +199,7 @@ async def _probe_endpoint(
     return False
 
 
-def _build_dp_supervisor_app(
-    supervisor: DPSupervisor,
-) -> FastAPI:
+def _build_dp_supervisor_app(supervisor: DPSupervisor) -> FastAPI:
     app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
     app.state.supervisor = supervisor
 
