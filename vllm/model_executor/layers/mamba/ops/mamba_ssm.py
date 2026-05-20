@@ -98,8 +98,6 @@ def get_ssm_configs(
                 if isinstance(raw, dict):
                     # triton_version included in the config file only for reference
                     raw.pop("triton_version", None)
-                    # Filter to integer-string keys to tolerate hand-edited
-                    # configs with extra annotation fields.
                     return {int(k): v for k, v in raw.items() if k.isdigit()}
 
     logger.warning_once(
@@ -157,9 +155,8 @@ _ssm_config_override: tuple[int, int] | None = None
 
 @contextmanager
 def override_ssm_config(config: tuple[int, int]):
-    """Force ``try_get_optimal_ssm_config`` to return ``config`` for the
-    duration of the context. Used by the tuning benchmark to time specific
-    (BLOCK_SIZE_M, num_warps) pairs."""
+    """Pin ``try_get_optimal_ssm_config`` to ``config`` for the duration of
+    the context. Used by the tuning benchmark to time specific configs."""
     global _ssm_config_override
     prev = _ssm_config_override
     _ssm_config_override = config

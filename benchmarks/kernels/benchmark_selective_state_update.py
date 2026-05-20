@@ -36,8 +36,7 @@ from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
 )
 from vllm.triton_utils import triton
 
-# bf16 maps to float16
-# (same number of bits, same tuned config should work for both)
+# bf16 shares configs with fp16 - same bit width.
 _SSM_CACHE_DTYPE_MAP: dict[str, torch.dtype] = {
     "float32": torch.float32,
     "float16": torch.float16,
@@ -69,8 +68,7 @@ def _block_size_m_choices(headdim: int) -> list[int]:
 
 # Default deployment shapes. effective_batch = batch * nheads scales the
 # kernel grid, so configs transfer across (model, TP) combos sharing
-# (headdim, dstate, cache_dtype). nheads=128 and 256 cover common Mamba2
-# deployment shapes (Nemotron-class with/without TP).
+# (headdim, dstate, cache_dtype).
 DEFAULT_BATCH_SIZES = [1, 8, 16, 32, 64, 128, 256, 512, 1024, 1536, 2048]
 DEFAULT_NHEADS = [128, 256]
 
@@ -343,9 +341,8 @@ def validate_configs(
     config, run the kernel with that config and compare against the reference.
     Returns {effective_batch: passed}.
     """
-    # Disable TF32 in the reference's matmul: at larger effective_batch the
-    # worst output value grows, so TF32 rounding shows up as a bf16-quantum
-    # mismatch (e.g. 1.0–4.0) versus the Triton kernel's true fp32 accumulation.
+    # Disable TF32 so the reference's matmul matches the Triton kernel's
+    # fp32 accumulation; otherwise large ebs show bf16 rounding mismatches.
     torch.set_float32_matmul_precision("highest")
 
     print(f"\n{'=' * 74}")
@@ -703,7 +700,6 @@ def main():
             )
 
             if args.compare:
-                # Use the measurements from tune_dstate
                 compare_heuristic_vs_tuned(
                     dstate=dstate,
                     headdim=args.headdim,
