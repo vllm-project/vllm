@@ -1273,6 +1273,11 @@ class FusedMoEConfig:
     is_act_and_mul: bool = True
     is_lora_enabled: bool = False
 
+    # SwiGLU clamp limit. When set, backends that do not implement the clamp
+    # are filtered out by `FusedMoEExperts.is_supported_config` so the oracle
+    # cannot silently select one and drop the clamp.
+    swiglu_limit: float | None = None
+
     # This flag is used to disable the inplace optimization
     # in MoE kernels. If this flag is True then the kernel
     # should not be using inplace. If the flag is false, the
