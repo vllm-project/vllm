@@ -563,7 +563,12 @@ class MoRIIOConnectorScheduler:
         """
 
         request_id = request.request_id
-        self.unmap_request_id(request_id)
+        # Consumer: can unmap transfer_id<->request_id immediately since done_recving
+        #   has fired at this point (i.e. KV has been transferred)
+        # Producer: must keep the mapping until we get notification that blocks can
+        #   be freed, which may be several scheduler steps later.
+        if not self.is_producer:
+            self.unmap_request_id(request_id)
 
         params = request.kv_transfer_params
         logger.debug(
@@ -628,6 +633,14 @@ class MoRIIOConnectorScheduler:
         entries into connector_output.finished_sending so the scheduler
         frees them via the normal path.
         """
+        # Producer: unmap transfer_id<->request_id for sends that are now (async)
+        #   reported as completed. This unmapping have to be deferred until now
+        #   so get_finished can use it in any scheduler step.
+        # Consumer: unmapping already done in request_finished
+        if self.is_producer and connector_output.finished_sending:
+            for req_id in connector_output.finished_sending:
+                self.unmap_request_id(req_id)
+
         if not self._deferred_send_deadlines:
             return
 
@@ -651,6 +664,8 @@ class MoRIIOConnectorScheduler:
         for req_id in expired_reqs:
             connector_output.finished_sending.add(req_id)
             del self._deferred_send_deadlines[req_id]
+            if self.is_producer:
+                self.unmap_request_id(req_id)
         logger.warning(
             "Reaped %d deferred sends with no finished_sending notification "
             "after %.0fs. This indicates lost async KV completion "
