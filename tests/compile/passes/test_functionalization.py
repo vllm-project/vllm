@@ -291,7 +291,7 @@ class TestFusedDeepseekV4QnormRopeKvInsert(torch.nn.Module):
                 pass
 
             torch.library.register_fake(
-                "_C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert",
+                "_C::fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert",
                 fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert_fake,
             )
 
