@@ -888,3 +888,37 @@ class TestStreamingExtraction:
         assert len(all_tool_calls) >= 2, (
             f"Expected at least 2 tool calls, got {len(all_tool_calls)}"
         )
+
+    def test_streaming_filename_suffix_preserved_across_chunks(
+        self, parser, mock_request
+    ):
+        """File extensions split across chunks must not be dropped."""
+        chunks = [
+            "<|tool_call>",
+            "call:read_file{",
+            'path:<|"|>src/main.',
+            'rs<|"|>}',
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_text = self._collect_arguments(results)
+
+        assert json.loads(args_text) == {"path": "src/main.rs"}
+
+    def test_streaming_string_prefix_preserved_across_chunks(
+        self, parser, mock_request
+    ):
+        """String values split after the first character must be preserved."""
+        chunks = [
+            "<|tool_call>",
+            "call:spawn_agent{",
+            'subagent_type:<|"|>e',
+            'xplore<|"|>}',
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_text = self._collect_arguments(results)
+
+        assert json.loads(args_text) == {"subagent_type": "explore"}
