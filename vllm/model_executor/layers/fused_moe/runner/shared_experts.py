@@ -100,7 +100,7 @@ class SharedExperts:
             return SharedExpertsOrder.MK_INTERNAL_OVERLAPPED
 
         should_run_shared_in_aux_stream = (
-            current_platform.is_cuda()
+            current_platform.is_cuda_alike()
             and self._stream is not None
             and hidden_states.shape[0]
             <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
