@@ -104,8 +104,13 @@ def _trtllm_prefill_attn_kvfp8_dequant(
     mock_kv_cache_ptr,
     k_scale_ptr,
     v_scale_ptr,
-    K_CACHE_STRIDE: tl.constexpr,
-    KV_CACHE_STRIDE: tl.constexpr,
+    src_stride_page,
+    src_stride_kv,
+    src_stride_head,
+    DST_K_CACHE_STRIDE: tl.constexpr,
+    DST_KV_CACHE_STRIDE: tl.constexpr,
+    HEAD_STRIDE: tl.constexpr,
+    NUM_KV_HEADS: tl.constexpr,
 ):
     batch_idx = tl.program_id(0).to(tl.int64)
     mock_block_table_idx = tl.program_id(1).to(tl.int64)
@@ -116,31 +121,48 @@ def _trtllm_prefill_attn_kvfp8_dequant(
         return
     dequant_dtype = mock_kv_cache_ptr.dtype.element_ty
 
-    # Dequantize K
     k_scale_val = tl.load(k_scale_ptr)
-    offset = orig_page_num * KV_CACHE_STRIDE + tl.arange(0, K_CACHE_STRIDE)
-    fp8_vals = tl.load(kv_cache_ptr + offset)
-    dequantized_vals = fp8_vals.to(tl.float32) * k_scale_val
-    mock_cache_offset = (
-        batch_idx * block_table_stride + mock_block_table_idx + 1
-    ) * KV_CACHE_STRIDE + tl.arange(0, K_CACHE_STRIDE)
-    dequantized_vals = dequantized_vals.to(dequant_dtype)
-    tl.store(mock_kv_cache_ptr + mock_cache_offset, dequantized_vals)
-
-    # Dequantize V
     v_scale_val = tl.load(v_scale_ptr)
-    offset = (
-        orig_page_num * KV_CACHE_STRIDE + K_CACHE_STRIDE + tl.arange(0, K_CACHE_STRIDE)
-    )
-    fp8_vals = tl.load(kv_cache_ptr + offset)
-    dequantized_vals = fp8_vals.to(tl.float32) * v_scale_val
-    mock_cache_offset = (
-        (batch_idx * block_table_stride + mock_block_table_idx + 1) * KV_CACHE_STRIDE
-        + K_CACHE_STRIDE
-        + tl.arange(0, K_CACHE_STRIDE)
-    )
-    dequantized_vals = dequantized_vals.to(dequant_dtype)
-    tl.store(mock_kv_cache_ptr + mock_cache_offset, dequantized_vals)
+
+    mock_page_idx = batch_idx * block_table_stride + mock_block_table_idx + 1
+    head_offsets = tl.arange(0, HEAD_STRIDE)
+
+    # Loop per head so tl.arange stays at the (typically power-of-2 and
+    # small) head_stride = block_size * head_size, instead of growing with
+    # num_kv_heads.  This avoids triton constraints on power-of-2 sizes and
+    # register pressure that a single huge tl.arange across all heads would
+    # impose, and also lets us honor non-contiguous source strides for
+    # both NHD and HND physical layouts.
+    for h in range(NUM_KV_HEADS):
+        h_off = tl.cast(h, tl.int64)
+
+        # Read K from source (supports non-contiguous page/kv/head strides)
+        src_k = orig_page_num * src_stride_page + h_off * src_stride_head + head_offsets
+        fp8_k = tl.load(kv_cache_ptr + src_k)
+        dequant_k = (fp8_k.to(tl.float32) * k_scale_val).to(dequant_dtype)
+
+        # Write K to contiguous mock cache
+        dst_k = mock_page_idx * DST_KV_CACHE_STRIDE + h * HEAD_STRIDE + head_offsets
+        tl.store(mock_kv_cache_ptr + dst_k, dequant_k)
+
+        # Read V from source (offset by src_stride_kv for the V half)
+        src_v = (
+            orig_page_num * src_stride_page
+            + src_stride_kv
+            + h_off * src_stride_head
+            + head_offsets
+        )
+        fp8_v = tl.load(kv_cache_ptr + src_v)
+        dequant_v = (fp8_v.to(tl.float32) * v_scale_val).to(dequant_dtype)
+
+        # Write V to contiguous mock cache
+        dst_v = (
+            mock_page_idx * DST_KV_CACHE_STRIDE
+            + DST_K_CACHE_STRIDE
+            + h * HEAD_STRIDE
+            + head_offsets
+        )
+        tl.store(mock_kv_cache_ptr + dst_v, dequant_v)
 
 
 def trtllm_prefill_attn_kvfp8_dequant(
@@ -149,23 +171,47 @@ def trtllm_prefill_attn_kvfp8_dequant(
     k_scale: torch.Tensor,
     v_scale: torch.Tensor,
     dequant_dtype: torch.dtype,
+    mock_kv_cache: torch.Tensor,
+    mock_block_table: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Dequantize the prefill slice of the FP8 KV cache into a BF16/FP16
+    "mock" KV cache that the TRTLLM prefill kernel can consume.
+
+    The caller is responsible for providing pre-allocated ``mock_kv_cache``
+    and ``mock_block_table`` workspaces (see the metadata-level workspace
+    on :class:`FlashInferMetadataBuilder`).  This avoids per-layer
+    allocations during ``forward`` for every attention layer, which would
+    otherwise quickly fragment / exhaust GPU memory on long prefills.
+    """
     batch_size, num_of_page_per_token = block_tables_prefill.shape
     s = kv_cache.shape
     assert s[1] == 2
     assert dequant_dtype in (torch.bfloat16, torch.float16)
-    k_cache_stride = s[2] * s[3] * s[4]
+
+    num_kv_heads, block_size, head_size = s[2], s[3], s[4]
+    head_stride = block_size * head_size
+    k_cache_stride = num_kv_heads * head_stride
     kv_cache_stride = k_cache_stride * s[1]
-    new_s = (batch_size * num_of_page_per_token + 1, s[1], s[2], s[3], s[4])
-    # mock kv cache contains just the pages needed by this prefill
-    mock_kv_cache = torch.empty(new_s, dtype=dequant_dtype, device=kv_cache.device)
-    # we simply sequentially index the pages needed by this prefill
-    mock_block_table = torch.arange(
-        start=1,
-        end=batch_size * num_of_page_per_token + 1,
-        dtype=torch.int32,
-        device=block_tables_prefill.device,
-    ).reshape(batch_size, num_of_page_per_token)
+
+    strides = kv_cache.stride()
+    assert strides[3] == head_size and strides[4] == 1, (
+        "For kv cache layouts, (block_size, head_size) "
+        f"dimensions must be contiguous, got strides {strides}"
+    )
+
+    # The workspace buffers may have been allocated for an upper bound; slice
+    # to the exact extent required for this call.
+    required_pages = batch_size * num_of_page_per_token + 1
+    assert mock_kv_cache.shape[0] >= required_pages, (
+        f"mock_kv_cache workspace too small: got {mock_kv_cache.shape[0]} "
+        f"pages, need {required_pages}."
+    )
+    assert mock_block_table.shape == (batch_size, num_of_page_per_token), (
+        f"mock_block_table workspace shape {tuple(mock_block_table.shape)} "
+        f"does not match required ({batch_size}, {num_of_page_per_token})."
+    )
+    mock_kv_cache = mock_kv_cache[:required_pages]
+
     grid = (batch_size, num_of_page_per_token)
     _trtllm_prefill_attn_kvfp8_dequant[grid](
         kv_cache,
@@ -174,8 +220,13 @@ def trtllm_prefill_attn_kvfp8_dequant(
         mock_kv_cache,
         k_scale,
         v_scale,
+        strides[0],
+        strides[1],
+        strides[2],
         k_cache_stride,
         kv_cache_stride,
+        head_stride,
+        num_kv_heads,
     )
     return mock_kv_cache, mock_block_table
 
@@ -450,6 +501,15 @@ class TRTLLMPrefill:
     max_seq_len: int
     """The maximum sequence length for KV Cache."""
 
+    # Pre-allocated workspaces for the BF16/FP16 mock kv cache used when
+    # TRTLLM prefill needs to be run against an FP8 kv cache with a non-FP8
+    # query (no native TRTLLM kernel for that combination).  These are
+    # owned by FlashInferMetadataBuilder and shared across all attention
+    # layers within a forward step.  Both fields are None when the dequant
+    # path is not needed (BF16/FP16 kv cache or FP8 query).
+    mock_kv_cache_workspace: torch.Tensor | None = None
+    mock_block_table: torch.Tensor | None = None
+
 
 @dataclass
 class TRTLLMDecode:
@@ -657,6 +717,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.paged_kv_indices = self._make_buffer(max_num_pages)
         self.paged_kv_last_page_len = self._make_buffer(max_num_reqs)
 
+        # Workspaces for the FP8-KV -> BF16/FP16 dequant "mock" KV cache used
+        # by the TRTLLM prefill path when query dtype differs from kv dtype.
+        # Allocated lazily on the first call that needs them and reused
+        # across attention layers/steps to avoid per-layer alloc-and-free
+        # fragmentation.  See trtllm_prefill_attn_kvfp8_dequant().
+        self._mock_kv_cache_workspace: torch.Tensor | None = None
+        self._mock_block_table_workspace: torch.Tensor | None = None
+
     # The class methods below are helper functions to extract config values
     # from the configs to avoid duplciated code between __init__() and
     # get_cudagraph_support().
@@ -783,6 +851,58 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     def set_workspace_buffer(self, workspace_buffer: torch.Tensor):
         self._workspace_buffer = workspace_buffer
+
+    def _get_mock_kv_cache_workspace(
+        self,
+        kv_cache: torch.Tensor,
+        block_tables_prefill: torch.Tensor,
+        dequant_dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return persistent (mock_kv_cache, mock_block_table) workspaces.
+
+        These workspaces are shared by every attention layer within a step
+        (and reused across steps), so we never allocate a fresh per-layer
+        ``mock_kv_cache`` from inside ``forward``.  The mock cache is sized
+        by ``num_prefill_blocks + 1`` (the +1 page lets index 0 act as a
+        "skip" sentinel for unused block-table entries).
+        """
+        batch_size, num_of_page_per_token = block_tables_prefill.shape
+        required_pages = batch_size * num_of_page_per_token + 1
+        s = kv_cache.shape
+        # Mock cache shape: (pages, 2, num_kv_heads, block_size, head_size)
+        cache_shape = (required_pages, s[1], s[2], s[3], s[4])
+
+        ws = self._mock_kv_cache_workspace
+        if (
+            ws is None
+            or ws.dtype != dequant_dtype
+            or ws.device != kv_cache.device
+            or ws.shape[0] < required_pages
+            or tuple(ws.shape[1:]) != tuple(cache_shape[1:])
+        ):
+            self._mock_kv_cache_workspace = torch.empty(
+                cache_shape, dtype=dequant_dtype, device=kv_cache.device
+            )
+            ws = self._mock_kv_cache_workspace
+
+        bt = self._mock_block_table_workspace
+        need_pages = batch_size * num_of_page_per_token
+        if (
+            bt is None
+            or bt.device != block_tables_prefill.device
+            or bt.numel() < need_pages
+        ):
+            # Sequentially index pages [1, N+1).  Index 0 is reserved as the
+            # zero-page sentinel that the dequant kernel writes nothing to.
+            self._mock_block_table_workspace = torch.arange(
+                start=1,
+                end=need_pages + 1,
+                dtype=torch.int32,
+                device=block_tables_prefill.device,
+            )
+            bt = self._mock_block_table_workspace
+
+        return ws, bt[:need_pages].view(batch_size, num_of_page_per_token)
 
     def _get_prefill_wrapper(
         self,
@@ -1128,6 +1248,45 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     qo_indptr_prefill_cpu[1:] - qo_indptr_prefill_cpu[:-1]
                 )
                 max_q_len_prefill = int(query_lens_prefill_cpu.max().item())
+                # Lazily allocate / reuse the persistent FP8 -> BF16/FP16
+                # dequant workspace.  Only needed when (a) kv cache is FP8
+                # and (b) prefill query dtype is not FP8 (otherwise TRTLLM
+                # prefill can consume FP8 KV directly).  This mirrors the
+                # condition guarding trtllm_prefill_attn_kvfp8_dequant() in
+                # forward() and avoids per-layer allocation there.
+                mock_kv_cache_workspace: torch.Tensor | None = None
+                mock_block_table_workspace: torch.Tensor | None = None
+                cache_dtype_str = self.cache_config.cache_dtype
+                if (
+                    cache_dtype_str.startswith("fp8")
+                    and self.q_data_type_prefill != FP8_DTYPE
+                ):
+                    (
+                        mock_kv_cache_workspace,
+                        mock_block_table_workspace,
+                    ) = self._get_mock_kv_cache_workspace(
+                        # The dequant kernel cares about (num_kv_heads,
+                        # block_size, head_size), all of which are stored in
+                        # kv_cache_spec and don't depend on the actual
+                        # runtime kv_cache tensor.  Build a tiny meta tensor
+                        # with the right shape/dtype to drive the workspace
+                        # sizing without holding a strong reference to the
+                        # real cache.
+                        torch.empty(
+                            (
+                                1,
+                                2,
+                                self.num_kv_heads,
+                                self.page_size,
+                                self.head_dim,
+                            ),
+                            dtype=self.q_data_type_prefill,
+                            device=self.device,
+                        ),
+                        block_table_tensor[prefill_start:],
+                        self.q_data_type_prefill,
+                    )
+
                 attn_metadata.prefill = TRTLLMPrefill(
                     block_tables=block_table_tensor[prefill_start:],
                     seq_lens=seq_lens[prefill_start:],
@@ -1135,6 +1294,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     cum_seq_lens_kv=paged_kv_indptr_prefill_gpu,
                     max_q_len=max_q_len_prefill,
                     max_seq_len=max_seq_len,
+                    mock_kv_cache_workspace=mock_kv_cache_workspace,
+                    mock_block_table=mock_block_table_workspace,
                 )
             else:
                 prefill_wrapper = self._get_prefill_wrapper()
@@ -1682,6 +1843,11 @@ class FlashInferImpl(AttentionImpl):
                     # with fp8 kv cache, we can construct a mock block
                     # and mock kv cache with BF16 KV involved in the prefill
                     #
+                    # The mock_kv_cache and mock_block_table are workspaces
+                    # owned by the metadata builder; they are allocated
+                    # once and reused across all attention layers/steps to
+                    # avoid per-layer alloc-and-free fragmentation that
+                    # could OOM on long prefills with many layers.
                     kv_cache_permute = canonicalize_singleton_dim_strides(
                         kv_cache_permute
                     )
@@ -1693,12 +1859,21 @@ class FlashInferImpl(AttentionImpl):
                         "KV cache inner dims (block_size, head_size) must be "
                         f"contiguous, got strides {kv_strides}"
                     )
+                    assert (
+                        attn_metadata.prefill.mock_kv_cache_workspace is not None
+                        and attn_metadata.prefill.mock_block_table is not None
+                    ), (
+                        "TRTLLMPrefill metadata is missing the FP8 dequant "
+                        "workspace; this is a metadata-build bug."
+                    )
                     mock_kv_cache, mock_block_table = trtllm_prefill_attn_kvfp8_dequant(
                         kv_cache_permute,
                         block_tables_prefill,
                         layer._k_scale,
                         layer._v_scale,
                         attn_metadata.q_data_type_prefill,
+                        attn_metadata.prefill.mock_kv_cache_workspace,
+                        attn_metadata.prefill.mock_block_table,
                     )
                 else:
                     mock_kv_cache = kv_cache_permute
@@ -1815,11 +1990,26 @@ class FlashInferImpl(AttentionImpl):
                 # on sm100f GPUs.
                 if current_platform.is_device_capability_family(100):
                     assert get_kv_cache_layout() == "HND"
-                assert decode_query.is_contiguous()
-                assert kv_cache_permute.is_contiguous()
-                assert workspace_buffer.is_contiguous()
-                assert block_tables_decode.is_contiguous()
-                assert seq_lens_decode.is_contiguous()
+                assert is_strictly_contiguous(decode_query)
+                assert is_strictly_contiguous(workspace_buffer)
+                assert is_strictly_contiguous(block_tables_decode)
+                assert is_strictly_contiguous(seq_lens_decode)
+                # Note: kv_cache_permute is a permuted *view* of the
+                # underlying kv_cache storage and is not contiguous when
+                # the physical layout is HND (we permute the logical NHD
+                # shape into HND-strided memory).  TRTLLM only requires
+                # the inner two dims (block_size, head_size) to be
+                # contiguous, so check that explicitly instead of
+                # demanding overall contiguity (which would crash on
+                # SM100 under the HND path).
+                kv_cache_permute = canonicalize_singleton_dim_strides(kv_cache_permute)
+                kv_strides = kv_cache_permute.stride()
+                assert (
+                    kv_strides[-1] == 1 and kv_strides[-2] == kv_cache_permute.shape[-1]
+                ), (
+                    "KV cache inner dims (block_size, head_size) must be "
+                    f"contiguous, got strides {kv_strides}"
+                )
 
                 if output.dtype == FP4_DTYPE:
                     assert self.o_sf_scale is not None

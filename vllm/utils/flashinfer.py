@@ -534,11 +534,19 @@ def use_trtllm_attention(
             return True
     elif force_use_trtllm is False:
         if supports_trtllm is True:
-            print_warning(
-                f"{prefix} Using TRTLLM for {phase_str} even though --attention-config."
-                f"use_trtllm_attention is set to 0. (Reason: {reason})"
+            # The configuration requires TRTLLM attention (e.g. attention
+            # sinks or speculative decoding in the decode phase), but the
+            # user explicitly disabled it via
+            # --attention-config.use_trtllm_attention=0.  Surface this as
+            # a hard error with the reason instead of silently flipping
+            # the user's flag back on.
+            raise ValueError(
+                f"{prefix} TRTLLM attention is required for {phase_str} "
+                f"(Reason: {reason}) but --attention-config."
+                "use_trtllm_attention is set to 0.  Either re-enable "
+                "TRTLLM attention or remove the feature that requires "
+                "it from this run."
             )
-            return True
         else:
             print_info(
                 f"{prefix} Using non-TRTLLM for {phase_str}. (Reason: --attention-"

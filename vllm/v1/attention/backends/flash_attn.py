@@ -773,6 +773,20 @@ class FlashAttentionImpl(AttentionImpl):
             k_descale = layer._k_scale.expand(descale_shape)
             v_descale = layer._v_scale.expand(descale_shape)
 
+            logger.info_once(
+                "FlashAttention dtype check: kv_cache_dtype=%s, q_dtype=%s, "
+                "k_cache_dtype=%s, v_cache_dtype=%s, q_descale=%s, "
+                "k_descale=%s, v_descale=%s, fa_version=%s",
+                self.kv_cache_dtype,
+                query.dtype,
+                key_cache.dtype,
+                value_cache.dtype,
+                q_descale is not None,
+                k_descale is not None,
+                v_descale is not None,
+                self.vllm_flash_attn_version,
+            )
+
             if self.dcp_world_size > 1:
                 self._forward_with_dcp(
                     query[:num_actual_tokens],
