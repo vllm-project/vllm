@@ -66,7 +66,6 @@ class HybridW4A16MoEExperts(mk.FusedMoEExpertsModular):
         # Cached tensors to avoid repeated allocation in hot path
         self._cached_arange: torch.Tensor | None = None
         self._cached_inv_perm_buf: torch.Tensor | None = None
-        self._cached_expert_ids_buf: torch.Tensor | None = None
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -292,15 +291,7 @@ class HybridW4A16MoEExperts(mk.FusedMoEExpertsModular):
         scattered = block_size_m == 1
         if scattered and expert_map is None:
             # Decode without EP: skip moe_align_block_size entirely.
-            if (
-                self._cached_expert_ids_buf is None
-                or self._cached_expert_ids_buf.size(0) < P
-            ):
-                self._cached_expert_ids_buf = torch.empty(
-                    P, dtype=torch.int32, device=hidden_states.device
-                )
-            expert_ids = self._cached_expert_ids_buf[:P]
-            expert_ids.copy_(topk_ids.view(-1))
+            expert_ids = topk_ids.view(-1)
             if self._cached_arange is None or self._cached_arange.size(0) < P:
                 self._cached_arange = torch.arange(
                     P, dtype=torch.int32, device=hidden_states.device
