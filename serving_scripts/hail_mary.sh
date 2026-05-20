@@ -7,7 +7,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=256G
-#SBATCH --time=00:30:10
+#SBATCH --time=02:00:10
 #SBATCH --output=results/%x-%j.out
 #SBATCH --error=results/%x-%j.err
 #SBATCH --mail-user=jason.miller@eng.ox.ac.uk
@@ -17,7 +17,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="arc-ray-qwen3-30b-a3b-instruct-clean-copy-no-overlap-v3-search-both-ray-tmp-roots"
+SCRIPT_VERSION="arc-ray-qwen3-30b-a3b-instruct-v4-instep-worker-nsight-copy"
 
 # Set DEBUG_SLURM_SCRIPT=1 for extra diagnostics.
 # Set NSYS_COPY_DEBUG=1 for verbose Nsight copy traces.
@@ -26,6 +26,7 @@ NSYS_COPY_DEBUG="${NSYS_COPY_DEBUG:-0}"
 
 # Post-run copy should not hang the whole batch forever.
 SRUN_COPY_TIMEOUT="${SRUN_COPY_TIMEOUT:-480s}"
+SERVER_SHUTDOWN_TIMEOUT_S="${SERVER_SHUTDOWN_TIMEOUT_S:-420}"
 
 slurm_debug() {
   if [ "${DEBUG_SLURM_SCRIPT}" = "1" ]; then
@@ -65,6 +66,86 @@ nsight_summarize_dest() {
   else
     nsight_copy_msg "  (no dest directory yet)"
   fi
+}
+
+wait_for_pid_or_kill() {
+  local pid="$1"
+  local label="$2"
+  local timeout_s="${3:-420}"
+
+  if [ -z "${pid}" ] || ! kill -0 "${pid}" 2>/dev/null; then
+    echo "${label}: pid ${pid:-<empty>} is not running"
+    return 0
+  fi
+
+  local elapsed=0
+  while kill -0 "${pid}" 2>/dev/null && [ "${elapsed}" -lt "${timeout_s}" ]; do
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+
+  if kill -0 "${pid}" 2>/dev/null; then
+    echo "${label}: still alive after ${timeout_s}s; sending TERM"
+    kill -TERM "${pid}" 2>/dev/null || true
+    sleep 10
+  fi
+
+  if kill -0 "${pid}" 2>/dev/null; then
+    echo "${label}: still alive after TERM; sending KILL"
+    kill -KILL "${pid}" 2>/dev/null || true
+  fi
+
+  wait "${pid}" 2>/dev/null || true
+}
+
+# Copy Nsight files from within the Ray srun step itself.
+#
+# This is intentionally separate from the post-run srun copy. On ARC, worker
+# reports may be written under Slurm job-local tmp, for example:
+#
+#   /tmp/slurm-${SLURM_JOB_ID}/tmp/ray/session_*/logs/nsight/*.nsys-rep
+#
+# That directory can disappear or become empty after the Ray srun step exits.
+# Therefore, each Ray head/worker srun installs this function as an EXIT trap,
+# so reports are copied before Slurm cleans job-local tmp.
+copy_ray_nsight_locally() {
+  set +e
+
+  local node
+  node="$(hostname -s 2>/dev/null || hostname)"
+  local dest="${TRACE_RUN_DIR}/ray_worker_nsight/${node}"
+
+  echo "[nsight-copy] in-step copy on ${node} -> ${dest}"
+  echo "[nsight-copy] in-step SLURM_JOB_ID=${SLURM_JOB_ID:-unknown}"
+  mkdir -p "${dest}" 2>/dev/null || true
+
+  echo "[nsight-copy] in-step candidate dirs:"
+  for d in \
+    /tmp/ray/session_*/logs/nsight \
+    /tmp/slurm-${SLURM_JOB_ID}/tmp/ray/session_*/logs/nsight
+  do
+    [ -d "$d" ] || continue
+    echo "[nsight-copy]   dir=$d"
+    ls -la "$d" 2>/dev/null || true
+  done
+
+  find \
+    /tmp/ray/session_*/logs/nsight \
+    /tmp/slurm-${SLURM_JOB_ID}/tmp/ray/session_*/logs/nsight \
+    -maxdepth 1 -type f \( -name '*.nsys-rep' -o -name '*.qdstrm' \) \
+    -print0 2>/dev/null |
+    while IFS= read -r -d '' f; do
+      local base session out
+      base="$(basename "$f")"
+      session="$(echo "$f" | sed -n 's#^.*/\(session_[^/]*\)/logs/nsight/.*#\1#p')"
+      [ -n "$session" ] || session=unknown_session
+      out="${dest}/${node}_${session}_${base}"
+      cp -v "$f" "$out" 2>&1 || true
+    done
+
+  echo "[nsight-copy] in-step dest after copy:"
+  find "${dest}" -type f \( -name '*.nsys-rep' -o -name '*.qdstrm' \) \
+    -printf '[nsight-copy]   %p %s bytes\n' 2>/dev/null | sort || true
 }
 
 # Plain, non-overlapped copy step.
@@ -121,7 +202,8 @@ copy_ray_nsight_from_node() {
           /tmp/ray/session_*/logs/nsight \
           /tmp/slurm-${SLURM_JOB_ID}/tmp/ray/session_*/logs/nsight \
           -maxdepth 1 -type f \( -name '*.nsys-rep' -o -name '*.qdstrm' \) \
-          -printf '[nsight-copy]   %p %s bytes\n' 2>/dev/null | sort || true
+          -printf '[nsight-copy]   %p %s bytes
+' 2>/dev/null | sort || true
 
         copied=0
 
@@ -148,7 +230,8 @@ copy_ray_nsight_from_node() {
         echo '[nsight-copy] dest after copy:'
         ls -la '${dest}/' 2>/dev/null || true
         find '${dest}' -type f \( -name '*.nsys-rep' -o -name '*.qdstrm' \) \
-          -printf '[nsight-copy] copied %p %s bytes\n' 2>/dev/null | sort || true
+          -printf '[nsight-copy] copied %p %s bytes
+' 2>/dev/null | sort || true
       "
   srun_status=$?
   set -e
@@ -326,6 +409,7 @@ echo "NSYS_PROFILE_SERVER=${NSYS_PROFILE_SERVER}"
 echo "NSYS_PROFILE_RAY=${NSYS_PROFILE_RAY}"
 echo "NSYS_COPY_DEBUG=${NSYS_COPY_DEBUG}"
 echo "SRUN_COPY_TIMEOUT=${SRUN_COPY_TIMEOUT}"
+echo "SERVER_SHUTDOWN_TIMEOUT_S=${SERVER_SHUTDOWN_TIMEOUT_S}"
 echo "nsys path: $(command -v nsys || echo '<not found>')"
 nsys --version || true
 
@@ -438,9 +522,13 @@ RAY_HEAD_CMD="$(
   declare -f interface_for_ip
   declare -f interface_has_ip
   declare -f configure_socket_ifnames
+  declare -f copy_ray_nsight_locally
 )
 source \"${VENV_DIR}/bin/activate\"
 unset GLOO_SOCKET_IFNAME
+export TRACE_RUN_DIR='${TRACE_RUN_DIR}'
+export SLURM_JOB_ID='${SLURM_JOB_ID:-unknown}'
+trap copy_ray_nsight_locally EXIT
 export VLLM_HOST_IP=${HEAD_NODE_IP}
 configure_socket_ifnames \"${HEAD_NODE_IP}\" 0
 
@@ -494,9 +582,13 @@ if [ -n "${WORKER_NODES}" ]; then
       declare -f interface_for_ip
       declare -f interface_has_ip
       declare -f configure_socket_ifnames
+      declare -f copy_ray_nsight_locally
 )
 source \"${VENV_DIR}/bin/activate\"
 unset GLOO_SOCKET_IFNAME
+export TRACE_RUN_DIR='${TRACE_RUN_DIR}'
+export SLURM_JOB_ID='${SLURM_JOB_ID:-unknown}'
+trap copy_ray_nsight_locally EXIT
 export VLLM_HOST_IP=${WORKER_IP}
 configure_socket_ifnames \"${WORKER_IP}\" 0
 
@@ -568,7 +660,7 @@ fi
 if [ "${NSYS_ENABLE}" = "1" ] && [ "${NSYS_PROFILE_SERVER}" = "1" ]; then
   echo "Profiling vLLM server and Ray workers with Nsight Systems"
   echo "API-server Nsight output: ${NSYS_DIR}/vllm_api_server_${HEAD_NODE}.nsys-rep"
-  nsight_copy_msg "worker traces expected on each node: /tmp/ray/session_latest/logs/nsight/worker_process_*.nsys-rep"
+  nsight_copy_msg "worker traces expected under /tmp/ray/session_*/logs/nsight or /tmp/slurm-${SLURM_JOB_ID}/tmp/ray/session_*/logs/nsight"
   nsight_copy_msg "PP rank 0 -> ${HEAD_NODE}, PP rank 1 -> ${WORKER_NODES:-<none>}"
   nsight_debug "NSYS_PROFILE_SERVER=1: outer nsys wraps api_server on ${HEAD_NODE}; --ray-workers-use-nsight on Ray actors"
 
@@ -648,7 +740,7 @@ echo "Workload finished. Stopping vLLM/Nsight server process cleanly..."
 if [ -n "${SERVER_STEP_PID}" ] && kill -0 "${SERVER_STEP_PID}" 2>/dev/null; then
   echo "Sending SIGINT to vLLM/Nsight server pid=${SERVER_STEP_PID}..."
   kill -INT "${SERVER_STEP_PID}" 2>/dev/null || true
-  wait "${SERVER_STEP_PID}" 2>/dev/null || true
+  wait_for_pid_or_kill "${SERVER_STEP_PID}" "vLLM/Nsight API server" "${SERVER_SHUTDOWN_TIMEOUT_S}"
   SERVER_STEP_PID=""
 fi
 
