@@ -55,6 +55,9 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
         self.new_turn_token_id = self.vocab["<|turn>"]
         self.tool_call_token_id = self.vocab["<|tool_call>"]
         self.tool_response_token_id = self.vocab["<|tool_response>"]
+        # End-of-tool-response marker (closes <|tool_response>...<tool_response|>).
+        # May be None if not in vocabulary.
+        self.tool_response_end_token_id = self.vocab.get("<tool_response|>")
 
     def adjust_request(
         self, request: "ChatCompletionRequest | ResponsesRequest"
@@ -79,6 +82,12 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
         new_turn_token_id = self.new_turn_token_id
         tool_call_token_id = self.tool_call_token_id
         tool_response_token_id = self.tool_response_token_id
+        tool_response_end_token_id = self.tool_response_end_token_id
+
+        # Tracks whether we passed a <tool_response|> end marker (which only
+        # appears in prompt context when the tool exchange is complete) before
+        # reaching <|tool_response> start token while searching backward.
+        saw_tool_response_end = False
 
         # Search from the end of input_ids to find the last match.
         for i in range(len(input_ids) - 1, -1, -1):
@@ -90,15 +99,25 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
             if input_ids[i] == new_turn_token_id:
                 # A new conversation turn is starting; new reasoning may follow.
                 return False
-            if input_ids[i] == tool_response_token_id:
-                # <|tool_response> is the stop token that terminates a tool call
-                # sequence.  Do NOT return False here — keep searching backward
-                # so we can find the preceding <|tool_call> token and return True.
-                # (In multi-turn scenarios this token appears in the user's prompt
-                # context, never in the model's generated delta, so skipping it is
-                # safe.)
-                continue
-            if input_ids[i] == end_token_id:
+            if (
+                tool_response_end_token_id is not None
+                and input_ids[i] == tool_response_end_token_id
+            ):
+                # <tool_response|> closes a tool-response block in the prompt.
+                # Set a flag so we know the next <|tool_response> we encounter
+                # is part of a completed exchange, not a bare stop token.
+                saw_tool_response_end = True
+            elif input_ids[i] == tool_response_token_id:
+                if saw_tool_response_end:
+                    # Completed tool exchange in the prompt: the model is in a
+                    # fresh state and may start new reasoning in this turn.
+                    # Returning False prevents a prior <|tool_call> from being
+                    # found further back and incorrectly triggering return True.
+                    return False
+                # else: <|tool_response> is a bare stop token appended to the
+                # delta after a tool call — keep searching backward to find the
+                # preceding <|tool_call> token and correctly return True.
+            elif input_ids[i] == end_token_id:
                 return True
         return False
 

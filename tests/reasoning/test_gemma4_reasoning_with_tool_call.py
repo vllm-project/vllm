@@ -152,6 +152,95 @@ def test_reasoning_then_tool_call_single_delta(parser, tokenizer):
     assert tool_calls[0].function.name == "find"
 
 
+def test_reasoning_after_tool_response(parser, tokenizer):
+    """Second-turn generation: reasoning must not leak when prompt has a prior
+    completed tool call + tool response (the multi-turn reasoning-leak bug).
+
+    Simulates: prompt_token_ids ends with <|tool_call>...<|tool_response>...
+    which used to make is_reasoning_end() return True (finding the prior
+    <|tool_call> while searching backward past <|tool_response>), causing
+    reasoning_ended=True at the very start and leaking <|channel>thought...
+    tokens as content.
+    """
+    vocab = tokenizer.get_vocab()
+
+    tool_call_tok = vocab.get("<|tool_call>")
+    tool_call_end_tok = vocab.get("<tool_call|>")
+    tool_resp_tok = vocab.get("<|tool_response>")
+    tool_resp_end_tok = vocab.get("<tool_response|>")
+
+    # Synthetic prompt_token_ids: simulate a completed first-turn tool exchange.
+    # The structure mirrors the Gemma4 template output:
+    #   <|tool_call>body<tool_call|><|tool_response>body<tool_response|>
+    # The <tool_response|> end marker is required for is_reasoning_end to
+    # distinguish this (completed exchange) from a bare stop token.
+    prompt_ids: list[int] = []
+    if tool_call_tok is not None:
+        prompt_ids.append(tool_call_tok)
+    prompt_ids += [1000, 1001, 1002]          # tool call body tokens
+    if tool_call_end_tok is not None:
+        prompt_ids.append(tool_call_end_tok)
+    if tool_resp_tok is not None:
+        prompt_ids.append(tool_resp_tok)
+    prompt_ids += [2000, 2001]                 # tool response body tokens
+    if tool_resp_end_tok is not None:
+        prompt_ids.append(tool_resp_end_tok)
+
+    request = _make_request()
+    reasoning_parts: list[str] = []
+    content_parts: list[str] = []
+    tool_calls_found: list = []
+
+    # Feed second-turn generation as individual token strings, passing
+    # prompt_token_ids only on the very first call (mimics parse_delta usage).
+    enc = getattr(tokenizer, "tokenizer", tokenizer)
+    first = True
+    for tok_str in ["<|channel>", "thought", "\n", "I", " need", " to", " answer",
+                    "<channel|>", "The", " answer", " is", " 42"]:
+        tok_id = vocab.get(tok_str)
+        if tok_id is not None:
+            ids = [tok_id]
+        else:
+            try:
+                ids = enc.encode(tok_str, add_special_tokens=False)
+            except TypeError:
+                ids = enc.encode(tok_str)
+
+        delta = parser.parse_delta(
+            tok_str, ids, request,
+            prompt_token_ids=prompt_ids if first else None,
+        )
+        first = False
+        if delta is None:
+            continue
+        if delta.reasoning:
+            reasoning_parts.append(delta.reasoning)
+        if delta.content:
+            content_parts.append(delta.content)
+        if delta.tool_calls:
+            tool_calls_found.extend(delta.tool_calls)
+
+    reasoning = "".join(reasoning_parts) or None
+    content = "".join(content_parts) or None
+
+    assert reasoning is not None, (
+        "reasoning was lost in second-turn generation after tool response in prompt"
+    )
+    assert not reasoning.startswith("thought"), (
+        f"'thought\\n' prefix must be stripped; got {reasoning!r}"
+    )
+    assert "<|channel>" not in reasoning
+    assert "<channel|>" not in reasoning
+
+    assert content is not None, "content after reasoning must not be dropped"
+    assert "42" in content, f"expected '42' in content, got {content!r}"
+    assert len(tool_calls_found) == 0
+
+    # No raw thinking tokens should have leaked into content
+    assert "<|channel>" not in (content or ""), "thinking start token leaked into content"
+    assert "<channel|>" not in (content or ""), "thinking end token leaked into content"
+
+
 def test_reasoning_only_no_tool_call(parser, tokenizer):
     """Reasoning only (no tool call): content passes through cleanly."""
     token_strings = (
