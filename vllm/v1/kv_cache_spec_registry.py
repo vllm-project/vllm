@@ -156,7 +156,7 @@ class KVCacheSpecRegistry:
     @classmethod
     def get_manager_class(
         cls, kvcache_spec: "KVCacheSpec"
-    ) -> type["SingleTypeKVCacheManager"]:
+    ) -> type["SingleTypeKVCacheManager"] | None:
         """
         Get the single type kvcache manager class for a given kvcache spec instance.
 
@@ -173,16 +173,12 @@ class KVCacheSpecRegistry:
             if base in _REGISTRY_KVCACHESPEC_LIST:
                 return _REGISTRY_KVCACHESPEC_LIST[base].manager_class
 
-        raise ValueError(
-            f"No manager registered for spec type {kvcache_spec_cls}. "
-            f"Please register it using KVCacheSpecRegistry.register() or "
-            f"the @register_kv_cache_spec decorator."
-        )
+        return None
 
     @classmethod
     def get_uniform_type_base_spec(
         cls, kvcache_spec: "KVCacheSpec"
-    ) -> type["KVCacheSpec"]:
+    ) -> type["KVCacheSpec"] | None:
         """
         Get the base kvcache spec class for grouping compatibility checks.
         KVCacheSpecs with uniform_type_base_spec will be trated as one group.
@@ -200,9 +196,29 @@ class KVCacheSpecRegistry:
             if base in _REGISTRY_KVCACHESPEC_LIST:
                 return _REGISTRY_KVCACHESPEC_LIST[base].uniform_type_base_spec
 
-        raise ValueError(
-            f"No uniform type base class registered for spec type {kvcache_spec_cls}."
-        )
+        return None
+
+    @classmethod
+    def check_kv_cache_spec_registry(
+        cls, kv_cache_spec: dict[str, "KVCacheSpec"]
+    ) -> None:
+        """
+        Check if the KVCacheSpecs of each layer are registered as expected.
+        """
+        for layer_name, spec in kv_cache_spec.items():
+            # use raise instead of assert to make it effective in production environment
+            if cls.get_uniform_type_base_spec(spec) is None:
+                raise ValueError(
+                    f"Unsupported KV cache spec type for layer {layer_name}: "
+                    f"{type(spec)}. Please register it using "
+                    f"@register_kv_cache_spec decorator."
+                )
+            if cls.get_manager_class(spec) is None:
+                raise ValueError(
+                    f"No manager found for KV cache spec type for layer "
+                    f"{layer_name}: {type(spec)}. Please register it using "
+                    f"@register_kv_cache_spec decorator."
+                )
 
 
 def register_kv_cache_spec(

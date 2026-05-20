@@ -9,6 +9,7 @@ import torch
 
 from vllm.config import (
     CacheConfig,
+    DeviceConfig,
     VllmConfig,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
@@ -47,6 +48,7 @@ def make_vllm_config() -> VllmConfig:
             block_size=64,
             cache_dtype="bfloat16",
         ),
+        device_config=DeviceConfig(device="cpu"),
     )
 
 
@@ -240,17 +242,20 @@ class TestKVCacheSpecRegistry:
 
     def test_unregistered_spec_no_registered_parent_raises(self):
         """
-        A spec whose entire MRO contains no registered class raises ValueError.
-        Subclasses of registered specs intentionally *do not* raise — they
-        inherit their parent's manager via MRO walking.
+        A spec whose entire MRO contains no registered class resolves to None.
+        Runtime callers should use check_kv_cache_spec_registry to fail early.
+        Subclasses of registered specs intentionally do not fail — they inherit
+        their parent's manager via MRO walking.
         """
         spec = _TrulyUnregisteredSpec(block_size=16)
 
-        with pytest.raises(ValueError, match="No manager registered"):
-            KVCacheSpecRegistry.get_manager_class(spec)
+        assert KVCacheSpecRegistry.get_manager_class(spec) is None
+        assert KVCacheSpecRegistry.get_uniform_type_base_spec(spec) is None
 
-        with pytest.raises(ValueError, match="No uniform type base class"):
-            KVCacheSpecRegistry.get_uniform_type_base_spec(spec)
+        with pytest.raises(
+            ValueError, match="Unsupported KV cache spec type for layer layer_0"
+        ):
+            KVCacheSpecRegistry.check_kv_cache_spec_registry({"layer_0": spec})
 
     def test_unregistered_subclass_inherits_parent_manager(self):
         """

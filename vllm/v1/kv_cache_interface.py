@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 from collections import Counter
+from collections.abc import Hashable
 from dataclasses import dataclass, fields, replace
 from enum import Enum, IntEnum
 from math import prod
@@ -139,6 +140,13 @@ class KVCacheSpec:
             "All layers in the same KV cache group must be the same."
         )
         return copy.deepcopy(specs[0])
+
+    def get_uniform_type_constraints(self) -> dict[str, Hashable]:
+        """
+        Return a dict of attributes required by uniform type checking,
+        block_size is required by default.
+        """
+        return {"block_size": self.block_size}
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -431,6 +439,15 @@ class ChunkedLocalAttentionSpec(AttentionSpec):
         )
         return max_blocks * self.page_size_bytes
 
+    def get_uniform_type_constraints(self) -> dict[str, Hashable]:
+        """
+        block_size and attention_chunk_size are required by uniform type checking.
+        """
+        return {
+            "block_size": self.block_size,
+            "attention_chunk_size": self.attention_chunk_size,
+        }
+
 
 @dataclass(frozen=True, kw_only=True)
 class SlidingWindowSpec(AttentionSpec):
@@ -493,6 +510,15 @@ class SlidingWindowSpec(AttentionSpec):
             max_num_batched_tokens=max_num_batched_tokens, max_model_len=max_model_len
         )
         return max_blocks * self.page_size_bytes
+
+    def get_uniform_type_constraints(self) -> dict[str, Hashable]:
+        """
+        block_size and sliding_window are required by uniform type checking.
+        """
+        return {
+            "block_size": self.block_size,
+            "sliding_window": self.sliding_window,
+        }
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -559,6 +585,15 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             model_version=model_version_set.pop(),
         )
 
+    def get_uniform_type_constraints(self) -> dict[str, Hashable]:
+        """
+        block_size and sliding_window are required by uniform type checking.
+        """
+        return {
+            "block_size": self.block_size,
+            "sliding_window": self.sliding_window,
+        }
+
 
 @dataclass(frozen=True)
 class MambaSpec(KVCacheSpec):
@@ -590,6 +625,15 @@ class MambaSpec(KVCacheSpec):
             return self.page_size_bytes * (2 + self.num_speculative_blocks)
         else:
             return self.page_size_bytes * (1 + self.num_speculative_blocks)
+
+    def get_uniform_type_constraints(self) -> dict[str, Hashable]:
+        """
+        block_size and num_speculative_blocks are required by uniform type checking.
+        """
+        return {
+            "block_size": self.block_size,
+            "num_speculative_blocks": self.num_speculative_blocks,
+        }
 
 
 @dataclass(frozen=True)
@@ -694,64 +738,28 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
         Uses the registry to determine grouping base classes, so custom specs
         that inherit from FullAttentionSpec are treated as full attention.
         """
-        block_sizes = set(spec.block_size for spec in kv_cache_specs.values())
-        if len(block_sizes) > 1:
-            # Different block sizes, not uniform.
-            return False
-
-        # Get the grouping base spec for the first spec
-        one_spec = next(iter(kv_cache_specs.values()))
-        try:
-            base_spec = KVCacheSpecRegistry.get_uniform_type_base_spec(one_spec)
-        except ValueError as error:
-            # Spec not registered, fall back to NotImplementedError
-            raise NotImplementedError(
-                f"Unsupported KV cache spec type: {type(one_spec)}. "
-                f"Please register it using @register_kv_cache_spec decorator."
-            ) from error
+        constraint_values: dict[str, set] = dict()
+        for spec in kv_cache_specs.values():
+            for (
+                constraint_attr,
+                constraint_value,
+            ) in spec.get_uniform_type_constraints().items():
+                if constraint_attr not in constraint_values:
+                    constraint_values[constraint_attr] = set()
+                constraint_values[constraint_attr].add(constraint_value)
+        for constraint_attr, values in constraint_values.items():
+            if len(values) > 1:
+                # Different values for a uniform type constraint, not uniform.
+                return False
 
         # Check if all specs have the same grouping base spec
-        for spec in kv_cache_specs.values():
-            try:
-                if spec.uniform_type_base_spec != base_spec:
-                    return False
-            except ValueError as error:
-                raise NotImplementedError(
-                    f"Unsupported KV cache spec type: {type(spec)}. "
-                    f"Please register it using @register_kv_cache_spec decorator."
-                ) from error
-
-        # Additional type-specific checks for built-in kvcache specs that
-        # requires not only the same type.
-        # NOTE: Check subclasses before parent classes since isinstance()
-        # returns True for subclasses.
-        if isinstance(one_spec, SlidingWindowMLASpec):
-            # SlidingWindowMLASpec is uniform if all specs are SlidingWindowMLASpec
-            # with the same sliding_window size.
-            return all(
-                spec.sliding_window == one_spec.sliding_window  # type: ignore[attr-defined]
-                for spec in kv_cache_specs.values()
-            )
-        elif isinstance(one_spec, SlidingWindowSpec):
-            # All sliding window specs must have the same window size
-            return all(
-                spec.sliding_window == one_spec.sliding_window  # type: ignore[attr-defined]
-                for spec in kv_cache_specs.values()
-            )
-        elif isinstance(one_spec, ChunkedLocalAttentionSpec):
-            return all(
-                spec.attention_chunk_size == one_spec.attention_chunk_size  # type: ignore[attr-defined]
-                for spec in kv_cache_specs.values()
-            )
-        elif isinstance(one_spec, MambaSpec):
-            return all(
-                spec.num_speculative_blocks == one_spec.num_speculative_blocks  # type: ignore[attr-defined]
-                for spec in kv_cache_specs.values()
-            )
-        else:
-            # For the other or custom base classes, default to True if they
-            # share the same grouping base class and block size.
-            return True
+        for idx, spec in enumerate(kv_cache_specs.values()):
+            if idx == 0:
+                base_spec = KVCacheSpecRegistry.get_uniform_type_base_spec(spec)
+                continue
+            if KVCacheSpecRegistry.get_uniform_type_base_spec(spec) != base_spec:
+                return False
+        return True
 
     @classmethod
     def from_specs(cls, kv_cache_specs: dict[str, KVCacheSpec]) -> Self | None:

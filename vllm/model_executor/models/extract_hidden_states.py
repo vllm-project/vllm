@@ -325,7 +325,7 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
         # Re-read block_size: hybrid models may bump it after __init__.
         return KVCacheSpecRegistry.create(
             kvcache_spec_cls=HiddenStateCacheSpec,
-            block_size=self.block_size,
+            block_size=vllm_config.cache_config.block_size,
             num_kv_heads=self.num_heads,
             head_size=self.head_size,
             dtype=self.kv_cache_torch_dtype,
