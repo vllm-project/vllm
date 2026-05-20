@@ -1,18 +1,36 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import TypeGuard
+
 import torch
 
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsScheme,
-    CompressedTensorsW4A4Fp4,
+)
+from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
+    QuantSpecScheme,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.transform.linear import (  # noqa: E501
     CompressedTensorsLinearTransformMethod,
     TransformTuple,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kNvfp4Dynamic,
+    kNvfp4Static,
+)
 
 __all__ = ["is_qutlass_fp4_scheme", "QutlassNvFP4LinearMethod"]
+
+
+def _is_nvfp4_w4a4_scheme(
+    quant_scheme: CompressedTensorsScheme | None,
+) -> TypeGuard[QuantSpecScheme]:
+    return (
+        isinstance(quant_scheme, QuantSpecScheme)
+        and quant_scheme.spec.weight == kNvfp4Static
+        and quant_scheme.spec.activation == kNvfp4Dynamic
+    )
 
 
 def is_qutlass_fp4_scheme(
@@ -20,7 +38,7 @@ def is_qutlass_fp4_scheme(
     input_tfms: dict[int, TransformTuple],
 ) -> bool:
     return (
-        isinstance(quant_scheme, (CompressedTensorsW4A4Fp4,))
+        _is_nvfp4_w4a4_scheme(quant_scheme)
         and len(input_tfms) == 1
         and input_tfms[0].scheme.head_dim == quant_scheme.group_size
     )
@@ -38,7 +56,7 @@ class QutlassNvFP4LinearMethod(CompressedTensorsLinearTransformMethod):
         **extra_weight_attrs,
     ):
         # initializes fp4 qparams
-        assert isinstance(layer.scheme, (CompressedTensorsW4A4Fp4,))
+        assert _is_nvfp4_w4a4_scheme(layer.scheme)
         ret = super().create_weights(
             layer,
             input_size_per_partition,

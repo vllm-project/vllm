@@ -7,7 +7,7 @@ import torch
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
-from vllm.model_executor.layers.quantization.compressed_tensors.schemes.nvfp4_builders import (  # noqa: E501
+from vllm.model_executor.layers.quantization.compressed_tensors.schemes.builders.nvfp4 import (  # noqa: E501
     NvFp4StaticWeightBuilder,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (

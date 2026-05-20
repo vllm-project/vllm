@@ -1,10 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Callable
-
 import torch
 from torch.nn.parameter import Parameter
 
+from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.compressed_tensors.schemes.quant_spec_scheme import (  # noqa: E501
+    ACTIVATION_BUILDERS,
+    WEIGHT_BUILDERS,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kNvfp4Dynamic,
+    kNvfp4Static,
+)
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     ModelWeightParameter,
@@ -15,6 +22,8 @@ __all__ = [
     "NvFp4DynamicActivationBuilder",
     "NvFp4StaticWeightBuilder",
 ]
+
+logger = init_logger(__name__)
 
 
 class NvFp4StaticWeightBuilder:
@@ -32,7 +41,7 @@ class NvFp4StaticWeightBuilder:
         output_partition_sizes: list[int],
         input_size_per_partition: int,
         params_dtype: torch.dtype,
-        weight_loader: Callable,
+        weight_loader,
         **kwargs,
     ) -> None:
         output_size_per_partition = sum(output_partition_sizes)
@@ -93,7 +102,7 @@ class NvFp4DynamicActivationBuilder:
         output_partition_sizes: list[int],
         input_size_per_partition: int,
         params_dtype: torch.dtype,
-        weight_loader: Callable,
+        weight_loader,
         **kwargs,
     ) -> None:
         input_global_scale = PerTensorScaleParameter(
@@ -103,6 +112,18 @@ class NvFp4DynamicActivationBuilder:
         layer.register_parameter("input_global_scale", input_global_scale)
 
     def post_load(self, layer: torch.nn.Module) -> None:
+        if (
+            torch.unique(layer.input_global_scale).numel() != 1
+            or torch.unique(layer.weight_global_scale).numel() != 1
+        ):
+            logger.warning_once(
+                "In NVFP4 linear, the global scale for input or weight are different"
+                " for parallel layers (e.g. q_proj, k_proj, v_proj). This "
+                " will likely result in reduced accuracy. Please verify the model"
+                " accuracy. Consider using a checkpoint with a shared global NVFP4"
+                " scale for fused layers."
+            )
+
         # CT stores global scales as divisors, i.e. 1 / runtime scale.
         input_global_scale_inv = layer.input_global_scale.max().to(torch.float32)
         layer.input_global_scale = Parameter(
@@ -111,3 +132,7 @@ class NvFp4DynamicActivationBuilder:
         layer.input_global_scale_inv = Parameter(
             input_global_scale_inv, requires_grad=False
         )
+
+
+WEIGHT_BUILDERS[kNvfp4Static] = NvFp4StaticWeightBuilder()
+ACTIVATION_BUILDERS[kNvfp4Dynamic] = NvFp4DynamicActivationBuilder()

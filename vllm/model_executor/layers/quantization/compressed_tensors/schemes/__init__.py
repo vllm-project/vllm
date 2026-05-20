@@ -12,6 +12,7 @@ from .compressed_tensors_w8a8_int8 import CompressedTensorsW8A8Int8
 from .compressed_tensors_w8a8_mxfp8 import CompressedTensorsW8A8Mxfp8
 from .compressed_tensors_w8a16_fp8 import CompressedTensorsW8A16Fp8
 from .compressed_tensors_wNa16 import WNA16_SUPPORTED_BITS, CompressedTensorsWNA16
+from .quant_spec_scheme import QuantSpecScheme
 
 __all__ = [
     "CompressedTensorsScheme",
@@ -26,4 +27,5 @@ __all__ = [
     "CompressedTensorsW4A8Int",
     "CompressedTensorsW4A8Fp8",
     "CompressedTensorsW8A8Mxfp8",
+    "QuantSpecScheme",
 ]
