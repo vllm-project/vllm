@@ -3094,9 +3094,12 @@ class GPUModelRunner(
         """
         Step for the EPLB (Expert Parallelism Load Balancing) state.
         """
+        eplb_config = self.parallel_config.eplb_config
         if not self.parallel_config.enable_eplb or self.eep_eplb_suppressed:
             return
-        if self.eplb_state is None:
+        # Record step only if online EPLB is enabled
+        # or if server collects statistics for offline EPLB
+        if eplb_config.disable_online and eplb_config.save_path is None:
             return
 
         assert self.eplb_state is not None
@@ -3105,7 +3108,7 @@ class GPUModelRunner(
         self.eplb_state.step(
             is_dummy,
             is_profile,
-            log_stats=self.parallel_config.eplb_config.log_balancedness,
+            log_stats=eplb_config.log_balancedness,
         )
 
     def setup_eplb_from_mapping(
@@ -4899,7 +4902,13 @@ class GPUModelRunner(
             and self.parallel_config.eplb_config.load_path is not None
         ):
             self.eplb_state.rearrange(load_initial=True)
-            self.eplb_state = None
+            # Free memory if we are not using online EPLB
+            # and do not collect statistics for offline EPLB
+            if (
+                self.parallel_config.eplb_config.disable_online
+                and self.parallel_config.eplb_config.save_path is None
+            ):
+                self.eplb_state = None
 
         if (
             is_mixture_of_experts(self.model)

@@ -154,8 +154,9 @@ Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. T
 | `use_async` | Use non-blocking EPLB for reduced latency overhead | `false` |
 | `policy` | The policy type for expert parallel load balancing | `"default"` |
 | `communicator` | Backend for expert weight transfers: `"torch_nccl"`, `"torch_gloo"`, `"pynccl"`, `"nixl"`,  or `null` (auto) | `null` |
-| `save_path` | Path to write the cumulative per-logical-expert load tensor at every rearrange step. Online rearrangement is disabled while recording. Used by offline EPLB; see [Offline EPLB Mapping](#offline-eplb-mapping). Mutually exclusive with `load_path`. | `null` |
-| `load_path` | Path to a per-logical-expert load tensor previously written via `save_path`. Loaded at startup, the EPLB policy is run once against the live deploy topology, and the resulting physical-to-logical mapping is applied before warmup. Online rearrangement is disabled for the rest of the run (mapping stays static). Mutually exclusive with `save_path`. | `null` |
+| `save_path` | Path to write the cumulative per-logical-expert load tensor at every rearrange step. Used by offline EPLB; see [Offline EPLB Mapping](#offline-eplb-mapping). | `null` |
+| `load_path` | Path to a per-logical-expert load tensor previously written via `save_path`. Loaded at startup, the EPLB policy is run once against the live deploy topology, and the resulting physical-to-logical mapping is applied before warmup. | `null` |
+| `disable_online` | If `true`, suppress all online EPLB activity (no per-step stats, no periodic rearrange). Useful in combination with `load_path` to freeze the placement at the loaded schedule. Defaults to `false`, so online and offline EPLB are orthogonal and can be combined. | `false` |
 
 For example:
 
@@ -213,12 +214,8 @@ Online and offline EPLB are independent modes that can be enabled separately or 
 
 The two new fields:
 
-- **`save_path`** — record mode. The cumulative per-logical-expert load tensor is written to a `safetensors` file at every rearrange step (overwrites in place). In the current implementation, physical rearrangement is suppressed during the recording run so the captured stats reflect the unchanged baseline topology; the same run therefore doubles as a no-EPLB reference for benchmarking.
+- **`save_path`** — record mode. The cumulative per-logical-expert load tensor is written to a `safetensors` file at every rearrange step (overwrites in place).
 - **`load_path`** — replay mode. The recorded tensor is loaded at startup, the EPLB policy is run once against the live deploy topology (which can differ in EP rank count, `num_redundant_experts`, etc. from the recording run), and the resulting physical-to-logical mapping is applied before warmup.
-
-`save_path` and `load_path` are mutually exclusive — a run is either recording stats or replaying them, never both. Both accept a path to a `safetensors` file; parent directories are created on demand during recording.
-
-Online rearrangement is still configured via `step_interval` and `window_size`. To run a deployment with an offline-loaded initial placement and **no further online rebalancing**, set `step_interval` to a value large enough that the online trigger never fires during the deployment (e.g. `100000`). To keep online rebalancing active on top of an offline-loaded initial placement, leave `step_interval` at its normal production value.
 
 #### Workflow
 
@@ -228,14 +225,12 @@ Online rearrangement is still configured via `step_interval` and `window_size`. 
 # no-rearrangement baseline. `step_interval` controls how often the
 # cumulative load is written to disk during recording.
 vllm serve <model> [shared flags] --enable-eplb \
-    --eplb-config '{"save_path":"./cumulative.safetensors","step_interval":256,"communicator":"torch_gloo"}'
+    --eplb-config '{"save_path":"./cumulative.safetensors","disable_online":"true","step_interval":256,"communicator":"torch_gloo"}'
 
 # Step 2 — start the production server with the recorded initial placement.
-# `load_path` applies the mapping once at startup. Pin `step_interval`
-# to a large value (e.g. 100000) so online rearrangement effectively
-# never fires for the rest of the run; the mapping stays static.
+# `load_path` applies the mapping once at startup.
 vllm serve <model> [shared flags] --enable-eplb \
-    --eplb-config '{"load_path":"./cumulative.safetensors","step_interval":100000,"communicator":"torch_gloo"}'
+    --eplb-config '{"load_path":"./cumulative.safetensors","disable_online":"true","communicator":"torch_gloo"}'
 ```
 
 The recording run can use a different EP topology from the deployment run: the load profile is stored per logical expert, and the replay phase re-runs the EPLB policy against whatever topology the deployment exposes to produce the initial placement.

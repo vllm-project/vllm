@@ -105,8 +105,14 @@ class EPLBConfig:
     load_path: Path | None = None
     """If set, load a per-logical-expert load tensor from this file at startup,
     run the EPLB policy once against the live deploy topology, and apply the
-    resulting physical-to-logical mapping before warmup. Online rearrangement
-    is disabled for the rest of the run (mapping stays static)."""
+    resulting physical-to-logical mapping before warmup."""
+
+    disable_online: bool = False
+    """If True, online EPLB is suppressed: no per-step stats accumulation
+    and no periodic rearrange. Intended for offline-EPLB scenarios where
+    a initial placement is loaded via `load_path` and the user does not
+    want online EPLB activity for the rest of the run. Online and offline
+    EPLB are otherwise orthogonal — by default they can be combined."""
 
     @model_validator(mode="after")
     def _validate_eplb_config(self) -> Self:
@@ -114,11 +120,6 @@ class EPLBConfig:
             raise ValueError("Async EPLB is only supported with the default policy.")
         if self.log_balancedness and self.log_balancedness_interval <= 0:
             raise ValueError("log_balancedness_interval must be greater than 0.")
-        if self.save_path is not None and self.load_path is not None:
-            raise ValueError(
-                "save_path and load_path cannot both be set: a run is either "
-                "recording stats or replaying them."
-            )
         return self
 
 

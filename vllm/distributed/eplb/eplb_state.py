@@ -662,6 +662,62 @@ class EplbState:
         for ls in layer_states:
             ls.should_record_tensor = self.should_record_tensor
 
+    def _compute_global_expert_load_window(
+        self,
+        eplb_model_state: EplbModelState,
+        name: str,
+        load_initial: bool,
+        preloaded_tensors: dict[str, torch.Tensor] | None,
+    ) -> torch.Tensor:
+        # Uncommon Case: If the user has provided an expert load window
+        # for initial placement, load it instead of computing it.
+        if load_initial:
+            assert preloaded_tensors is not None
+            return preloaded_tensors[name].to(
+                device=eplb_model_state.expert_load_window.device,
+                dtype=eplb_model_state.expert_load_window.dtype,
+            )
+
+        # Map the physical expert load to global logical experts
+        expert_load_window = eplb_model_state.expert_load_window[
+            :, :, : self.num_valid_physical_experts
+        ]
+        logical_expert_load_window = torch.zeros(
+            self.expert_load_window_size,
+            eplb_model_state.model.num_moe_layers,
+            eplb_model_state.model.num_logical_experts,
+            dtype=eplb_model_state.expert_load_window.dtype,
+            device=eplb_model_state.expert_load_window.device,
+        )
+        logical_expert_load_window.scatter_add_(
+            dim=-1,
+            index=eplb_model_state.physical_to_logical_map[
+                :, : self.num_valid_physical_experts
+            ]
+            .unsqueeze(0)
+            .expand_as(expert_load_window)
+            .long(),
+            src=expert_load_window,
+        )
+        return logical_expert_load_window.sum(dim=0)
+
+    def _write_load_to_file(
+        self,
+        save_path: str,
+        global_expert_load_windows: list[torch.Tensor],
+    ) -> None:
+        for (name, _), global_load in zip(
+            self.model_states.items(), global_expert_load_windows
+        ):
+            load_cpu = global_load.detach().to(dtype=torch.float32, device="cpu")
+            if name in self.cumulative_logical_load:
+                self.cumulative_logical_load[name].add_(load_cpu)
+            else:
+                self.cumulative_logical_load[name] = load_cpu.clone()
+        if get_ep_group().device_group.rank() == 0:
+            self._save_logical_load(self.cumulative_logical_load, Path(save_path))
+            logger.info("Saved EPLB cumulative logical load to %s.", save_path)
+
     def rearrange(
         self,
         is_profile: bool = False,
@@ -696,65 +752,24 @@ class EplbState:
                 "(profile)" if is_profile else "",
             )
 
+        preloaded_tensors = None
         if load_initial:
             load_path = self.parallel_config.eplb_config.load_path
             assert load_path is not None
-            tensors = load_file(str(load_path))
-            global_expert_load_windows = []
-            for name, eplb_model_state in self.model_states.items():
-                global_expert_load_windows.append(
-                    tensors[name].to(
-                        device=eplb_model_state.expert_load_window.device,
-                        dtype=eplb_model_state.expert_load_window.dtype,
-                    )
-                )
-        else:
-            # Map the physical expert load to global logical experts
-            global_expert_load_windows = []
-            for eplb_model_state in self.model_states.values():
-                expert_load_window = eplb_model_state.expert_load_window[
-                    :, :, : self.num_valid_physical_experts
-                ]
-                logical_expert_load_window = torch.zeros(
-                    self.expert_load_window_size,
-                    eplb_model_state.model.num_moe_layers,
-                    eplb_model_state.model.num_logical_experts,
-                    dtype=eplb_model_state.expert_load_window.dtype,
-                    device=eplb_model_state.expert_load_window.device,
-                )
-                logical_expert_load_window.scatter_add_(
-                    dim=-1,
-                    index=eplb_model_state.physical_to_logical_map[
-                        :, : self.num_valid_physical_experts
-                    ]
-                    .unsqueeze(0)
-                    .expand_as(expert_load_window)
-                    .long(),
-                    src=expert_load_window,
-                )
+            preloaded_tensors = load_file(str(load_path))
 
-                global_expert_load_window = logical_expert_load_window.sum(dim=0)
-                global_expert_load_windows.append(global_expert_load_window)
+        global_expert_load_windows = [
+            self._compute_global_expert_load_window(
+                eplb_model_state, name, load_initial, preloaded_tensors
+            )
+            for name, eplb_model_state in self.model_states.items()
+        ]
         # Perform all-reduce to get the expert load across all ranks for each model
         global_expert_load_windows = self._allreduce_list(global_expert_load_windows)
 
         save_path = self.parallel_config.eplb_config.save_path
         if save_path is not None and not is_profile:
-            for (name, _), global_load in zip(
-                self.model_states.items(), global_expert_load_windows
-            ):
-                load_cpu = global_load.detach().to(dtype=torch.float32, device="cpu")
-                if name in self.cumulative_logical_load:
-                    self.cumulative_logical_load[name].add_(load_cpu)
-                else:
-                    self.cumulative_logical_load[name] = load_cpu.clone()
-            if get_ep_group().device_group.rank() == 0:
-                self._save_logical_load(self.cumulative_logical_load, Path(save_path))
-                logger.info("Saved EPLB cumulative logical load to %s.", save_path)
-            # Recording-only mode: skip physical rearrangement so we capture
-            # the baseline on the unchanged topology and avoid NCCL p2p OOM
-            # from move_to_buffer (the apply path allocates large transfer
-            # buffers that don't fit alongside model weights + KV cache).
+            self._write_load_to_file(save_path, global_expert_load_windows)
             return None
 
         # TODO(bowen): Treat differently for prefill and decode nodes
