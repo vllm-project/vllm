@@ -674,3 +674,82 @@ class TestTruncateRequest(unittest.TestCase):
         scheduler.truncate_request(req.request_id, target_num_tokens=-1)
         assert req._all_token_ids == pre_tokens
         scheduler.kv_cache_manager.truncate_to_tokens.assert_not_called()
+
+
+class TestEvictTokenRangeRegressions(unittest.TestCase):
+    """Regression tests for Scheduler.evict_token_range bugs caught in
+    review of the experimental session-eviction PR."""
+
+    def _make_waiting_streaming_request(
+        self,
+        scheduler: Scheduler,
+        prompt_len: int,
+        num_computed: int,
+    ) -> Request:
+        """Create a Request directly in WAITING_FOR_STREAMING_REQ state,
+        bypassing the prefill path. Used only for evict_token_range
+        unit tests that need control over ``num_computed_tokens``."""
+        req = DummyRequest(
+            request_id="req",
+            prompt_token_ids=list(range(prompt_len)),
+        )
+        req.status = RequestStatus.WAITING_FOR_STREAMING_REQ
+        req.num_computed_tokens = num_computed
+        # Pretend the request is in the scheduler's tracking so that
+        # evict_token_range can find it.
+        scheduler.requests[req.request_id] = req
+        # Provide a no-op kv_cache_manager.evict_and_compact so we can
+        # exercise scheduler-side bookkeeping in isolation.
+        scheduler.kv_cache_manager.evict_and_compact = MagicMock(return_value=None)
+        return req
+
+    def test_evict_with_num_computed_below_sink_does_not_inflate(self):
+        """Regression: if num_computed_tokens < evict_start (= num_sink_tokens),
+        none of the computed tokens are evicted and num_computed_tokens
+        must stay unchanged. Previously the ``max(num_sink_tokens, ...)``
+        formula incorrectly bumped num_computed_tokens UP to the sink
+        boundary, falsely claiming tokens were computed.
+
+        See: https://github.com/vllm-project/vllm/pull/43374#... (review
+        comment on `Scheduler.evict_token_range`).
+        """
+        scheduler = create_scheduler()
+        req = self._make_waiting_streaming_request(
+            scheduler, prompt_len=100, num_computed=5
+        )
+        # num_computed=5 is below evict_start (= num_sink_tokens=10).
+        scheduler.evict_token_range(
+            req.request_id, num_tokens_to_evict=20, num_sink_tokens=10
+        )
+        assert req.num_computed_tokens == 5, (
+            f"num_computed_tokens should stay at 5 (none of the computed "
+            f"tokens were evicted), got {req.num_computed_tokens}"
+        )
+
+    def test_evict_clears_one_shot_state_after_scheduling(self):
+        """Regression: after Scheduler.schedule() serializes the eviction
+        signal into NewRequestData, scheduler-side
+        ``Request.num_tokens_evicted`` / ``num_sink_tokens`` must be
+        cleared. Otherwise a preemption+resume would re-deliver the
+        same delta and cause the runner to apply compensation twice."""
+        scheduler = create_scheduler()
+        # Build a request whose eviction state is set (as
+        # evict_token_range would leave it). We poke the fields directly
+        # because doing a full evict here would require a real
+        # kv_cache_manager.
+        req = DummyRequest(
+            request_id="req",
+            prompt_token_ids=list(range(8)),
+        )
+        req.num_tokens_evicted = 4
+        req.num_sink_tokens = 2
+        scheduler.add_request(req)
+        scheduler.schedule()
+        assert req.num_tokens_evicted == 0, (
+            f"num_tokens_evicted should be cleared after scheduling, "
+            f"got {req.num_tokens_evicted}"
+        )
+        assert req.num_sink_tokens == 0, (
+            f"num_sink_tokens should be cleared after scheduling, "
+            f"got {req.num_sink_tokens}"
+        )

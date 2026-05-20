@@ -49,6 +49,15 @@ class CachedRequestState:
 
     lora_request: LoRARequest | None = None
     prompt_embeds: torch.Tensor | None = None
+
+    # Experimental streaming-eviction state, mirrored from
+    # ``Request`` / ``NewRequestData``. Read by runner subclasses that
+    # override ``GPUModelRunner._post_add_requests`` to perform GPU-side
+    # compensation (e.g., RoPE re-rotation). 0 for requests that never
+    # use eviction.
+    num_sink_tokens: int = 0
+    num_tokens_evicted: int = 0
+
     # To accumulate prompt logprobs tensor chunks across prefill steps.
     in_progress_prompt_logprobs_cpu: LogprobsTensors | None = None
 

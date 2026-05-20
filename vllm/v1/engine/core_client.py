@@ -217,6 +217,19 @@ class EngineCoreClient(ABC):
                 (request_id, target_num_tokens),
             )
 
+    async def evict_token_range_async(
+        self,
+        request_id: str,
+        num_tokens_to_evict: int,
+        num_sink_tokens: int = 0,
+    ) -> None:
+        """Evict a token range from a streaming session's KV cache."""
+        if not self.resources.engine_dead:
+            await self._send_input(
+                EngineCoreRequestType.EVICT_TOKEN_RANGE,
+                (request_id, num_tokens_to_evict, num_sink_tokens),
+            )
+
     async def get_output_async(self) -> EngineCoreOutputs:
         raise NotImplementedError
 
