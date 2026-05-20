@@ -215,23 +215,6 @@ class ModelOptQuantConfigBase(QuantizationConfig):
 
         return None
 
-    def get_cache_scale_mapper(self) -> "WeightsMapper":
-        """Map ModelOpt KV-cache scale names to vLLM names.
-
-        ModelOpt checkpoints store KV scales as `<...>.self_attn.k_proj.k_scale`
-        (and similar for v/q). Rename the suffix to `<...>.self_attn.attn.{k,v,q}_scale`
-        so they flow into the vLLM `attn.*_scale` params directly.
-        """
-        from vllm.model_executor.models.utils import WeightsMapper
-
-        return WeightsMapper(
-            orig_to_new_suffix={
-                ".self_attn.k_proj.k_scale": ".self_attn.attn.k_scale",
-                ".self_attn.v_proj.v_scale": ".self_attn.attn.v_scale",
-                ".self_attn.q_proj.q_scale": ".self_attn.attn.q_scale",
-            }
-        )
-
     def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
         if len(self.exclude_modules) > 0:
             # This is a workaround for the weights remapping issue:
