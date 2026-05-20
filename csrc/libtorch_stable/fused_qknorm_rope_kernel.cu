@@ -603,10 +603,10 @@ void launchFusedQKNormRopeNTokenHeads(
     void const* k_weight, void const* cos_sin_cache, bool const interleave,
     int64_t const* position_ids, int const token_heads_per_warp,
     cudaStream_t stream) {
-  TORCH_CHECK(token_heads_per_warp == 1 || token_heads_per_warp == 2 ||
-                  token_heads_per_warp == 4 || token_heads_per_warp == 8,
-              "token_heads_per_warp must be 1, 2, 4, or 8, got ",
-              token_heads_per_warp);
+  STD_TORCH_CHECK(token_heads_per_warp == 1 || token_heads_per_warp == 2 ||
+                      token_heads_per_warp == 4 || token_heads_per_warp == 8,
+                  "token_heads_per_warp must be 1, 2, 4, or 8, got ",
+                  token_heads_per_warp);
 
   // token_heads_per_warp == 1: delegate to the 1-head baseline kernel.
   if (token_heads_per_warp == 1) {
@@ -690,7 +690,7 @@ void launchFusedQKNormRopeNTokenHeads(
         });                                                                  \
         break;                                                               \
       default:                                                               \
-        TORCH_CHECK(false, "Unsupported head dimension: ", head_dim);        \
+        STD_TORCH_CHECK(false, "Unsupported head dimension: ", head_dim);    \
     }                                                                        \
   } while (0)
 

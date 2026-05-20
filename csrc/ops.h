@@ -61,6 +61,9 @@ void merge_attn_states(
     const std::optional<int64_t> prefill_tokens_with_context,
     const std::optional<torch::Tensor>& output_scale = std::nullopt);
 
+// rms_norm and fused_add_rms_norm declarations also exist in
+// csrc/libtorch_stable/ops.h (torch::stable ABI for CUDA). They remain here
+// because the CPU build still uses these torch::Tensor declarations.
 void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
               double epsilon);
 
@@ -98,6 +101,9 @@ void silu_and_mul_per_block_quant(torch::Tensor& out,
                                   std::optional<torch::Tensor> scale_ub,
                                   bool is_scale_transposed);
 
+// rotary_embedding also exist in csrc/libtorch_stable/ops.h (torch::stable
+// ABI for CUDA). It remains here because the CPU build still uses these
+// torch::Tensor declarations.
 void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
                       std::optional<torch::Tensor> key, int64_t head_size,
                       torch::Tensor& cos_sin_cache, bool is_neox,
