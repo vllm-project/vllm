@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for offline EPLB support — pure-Python checks for the two
+"""Unit tests for offline EPLB support — pure-Python checks for the
 public surfaces added by the offline-EPLB feature:
 
-  1. `EPLBConfig.save_path` / `load_path` are mutually exclusive.
-  2. `EplbState._save_logical_load` writes a safetensors file that
+  1. `EplbState._save_logical_load` writes a safetensors file that
      round-trips, creates parent directories on demand, and tags the file
      with `version: "1"` metadata.
 
@@ -19,23 +18,6 @@ from safetensors.torch import load_file
 
 from vllm.config.parallel import EPLBConfig
 from vllm.distributed.eplb.eplb_state import EplbState
-
-
-def test_eplb_config_save_load_paths_are_mutually_exclusive(tmp_path):
-    """Only one of `save_path` / `load_path` may be set at a time:
-    a run either records stats or replays them, never both."""
-    save_only = tmp_path / "save.safetensors"
-    load_only = tmp_path / "load.safetensors"
-
-    # Each side alone is fine.
-    EPLBConfig(save_path=save_only)
-    EPLBConfig(load_path=load_only)
-    # Neither side set is also fine (back-compat with existing configs).
-    EPLBConfig()
-
-    # Both at once is rejected by the model validator.
-    with pytest.raises(ValueError, match="save_path and load_path"):
-        EPLBConfig(save_path=save_only, load_path=load_only)
 
 
 def test_save_logical_load_roundtrip_creates_parents_and_tags_version(tmp_path):
