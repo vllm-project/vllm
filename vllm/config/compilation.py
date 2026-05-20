@@ -963,6 +963,7 @@ class CompilationConfig:
             # TODO(zhuhaoran): support rope native forward match and remove this.
             # Linked issue: https://github.com/vllm-project/vllm/issues/28042
             self.custom_ops.append("+rotary_embedding")
+
         if (
             self.pass_config.fuse_rope_kvcache
             and "+rotary_embedding" not in self.custom_ops
@@ -970,16 +971,12 @@ class CompilationConfig:
             # TODO(Rohan138): support rope native forward match and remove this.
             # Linked issue: https://github.com/vllm-project/vllm/issues/28042
             self.custom_ops.append("+rotary_embedding")
-        if self.pass_config.fuse_qk_norm_rope_kvcache:
-            if "+rotary_embedding" not in self.custom_ops:
-                self.custom_ops.append("+rotary_embedding")
-            if not self.use_inductor_graph_partition:
-                self.use_inductor_graph_partition = True
-                logger.info(
-                    "Enabling use_inductor_graph_partition for "
-                    "fuse_qk_norm_rope_kvcache (requires "
-                    "unified_kv_cache_update in compiled graph)."
-                )
+
+        if (
+            self.pass_config.fuse_qk_norm_rope_kvcache
+            and "+rotary_embedding" not in self.custom_ops
+        ):
+            self.custom_ops.append("+rotary_embedding")
 
         if (
             is_torch_equal_or_newer("2.9.0.dev")

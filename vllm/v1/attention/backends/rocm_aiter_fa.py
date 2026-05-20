@@ -1497,7 +1497,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             self._cached_v_scale_cpu = torch.tensor(v_scale_val, dtype=torch.float32)
             self._cached_v_scale_val = v_scale_val
 
-        rocm_aiter_ops.hip_qk_norm_rope_and_cache(
+        rocm_aiter_ops.fused_qk_norm_rope_and_cache(
             qkv=qkv,
             q_weight=q_weight,
             k_weight=k_weight,

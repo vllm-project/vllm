@@ -2089,7 +2089,7 @@ class rocm_aiter_ops:
         return y
 
     @staticmethod
-    def hip_qk_norm_rope_and_cache(
+    def fused_qk_norm_rope_and_cache(
         qkv: torch.Tensor,
         q_weight: torch.Tensor,
         k_weight: torch.Tensor,
