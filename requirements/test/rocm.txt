@@ -1041,6 +1041,8 @@ sacrebleu==2.6.0
     # via lm-eval
 safetensors==0.7.0
     # via
+    #   -c requirements/common.txt
+    #   -r requirements/test/../common.txt
     #   accelerate
     #   open-clip-torch
     #   peft
