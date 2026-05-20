@@ -17,6 +17,7 @@ from transformers import AutoModelForCausalLM, PreTrainedTokenizerBase
 
 from vllm.benchmarks.datasets import (
     AIMODataset,
+    ASRDataset,
     BurstGPTDataset,
     ConversationDataset,
     InstructCoderDataset,
@@ -49,6 +50,7 @@ def run_vllm(
     engine_args: EngineArgs,
     do_profile: bool,
     disable_detokenize: bool = False,
+    prequeue_requests: bool = False,
 ) -> tuple[float, list[RequestOutput] | None]:
     from vllm import LLM, SamplingParams
 
@@ -93,12 +95,29 @@ def run_vllm(
 
     outputs = None
     if not use_beam_search:
+        if prequeue_requests:
+            llm.sleep(level=0, mode="abort")
+
         start = time.perf_counter()
         if do_profile:
             llm.start_profile()
-        outputs = llm.generate(
-            prompts, sampling_params, lora_request=lora_requests, use_tqdm=True
-        )
+
+        if prequeue_requests:
+            try:
+                llm.enqueue(
+                    prompts,
+                    sampling_params,
+                    lora_request=lora_requests,
+                    use_tqdm=True,
+                )
+            finally:
+                llm.wake_up(tags=["scheduling"])
+            outputs = llm.wait_for_completion(output_type=RequestOutput, use_tqdm=True)
+        else:
+            outputs = llm.generate(
+                prompts, sampling_params, lora_request=lora_requests, use_tqdm=True
+            )
+
         if do_profile:
             llm.stop_profile()
         end = time.perf_counter()
@@ -132,6 +151,7 @@ def run_vllm_chat(
     engine_args: EngineArgs,
     do_profile: bool,
     disable_detokenize: bool = False,
+    prequeue_requests: bool = False,
 ) -> tuple[float, list[RequestOutput]]:
     """
     Run vLLM chat benchmark. This function is recommended ONLY for benchmarking
@@ -165,12 +185,25 @@ def run_vllm_chat(
                 detokenize=not disable_detokenize,
             )
         )
+    if prequeue_requests:
+        llm.sleep(level=0, mode="abort")
+
     start = time.perf_counter()
     if do_profile:
         llm.start_profile()
-    outputs = llm.chat(prompts, sampling_params, use_tqdm=True)
+
+    if prequeue_requests:
+        try:
+            llm.enqueue_chat(prompts, sampling_params, use_tqdm=True)
+        finally:
+            llm.wake_up(tags=["scheduling"])
+        outputs = llm.wait_for_completion(output_type=RequestOutput, use_tqdm=True)
+    else:
+        outputs = llm.chat(prompts, sampling_params, use_tqdm=True)
+
     if do_profile:
         llm.stop_profile()
+
     end = time.perf_counter()
     return end - start, outputs
 
@@ -392,28 +425,53 @@ def get_requests(args, tokenizer):
     elif args.dataset_name == "hf":
         if args.output_len is not None:
             sample_kwargs["output_len"] = args.output_len
-        if args.dataset_path in VisionArenaDataset.SUPPORTED_DATASET_PATHS:
+        common_kwargs["hf_name"] = args.hf_name
+        if (
+            args.dataset_path in VisionArenaDataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in VisionArenaDataset.SUPPORTED_DATASET_PATHS
+        ):
             dataset_cls = VisionArenaDataset
             common_kwargs["dataset_subset"] = None
             common_kwargs["dataset_split"] = "train"
             sample_kwargs["enable_multimodal_chat"] = True
-        elif args.dataset_path in InstructCoderDataset.SUPPORTED_DATASET_PATHS:
+        elif (
+            args.dataset_path in InstructCoderDataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in InstructCoderDataset.SUPPORTED_DATASET_PATHS
+        ):
             dataset_cls = InstructCoderDataset
             common_kwargs["dataset_split"] = "train"
-        elif args.dataset_path in MultiModalConversationDataset.SUPPORTED_DATASET_PATHS:
+        elif (
+            args.dataset_path in MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
+        ):
             dataset_cls = MultiModalConversationDataset
             common_kwargs["dataset_subset"] = args.hf_subset
             common_kwargs["dataset_split"] = args.hf_split
             sample_kwargs["enable_multimodal_chat"] = True
-        elif args.dataset_path in ConversationDataset.SUPPORTED_DATASET_PATHS:
+        elif (
+            args.dataset_path in ConversationDataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in ConversationDataset.SUPPORTED_DATASET_PATHS
+        ):
             dataset_cls = ConversationDataset
             common_kwargs["dataset_subset"] = args.hf_subset
             common_kwargs["dataset_split"] = args.hf_split
             sample_kwargs["enable_multimodal_chat"] = True
-        elif args.dataset_path in AIMODataset.SUPPORTED_DATASET_PATHS:
+        elif (
+            args.dataset_path in AIMODataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in AIMODataset.SUPPORTED_DATASET_PATHS
+        ):
             dataset_cls = AIMODataset
             common_kwargs["dataset_subset"] = None
             common_kwargs["dataset_split"] = "train"
+        elif (
+            args.dataset_path in ASRDataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in ASRDataset.SUPPORTED_DATASET_PATHS
+        ):
+            dataset_cls = ASRDataset
+            common_kwargs["dataset_subset"] = args.hf_subset
+            common_kwargs["dataset_split"] = args.hf_split
+            sample_kwargs["asr_min_audio_len_sec"] = args.asr_min_audio_len_sec
+            sample_kwargs["asr_max_audio_len_sec"] = args.asr_max_audio_len_sec
     elif args.dataset_name == "prefix_repetition":
         dataset_cls = PrefixRepetitionRandomDataset
         sample_kwargs["prefix_len"] = args.prefix_repetition_prefix_len
@@ -517,6 +575,10 @@ def validate_args(args):
     valid_backends = {"vllm", "hf", "mii", "vllm-chat"}
     if args.backend not in valid_backends:
         raise ValueError(f"Unsupported backend: {args.backend}")
+    if args.prequeue_requests and args.backend not in {"vllm", "vllm-chat"}:
+        raise ValueError("--prequeue-requests requires --backend vllm or vllm-chat")
+    if args.prequeue_requests and args.async_engine:
+        raise ValueError("--prequeue-requests is not supported with --async-engine")
 
     # === Dataset Configuration ===
     if (
@@ -550,6 +612,10 @@ def validate_args(args):
             VisionArenaDataset.SUPPORTED_DATASET_PATHS.keys()
             | MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
             | ConversationDataset.SUPPORTED_DATASET_PATHS
+        ) or args.hf_name in (
+            VisionArenaDataset.SUPPORTED_DATASET_PATHS.keys()
+            | MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
+            | ConversationDataset.SUPPORTED_DATASET_PATHS
         ):
             assert args.backend == "vllm-chat", (
                 f"{args.dataset_path} needs to use vllm-chat as the backend."
@@ -557,6 +623,11 @@ def validate_args(args):
         elif args.dataset_path in (
             InstructCoderDataset.SUPPORTED_DATASET_PATHS
             | AIMODataset.SUPPORTED_DATASET_PATHS
+            | ASRDataset.SUPPORTED_DATASET_PATHS
+        ) or args.hf_name in (
+            InstructCoderDataset.SUPPORTED_DATASET_PATHS
+            | AIMODataset.SUPPORTED_DATASET_PATHS
+            | ASRDataset.SUPPORTED_DATASET_PATHS
         ):
             assert args.backend == "vllm", (
                 f"{args.dataset_path} needs to use vllm as the backend."
@@ -755,6 +826,20 @@ def add_cli_args(parser: argparse.ArgumentParser):
         help="Use vLLM async engine rather than LLM class.",
     )
     parser.add_argument(
+        "--prequeue-requests",
+        action="store_true",
+        default=False,
+        help=(
+            "For the vLLM backends, enqueue all requests before allowing the "
+            "scheduler to process them. This can improve benchmark "
+            "reproducibility by removing overlap between request rendering "
+            "and engine scheduling, but may reduce measured throughput. "
+            "Request rendering is typically fast relative to scheduling and "
+            "processing; the intended use case of this flag is multimodal "
+            "benchmarks with time-consuming image rendering."
+        ),
+    )
+    parser.add_argument(
         "--disable-detokenize",
         action="store_true",
         help=(
@@ -787,7 +872,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "context in a request (default: 0).",
     )
 
-    # hf dtaset
+    # hf dataset
     parser.add_argument(
         "--hf-subset",
         type=str,
@@ -799,6 +884,17 @@ def add_cli_args(parser: argparse.ArgumentParser):
         type=str,
         default=None,
         help="Split of the HF dataset.",
+    )
+    parser.add_argument(
+        "--hf-name",
+        type=str,
+        default=None,
+        help=(
+            "Name of the dataset on HuggingFace "
+            "(e.g., 'lmms-lab/LLaVA-OneVision-Data'). "
+            "Specify this when --dataset-path is a local filesystem path "
+            "so the benchmark can identify the correct dataset class."
+        ),
     )
     parser.add_argument(
         "--profile",
@@ -841,6 +937,20 @@ def add_cli_args(parser: argparse.ArgumentParser):
     add_random_dataset_base_args(parser)
     add_random_multimodal_dataset_args(parser)
 
+    # ASR dataset
+    parser.add_argument(
+        "--asr-min-audio-len-sec",
+        type=float,
+        default=0.0,
+        help="Minimum audio duration in seconds for ASR dataset filtering.",
+    )
+    parser.add_argument(
+        "--asr-max-audio-len-sec",
+        type=float,
+        default=float("inf"),
+        help="Maximum audio duration in seconds for ASR dataset filtering.",
+    )
+
     parser = AsyncEngineArgs.add_cli_args(parser)
 
 
@@ -882,6 +992,7 @@ def main(args: argparse.Namespace):
                 EngineArgs.from_cli_args(args),
                 disable_detokenize=args.disable_detokenize,
                 do_profile=args.profile,
+                prequeue_requests=args.prequeue_requests,
             )
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
@@ -905,6 +1016,7 @@ def main(args: argparse.Namespace):
             EngineArgs.from_cli_args(args),
             disable_detokenize=args.disable_detokenize,
             do_profile=args.profile,
+            prequeue_requests=args.prequeue_requests,
         )
     else:
         raise ValueError(f"Unknown backend: {args.backend}")

@@ -4,7 +4,7 @@
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
-from typing import Literal, cast
+from typing import cast
 
 import numpy as np
 import regex as re
@@ -19,6 +19,7 @@ from transformers import BatchFeature, WhisperConfig
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import MultiModalDataDict, PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -55,7 +56,10 @@ from vllm.multimodal.processing.processor import (
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.tokenizers.mistral import MistralTokenizer
-from vllm.transformers_utils.processors.voxtral import MistralCommonVoxtralProcessor
+from vllm.transformers_utils.processors.voxtral import (
+    MistralCommonFeatureExtractor,
+    MistralCommonVoxtralProcessor,
+)
 from vllm.utils.collection_utils import is_list_of
 
 from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsTranscription
@@ -84,15 +88,19 @@ class VoxtralProcessingInfo(BaseProcessingInfo):
 
         return tokenizer
 
+    def get_feature_extractor(self) -> MistralCommonFeatureExtractor:
+        return MistralCommonFeatureExtractor(
+            self.get_tokenizer().instruct.audio_encoder
+        )
+
     def get_hf_processor(self, **kwargs) -> MistralCommonVoxtralProcessor:
-        return self.ctx.init_processor(
-            MistralCommonVoxtralProcessor,
+        return MistralCommonVoxtralProcessor(
             tokenizer=self.get_tokenizer(),
-            **kwargs,
+            feature_extractor=self.get_feature_extractor(),
         )
 
     def get_data_parser(self):
-        feature_extractor = self.get_hf_processor().feature_extractor
+        feature_extractor = self.get_feature_extractor()
 
         return MultiModalDataParser(
             target_sr=feature_extractor.sampling_rate,
@@ -114,7 +122,7 @@ class VoxtralProcessingInfo(BaseProcessingInfo):
         return self.ctx.model_config.max_model_len
 
     def get_max_audio_array_len(self) -> int:
-        feature_extractor = self.get_hf_processor().feature_extractor
+        feature_extractor = self.get_feature_extractor()
 
         return self.get_max_audio_tokens() * int(
             feature_extractor.sampling_rate // feature_extractor.frame_rate
@@ -153,7 +161,7 @@ class VoxtralDummyInputsBuilder(BaseDummyInputsBuilder[VoxtralProcessingInfo]):
         mm_data: MultiModalDataDict | None = None,
     ) -> ProcessorInputs:
         tokenizer = self.info.get_tokenizer()
-        feature_extractor = self.info.get_hf_processor().feature_extractor
+        feature_extractor = self.info.get_feature_extractor()
 
         dummy_text = self.get_dummy_text(mm_counts)
         dummy_mm_data = (
@@ -439,14 +447,13 @@ class VoxtralForConditionalGeneration(
     # for speech-to-text transcription
     def get_generation_prompt(
         cls,
-        audio: np.ndarray,
-        model_config: ModelConfig,
-        stt_config: SpeechToTextConfig,
-        language: str | None,
-        task_type: Literal["transcribe", "translate"],
-        request_prompt: str,
-        to_language: str | None,
+        stt_params: SpeechToTextParams,
     ) -> PromptType:
+        audio = stt_params.audio
+        model_config = stt_params.model_config
+        stt_config = stt_params.stt_config
+        language = stt_params.language
+
         tokenizer = cached_tokenizer_from_config(model_config)
         audio = Audio(audio, int(stt_config.sample_rate), format="wav")  # lossless
         req = TranscriptionRequest(
@@ -480,8 +487,10 @@ class VoxtralForConditionalGeneration(
         This is used for estimating the amount of processing for this audio.
         """
         tokenizer = cached_tokenizer_from_config(model_config)
-        adapter = MistralCommonVoxtralProcessor(tokenizer)
-        return adapter.feature_extractor.get_num_audio_tokens(
+        feature_extractor = MistralCommonFeatureExtractor(
+            tokenizer.instruct.audio_encoder
+        )
+        return feature_extractor.get_num_audio_tokens(
             int(audio_duration_s * stt_config.sample_rate)
         )
 

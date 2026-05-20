@@ -9,10 +9,14 @@ import numpy.typing as npt
 import pybase64
 import torch
 
+from vllm.logger import init_logger
+from vllm.multimodal.audio import resample_audio_pyav
 from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.serial_utils import tensor2base64
 
 from .base import MediaIO
+
+logger = init_logger(__name__)
 
 try:
     import av
@@ -25,15 +29,9 @@ except ImportError:
     soundfile = PlaceholderModule("soundfile")  # type: ignore[assignment]
 
 
-try:
-    import resampy
-except ImportError:
-    resampy = PlaceholderModule("resampy")  # type: ignore[assignment]
-
-
-# Public libsndfile error codes exposed via `soundfile.LibsndfileError.code`, soundfile
-# being librosa's main backend. Used to validate if an audio loading error is due to a
-# server error vs a client error (invalid audio file).
+# Public libsndfile error codes exposed via `soundfile.LibsndfileError.code`,
+# soundfile being the main audio loading backend. Used to validate if an audio
+# loading error is due to a server error vs a client error (invalid audio file).
 # 0 = sf_error(NULL) race condition: when multiple threads fail sf_open_virtual
 #     concurrently, one thread may clear the global error before another reads it,
 #     producing code=0 ("Garbled error message from libsndfile" in soundfile).
@@ -126,7 +124,7 @@ def load_audio_soundfile(
         y = np.mean(y, axis=tuple(range(y.ndim - 1)))
 
     if sr is not None and sr != native_sr:
-        y = resampy.resample(y, sr_orig=native_sr, sr_new=sr)
+        y = resample_audio_pyav(y, orig_sr=native_sr, target_sr=sr)
         return y, int(sr)
     return y, native_sr
 
@@ -139,19 +137,27 @@ def load_audio(
 ):
     try:
         return load_audio_soundfile(path, sr=sr, mono=mono)
+    except ImportError as exc:
+        # soundfile (or resampy) is not installed — fall through to pyav.
+        # NOTE: this clause must stay BEFORE ``soundfile.LibsndfileError``
+        # because when soundfile is a PlaceholderModule, evaluating
+        # ``soundfile.LibsndfileError`` itself raises ImportError.
+        logger.error("Failed to load audio via soundfile: %r", exc)
     except soundfile.LibsndfileError as exc:
         # Only fall back for known format-detection failures.
         # Re-raise anything else (e.g. corrupt but recognised format).
         if exc.code not in _BAD_SF_CODES:
             raise
-        # soundfile may have advanced the BytesIO seek position before failing;
-        # reset it so PyAV can read from the beginning.
-        if isinstance(path, BytesIO):
-            path.seek(0)
-        try:
-            return load_audio_pyav(path, sr=sr, mono=mono)
-        except Exception as pyav_exc:
-            raise ValueError("Invalid or unsupported audio file.") from pyav_exc
+    # soundfile may have advanced the BytesIO seek position before failing;
+    # reset it so PyAV can read from the beginning.
+    if isinstance(path, BytesIO):
+        path.seek(0)
+    try:
+        return load_audio_pyav(path, sr=sr, mono=mono)
+    except ImportError:
+        raise  # Let PlaceholderModule's message ("install vllm[audio]") propagate.
+    except Exception as pyav_exc:
+        raise ValueError("Invalid or unsupported audio file.") from pyav_exc
 
 
 class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):

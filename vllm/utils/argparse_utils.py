@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Argument parsing utilities for vLLM."""
 
+import argparse
 import json
 import sys
 import textwrap
@@ -23,6 +24,71 @@ import yaml
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+
+def human_readable_int(value: str) -> int:
+    """Parse human-readable integers like '1k', '2M', etc.
+    Including decimal values with decimal multipliers.
+
+    Examples:
+    - '1k' -> 1,000
+    - '1K' -> 1,024
+    - '25.6k' -> 25,600
+    """
+    value = value.strip()
+
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)([kKmMgGtT])", value)
+    if match:
+        decimal_multiplier = {
+            "k": 10**3,
+            "m": 10**6,
+            "g": 10**9,
+            "t": 10**12,
+        }
+        binary_multiplier = {
+            "K": 2**10,
+            "M": 2**20,
+            "G": 2**30,
+            "T": 2**40,
+        }
+
+        number, suffix = match.groups()
+        if suffix in decimal_multiplier:
+            mult = decimal_multiplier[suffix]
+            return int(float(number) * mult)
+        elif suffix in binary_multiplier:
+            mult = binary_multiplier[suffix]
+            # Do not allow decimals with binary multipliers
+            try:
+                return int(number) * mult
+            except ValueError as e:
+                raise argparse.ArgumentTypeError(
+                    "Decimals are not allowed "
+                    f"with binary suffixes like {suffix}. Did you mean to use "
+                    f"{number}{suffix.lower()} instead?"
+                ) from e
+
+    # Regular plain number.
+    return int(value)
+
+
+def human_readable_int_or_auto(value: str) -> int:
+    """Parse human-readable integers like '1k', '2M', etc.
+    Including decimal values with decimal multipliers.
+    Also accepts -1 or 'auto' as a special value for auto-detection.
+
+    Examples:
+    - '1k' -> 1,000
+    - '1K' -> 1,024
+    - '25.6k' -> 25,600
+    - '-1' or 'auto' -> -1 (special value for auto-detection)
+    """
+    value = value.strip()
+
+    if value == "-1" or value.lower() == "auto":
+        return -1
+
+    return human_readable_int(value)
 
 
 class SortedHelpFormatter(ArgumentDefaultsHelpFormatter, RawDescriptionHelpFormatter):
@@ -192,7 +258,7 @@ class FlexibleArgumentParser(ArgumentParser):
                     "With `vllm serve`, you should provide the model as a "
                     "positional argument or in a config file instead of via "
                     "the `--model` option. "
-                    "The `--model` option will be removed in v0.13."
+                    "The `--model` option will be removed in a future version."
                 )
 
                 if args[model_idx] == "--model":
@@ -338,7 +404,12 @@ class FlexibleArgumentParser(ArgumentParser):
                 try:
                     value = json.loads(value_str)
                 except json.decoder.JSONDecodeError:
-                    value = value_str
+                    # Support human-readable suffixes (e.g. 1k, 80g) for
+                    # dotted config args like --config.field 80g
+                    try:
+                        value = human_readable_int(value_str)  # type: ignore[assignment]
+                    except (ValueError, ArgumentTypeError):
+                        value = value_str
 
                 # Merge all values with the same key into a single dict
                 arg_dict = create_nested_dict(keys, value)

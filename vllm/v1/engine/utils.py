@@ -11,7 +11,7 @@ from enum import Enum, auto
 from multiprocessing import Process, connection
 from multiprocessing.process import BaseProcess
 from multiprocessing.queues import Queue
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
 import msgspec
@@ -22,10 +22,12 @@ from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
+from vllm.utils import numa_utils
 from vllm.utils.network_utils import get_open_zmq_ipc_path, zmq_socket_ctx
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.executor import Executor
+from vllm.v1.executor.ray_utils import WORKER_SPECIFIC_ENV_VARS
 from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
 
 if TYPE_CHECKING:
@@ -77,6 +79,21 @@ class EngineHandshakeMetadata:
 
     addresses: EngineZmqAddresses
     parallel_config: dict[str, int | str | list[int]]
+
+
+def _make_control_bundle(node_ip: str) -> dict[str, float]:
+    # The engine actor is scheduled on the final CPU-only bundle. Keep that
+    # bundle colocated with the group's first GPU bundle so the actor does not
+    # float to an unrelated node and reorder worker ranks away from the
+    # advertised DP bootstrap host.
+    return {"CPU": 1.0, "node:" + node_ip: 0.001}
+
+
+def _get_bundle_node_ip(bundle: dict[str, float]) -> str:
+    for key in bundle:
+        if key.startswith("node:"):
+            return key.split(":", 1)[1]
+    raise ValueError(f"Missing node affinity in placement bundle: {bundle}")
 
 
 class CoreEngineProcManager:
@@ -133,19 +150,42 @@ class CoreEngineProcManager:
             )
 
         self._finalizer = weakref.finalize(self, shutdown, self.processes)
+        self.manager_stopped = threading.Event()
+        self.failed_proc_name: str | None = None
 
         try:
             for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
-                # Adjust device control in DP for non-CUDA platforms
-                # as well as external and ray launchers
-                # For CUDA platforms, we use torch.accelerator.set_device_index()()
+                # Adjust device control in DP for platforms that cannot rely
+                # on torch.accelerator.set_device_index(), and for Ray launchers.
+                device_control_context: contextlib.AbstractContextManager[None] = (
+                    contextlib.nullcontext()
+                )
+                needs_device_env_isolation = not (
+                    current_platform.is_cuda_alike() or current_platform.is_xpu()
+                )
                 if is_dp and (
-                    not current_platform.is_cuda_alike()
-                    or vllm_config.parallel_config.use_ray
+                    needs_device_env_isolation or vllm_config.parallel_config.use_ray
                 ):
-                    with set_device_control_env_var(vllm_config, local_dp_rank):
-                        proc.start()
-                else:
+                    device_control_context = set_device_control_env_var(
+                        vllm_config, local_dp_rank
+                    )
+
+                with (
+                    device_control_context,
+                    numa_utils.configure_subprocess(
+                        # EngineCore itself does not have a TP/PP-local rank.
+                        # When DP is enabled, set_device_control_env_var()
+                        # narrows visible devices to this DP shard first, so
+                        # local_rank=0 means "the first local GPU in this
+                        # shard". The actual TP/PP worker processes spawned by
+                        # the executor are bound separately with their own
+                        # local_rank values.
+                        vllm_config,
+                        local_rank=0,
+                        dp_local_rank=local_dp_rank,
+                        process_kind="EngineCore",
+                    ),
+                ):
                     proc.start()
         finally:
             # Kill other procs if not all are running.
@@ -154,12 +194,31 @@ class CoreEngineProcManager:
 
     def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown engine core processes with configurable timeout."""
+        self.manager_stopped.set()
         if self._finalizer.detach() is not None:
             shutdown(self.processes, timeout=timeout)
 
-    def join_first(self):
-        """Wait for any process to exit."""
-        connection.wait(proc.sentinel for proc in self.processes)
+    def monitor_engine_liveness(self) -> None:
+        """Monitor engine core process liveness."""
+
+        sentinel_to_proc = {proc.sentinel: proc for proc in self.processes}
+        sentinels = set(sentinel_to_proc.keys())
+
+        while sentinels and not self.manager_stopped.is_set():
+            died_sentinels = connection.wait(sentinels, timeout=1)
+
+            for sentinel in died_sentinels:
+                proc = sentinel_to_proc.pop(cast(int, sentinel))
+                exitcode = proc.exitcode
+                if exitcode != 0 and not self.manager_stopped.is_set():
+                    self.failed_proc_name = proc.name
+            if died_sentinels:
+                # Any engine exit currently triggers a shutdown. Future
+                # work (e.g., Elastic and fault-tolerant EP) will add finer-grained
+                # handling for different exit scenarios.
+                break
+
+        self.shutdown()
 
     def sentinels(self) -> list:
         return [proc.sentinel for proc in self.processes]
@@ -251,6 +310,18 @@ def get_device_indices(
     return value
 
 
+def _apply_dp_identity_suffix(dp_vllm_config, dp_rank: int) -> None:
+    # Ray actor names (RayExecutorV2) and KV-connector engine_ids must
+    # be unique across sibling DP engines or registration collides.
+    # Use the global DP rank, not a node-local rank, since sibling DP
+    # engines can span multiple nodes.
+    dp_vllm_config.instance_id = f"{dp_vllm_config.instance_id}_dp{dp_rank}"
+    if dp_vllm_config.kv_transfer_config is not None:
+        dp_vllm_config.kv_transfer_config.engine_id = (
+            f"{dp_vllm_config.kv_transfer_config.engine_id}_dp{dp_rank}"
+        )
+
+
 class CoreEngineActorManager:
     """
     Utility class to handle creation, readiness, and shutdown
@@ -287,7 +358,10 @@ class CoreEngineActorManager:
         self.local_engine_actors: list[ray.ActorHandle] = []
         self.remote_engine_actors: list[ray.ActorHandle] = []
 
-        env_vars_list = get_env_vars_to_copy(destination=actor_class.__name__)
+        env_vars_list = get_env_vars_to_copy(
+            destination=actor_class.__name__,
+            exclude_vars=WORKER_SPECIFIC_ENV_VARS,
+        )
         self.env_vars_dict = {
             name: os.environ[name] for name in env_vars_list if name in os.environ
         }
@@ -298,6 +372,8 @@ class CoreEngineActorManager:
         self.log_stats = log_stats
         local_engine_count = vllm_config.parallel_config.data_parallel_size_local
         world_size = vllm_config.parallel_config.world_size
+        self.manager_stopped = threading.Event()
+        self.failed_proc_name: str | None = None
 
         if ray.is_initialized():
             logger.info("Ray is already initialized. Skipping Ray initialization.")
@@ -344,15 +420,10 @@ class CoreEngineActorManager:
             range(dp_size), local_dp_ranks, placement_groups
         ):
             dp_vllm_config = copy.deepcopy(vllm_config)
+            if dp_size > 1:
+                _apply_dp_identity_suffix(dp_vllm_config, index)
             dp_vllm_config.parallel_config.placement_group = pg
             local_client = index < local_engine_count
-
-            if dp_size > 1 and dp_vllm_config.kv_transfer_config is not None:
-                # modify the engine_id and append the local_dp_rank to it to ensure
-                # that the kv_transfer_config is unique for each DP rank.
-                dp_vllm_config.kv_transfer_config.engine_id = (
-                    f"{dp_vllm_config.kv_transfer_config.engine_id}_dp{local_index}"
-                )
 
             # Ray XPU known issue: dpctl initializes the GPU runtime early, so
             # setting device env vars in Ray actor's initialization method
@@ -395,8 +466,11 @@ class CoreEngineActorManager:
 
         ray.get(refs)
         self.run_refs = []
+        self.actor_run_ref_dict = dict()
         for actor in self.local_engine_actors + self.remote_engine_actors:
-            self.run_refs.append(actor.run.remote())
+            ref = actor.run.remote()
+            self.run_refs.append(ref)
+            self.actor_run_ref_dict[actor] = ref
 
     @staticmethod
     def create_dp_placement_groups(
@@ -550,10 +624,20 @@ class CoreEngineActorManager:
                     if len(collected_bundles) < world_size:
                         continue
 
-                    bundles = collected_bundles + [{"CPU": 1.0}]
+                    control_node_ip = _get_bundle_node_ip(collected_bundles[0])
+                    bundles = collected_bundles + [
+                        _make_control_bundle(control_node_ip)
+                    ]
                     collected_bundles = []
                 else:
-                    bundles = device_bundle * world_size + [{"CPU": 1.0}]
+                    # STRICT_PACK already keeps every bundle in the placement
+                    # group on one node, so the explicit node affinity on the
+                    # control bundle is redundant for correctness here. Keep it
+                    # anyway for consistency with the span path and to preserve
+                    # intent if this scheduling strategy changes later.
+                    bundles = device_bundle * world_size + [
+                        _make_control_bundle(node_ip)
+                    ]
 
                 pg = ray.util.placement_group(
                     name=f"dp_rank_{len(placement_groups)}",
@@ -712,6 +796,8 @@ class CoreEngineActorManager:
         for i, (pg, local_rank) in enumerate(zip(placement_groups, local_dp_ranks)):
             rank = cur_data_parallel_size + i
             dp_vllm_config = copy.deepcopy(cur_vllm_config)
+            if new_data_parallel_size > 1:
+                _apply_dp_identity_suffix(dp_vllm_config, rank)
             dp_vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
             dp_vllm_config.parallel_config.placement_group = pg
 
@@ -776,7 +862,9 @@ class CoreEngineActorManager:
         ) + self.remote_engine_actors[-(len(placement_groups) - new_local_engines) :]
 
         for actor in actors:
-            self.run_refs.append(actor.run.remote())
+            ref = actor.run.remote()
+            self.run_refs.append(ref)
+            self.actor_run_ref_dict[actor] = ref
 
         cur_vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
         # Update old_vllm_config with new data_parallel_size_local if any new
@@ -805,12 +893,59 @@ class CoreEngineActorManager:
                 self.remote_engine_actors.pop()
             ray.util.remove_placement_group(pg)
 
+    def remove_run_refs_for_scale_down(self, removed_dp_size: int) -> None:
+        if removed_dp_size <= 0:
+            return
+        flags = self.placement_group_is_local[-removed_dp_size:]
+        li = len(self.local_engine_actors) - 1
+        ri = len(self.remote_engine_actors) - 1
+        for is_local in reversed(flags):
+            if is_local:
+                actor = self.local_engine_actors[li]
+                li -= 1
+            else:
+                actor = self.remote_engine_actors[ri]
+                ri -= 1
+            ref = self.actor_run_ref_dict.pop(actor)
+            self.run_refs.remove(ref)
+
     def get_run_refs(self):
         return self.run_refs
+
+    def monitor_engine_liveness(self) -> None:
+        import ray
+
+        while not self.manager_stopped.is_set():
+            actor_run_refs = list(self.get_run_refs())
+            if not actor_run_refs:
+                logger.info(
+                    "There are no actors to monitor currently. "
+                    "The monitoring function is about to terminate."
+                )
+                break
+            actor_done_refs, _ = ray.wait(actor_run_refs, timeout=5)
+            unexpected_failure = False
+            for actor_ref in actor_done_refs:
+                if self.manager_stopped.is_set():
+                    break
+                if actor_ref not in self.get_run_refs():
+                    # The run refs may have been updated by elastic scale-down.
+                    continue
+                try:
+                    ray.get(actor_ref)
+                except ray.exceptions.RayActorError:
+                    self.failed_proc_name = f"Actor {actor_ref}"
+                    unexpected_failure = True
+
+            if unexpected_failure:
+                break
+
+        self.shutdown()
 
     def shutdown(self, timeout: float | None = None) -> None:
         import ray
 
+        self.manager_stopped.set()
         for actor in self.local_engine_actors + self.remote_engine_actors:
             ray.kill(actor)
         for pg in self.created_placement_groups:
@@ -831,7 +966,7 @@ def get_engine_zmq_addresses(
 
     # In offline mode there is an LLM instance per DP rank and
     # one core engine per LLM, see
-    # examples/offline_inference/data_parallel.py.
+    # examples/features/data_parallel/data_parallel_offline.py.
     offline_mode = local_start_index is not None
 
     # client_local_only = True for cases where this front-end
@@ -1116,19 +1251,6 @@ def wait_for_engine_startup(
             start_pending[0 if local else 1] += 1
             engine.state = CoreEngineState.CONNECTED
         elif status == "READY" and engine.state == CoreEngineState.CONNECTED:
-            # Setup KV cache config with initialization state from
-            # engine core process. Sum values from all engines in DP case.
-            num_gpu_blocks = cache_config.num_gpu_blocks or 0
-            num_gpu_blocks += msg["num_gpu_blocks"]
-            cache_config.num_gpu_blocks = num_gpu_blocks
-
-            # In external DP LB mode, the coordinator address that the
-            # front-end procs connect to is obtained from rank 0 via
-            # one of the engine handshakes, and passed to the local
-            # front-end process in the response from the other.
-            if addresses.frontend_stats_publish_address is None:
-                addresses.frontend_stats_publish_address = msg.get("dp_stats_address")
-
             # Validate config hash consistency across DP workers for MoE models.
             if coordinated_dp:
                 worker_config_hash = msg.get("parallel_config_hash")

@@ -6,7 +6,6 @@ import copy
 import json
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import Callable
 from contextlib import AsyncExitStack
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Final, Union
@@ -273,7 +272,7 @@ class ParsableContext(ConversationContext):
         *,
         response_messages: list[ResponseInputOutputItem],
         tokenizer: TokenizerLike,
-        reasoning_parser_cls: Callable[[TokenizerLike], ReasoningParser] | None,
+        reasoning_parser_cls: type[ReasoningParser] | None,
         request: ResponsesRequest,
         available_tools: list[str] | None,
         tool_parser_cls: type[ToolParser] | None,
@@ -296,6 +295,8 @@ class ParsableContext(ConversationContext):
             response_messages=response_messages,
             request=request,
             tool_parser_cls=tool_parser_cls,
+            chat_template=chat_template,
+            chat_template_content_format=chat_template_content_format,
         )
         self.tool_parser_cls = tool_parser_cls
         self.request = request
@@ -523,10 +524,12 @@ class HarmonyContext(ConversationContext):
         self,
         messages: list,
         available_tools: list[str],
+        function_tool_names: frozenset[str] | None = None,
     ):
         self._messages = messages
         self.finish_reason: str | None = None
         self.available_tools = available_tools
+        self.function_tool_names = function_tool_names
         self._tool_sessions: dict[str, ClientSession | Tool] = {}
         self.called_tools: set[str] = set()
 

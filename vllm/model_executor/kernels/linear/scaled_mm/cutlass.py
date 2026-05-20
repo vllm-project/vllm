@@ -5,12 +5,19 @@
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils import replace_parameter
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    CUTLASS_BLOCK_FP8_SUPPORTED,
     convert_to_channelwise,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import direct_register_custom_op
 
+from .BlockScaledMMLinearKernel import Fp8BlockScaledMMLinearKernel
 from .ScaledMMLinearKernel import (
     FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
@@ -155,6 +162,20 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
 
+    @staticmethod
+    def _pad_to_alignment(
+        x: torch.Tensor, dim: int, alignment: int, value: float = 0.0
+    ) -> torch.Tensor:
+        """Pad tensor ``x`` along ``dim`` to the next multiple of
+        ``alignment``."""
+        remainder = x.shape[dim] % alignment
+        if remainder == 0:
+            return x
+        pad_size = alignment - remainder
+        pad_spec = [0] * (2 * x.dim())
+        pad_spec[-(2 * dim + 1)] = pad_size
+        return torch.nn.functional.pad(x, pad_spec, value=value)
+
     def apply_scaled_mm(
         self,
         *,
@@ -166,8 +187,176 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         bias: torch.Tensor | None,
         output_shape: list,
     ) -> torch.Tensor:
-        # Fused GEMM_DQ
+        # Per-tensor/Per-channel padding to use Cutlass instead of Triton.
+        K, N = B.shape
+        pad_k = (16 - K % 16) % 16
+        pad_n = (16 - N % 16) % 16
+
+        if pad_k > 0 or pad_n > 0:
+            # B is column-major [K, N].  Transpose to row-major [N, K],
+            # pad both dims in one call, then transpose back so the
+            # result keeps column-major layout with stride (1, K_padded).
+            B = torch.nn.functional.pad(B.t().contiguous(), (0, pad_k, 0, pad_n)).t()
+
+            if pad_k > 0:
+                A = self._pad_to_alignment(A, dim=1, alignment=16)
+            if pad_n > 0:
+                if bias is not None:
+                    bias = self._pad_to_alignment(bias, dim=0, alignment=16)
+                # Bs is per-tensor (numel==1) or per-channel (numel==N)
+                # in this kernel class — never 2D block-wise.
+                if Bs.numel() > 1:
+                    Bs = self._pad_to_alignment(
+                        Bs.view(-1), dim=0, alignment=16, value=1.0
+                    )
+                    if Bs.dim() == 1 and B.shape[1] > 1:
+                        Bs = Bs.view(-1, 1)
+
         output = ops.cutlass_scaled_mm(
             A, B, out_dtype=out_dtype, scale_a=As, scale_b=Bs, bias=bias
         )
+
+        if pad_n > 0:
+            output = output[..., :N].contiguous()
+
         return output.view(*output_shape)
+
+
+class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
+    def __init__(self, config: FP8ScaledMMLinearLayerConfig) -> None:
+        super().__init__(config)
+        act_scale_descriptor = config.activation_quant_key.scale
+        self.weight_group_shape = config.weight_quant_key.scale.group_shape
+        self.quant_fp8 = QuantFP8(
+            static=act_scale_descriptor.static,
+            group_shape=act_scale_descriptor.group_shape,
+            num_token_padding=self.get_output_padding(),
+            use_ue8m0=False,
+            column_major_scales=True,
+        )
+        self.is_hopper = current_platform.is_device_capability(90)
+
+    @classmethod
+    def is_supported(cls, compute_capability=None):
+        if not CUTLASS_BLOCK_FP8_SUPPORTED:
+            return (
+                False,
+                "The device compute capability of"
+                f"{compute_capability} is not supported.",
+            )
+        return True, None
+
+    @classmethod
+    def can_implement(cls, config: FP8ScaledMMLinearLayerConfig):
+        can_implement_base, reason = super().can_implement(config)
+        if not can_implement_base:
+            return can_implement_base, reason
+
+        act_quant_desc = config.activation_quant_key.scale
+        if act_quant_desc.group_shape != GroupShape(1, 128):
+            return (
+                False,
+                "Supports only dynamic per token group activation "
+                "quantization with group_shape=(1,128).",
+            )
+        return True, None
+
+    def apply_block_scaled_mm(
+        self,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+    ) -> torch.Tensor:
+        out_dtype = self.config.out_dtype
+        if self.is_hopper:
+            return torch.ops.vllm.padded_cutlass(
+                A,
+                B,
+                As,
+                Bs,
+                list(self.weight_group_shape),
+                out_dtype,
+            )
+        else:
+            return ops.cutlass_scaled_mm(
+                A,
+                B.T,
+                out_dtype=out_dtype,
+                scale_a=As,
+                scale_b=Bs.T,
+            )
+
+
+def cutlass_scaled_mm(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    block_size: list[int],
+    output_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    return ops.cutlass_scaled_mm(
+        A,
+        B.T,
+        out_dtype=output_dtype,
+        scale_a=As,
+        scale_b=Bs.T,
+    )
+
+
+def _padded_cutlass(
+    qx: torch.Tensor,
+    weight: torch.Tensor,
+    x_scale: torch.Tensor,
+    weight_scale: torch.Tensor,
+    block_size: list[int],
+    output_dtype: torch.dtype,
+) -> torch.Tensor:
+    pad_multiple = 4
+    dim = qx.shape[0]
+    padded = (
+        dim if dim % pad_multiple == 0 else dim + pad_multiple - (dim % pad_multiple)
+    )
+
+    has_pad = padded > dim
+
+    if has_pad:
+        padded_shape = [padded, *qx.shape[1:]]
+        padded_qx = torch.zeros(padded_shape, device=qx.device, dtype=qx.dtype)
+        padded_qx[0 : qx.shape[0], ...].copy_(qx)
+
+        padded_x_scale_shape = [*x_scale.shape[1:], padded]
+        padded_x_scale = torch.ones(
+            padded_x_scale_shape, device=x_scale.device, dtype=x_scale.dtype
+        ).permute(-1, -2)
+        padded_x_scale[0 : x_scale.shape[0], ...].copy_(x_scale)
+
+        output = cutlass_scaled_mm(
+            padded_qx, weight, padded_x_scale, weight_scale, block_size, output_dtype
+        )
+        return output[0 : qx.shape[0], ...]
+    else:
+        return cutlass_scaled_mm(
+            qx, weight, x_scale, weight_scale, block_size, output_dtype
+        )
+
+
+def _padded_cutlass_fake(
+    qx: torch.Tensor,
+    weight: torch.Tensor,
+    x_scale: torch.Tensor,
+    weight_scale: torch.Tensor,
+    block_size: list[int],
+    output_dtype: torch.dtype,
+) -> torch.Tensor:
+    return torch.empty(
+        (qx.size(0), weight.size(0)), dtype=output_dtype, device=qx.device
+    )
+
+
+direct_register_custom_op(
+    "padded_cutlass",
+    _padded_cutlass,
+    fake_impl=_padded_cutlass_fake,
+)
