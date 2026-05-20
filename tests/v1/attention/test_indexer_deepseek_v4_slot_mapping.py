@@ -5,16 +5,13 @@ import pytest
 import torch
 
 from tests.v1.attention.utils import create_vllm_config
-from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadataBuilder
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_indexer_builder_deepseek_v4_compressed_slot_mapping_uses_storage_block_size(
-    tmp_path,
-):
+def test_indexer_builder_deepseek_v4_compressed_slot_mapping_uses_storage_block_size():
     """Regression test: DeepseekV4 compression path must compute slot_mapping from
     compressed positions, not reuse the uncompressed common metadata mapping.
     """
@@ -28,18 +25,7 @@ def test_indexer_builder_deepseek_v4_compressed_slot_mapping_uses_storage_block_
         dtype=torch.bfloat16,
         compress_ratio=4,
     )
-    hf_config = DeepseekV4Config(
-        architectures=["DeepseekV4ForCausalLM"],
-        hidden_size=128,
-        intermediate_size=256,
-        max_position_embeddings=2048,
-        num_attention_heads=4,
-        num_hidden_layers=1,
-        num_key_value_heads=4,
-        vocab_size=32000,
-    )
-    hf_config.save_pretrained(tmp_path)
-    vllm_config = create_vllm_config(model_name=str(tmp_path), max_model_len=1024)
+    vllm_config = create_vllm_config(max_model_len=1024)
     builder = DeepseekV32IndexerMetadataBuilder(
         kv_cache_spec=kv_cache_spec,
         layer_names=["dummy"],
