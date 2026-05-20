@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --nodelist=htc-g[053-055,059-060]
+#SBATCH --nodelist=htc-g[053,054,055,059,060]
 #SBATCH --job-name=vllm-host-qwen3-30b
 #SBATCH --nodes=2
 #SBATCH --partition=short
