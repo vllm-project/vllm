@@ -239,7 +239,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         trust_remote_code=True,
     ),
     "Cohere2MoeForCausalLM": _HfExamplesInfo(
-        "/host/engines/cohere-moe",
+        "CohereLabs/command-a-plus-05-2026",
         trust_remote_code=True,
         is_available_online=False,
     ),
@@ -988,6 +988,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "internlm/Intern-S1-Pro",
         trust_remote_code=True,
     ),
+    "InternS2PreviewForConditionalGeneration": _HfExamplesInfo(
+        "internlm/Intern-S2-Preview",
+        trust_remote_code=True,
+        is_available_online=False,
+    ),
     "InternVLChatModel": _HfExamplesInfo(
         "OpenGVLab/InternVL2-1B",
         extras={
@@ -1198,6 +1203,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
             )
         },
     ),
+    "OpenVLAForActionPrediction": _HfExamplesInfo(
+        "openvla/openvla-7b",
+        trust_remote_code=True,
+    ),
     "Ovis": _HfExamplesInfo(
         "AIDC-AI/Ovis2-1B",
         trust_remote_code=True,
@@ -1334,7 +1343,16 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "RForConditionalGeneration": _HfExamplesInfo("YannQi/R-4B", trust_remote_code=True),
     "SkyworkR1VChatModel": _HfExamplesInfo(
-        "Skywork/Skywork-R1V-38B", trust_remote_code=True
+        "Skywork/Skywork-R1V-38B",
+        trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "hf": (
+                "SkyworkChatModel.__init__ does not call self.post_init(), so "
+                "`all_tied_weights_keys` is never set; Transformers v5 requires "
+                "this attribute in _move_missing_keys_from_meta_to_device."
+            )
+        },
     ),
     "SmolVLMForConditionalGeneration": _HfExamplesInfo(
         "HuggingFaceTB/SmolVLM2-2.2B-Instruct"

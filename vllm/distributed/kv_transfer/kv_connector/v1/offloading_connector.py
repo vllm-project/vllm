@@ -174,6 +174,11 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     def get_required_kvcache_layout(cls, vllm_config: VllmConfig) -> str | None:
         return "HND"
 
+    def reset_cache(self) -> bool | None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.reset_cache()
+        return True
+
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         if self.connector_worker is None:
             return None  # We only emit stats from the worker-side
