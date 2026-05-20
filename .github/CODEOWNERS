@@ -31,8 +31,8 @@
 /vllm/entrypoints/cli @hmellor @mgoin @DarkLight1337 @russellb
 /vllm/entrypoints/mcp @heheda12345
 /vllm/entrypoints/openai @aarnphm @chaunceyjiang @DarkLight1337 @russellb
-/vllm/entrypoints/openai/realtime @njhill
-/vllm/entrypoints/openai/speech_to_text @NickLucche
+/vllm/entrypoints/speech_to_text/realtime @njhill
+/vllm/entrypoints/speech_to_text @NickLucche
 /vllm/entrypoints/pooling @noooop
 /vllm/entrypoints/sagemaker @DarkLight1337
 /vllm/entrypoints/serve @njhill
@@ -153,9 +153,7 @@ mkdocs.yaml @hmellor
 /vllm/model_executor/models/deepseek_mtp.py @luccafong
 
 # DeepseekV4-specific files
-/vllm/v1/attention/ops/deepseek_v4_ops @zyongye
-/vllm/model_executor/layers/deepseek_compressor.py @zyongye
-/vllm/model_executor/layers/deepseek_v4_attention.py @zyongye
+/vllm/models/deepseek_v4 @zyongye
 /vllm/model_executor/layers/sparse_attn_indexer.py @zyongye
 
 # Mistral-specific files
