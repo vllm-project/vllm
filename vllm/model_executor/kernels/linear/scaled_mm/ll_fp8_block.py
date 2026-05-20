@@ -10,21 +10,23 @@ from vllm.model_executor.kernels.linear.scaled_mm.BlockScaledMMLinearKernel impo
     FP8ScaledMMLinearLayerConfig,
 )
 
+_ll_available = False
+try:
+    from vllm.model_executor.layers.fused_moe.router.ll_fp8_block_gemm import (
+        is_available,
+    )
+    _ll_available = is_available()
+except ImportError:
+    pass
+
+
 class LLFp8BlockScaledMMKernel(DeepGemmFp8BlockScaledMMKernel):
     def __init__(self, config: FP8ScaledMMLinearLayerConfig):
         super().__init__(config)
-        self._ll_available = False
-        try:
-            from vllm.model_executor.layers.fused_moe.router.ll_fp8_block_gemm import (
-                is_available,
-            )
-            self._ll_available = is_available()
-        except ImportError:
-            pass
 
     @classmethod
     def can_implement(cls, config):
-        return super().can_implement(config)
+        return _ll_available and super().can_implement(config)
 
     def apply_block_scaled_mm(
         self,
@@ -33,38 +35,51 @@ class LLFp8BlockScaledMMKernel(DeepGemmFp8BlockScaledMMKernel):
         As: torch.Tensor,
         Bs: torch.Tensor,
     ) -> torch.Tensor:
-        M = A.shape[0]
-        if self._ll_available and M <= 16:
-            K_fp8 = A.shape[1]
-            N = B.shape[0]
-            if K_fp8 <= 4096 and K_fp8 % 256 == 0 and N <= 4096:
-                output = torch.empty(
-                    (M, N), dtype=self.config.out_dtype, device=A.device
-                )
-                torch.ops.vllm.ll_fp8_block_gemm_op(A, As, B, Bs, output)
-                return output
-        return super().apply_block_scaled_mm(A, B, As, Bs)
+        out_dtype = self.config.out_dtype
+        output = torch.empty(
+            (A.shape[0], B.shape[0]),
+            dtype=out_dtype,
+            device=A.device,
+        )
+        torch.ops.vllm.ll_fp8_block_dispatch_op(
+            A, As, B, Bs, output, self.use_deep_gemm_e8m0
+        )
+        return output
 
 
-def _ll_fp8_block_gemm_op(
+def _ll_fp8_block_dispatch(
     q_input: torch.Tensor,
     input_scale: torch.Tensor,
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
     output: torch.Tensor,
+    use_deep_gemm_e8m0: bool,
 ) -> None:
-    from vllm.model_executor.layers.fused_moe.router.ll_fp8_block_gemm import (
-        ll_fp8_block_gemm,
-    )
-    ll_fp8_block_gemm(q_input, input_scale, weight, weight_scale, output)
+    M = q_input.shape[0]
+    K_fp8 = q_input.shape[1]
+    N = weight.shape[0]
+    if M <= 16 and K_fp8 <= 4096 and K_fp8 % 256 == 0 and N <= 4096:
+        from vllm.model_executor.layers.fused_moe.router.ll_fp8_block_gemm import (
+            ll_fp8_block_gemm,
+        )
+        ll_fp8_block_gemm(q_input, input_scale, weight, weight_scale, output)
+    else:
+        from vllm.utils.deep_gemm import fp8_gemm_nt
+        fp8_gemm_nt(
+            (q_input, input_scale),
+            (weight, weight_scale),
+            output,
+            is_deep_gemm_e8m0_used=use_deep_gemm_e8m0,
+        )
 
 
-def _ll_fp8_block_gemm_op_fake(
+def _ll_fp8_block_dispatch_fake(
     q_input: torch.Tensor,
     input_scale: torch.Tensor,
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
     output: torch.Tensor,
+    use_deep_gemm_e8m0: bool,
 ) -> None:
     return None
 
@@ -72,8 +87,8 @@ def _ll_fp8_block_gemm_op_fake(
 from vllm.utils.torch_utils import direct_register_custom_op
 
 direct_register_custom_op(
-    "ll_fp8_block_gemm_op",
-    _ll_fp8_block_gemm_op,
+    "ll_fp8_block_dispatch_op",
+    _ll_fp8_block_dispatch,
     mutates_args=["output"],
-    fake_impl=_ll_fp8_block_gemm_op_fake,
+    fake_impl=_ll_fp8_block_dispatch_fake,
 )

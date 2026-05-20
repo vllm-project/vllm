@@ -1,14 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CuTe DSL FP8 block-scaled GEMM: C[M,N] = (sA * A_fp8) @ (sB * B_fp8)^T.
+"""LL FP8 Block-Scaled GEMM kernel (SM90 compatible).
 
-Warp-specialized kernel with cp.async + mma.sync.m16n8k32.e4m3.
+C[M,N] = (scale_A * A_fp8) @ (scale_B * B_fp8)^T
+
+Warp-specialized: cp.async + mma.sync.m16n8k32.e4m3 + post-MMA scaling.
 FP8 data passed as bf16 view (2 fp8 elements per bf16).
-Block scales: packed ue8m0 int32, column-major layout.
-Post-MMA scaling: acc *= scale_A[m, kb] * scale_B[n_block, kb] per 128-element K-block.
+Block scales: scale_A[M, K//128] per-token-group,
+              scale_B[N//128, K//128] per-block, packed ue8m0 int32.
 """
+
 import math
-import torch
+
 import cutlass
 import cutlass.cute as cute
 from cuda.bindings.driver import CUstream
@@ -17,8 +20,6 @@ from cutlass._mlir.dialects import arith as _arith
 from cutlass._mlir.dialects import llvm as _llvm
 from cutlass.cutlass_dsl import dsl_user_op
 from cutlass.pipeline import sm90 as pipeline
-from cutlass.cute.runtime import from_dlpack
-from torch.cuda import current_stream
 
 
 @dsl_user_op
@@ -28,7 +29,7 @@ def fused_fp8_mma_2n(
     b0_lo, b0_hi, b1_lo, b1_hi, b2_lo, b2_hi, b3_lo, b3_hi,
     *, loc=None, ip=None,
 ):
-    """Fused: pack bf16 pairs + 2x mma.sync.m16n8k32.e4m3 (both N-atoms)."""
+    """Pack bf16 pairs + 2x mma.sync.m16n8k32.e4m3 (both N-atoms)."""
     f32 = cutlass.Float32.mlir_type
     i32 = _ir.IntegerType.get_signless(32)
 
@@ -47,17 +48,17 @@ def fused_fp8_mma_2n(
     a2 = _pack2(a2_lo.ir_value(loc=loc, ip=ip), a2_hi.ir_value(loc=loc, ip=ip))
     a3 = _pack2(a3_lo.ir_value(loc=loc, ip=ip), a3_hi.ir_value(loc=loc, ip=ip))
 
-    # N-atom 0
     b0_n0 = _pack2(b0_lo.ir_value(loc=loc, ip=ip), b0_hi.ir_value(loc=loc, ip=ip))
     b1_n0 = _pack2(b1_lo.ir_value(loc=loc, ip=ip), b1_hi.ir_value(loc=loc, ip=ip))
 
     asm_str = ("mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32 "
                "{$0,$1,$2,$3},{$4,$5,$6,$7},{$8,$9},{$10,$11,$12,$13};")
     constraint = "=f,=f,=f,=f,r,r,r,r,r,r,0,1,2,3"
+    struct_ty = _llvm.StructType.get_literal([f32, f32, f32, f32])
+
     args_n0 = [a0, a1, a2, a3, b0_n0, b1_n0,
                c0.ir_value(loc=loc, ip=ip), c1.ir_value(loc=loc, ip=ip),
                c2.ir_value(loc=loc, ip=ip), c3.ir_value(loc=loc, ip=ip)]
-    struct_ty = _llvm.StructType.get_literal([f32, f32, f32, f32])
     res0 = _llvm.inline_asm(struct_ty, args_n0, asm_str, constraint,
                             has_side_effects=True, loc=loc, ip=ip)
     r0 = _llvm.extractvalue(f32, res0, [0], loc=loc, ip=ip)
@@ -65,7 +66,6 @@ def fused_fp8_mma_2n(
     r2 = _llvm.extractvalue(f32, res0, [2], loc=loc, ip=ip)
     r3 = _llvm.extractvalue(f32, res0, [3], loc=loc, ip=ip)
 
-    # N-atom 1
     b0_n1 = _pack2(b2_lo.ir_value(loc=loc, ip=ip), b2_hi.ir_value(loc=loc, ip=ip))
     b1_n1 = _pack2(b3_lo.ir_value(loc=loc, ip=ip), b3_hi.ir_value(loc=loc, ip=ip))
     args_n1 = [a0, a1, a2, a3, b0_n1, b1_n1,
@@ -86,28 +86,20 @@ def fused_fp8_mma_2n(
 
 @dsl_user_op
 def ue8m0_to_f32(packed_i32, byte_idx, *, loc=None, ip=None):
-    """Extract one ue8m0 byte from packed int32 and convert to fp32 scale.
-
-    ue8m0 format: 8-bit exponent, value = 2^(e - 127).
-    packed_i32 contains 4 ue8m0 values as bytes.
-    byte_idx selects which byte (0-3).
-    """
+    """Extract ue8m0 byte from packed int32 → fp32 scale (2^(e-127))."""
     f32 = cutlass.Float32.mlir_type
     i32 = _ir.IntegerType.get_signless(32)
     val = packed_i32.ir_value(loc=loc, ip=ip)
     idx = byte_idx.ir_value(loc=loc, ip=ip)
-    # Extract byte, shift to fp32 exponent position, reinterpret as float
-    # f32 = 2^(e-127) is simply the float with exponent=e, mantissa=0
-    # IEEE 754: float bits = (e << 23) when sign=0, mantissa=0
     res = _llvm.inline_asm(
         f32, [val, idx],
         "{"
         ".reg .u32 shift, byte_val, f_bits;"
-        "shl.b32 shift, $2, 3;"              # shift = byte_idx * 8
-        "shr.b32 byte_val, $1, shift;"       # byte_val = packed >> shift
-        "and.b32 byte_val, byte_val, 0xFF;"  # mask to 8 bits
-        "shl.b32 f_bits, byte_val, 23;"      # place as fp32 exponent
-        "mov.b32 $0, f_bits;"                # reinterpret as float
+        "shl.b32 shift, $2, 3;"
+        "shr.b32 byte_val, $1, shift;"
+        "and.b32 byte_val, byte_val, 0xFF;"
+        "shl.b32 f_bits, byte_val, 23;"
+        "mov.b32 $0, f_bits;"
         "}",
         "=f,r,r", has_side_effects=False, loc=loc, ip=ip)
     return cutlass.Float32(res)
@@ -118,27 +110,25 @@ class LLFp8BlockGemm:
     def __init__(
         self,
         tile_n: int = 16,
-        tile_k: int = 256,  # in bf16 units = 512 fp8 elements = 4 scale blocks
+        tile_k: int = 256,
         num_stages: int = 2,
         num_dma_warps: int = 4,
         *, loc=None, ip=None,
     ):
-        self.ab_dtype = cutlass.BFloat16  # bf16 view of fp8
+        self.ab_dtype = cutlass.BFloat16
         self.acc_dtype = cutlass.Float32
         self.out_dtype = cutlass.BFloat16
         self.tile_m = 16
         self.tile_n = tile_n
-        self.tile_k = tile_k  # bf16 units
-        self.tile_k_fp8 = tile_k * 2  # actual fp8 elements
+        self.tile_k = tile_k
+        self.tile_k_fp8 = tile_k * 2
         self.num_stages = num_stages
-        self.mma_shape = (16, 8, 16)  # bf16 view MMA shape
+        self.mma_shape = (16, 8, 16)
         self.atom_layout = (1, 1, 1)
         self.num_mma_warps = 4
         self.num_dma_threads = num_dma_warps * 32
         self.num_mma_threads = self.num_mma_warps * 32
         self.num_threads = self.num_dma_threads + self.num_mma_threads
-        # Number of 128-element FP8 scale blocks per K-tile
-        self.scale_blocks_per_tile = self.tile_k_fp8 // 128
 
     def _make_smem_layout_AB(self, dtype, copy_bits, smem_tiler):
         major_size = min(smem_tiler[1], 64)
@@ -240,8 +230,8 @@ class LLFp8BlockGemm:
 
         smem = cutlass.utils.SmemAllocator()
         storage_ptr = smem.allocate(
-            SharedStorage.size_in_bytes(), byte_alignment=16)  # type: ignore[attr-defined]
-        storage = SharedStorage(storage_ptr)  # type: ignore[call-arg]
+            SharedStorage.size_in_bytes(), byte_alignment=16)
+        storage = SharedStorage(storage_ptr)
         sA = storage.a.get_tensor(sA_layout)
         sB = storage.b.get_tensor(sB_layout)
 
@@ -259,7 +249,6 @@ class LLFp8BlockGemm:
         k_tile_count = cute.size(gA, mode=[2])
 
         if is_dma:
-            # ===== DMA WARPS: load A/B tiles =====
             cute.arch.setmaxregister_decrease(40)
             thr_A = tiled_copy_A.get_slice(dma_tidx)
             thr_B = tiled_copy_B.get_slice(dma_tidx)
@@ -311,7 +300,6 @@ class LLFp8BlockGemm:
             mainloop_pipeline.producer_tail(producer_state)
 
         else:
-            # ===== MMA WARPS: FP8 MMA with block-scale application =====
             cute.arch.setmaxregister_increase(232)
             lane_id = mma_tidx % 32
             mma_warp_idx = mma_tidx // 32
@@ -343,22 +331,16 @@ class LLFp8BlockGemm:
 
             num_k_block = cute.size(tCrA, mode=[2])
             K_PER_WARP: cutlass.Constexpr = num_k_block // NUM_MMA_WARPS
-            SCALE_BLOCKS: cutlass.Constexpr = self.scale_blocks_per_tile
+            KB_PER_SCALE: cutlass.Constexpr = 4
+            SCALE_GROUPS_PER_WARP: cutlass.Constexpr = (
+                K_PER_WARP // KB_PER_SCALE)
 
             consumer_state = pipeline.make_pipeline_state(
                 pipeline.PipelineUserType.Consumer, num_stages)
 
-            # MMA thread → output position mapping for m16n8k32:
-            # Each thread owns 2 M-rows and 2 N-positions (across 2 N-atoms)
-            # m_row_0 = lane_id // 4, m_row_1 = m_row_0 + 8
             m_row_0 = lane_id // 4
             m_row_1 = m_row_0 + 8
-            # N-block index for scale_B (all N within tile share same block
-            # since tile_n < 128)
             n_block_idx = bid_n * bN // 128
-
-            # K dimension in FP8 elements (bf16 view K * 2)
-            K_fp8 = cute.size(mA, mode=[1]) * 2
 
             for k_tile in range(k_tile_count):
                 mainloop_pipeline.consumer_wait(consumer_state)
@@ -366,28 +348,52 @@ class LLFp8BlockGemm:
                 tCsA_p = tCsA_v[None, None, None, consumer_state.index]
                 tCsB_p = tCsB_v[None, None, None, consumer_state.index]
 
-                # FP8 MMA with per-scale-block accumulation
-                # Each K-tile (tile_k bf16 = tile_k*2 fp8) contains
-                # SCALE_BLOCKS groups of 128 fp8 elements.
-                # mma.sync.m16n8k32 processes 32 fp8 elements per instruction.
-                # K_PER_WARP k_blocks per warp, each k_block = 16 bf16 = 32 fp8
-                # So 128 fp8 = 4 k_blocks = 1 scale group.
-                # With 4 MMA warps interleaving, each warp does K_PER_WARP
-                # k_blocks per tile.
-
                 a_s = tCrA[None, None, 0]
                 b_s = tCrB[None, None, 0]
 
-                for ki in cutlass.range(K_PER_WARP, unroll_full=True):
-                    k_block = ki * NUM_MMA_WARPS + mma_warp_idx
-                    cute.copy(tiled_s2r_A,
-                              tCsA_p[None, None, k_block],
-                              tCrA_v[None, None, 0])
-                    cute.copy(tiled_s2r_B,
-                              tCsB_p[None, None, k_block],
-                              tCrB_v[None, None, 0])
+                TILE_K_FP8: cutlass.Constexpr = self.tile_k_fp8
+                packed_k_tile = (k_tile * TILE_K_FP8 // 128) // 4
 
-                    # Partial MMA for this k_block (32 fp8 elements)
+                global_m0 = bid_m * bM + m_row_0
+                global_m1 = bid_m * bM + m_row_1
+                safe_m0 = global_m0 if global_m0 < M_out else M_out - 1
+                safe_m1 = global_m1 if global_m1 < M_out else M_out - 1
+
+                sa0_p = (mSA.iterator
+                         + packed_k_tile * M_out + safe_m0).align(4)
+                sa0_t = cute.make_tensor(
+                    sa0_p, cute.make_layout((1,)))
+                sa0_packed = cute.make_rmem_tensor((1,), cutlass.Int32)
+                cute.autovec_copy(sa0_t, sa0_packed)
+                sa1_p = (mSA.iterator
+                         + packed_k_tile * M_out + safe_m1).align(4)
+                sa1_t = cute.make_tensor(
+                    sa1_p, cute.make_layout((1,)))
+                sa1_packed = cute.make_rmem_tensor((1,), cutlass.Int32)
+                cute.autovec_copy(sa1_t, sa1_packed)
+
+                n_repr = n_block_idx * 128
+                sb_p = (mSB.iterator
+                        + packed_k_tile * N_out + n_repr).align(4)
+                sb_t = cute.make_tensor(
+                    sb_p, cute.make_layout((1,)))
+                sb_packed = cute.make_rmem_tensor((1,), cutlass.Int32)
+                cute.autovec_copy(sb_t, sb_packed)
+
+                for sg in cutlass.range(
+                        SCALE_GROUPS_PER_WARP, unroll_full=True):
+                    sg_global = mma_warp_idx * SCALE_GROUPS_PER_WARP + sg
+                    k_fp8_base = k_tile * TILE_K_FP8 + sg_global * 128
+                    scale_k_idx = k_fp8_base // 128
+                    packed_k = scale_k_idx // 4
+                    byte_k = scale_k_idx - packed_k * 4
+
+                    scale_a_m0 = ue8m0_to_f32(sa0_packed[0], byte_k)
+                    scale_a_m1 = ue8m0_to_f32(sa1_packed[0], byte_k)
+                    scale_b_val = ue8m0_to_f32(sb_packed[0], byte_k)
+                    scale_m0 = scale_a_m0 * scale_b_val
+                    scale_m1 = scale_a_m1 * scale_b_val
+
                     p0 = cutlass.Float32(0.0)
                     p1 = cutlass.Float32(0.0)
                     p2 = cutlass.Float32(0.0)
@@ -396,58 +402,24 @@ class LLFp8BlockGemm:
                     p5 = cutlass.Float32(0.0)
                     p6 = cutlass.Float32(0.0)
                     p7 = cutlass.Float32(0.0)
-                    p0, p1, p2, p3, p4, p5, p6, p7 = \
-                        fused_fp8_mma_2n(
-                            p0, p1, p2, p3, p4, p5, p6, p7,
-                            a_s[0], a_s[1], a_s[2], a_s[3],
-                            a_s[4], a_s[5], a_s[6], a_s[7],
-                            b_s[0], b_s[1], b_s[2], b_s[3],
-                            b_s[4], b_s[5], b_s[6], b_s[7])
+                    for kb in cutlass.range(
+                            KB_PER_SCALE, unroll_full=True):
+                        k_block = (mma_warp_idx * K_PER_WARP
+                                   + sg * KB_PER_SCALE + kb)
+                        cute.copy(tiled_s2r_A,
+                                  tCsA_p[None, None, k_block],
+                                  tCrA_v[None, None, 0])
+                        cute.copy(tiled_s2r_B,
+                                  tCsB_p[None, None, k_block],
+                                  tCrB_v[None, None, 0])
+                        p0, p1, p2, p3, p4, p5, p6, p7 = \
+                            fused_fp8_mma_2n(
+                                p0, p1, p2, p3, p4, p5, p6, p7,
+                                a_s[0], a_s[1], a_s[2], a_s[3],
+                                a_s[4], a_s[5], a_s[6], a_s[7],
+                                b_s[0], b_s[1], b_s[2], b_s[3],
+                                b_s[4], b_s[5], b_s[6], b_s[7])
 
-                    # Block scale index: which 128-fp8-element group
-                    # k_block processes 32 fp8 elements (= 16 bf16)
-                    TILE_K_FP8: cutlass.Constexpr = self.tile_k_fp8
-                    k_fp8_offset = k_tile * TILE_K_FP8 + k_block * 32
-                    scale_k_idx = k_fp8_offset // 128
-
-                    # Packed int32 index and byte position
-                    packed_k = scale_k_idx // 4
-                    byte_k = scale_k_idx - packed_k * 4  # modulo without %
-
-                    # Scale layout: [M, K_packed] int32, COLUMN-MAJOR
-                    # stride=(1, M) → element [m, kp] at offset kp * M + m
-                    global_m0 = bid_m * bM + m_row_0
-                    global_m1 = bid_m * bM + m_row_1
-                    # Clamp to valid M range (MMA tile=16 may exceed actual M)
-                    safe_m0 = global_m0 if global_m0 < M_out else M_out - 1
-                    safe_m1 = global_m1 if global_m1 < M_out else M_out - 1
-
-                    # Load packed int32 for scale_A (column-major: kp * M + m)
-                    sa0_p = (mSA.iterator + packed_k * M_out + safe_m0).align(4)
-                    sa0_t = cute.make_tensor(sa0_p, cute.make_layout((1,)))
-                    sa0_r = cute.make_rmem_tensor((1,), cutlass.Int32)
-                    cute.autovec_copy(sa0_t, sa0_r)
-                    sa1_p = (mSA.iterator + packed_k * M_out + safe_m1).align(4)
-                    sa1_t = cute.make_tensor(sa1_p, cute.make_layout((1,)))
-                    sa1_r = cute.make_rmem_tensor((1,), cutlass.Int32)
-                    cute.autovec_copy(sa1_t, sa1_r)
-
-                    # Extract ue8m0 byte and convert to fp32
-                    scale_a_m0 = ue8m0_to_f32(sa0_r[0], byte_k)
-                    scale_a_m1 = ue8m0_to_f32(sa1_r[0], byte_k)
-
-                    # Load packed int32 for scale_B (column-major: kp * N + n)
-                    # weight_scale shape: [N, K_packed] stride=(1, N)
-                    n_repr = n_block_idx * 128
-                    sb_p = (mSB.iterator + packed_k * N_out + n_repr).align(4)
-                    sb_t = cute.make_tensor(sb_p, cute.make_layout((1,)))
-                    sb_r = cute.make_rmem_tensor((1,), cutlass.Int32)
-                    cute.autovec_copy(sb_t, sb_r)
-                    scale_b_val = ue8m0_to_f32(sb_r[0], byte_k)
-
-                    # Apply: acc += partial * scale_A * scale_B
-                    scale_m0 = scale_a_m0 * scale_b_val
-                    scale_m1 = scale_a_m1 * scale_b_val
                     tCrC[0] = tCrC[0] + p0 * scale_m0
                     tCrC[1] = tCrC[1] + p1 * scale_m0
                     tCrC[2] = tCrC[2] + p2 * scale_m1
@@ -479,7 +451,7 @@ class LLFp8BlockGemm:
                 n = idx % bN
                 global_m = bid_m * bM + m
                 global_n = bid_n * bN + n
-                if global_m < M_out:  # noqa: SIM102
+                if global_m < M_out:
                     if global_n < N_out:
                         total = cutlass.Float32(0.0)
                         for w in cutlass.range_constexpr(NUM_MMA_WARPS):
@@ -500,5 +472,3 @@ class LLFp8BlockGemm:
                         out_t[0] = out_r[0]
 
         cute.arch.sync_threads()
-
-

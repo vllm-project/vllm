@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Dispatch wrapper for LL FP8 block-scaled GEMM."""
 
 from __future__ import annotations
 
@@ -63,7 +64,7 @@ def _get_compiled(a_bf16, b_bf16, out, sa_flat, sb_flat):
     compiled = cute.compile(gemm, mA, mB, mC, mSA, mSB, stream,
                             options="--enable-tvm-ffi")
     _cache[cache_key] = compiled
-    logger.debug("Compiled ll_fp8_block_gemm")
+    logger.info("Compiled ll_fp8_block_gemm")
     return compiled
 
 
@@ -77,18 +78,11 @@ def ll_fp8_block_gemm(
     from cuda.bindings.driver import CUstream
     from torch.cuda import current_stream
 
-    M, K_fp8 = q_input.shape
-    N = weight.shape[0]
-
-    # View FP8 as BF16 (2 fp8 = 1 bf16)
     a_bf16 = q_input.view(torch.bfloat16)
     b_bf16 = weight.view(torch.bfloat16)
-    
-    # Use just view instead?
     sa_flat = input_scale.as_strided((input_scale.numel(),), (1,))
     sb_flat = weight_scale.as_strided((weight_scale.numel(),), (1,))
 
-    stream = CUstream(current_stream().cuda_stream)
-
     compiled = _get_compiled(a_bf16, b_bf16, output, sa_flat, sb_flat)
-    compiled(a_bf16, b_bf16, output, sa_flat, sb_flat, stream)
+    compiled(a_bf16, b_bf16, output, sa_flat, sb_flat,
+             CUstream(current_stream().cuda_stream))
