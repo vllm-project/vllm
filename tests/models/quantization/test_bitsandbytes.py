@@ -137,7 +137,12 @@ def test_load_pp_4bit_bnb_model(model_name, description) -> None:
         "--pipeline-parallel-size",
         "2",
     ]
-    compare_two_settings(model_name, common_args, pp_args)
+    compare_two_settings(
+        model_name,
+        common_args,
+        pp_args,
+        force_v1_runner=True,
+    )
 
 
 @pytest.mark.skipif(
