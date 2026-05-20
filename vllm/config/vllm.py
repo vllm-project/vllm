@@ -223,9 +223,7 @@ OPTIMIZATION_LEVEL_01 = {
         "use_inductor_graph_partition": False,
     },
     "kernel_config": {
-        # Disabled for now due to correctness issues:
-        # https://github.com/flashinfer-ai/flashinfer/issues/3197
-        "enable_flashinfer_autotune": False,
+        "enable_flashinfer_autotune": True,
     },
 }
 OPTIMIZATION_LEVEL_02 = {
@@ -246,9 +244,7 @@ OPTIMIZATION_LEVEL_02 = {
         "use_inductor_graph_partition": False,
     },
     "kernel_config": {
-        # Disabled for now due to correctness issues:
-        # https://github.com/flashinfer-ai/flashinfer/issues/3197
-        "enable_flashinfer_autotune": False,
+        "enable_flashinfer_autotune": True,
     },
 }
 OPTIMIZATION_LEVEL_03 = {
@@ -790,7 +786,7 @@ class VllmConfig:
         # pins memory, so we conservatively reject the combination whenever
         # any KV connector is configured.
         #
-        # Sleep mode is exempt: CuMemAllocator.use_memory_pool toggles
+        # CuMem allocator is exempt: CuMemAllocator.use_memory_pool toggles
         # expandable_segments off around its pool (see #40812), so the KV
         # cache allocated within that context lands on stable physical pages
         # even when the env var is set.
@@ -798,17 +794,18 @@ class VllmConfig:
             "PYTORCH_CUDA_ALLOC_CONF", ""
         ):
             return
-        if self.model_config is not None and self.model_config.enable_sleep_mode:
+        if self.model_config is not None and (self.model_config.enable_cumem_allocator):
             return
 
         raise ValueError(
             f"KV connector {self.kv_transfer_config.kv_connector} is "
             "incompatible with PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True "
-            "unless enable_sleep_mode is also enabled. PyTorch's CUDA VMM "
+            "unless enable_cumem_allocator is also enabled. PyTorch's CUDA VMM "
             "allocator can remap KV cache virtual addresses to different "
             "physical pages, invalidating any pinned/registered KV memory "
             "(e.g. IB memory regions registered by NIXL or Mooncake). Either "
-            "unset expandable_segments:True or enable sleep mode (which "
+            "unset expandable_segments:True or enable the cumem allocator "
+            "(sleep mode does this automatically and also "
             "routes KV allocations through CuMemAllocator's pool, where "
             "expandable_segments is automatically disabled)."
         )
@@ -1035,6 +1032,13 @@ class VllmConfig:
             )
             self.compilation_config.mode = CompilationMode.NONE
 
+        if envs.VLLM_USE_BREAKABLE_CUDAGRAPH:
+            logger.warning_once(
+                "VLLM_USE_BREAKABLE_CUDAGRAPH is set, disabling vLLM's "
+                "torch.compile pipeline. Equivalent to -cc.mode=none."
+            )
+            self.compilation_config.mode = CompilationMode.NONE
+
         if self.compilation_config.backend == "eager" or (
             self.compilation_config.mode is not None
             and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
@@ -1102,6 +1106,7 @@ class VllmConfig:
         if (
             self.compilation_config.cudagraph_mode.requires_piecewise_compilation()
             and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
+            and not envs.VLLM_USE_BREAKABLE_CUDAGRAPH
         ):
             logger.info(
                 "Cudagraph mode %s is not compatible with compilation mode %s."
@@ -1335,7 +1340,10 @@ class VllmConfig:
                 )
 
             if self.compilation_config.cudagraph_mode.requires_piecewise_compilation():
-                assert self.compilation_config.mode == CompilationMode.VLLM_COMPILE, (
+                assert (
+                    self.compilation_config.mode == CompilationMode.VLLM_COMPILE
+                    or envs.VLLM_USE_BREAKABLE_CUDAGRAPH
+                ), (
                     "Compilation mode should be CompilationMode.VLLM_COMPILE "
                     "when cudagraph_mode piecewise cudagraphs is used, "
                     f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
@@ -1980,6 +1988,10 @@ class VllmConfig:
                 unsupported.append("ngram/ngram_gpu speculative decoding")
             elif speculative_config.method not in ("eagle", "eagle3", "mtp"):
                 unsupported.append(f"speculative method '{speculative_config.method}'")
+
+            # V2 EagleSpeculator does not support parallel_drafting (required by PEagle)
+            if speculative_config.parallel_drafting:
+                unsupported.append("parallel drafting for speculative decoding")
 
             if (
                 speculative_config.method == "eagle3"
