@@ -165,10 +165,15 @@ def benchmark_config(
     state_dtype: torch.dtype | None = None,
     num_iters: int = 100,
     num_warmup: int = 20,
+    graph_batch_size: int = 10,
 ) -> float | None:
     """
     Time one (BLOCK_SIZE_M, num_warps) config for selective_state_update.
     Returns elapsed time in microseconds, or None on error.
+
+    Uses CUDA graph capture-and-replay to isolate kernel time from Python
+    eager-mode dispatch / kwarg-resolution overhead, mirroring the timing
+    methodology in benchmarks/kernels/benchmark_moe.py.
     """
     state, x, dt, A, B, C, D, dt_bias, out = _make_inputs(
         batch, nheads, dim, dstate, ngroups, dtype, state_dtype=state_dtype
@@ -179,47 +184,56 @@ def benchmark_config(
     def _fixed_launch_config(*_args, **_kwargs):
         return block_size_m, num_warps_val
 
+    def _call_kernel() -> None:
+        selective_state_update(
+            state,
+            x,
+            dt,
+            A,
+            B,
+            C,
+            D=D,
+            z=None,
+            dt_bias=dt_bias,
+            dt_softplus=True,
+            out=out,
+        )
+
     try:
         with patch.object(
             mamba_ssm_module, "try_get_optimal_ssm_config", _fixed_launch_config
         ):
-            # Warmup
+            # Eager-mode warmup: triggers Triton autotune / JIT, primes caches.
             for _ in range(num_warmup):
-                selective_state_update(
-                    state,
-                    x,
-                    dt,
-                    A,
-                    B,
-                    C,
-                    D=D,
-                    z=None,
-                    dt_bias=dt_bias,
-                    dt_softplus=True,
-                    out=out,
-                )
+                _call_kernel()
+            torch.accelerator.synchronize()
+
+            # Capture graph_batch_size invocations into a CUDA graph so the
+            # timed region runs without Python dispatch overhead per call.
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                for _ in range(graph_batch_size):
+                    _call_kernel()
+            torch.accelerator.synchronize()
+
+            # Warmup graph replays (let the runtime stabilize).
+            for _ in range(5):
+                graph.replay()
             torch.accelerator.synchronize()
 
             start = torch.cuda.Event(enable_timing=True)
             end = torch.cuda.Event(enable_timing=True)
-            start.record()
+            latencies: list[float] = []
             for _ in range(num_iters):
-                selective_state_update(
-                    state,
-                    x,
-                    dt,
-                    A,
-                    B,
-                    C,
-                    D=D,
-                    z=None,
-                    dt_bias=dt_bias,
-                    dt_softplus=True,
-                    out=out,
-                )
-            end.record()
-            torch.accelerator.synchronize()
-        return start.elapsed_time(end) / num_iters * 1000  # ms -> us
+                start.record()
+                graph.replay()
+                end.record()
+                end.synchronize()
+                latencies.append(start.elapsed_time(end))
+            graph.reset()
+        # elapsed_time returns ms; each replay runs graph_batch_size kernels,
+        # so divide by (num_iters * graph_batch_size) and convert ms -> us.
+        return sum(latencies) / (num_iters * graph_batch_size) * 1000
     except Exception as e:
         if "OutOfResources" not in str(e):
             print(
