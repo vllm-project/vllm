@@ -144,7 +144,6 @@ autotune = _lazy_import_wrapper(
     "autotune",
     fallback_fn=lambda *args, **kwargs: contextlib.nullcontext(),
 )
-_is_fi_autotuning: bool = False
 
 
 @functools.cache

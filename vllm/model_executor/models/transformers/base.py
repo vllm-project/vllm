@@ -342,14 +342,6 @@ class Base(
         for source, target in ccm.items():
             orig_to_new_regex[re.compile(source)] = target
 
-        # Gemma3 checkpoints saved with older Transformers versions include an
-        # extra `vision_model` level that the current AutoModel no longer has.
-        vision_tower = getattr(self.model, "vision_tower", None)
-        if vision_tower is not None and not hasattr(vision_tower, "vision_model"):
-            orig_to_new_regex[
-                re.compile(r"^(?:model\.)?vision_tower\.vision_model\.(.+)")
-            ] = r"model.vision_tower.\1"
-
         # Handle unexpected weights which should be ignored
         if self.model._keys_to_ignore_on_load_unexpected is not None:
             for key in self.model._keys_to_ignore_on_load_unexpected:
