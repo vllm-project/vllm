@@ -129,11 +129,6 @@ class MicroGemm<cpu_utils::ISA::VEC, scalar_t> {
     }
   }
 };
-
 }  // namespace cpu_micro_gemm
-
-#if defined(__riscv_v)
-  #include "cpu/micro_gemm/cpu_micro_gemm_rvv.hpp"
-#endif
 
 #endif

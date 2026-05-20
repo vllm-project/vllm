@@ -4,6 +4,9 @@
 #ifdef CPU_CAPABILITY_AMXBF16
   #include "cpu/micro_gemm/cpu_micro_gemm_amx.hpp"
 #endif
+#if defined(__riscv_v)
+  #include "cpu/micro_gemm/cpu_micro_gemm_rvv.hpp"
+#endif
 #include "cpu/micro_gemm/cpu_micro_gemm_vec.hpp"
 
 #define VLLM_DISPATCH_CASE_16B_TYPES(...)                 \
