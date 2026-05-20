@@ -348,10 +348,14 @@ class RequestRunner:
     def _parse_transfers(self):
         for transfer_spec in self.offloading_spec.get_flushed_transfers():
             src_spec, dst_spec = transfer_spec
-            assert isinstance(src_spec, GPULoadStoreSpec)
-
-            for block_id in src_spec.block_ids:
-                self.flushed_gpu_blocks.add(self.gpu_blocks[block_id.item()])
+            if isinstance(src_spec, GPULoadStoreSpec):
+                # store flush
+                for block_id in src_spec.block_ids:
+                    self.flushed_gpu_blocks.add(self.gpu_blocks[block_id.item()])
+            else:
+                # load flush
+                for block_id in dst_spec.block_ids:
+                    self.flushed_gpu_blocks.add(self.gpu_blocks[block_id.item()])
 
         block_size_factor = self.block_size_factor
 
@@ -458,9 +462,6 @@ class RequestRunner:
 
             self.worker_connector.bind_connector_metadata(kv_connector_metadata)
             self.worker_connector.start_load_kv(self._dummy_ctx)
-
-            if scheduler_output.total_num_scheduled_tokens > 0:
-                self.worker_connector.wait_for_save()
 
             if complete_transfers:
                 self.offloading_spec.complete_transfers()

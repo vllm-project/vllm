@@ -6,7 +6,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from functools import partial
 from importlib.metadata import version
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import torch
 from packaging.version import Version
@@ -17,6 +17,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    SupportsHMA,
 )
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
@@ -35,13 +36,9 @@ def extract_from_kv_cache(
     slot_mapping: torch.Tensor,
     num_tokens: int,
 ) -> torch.Tensor:
-    """Extract data from KV cache
-    Assume the shape of the kv_cache is (num_pages, page_size, num_heads, head_size)
-    """
-
-    padded_kv = kv_cache.flatten(0, 1)[slot_mapping]
-    # shape: [len(slot_mapping), num_heads, head_size]
-    return padded_kv[:num_tokens]  # shape: [num_tokens, num_heads, head_size]
+    """Extract data from KV cache."""
+    block_size = kv_cache.shape[1]
+    return kv_cache[slot_mapping // block_size, slot_mapping % block_size][:num_tokens]
 
 
 def load_hidden_states(path: str) -> dict[str, torch.Tensor]:
@@ -85,8 +82,6 @@ class ReqMeta:
     filename: str
     # Request tokens
     token_ids: torch.Tensor
-    # Slot mappings, should have the same length as token_ids
-    slot_mapping: torch.Tensor
     # Whether this request is a new request or partially computed already
     new_req: bool
 
@@ -95,24 +90,12 @@ class ReqMeta:
         req_id: str,
         filename: str,
         token_ids: list[int],
-        block_ids: list[int],
-        block_size: int,
         new_req: bool,
     ) -> "ReqMeta":
-        token_ids_tensor = torch.tensor(token_ids)
-        block_ids_tensor = torch.tensor(block_ids)
-        num_blocks = block_ids_tensor.shape[0]
-        block_offsets = torch.arange(0, block_size)
-        slot_mapping = (
-            block_offsets.reshape((1, block_size))
-            + block_ids_tensor.reshape((num_blocks, 1)) * block_size
-        )
-        slot_mapping = slot_mapping.flatten()
         return ReqMeta(
             req_id=req_id,
             filename=filename,
-            token_ids=token_ids_tensor,
-            slot_mapping=slot_mapping,
+            token_ids=torch.tensor(token_ids),
             new_req=new_req,
         )
 
@@ -126,18 +109,12 @@ class ExampleHiddenStatesConnectorMetadata(KVConnectorMetadata):
         req_id: str,
         filename: str,
         token_ids: list[int],
-        block_ids: list[int],
-        block_size: int,
         new_req: bool = True,
     ) -> None:
-        self.requests.append(
-            ReqMeta.make_meta(
-                req_id, filename, token_ids, block_ids, block_size, new_req
-            )
-        )
+        self.requests.append(ReqMeta.make_meta(req_id, filename, token_ids, new_req))
 
 
-class ExampleHiddenStatesConnector(KVConnectorBase_V1):
+class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
     """
     Simple debug implementation of a HiddenStatesConnector.
 
@@ -158,7 +135,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
         self,
         vllm_config: "VllmConfig",
         role: KVConnectorRole,
-        kv_cache_config: Optional["KVCacheConfig"] = None,
+        kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(
             vllm_config=vllm_config,
@@ -363,16 +340,21 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
         ready_event.record()
         copy_stream.wait_event(ready_event)
 
+        slot_mapping = attn_metadata.slot_mapping
+        offset = 0
         for request in connector_metadata.requests:
+            num_tokens = request.token_ids.shape[0]
             with torch.cuda.stream(copy_stream):
-                # Move the CPU slot_mapping to GPU on the copy stream so the
-                # implicit H2D inside fancy indexing doesn't sync the default
-                # stream.
-                slot_mapping_gpu = request.slot_mapping.to(
+                req_slot_mapping = slot_mapping[offset : offset + num_tokens]
+                offset += num_tokens
+
+                # Move the CPU slot_mapping to GPU on the copy stream to avoid
+                # implicit H2D that would sync the default stream.
+                slot_mapping_gpu = req_slot_mapping.to(
                     device=kv_layer.device, non_blocking=True
                 )
                 hidden_states_gpu = extract_from_kv_cache(
-                    kv_layer, slot_mapping_gpu, request.token_ids.shape[0]
+                    kv_layer, slot_mapping_gpu, num_tokens
                 )
                 # Async DtoH copy into pinned host memory.
                 pinned_hs = torch.empty_like(
@@ -449,8 +431,6 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
                 new_req.req_id,
                 filename=filename,
                 token_ids=token_ids,
-                block_ids=new_req.block_ids[0],
-                block_size=self._block_size,
             )
             self._request_filenames[new_req.req_id] = filename
             self._active_requests[new_req.req_id] = new_req
@@ -507,6 +487,13 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
                 self._accumulated_finished_req_ids.discard(req_id)
 
         return done_sending or None, None
+
+    def request_finished_all_groups(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        return self.request_finished(request, block_ids[0])
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:

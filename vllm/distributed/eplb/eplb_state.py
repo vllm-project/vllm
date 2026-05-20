@@ -940,6 +940,17 @@ class EplbLayerState:
     GPU work.
     """
 
+    def set_layer_state(
+        self,
+        moe_layer_idx: int,
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+    ) -> None:
+        self.expert_load_view = expert_load_view[moe_layer_idx]
+        self.logical_to_physical_map = logical_to_physical_map[moe_layer_idx]
+        self.logical_replica_count = logical_replica_count[moe_layer_idx]
+
 
 def _node_count_with_rank_mapping(
     pg: ProcessGroup | StatelessProcessGroup,
