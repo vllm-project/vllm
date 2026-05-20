@@ -2869,7 +2869,9 @@ class GPUModelRunner(
                 pe_tensor = mm_kwargs[i][1]["embedding"].data
                 assert isinstance(pe_tensor, torch.Tensor)
 
-                self.encoder_cache[mm_hashes[i]] = pe_tensor.to(self.device)
+                self.encoder_cache[mm_hashes[i]] = pe_tensor.to(
+                    self.device, non_blocking=True
+                )
                 self.maybe_save_ec_to_connector(self.encoder_cache, mm_hashes[i])
             # Filter out `prompt_embeds` items from mm_kwargs/mm_hashes/mm_lora_refs
             # since they don't require further encoder processing.

@@ -15,6 +15,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     SupportsHMA,
 )
 from vllm.logger import init_logger
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 
@@ -194,10 +195,11 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
             hidden_states = extract_from_kv_cache(
                 kv_layer, req_slot_mapping, num_tokens
             )
-            tensors = {
-                "hidden_states": hidden_states.detach().cpu(),
-                "token_ids": request.token_ids.detach().cpu(),
-            }
+            with gpu_sync_allowed():
+                tensors = {
+                    "hidden_states": hidden_states.detach().cpu(),
+                    "token_ids": request.token_ids.detach().cpu(),
+                }
             safetensors.torch.save_file(tensors, request.filename)
 
     # ==============================
