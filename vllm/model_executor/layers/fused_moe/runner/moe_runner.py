@@ -306,6 +306,10 @@ class MoERunner(MoERunnerInterface):
     def shared_experts(self) -> SharedExperts | None:
         return self._shared_experts
 
+    @property
+    def is_internal_router(self) -> bool:
+        return self.gate is not None
+
     # TODO(bnell): Temporary hack. Get rid of this.
     def _replace_quant_method(self, quant_method: FusedMoEMethodBase):
         self.routed_experts.quant_method = quant_method

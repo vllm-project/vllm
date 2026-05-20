@@ -35,11 +35,13 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             "Monolithic kernels are not supported for Fused MoE LoRA."
         )
 
+        moe_parallel_config = base_layer.moe_config.moe_parallel_config
+
         # Use the MoE-aware TP rank/size: when EP is active, FusedMoE collapses
         # moe_parallel_config.tp_size to 1 (experts are sharded across the
         # TP group instead).
-        self.tp_size = self.base_layer.tp_size
-        self.tp_rank = self.base_layer.tp_rank
+        self.tp_size = moe_parallel_config.tp_size
+        self.tp_rank = moe_parallel_config.tp_rank
         self.device = _get_lora_device(base_layer)
         # For non-gated MoE (is_act_and_mul=False), only 1 slice is needed
         # since there's only up_proj (w1), not gate_proj + up_proj (w1 + w3)
@@ -47,7 +49,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         # Mirrors per-(lora_id) layout of `self.lora_a_stacked` (built in
         # `create_lora_weights`) so `create_dummy_lora`'s n_slices fallback
         # matches `lora_a_stacked` length under EP.
-        self.n_slices = base_layer.local_num_experts * (self._w13_slices + 1)
+        self.n_slices = self.local_num_experts * (self._w13_slices + 1)
 
         routed_experts._ensure_moe_quant_config_init()
         if getattr(routed_experts.quant_method, "supports_internal_mk", False):
@@ -79,6 +81,20 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
     @property
     def local_num_experts(self) -> int:
         return self.base_layer.moe_config.num_local_experts
+
+    @property
+    def global_num_experts(self) -> int:
+        return self.base_layer.moe_config.num_experts
+
+    @property
+    def ep_rank(self) -> int:
+        moe_config = self.base_layer.moe_config
+        return moe_config.moe_parallel_config.ep_rank
+
+    @property
+    def use_ep(self) -> int:
+        moe_config = self.base_layer.moe_config
+        return moe_config.moe_parallel_config.use_ep
 
     @property
     def intermediate_size_per_partition(self) -> int:
@@ -181,7 +197,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         # EP on the expert dim, fully_sharded on the LoRA rank dim — with
         # mutually contradictory assumptions about which rank holds which
         # expert's rank-shard.
-        assert not (self.base_layer.use_ep and lora_config.fully_sharded_loras), (
+        routed_experts = self.base_layer.routed_experts
+        assert not (routed_experts.use_ep and lora_config.fully_sharded_loras), (
             "Fused MoE LoRA does not support enable_expert_parallel=True "
             "together with fully_sharded_loras=True. Disable one of them."
         )

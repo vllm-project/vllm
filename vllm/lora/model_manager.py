@@ -823,8 +823,8 @@ class LoRAModelManager:
                 # owned expert range before it gets copied into the local
                 # stacked buffer. For non-EP (local == global) this is a
                 # no-op slice.
-                global_num_experts = module.base_layer.global_num_experts
-                ep_rank = module.base_layer.ep_rank
+                global_num_experts = module.global_num_experts
+                ep_rank = module.ep_rank
                 expert_start = ep_rank * local_num_experts
                 expert_end = expert_start + local_num_experts
 
@@ -927,9 +927,9 @@ class LoRAModelManager:
             # untouched so set_lora can raise a clear error if needed.
             return
 
-        local_num_experts = module.base_layer.local_num_experts
-        global_num_experts = module.base_layer.global_num_experts
-        ep_rank = module.base_layer.ep_rank
+        local_num_experts = module.local_num_experts
+        global_num_experts = module.global_num_experts
+        ep_rank = module.ep_rank
         expert_start = ep_rank * local_num_experts
         expert_end = expert_start + local_num_experts
 
@@ -999,15 +999,15 @@ class LoRAModelManager:
         the CPU LoRAModel keeps the full global weight and set_lora has to
         re-slice on every activation.
         """
-        if not module.base_layer.use_ep:
+        if not module.use_ep:
             return
         module_lora = self._get_lora_layer_weights(lora_model, module_name)
         if module_lora is None or not isinstance(module_lora.lora_a, list):
             return
 
-        local_num_experts = module.base_layer.local_num_experts
-        global_num_experts = module.base_layer.global_num_experts
-        ep_rank = module.base_layer.ep_rank
+        local_num_experts = module.local_num_experts
+        global_num_experts = module.global_num_experts
+        ep_rank = module.ep_rank
         expert_start = ep_rank * local_num_experts
         expert_end = expert_start + local_num_experts
 
