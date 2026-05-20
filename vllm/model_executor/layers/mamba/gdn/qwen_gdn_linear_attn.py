@@ -150,10 +150,9 @@ def _is_libs_cu13_install_intact() -> bool:
 def _resolve_gdn_prefill_backend(
     backend: str, head_k_dim: int | None
 ) -> Literal["flashinfer", "triton", "cutedsl"]:
-    """Whether to use FlashInfer's GDN prefill kernel instead of the
-    Triton/FLA fallback.
+    """Resolve GDN prefill backend.
 
-    Requirements:
+    FlashInfer's GDN prefill kernel is chosen when:
     * ``requested in ["flashinfer", "auto"]``;
     * ``platform == cuda``;
     * one of the following:
@@ -161,9 +160,12 @@ def _resolve_gdn_prefill_backend(
       - Blackwell (SM10.x) with ``head_k_dim == 128``, ``cuda_runtime >= 13``,
         and an intact ``nvidia-cutlass-dsl-libs-cu13`` install on disk
         (see :func:`_is_libs_cu13_install_intact`).
+
+    In-tree CuteDSL GDN prefill kernel is chosen when:
+    * "cutedsl" is requested; (opt-in only)
+    * Blackwell (SM10.x) with ``head_k_dim == 128``;
     """
     is_cuda = current_platform.is_cuda()
-    supports_cutedsl = is_cuda and current_platform.has_device_capability(100)
 
     supports_flashinfer = False
     if is_cuda and current_platform.is_device_capability(90):
@@ -187,12 +189,18 @@ def _resolve_gdn_prefill_backend(
                 "--no-deps nvidia-cutlass-dsl-libs-cu13"
             )
 
-    if backend == "cutedsl" and supports_cutedsl:
-        return "cutedsl"
+    supports_cutedsl = (
+        is_cuda
+        and current_platform.has_device_capability(100)
+        and head_k_dim == 128
+        and current_platform.get_cuda_runtime_major() >= 13
+    )
+
     if backend in ["flashinfer", "auto"] and supports_flashinfer:
         return "flashinfer"
+    if backend == "cutedsl" and supports_cutedsl:
+        return "cutedsl"
     return "triton"
-
 
 
 def _log_gdn_backend_decision(
