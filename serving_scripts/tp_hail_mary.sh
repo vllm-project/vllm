@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #SBATCH --nodelist=htc-g[059-060]
-#SBATCH --job-name=vllm-host-qwen3-30b
+#SBATCH --job-name=vllm-qwen3-30b-tp2-pp2
 #SBATCH --nodes=2
 #SBATCH --partition=short
-#SBATCH --gres=gpu:h100:1
+#SBATCH --gres=gpu:h100:2
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=256G
@@ -17,40 +17,43 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="arc-ray-qwen3-30b-workers-nsys-no-api-wrapper-live-copy-v2-finalize-wait"
+SCRIPT_VERSION="arc-ray-qwen3-30b-tp2-pp2-workers-nsys-no-api-wrapper-live-copy-v1"
 
+# Configuration:
+#   2 nodes x 2 H100s/node = 4 total GPUs
+#   TP=2 within each node
+#   PP=2 across the two nodes
+#
+# Layout:
+#   htc-g059: 2-GPU TP group for PP stage 0
+#   htc-g060: 2-GPU TP group for PP stage 1
+#
 # This variant intentionally DOES NOT wrap the vLLM API server in:
 #   nsys profile python -m vllm.entrypoints.openai.api_server
 #
-# It still enables vLLM's worker-side Nsight path via:
+# It still enables vLLM worker-side Nsight via:
 #   --ray-workers-use-nsight
 #
-# Key fixes in v2:
-#   1. Do not copy empty.nsys-rep or zero-byte Nsight placeholder files.
-#   2. Keep Ray alive after the workload/server stops while worker Nsight
-#      has time to finalize real worker_process_*.nsys-rep files.
-#   3. The live sidecar keeps copying while Ray is alive, which matches the
-#      manual rescue that worked: SSH in, find the current session, copy before
-#      Slurm tmp cleanup.
+# Important Nsight copy behavior:
+#   - Ignore empty.nsys-rep and zero-byte placeholder reports.
+#   - Keep Ray alive after the workload/server stops while worker Nsight
+#     has time to finalize real worker_process_*.nsys-rep files.
+#   - Run a live sidecar copier inside each Ray srun step. This matches the
+#     manual rescue that worked: SSH into the node, find the current Ray session,
+#     and copy before Slurm tmp cleanup.
+#   - For ARC/Slurm, worker reports may appear under either:
+#       /tmp/ray/session_*/logs/nsight/*
+#       /tmp/slurm-${SLURM_JOB_ID}/tmp/ray/session_*/logs/nsight/*
+#     Do not trust /tmp/ray/session_latest; it can be stale.
 
 DEBUG_SLURM_SCRIPT="${DEBUG_SLURM_SCRIPT:-0}"
 NSYS_COPY_DEBUG="${NSYS_COPY_DEBUG:-0}"
 
-# Post-run fallback copy should not hang the batch forever.
 SRUN_COPY_TIMEOUT="${SRUN_COPY_TIMEOUT:-480s}"
-
-# Server shutdown should not hang forever.
 SERVER_SHUTDOWN_TIMEOUT_S="${SERVER_SHUTDOWN_TIMEOUT_S:-420}"
-
-# Live sidecar copy interval inside each Ray srun step.
 WORKER_NSYS_LIVE_COPY_INTERVAL="${WORKER_NSYS_LIVE_COPY_INTERVAL:-2}"
-
-# After stopping the vLLM API server, keep Ray alive this long while waiting
-# for real worker_process_*.nsys-rep files to appear and be copied.
-WORKER_NSYS_FINALIZE_WAIT_S="${WORKER_NSYS_FINALIZE_WAIT_S:-180}"
+WORKER_NSYS_FINALIZE_WAIT_S="${WORKER_NSYS_FINALIZE_WAIT_S:-240}"
 WORKER_NSYS_FINALIZE_POLL_S="${WORKER_NSYS_FINALIZE_POLL_S:-5}"
-
-# Treat files smaller than this as placeholders, not useful reports.
 MIN_WORKER_NSYS_REP_BYTES="${MIN_WORKER_NSYS_REP_BYTES:-1024}"
 
 slurm_debug() {
@@ -123,10 +126,8 @@ nsight_summarize_dest() {
   fi
 }
 
-# Return success only if every expected node has at least one real non-empty
-# worker_process_*.nsys-rep copied into TRACE_RUN_DIR/ray_worker_nsight/<node>.
 wait_for_real_worker_nsys_reports() {
-  local timeout_s="${1:-180}"
+  local timeout_s="${1:-240}"
   local poll_s="${2:-5}"
   local elapsed=0
 
@@ -138,6 +139,7 @@ wait_for_real_worker_nsys_reports() {
   echo "[nsight-copy] waiting up to ${timeout_s}s for real non-empty worker_process_*.nsys-rep files..."
   echo "[nsight-copy] minimum accepted .nsys-rep size: ${MIN_WORKER_NSYS_REP_BYTES} bytes"
   echo "[nsight-copy] expected nodes: ${HEAD_NODE} ${WORKER_NODES}"
+  echo "[nsight-copy] expected worker reports per node: ${EXPECTED_WORKER_REPORTS_PER_NODE}"
 
   while [ "${elapsed}" -lt "${timeout_s}" ]; do
     local all_ok=1
@@ -145,19 +147,24 @@ wait_for_real_worker_nsys_reports() {
 
     for node in ${HEAD_NODE} ${WORKER_NODES}; do
       local dest="${TRACE_RUN_DIR}/ray_worker_nsight/${node}"
+      local n
 
-      if ! find "${dest}" -maxdepth 1 -type f \
-        -name '*worker_process*.nsys-rep' \
-        ! -name '*empty*' \
-        -size +"${MIN_WORKER_NSYS_REP_BYTES}"c \
-        -print -quit 2>/dev/null | grep -q .; then
+      n="$(
+        find "${dest}" -maxdepth 1 -type f \
+          -name '*worker_process*.nsys-rep' \
+          ! -name '*empty*' \
+          -size +"${MIN_WORKER_NSYS_REP_BYTES}"c \
+          -print 2>/dev/null | wc -l | tr -d ' '
+      )"
+
+      if [ "${n:-0}" -lt "${EXPECTED_WORKER_REPORTS_PER_NODE}" ]; then
         all_ok=0
-        missing_nodes="${missing_nodes} ${node}"
+        missing_nodes="${missing_nodes} ${node}(${n:-0}/${EXPECTED_WORKER_REPORTS_PER_NODE})"
       fi
     done
 
     if [ "${all_ok}" = "1" ]; then
-      echo "[nsight-copy] found real non-empty worker_process_*.nsys-rep on every node."
+      echo "[nsight-copy] found expected real non-empty worker_process_*.nsys-rep files on every node."
       find "${TRACE_RUN_DIR}/ray_worker_nsight" -type f \
         \( -name '*.nsys-rep' -o -name '*.qdstrm' \) \
         -printf '[nsight-copy]   %p %s bytes\n' 2>/dev/null | sort || true
@@ -173,7 +180,7 @@ wait_for_real_worker_nsys_reports() {
     elapsed=$((elapsed + poll_s))
   done
 
-  echo "[nsight-copy] WARNING: timed out waiting for real non-empty worker_process_*.nsys-rep files."
+  echo "[nsight-copy] WARNING: timed out waiting for expected real non-empty worker_process_*.nsys-rep files."
   echo "[nsight-copy] Current worker Nsight destination contents:"
   find "${TRACE_RUN_DIR}/ray_worker_nsight" -type f \
     \( -name '*.nsys-rep' -o -name '*.qdstrm' \) \
@@ -182,23 +189,6 @@ wait_for_real_worker_nsys_reports() {
   return 1
 }
 
-# Copy worker Nsight files from inside a live Ray srun step.
-#
-# This is deliberately more restrictive than "find every /tmp/ray/session_*":
-# /tmp/ray often contains stale old sessions from previous jobs. We only copy:
-#
-#   1. current-job Slurm-local tmp:
-#      /tmp/slurm-${SLURM_JOB_ID}/tmp/ray/session_*/logs/nsight/*
-#
-#   2. /tmp/ray sessions that are referenced by currently live Ray/vLLM/nsys
-#      processes in this srun step.
-#
-# This matches what worked manually: ssh into the node while the allocation is
-# alive, find the real current session path, and copy before tmp cleanup.
-#
-# IMPORTANT:
-#   We intentionally ignore empty.nsys-rep and *_empty.nsys-rep. Those are
-#   zero-byte placeholders and not usable Nsight reports.
 copy_ray_nsight_locally_once() {
   set +e
 
@@ -343,15 +333,6 @@ start_ray_nsight_live_copier() {
   trap cleanup_live_copier EXIT TERM INT
 }
 
-# Post-run fallback copy. This is not the primary mechanism; the live sidecar is.
-#
-# IMPORTANT:
-#   Do not blindly copy all /tmp/ray/session_* files. That picked up stale
-#   May 14/19 reports in earlier debugging. This fallback searches:
-#     1. current-job /tmp/slurm-${SLURM_JOB_ID}/tmp/ray/session_*/logs/nsight
-#     2. /tmp/ray/<session names recorded while Ray was live>/logs/nsight
-#
-# Also intentionally skip empty.nsys-rep and zero-byte reports.
 copy_ray_nsight_from_node() {
   local NODE="$1"
   local dest="${TRACE_RUN_DIR}/ray_worker_nsight/${NODE}"
@@ -458,6 +439,7 @@ copy_ray_nsight_from_node() {
 # SD = decode / output tokens per request
 SP="${SP:-128}"
 SD="${SD:-128}"
+
 export NSYS_ENABLE="${NSYS_ENABLE:-1}"
 
 # Worker Nsight is the target. API-server outer wrapper is intentionally removed.
@@ -466,6 +448,7 @@ export NSYS_PROFILE_RAY="${NSYS_PROFILE_RAY:-0}"
 
 export HEAD_NODE
 HEAD_NODE="$(scontrol show hostnames "$SLURM_NODELIST" | head -n1)"
+
 export WORKER_NODES
 WORKER_NODES="$(scontrol show hostnames "$SLURM_NODELIST" | tail -n+2)"
 
@@ -481,8 +464,6 @@ echo "WORKER_NODES=${WORKER_NODES}"
 slurm_debug "SLURM_NTASKS=${SLURM_NTASKS:-} SLURM_JOB_NUM_NODES=${SLURM_JOB_NUM_NODES:-}"
 slurm_debug "Full nodelist: $(scontrol show hostnames "${SLURM_NODELIST}" 2>/dev/null | tr '\n' ' ')"
 
-# ARC/some clusters return link-local IPv6 records for Slurm hostnames.
-# Ray/vLLM need a routable node address here, so resolve an IPv4 address.
 resolve_host_ip() {
   local nodename="$1"
   local ip=""
@@ -609,7 +590,6 @@ module purge
 module load Anaconda3/2025.06-1
 module load CUDA/12.9.0
 
-# === Trace output directory ===
 TRACE_BASE="/data/engs-glass/catz0932/inference-traces/vllm/results"
 TRACE_RUN_DIR="${TRACE_BASE}/${SLURM_JOB_ID}"
 
@@ -618,15 +598,38 @@ mkdir -p "${TRACE_RUN_DIR}/nccl_logs"
 mkdir -p "${TRACE_RUN_DIR}/ray_worker_nsight"
 mkdir -p "${TRACE_RUN_DIR}/ray_session_names"
 
-# === Nsight Systems ===
 export NSYS_ENABLE="${NSYS_ENABLE:-1}"
 export NSYS_DIR="${TRACE_RUN_DIR}/nsight"
 export NSYS_TRACE="${NSYS_TRACE:-cuda,nvtx,osrt,cudnn,cublas}"
 export NSYS_DELAY="${NSYS_DELAY:-0}"
 
-# === NCCL logs ===
 export NCCL_DEBUG="${NCCL_DEBUG:-INFO}"
 export NCCL_DEBUG_FILE="${TRACE_RUN_DIR}/nccl_logs/nccl_%h_%p.log"
+
+if [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
+  REPO_ROOT="${SLURM_SUBMIT_DIR}"
+else
+  REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fi
+
+VENV_DIR="${REPO_ROOT}/.venv"
+
+MODEL_ID="${MODEL_ID:-Qwen/Qwen3-30B-A3B-Instruct-2507}"
+HOST="${HOST:-${HEAD_NODE_IP}}"
+PORT="${PORT:-8000}"
+
+# Recommended TP/PP layout for 2 nodes x 2 GPUs/node.
+GPUS_PER_NODE="${GPUS_PER_NODE:-2}"
+NUM_NODES="${SLURM_JOB_NUM_NODES:-${SLURM_NNODES:-2}}"
+TP="${TP:-${GPUS_PER_NODE}}"
+PP="${PP:-${NUM_NODES}}"
+
+EP="${EP:-1}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
+CPUS_PER_TASK="${CPUS_PER_TASK:-${SLURM_CPUS_PER_TASK:-1}}"
+SERVE_SCRIPT="${REPO_ROOT}/serving_scripts/serve_ShareGPT_multi_node.sh"
+
+EXPECTED_WORKER_REPORTS_PER_NODE="${EXPECTED_WORKER_REPORTS_PER_NODE:-${GPUS_PER_NODE}}"
 
 echo "TRACE_RUN_DIR=${TRACE_RUN_DIR}"
 echo "NSYS_DIR=${NSYS_DIR}"
@@ -644,16 +647,10 @@ echo "WORKER_NSYS_LIVE_COPY_INTERVAL=${WORKER_NSYS_LIVE_COPY_INTERVAL}"
 echo "WORKER_NSYS_FINALIZE_WAIT_S=${WORKER_NSYS_FINALIZE_WAIT_S}"
 echo "WORKER_NSYS_FINALIZE_POLL_S=${WORKER_NSYS_FINALIZE_POLL_S}"
 echo "MIN_WORKER_NSYS_REP_BYTES=${MIN_WORKER_NSYS_REP_BYTES}"
+echo "EXPECTED_WORKER_REPORTS_PER_NODE=${EXPECTED_WORKER_REPORTS_PER_NODE}"
 echo "nsys path: $(command -v nsys || echo '<not found>')"
 nsys --version || true
 
-if [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
-  REPO_ROOT="${SLURM_SUBMIT_DIR}"
-else
-  REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-fi
-
-VENV_DIR="${REPO_ROOT}/.venv"
 echo "REPO_ROOT=${REPO_ROOT}"
 echo "VENV_DIR=${VENV_DIR}"
 
@@ -704,18 +701,6 @@ export VLLM_TARGET_DEVICE=cuda
 export VLLM_USE_DEEP_GEMM="${VLLM_USE_DEEP_GEMM:-0}"
 export VLLM_MOE_USE_DEEP_GEMM="${VLLM_MOE_USE_DEEP_GEMM:-0}"
 export VLLM_DEEP_GEMM_WARMUP="${VLLM_DEEP_GEMM_WARMUP:-skip}"
-
-MODEL_ID="${MODEL_ID:-Qwen/Qwen3-30B-A3B-Instruct-2507}"
-HOST="${HOST:-${HEAD_NODE_IP}}"
-PORT="${PORT:-8000}"
-GPUS_PER_NODE="${GPUS_PER_NODE:-1}"
-NUM_NODES="${SLURM_JOB_NUM_NODES:-${SLURM_NNODES:-2}}"
-TP="${TP:-1}"
-PP="${PP:-${NUM_NODES}}"
-EP="${EP:-1}"
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
-CPUS_PER_TASK="${CPUS_PER_TASK:-${SLURM_CPUS_PER_TASK:-1}}"
-SERVE_SCRIPT="${REPO_ROOT}/serving_scripts/serve_ShareGPT_multi_node.sh"
 
 echo "=== runtime knobs ==="
 echo "MODEL_ID=${MODEL_ID} HOST=${HOST} PORT=${PORT} TP=${TP} PP=${PP} EP=${EP}"
@@ -989,8 +974,8 @@ HOST="${HEAD_NODE_IP}" PORT="${PORT}" MODEL_ID="${MODEL_ID}" \
 #        /tmp/slurm-${SLURM_JOB_ID}/tmp/ray/session_*/logs/nsight
 #        /tmp/ray/<live-session>/logs/nsight
 #
-#      This is the key fix. Previously we killed Ray too soon, so the only file
-#      copied was empty.nsys-rep.
+#      This is the key fix. Previously Ray was killed too soon, so only
+#      empty.nsys-rep placeholders were copied.
 #
 #   3. Only after the wait, stop Ray head/worker srun --block steps.
 #

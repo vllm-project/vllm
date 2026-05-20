@@ -193,6 +193,38 @@ def merge_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
     return [(s, e) for s, e in out]
 
 
+def trace_t0_us(events: list[dict[str, Any]]) -> int | None:
+    """Earliest event start (µs) in a trace, or None if empty."""
+    if not events:
+        return None
+    return min(e["ts"] for e in events)
+
+
+def global_align_t0(event_lists: list[list[dict[str, Any]]]) -> int | None:
+    """Shared timeline origin: min start time across all traces."""
+    starts = [t for ev in event_lists if ev for t in [trace_t0_us(ev)] if t is not None]
+    return min(starts) if starts else None
+
+
+def sync_capture_t0(event_lists: list[list[dict[str, Any]]]) -> int | None:
+    """
+    Plot origin when every worker capture has started (max local t0).
+
+    Removes leading empty time on early-start nodes (e.g. g059) relative to
+    nodes whose Nsight session began later.
+    """
+    starts = [t for ev in event_lists if ev for t in [trace_t0_us(ev)] if t is not None]
+    return max(starts) if starts else None
+
+
+def clock_offset_ms(events: list[dict[str, Any]], *, time_origin_us: int) -> float | None:
+    """Milliseconds from global origin to this trace's first event."""
+    local = trace_t0_us(events)
+    if local is None:
+        return None
+    return (local - time_origin_us) / 1000.0
+
+
 def duty_by_sub(events: list[dict[str, Any]]) -> dict[str, float]:
     if not events:
         return {}

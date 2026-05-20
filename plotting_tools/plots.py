@@ -16,6 +16,20 @@ from matplotlib.patches import Patch
 from plotting_tools.classify import classify_comm_operation, comm_operation_label
 from plotting_tools.trace_io import duty_by_sub, merge_intervals
 
+PLOT_EXT = ".pdf"
+
+
+def save_figure(fig, out_path: Path, *, bbox_tight: bool = True) -> None:
+    """Write matplotlib figure (PDF by default) and close it."""
+    out_path = Path(out_path)
+    fmt = out_path.suffix.lstrip(".") or "pdf"
+    kwargs: dict[str, Any] = {"dpi": 200, "format": fmt}
+    if bbox_tight:
+        kwargs["bbox_inches"] = "tight"
+    fig.savefig(out_path, **kwargs)
+    plt.close(fig)
+
+
 # White (no traffic) -> green -> dark blue (heavy traffic)
 TRAFFIC_CMAP = LinearSegmentedColormap.from_list(
     "traffic_wgb",
@@ -32,7 +46,60 @@ DECOMPOSED_LAYERS = (
     ("control", "Control", "#bab0ac"),
 )
 
+DECOMPOSED_LAYERS_PP_SPLIT = (
+    ("attention_comp", "Attention Comp", "#4c78a8"),
+    ("gate_comp", "Gate Comp", "#f58518"),
+    ("experts_comp", "Experts Comp", "#54a24b"),
+    ("add_norm_comp", "Add and Norm Comp", "#b279a2"),
+    ("other_compute", "Other Compute", "#9ecae9"),
+    ("pp_comm", "PP Comm (SendRecv)", "#d62728"),
+    ("local_comm", "Local Comm (memcpy)", "#ff9896"),
+    ("control", "Control", "#bab0ac"),
+)
+
 SUBCATEGORY_LABELS = {k: label for k, label, _ in DECOMPOSED_LAYERS}
+SUBCATEGORY_LABELS.update(
+    {k: label for k, label, _ in DECOMPOSED_LAYERS_PP_SPLIT}
+)
+
+
+def _plot_t0(events: list[dict[str, Any]], *, time_origin_us: int | None = None) -> int:
+    if time_origin_us is not None:
+        return time_origin_us
+    return min(e["ts"] for e in events)
+
+
+def _timeline_interval_ms(
+    e: dict[str, Any],
+    t0_us: int,
+) -> tuple[float, float] | None:
+    """
+    (start_ms, width_ms) relative to t0_us, clipped so start >= 0.
+
+    Events entirely before t0_us are omitted (synced multi-node plots).
+    """
+    start_us = int(e["ts"])
+    end_us = int(e.get("end", start_us + int(e["dur"])))
+    if end_us <= t0_us:
+        return None
+    clip_start = max(start_us, t0_us)
+    return ((clip_start - t0_us) / 1000.0, (end_us - clip_start) / 1000.0)
+
+
+def _decomposed_plot_sub(e: dict[str, Any], *, pp_comm_split: bool) -> str | None:
+    sub = e.get("sub")
+    if not pp_comm_split:
+        return sub
+    if sub != "collective_comm":
+        return sub
+    op = classify_comm_operation(e.get("name", ""), e.get("cat", ""))
+    if op == "point_to_point":
+        return "pp_comm"
+    return "local_comm"
+
+
+def _decomposed_layers(pp_comm_split: bool) -> tuple[tuple[str, str, str], ...]:
+    return DECOMPOSED_LAYERS_PP_SPLIT if pp_comm_split else DECOMPOSED_LAYERS
 
 
 def _ensure_out(out_dir: Path) -> Path:
@@ -46,35 +113,41 @@ def plot_decomposed_timeline(
     *,
     title: str = "Decomposed timeline",
     max_ms: float | None = None,
+    time_origin_us: int | None = None,
+    pp_comm_split: bool = False,
 ) -> None:
     """Horizontal stacked bands: attention / gate / experts / norm / comm / control."""
     if not events:
         return
-    t0 = events[0]["ts"]
+    layers = _decomposed_layers(pp_comm_split)
+    t0 = _plot_t0(events, time_origin_us=time_origin_us)
     fig, ax = plt.subplots(figsize=(18, 5))
-    y_positions = {spec[0]: i for i, spec in enumerate(DECOMPOSED_LAYERS)}
+    y_positions = {spec[0]: i for i, spec in enumerate(layers)}
 
-    for sub, _label, color in DECOMPOSED_LAYERS:
-        intervals = [
-            ((e["ts"] - t0) / 1000.0, e["dur"] / 1000.0)
-            for e in events
-            if e["sub"] == sub
-        ]
+    for sub, _label, color in layers:
+        intervals: list[tuple[float, float]] = []
+        for e in events:
+            if _decomposed_plot_sub(e, pp_comm_split=pp_comm_split) != sub:
+                continue
+            iv = _timeline_interval_ms(e, t0)
+            if iv is not None:
+                intervals.append(iv)
         if not intervals:
             continue
         y = y_positions[sub]
         ax.broken_barh(intervals, (y, 0.85), facecolors=color, edgecolors="none")
 
-    ax.set_yticks([i + 0.4 for i in range(len(DECOMPOSED_LAYERS))])
-    ax.set_yticklabels([spec[1] for spec in DECOMPOSED_LAYERS])
+    ax.set_yticks([i + 0.4 for i in range(len(layers))])
+    ax.set_yticklabels([spec[1] for spec in layers])
     ax.set_xlabel("Time (ms)")
     ax.set_title(title)
     ax.grid(True, axis="x", linestyle="--", alpha=0.3)
     if max_ms is not None:
         ax.set_xlim(0, max_ms)
+    else:
+        ax.set_xlim(left=0)
     plt.tight_layout()
-    fig.savefig(out_path, dpi=200)
-    plt.close(fig)
+    save_figure(fig, out_path)
 
 
 def _gpu_active_intervals(events: list[dict[str, Any]]) -> list[tuple[int, int]]:
@@ -275,8 +348,7 @@ def plot_idle_transition_bars(
         )
     ax.grid(True, axis="x", linestyle="--", alpha=0.3)
     plt.tight_layout()
-    fig.savefig(out_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
+    save_figure(fig, out_path)
 
 
 def plot_idle_transition_heatmap(
@@ -317,8 +389,7 @@ def plot_idle_transition_heatmap(
     ax.set_title(title)
     plt.colorbar(im, ax=ax, label="Total idle time (ms)")
     plt.tight_layout()
-    fig.savefig(out_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
+    save_figure(fig, out_path)
 
 
 def plot_idle_context(
@@ -334,12 +405,12 @@ def plot_idle_context(
 
     plot_idle_transition_bars(
         gaps,
-        out_dir / "idle_transitions_by_time.png",
+        out_dir / f"idle_transitions_by_time{PLOT_EXT}",
         title=f"{prefix}: idle gaps by before→after activity",
     )
     plot_idle_transition_heatmap(
         gaps,
-        out_dir / "idle_transition_heatmap.png",
+        out_dir / f"idle_transition_heatmap{PLOT_EXT}",
         title=f"{prefix}: idle time (ms) by before/after activity",
     )
 
@@ -384,8 +455,7 @@ def plot_traffic_volume_pct(
     ax.set_title(f"{title}\n{parallel_label}")
     ax.grid(True, axis="y", linestyle="--", alpha=0.3)
     plt.tight_layout()
-    fig.savefig(out_path, dpi=200)
-    plt.close(fig)
+    save_figure(fig, out_path)
 
 
 def _extract_comm_bytes(event: dict[str, Any]) -> int | None:
@@ -458,8 +528,7 @@ def plot_message_stats(
     axes[1].set_title(f"{prefix}: avg comm message size")
 
     plt.tight_layout()
-    fig.savefig(out_path, dpi=200)
-    plt.close(fig)
+    save_figure(fig, out_path)
     return {"prefill": stats["prefill"], "decode": stats["decode"], "all": all_s}
 
 
@@ -639,8 +708,7 @@ def plot_traffic_heatmap(
                     ax.text(j, i, txt, ha="center", va="center", fontsize=8, color=color)
     plt.colorbar(im, ax=ax, label=colorbar_label)
     plt.tight_layout()
-    fig.savefig(out_path, dpi=200)
-    plt.close(fig)
+    save_figure(fig, out_path)
 
 
 def plot_expert_traffic_volume(
@@ -670,8 +738,7 @@ def plot_expert_traffic_volume(
     ax.set_ylabel("Volume (GB)")
     ax.set_title("Expert traffic (routing / MoE comm heuristic)")
     plt.tight_layout()
-    fig.savefig(out_path, dpi=200)
-    plt.close(fig)
+    save_figure(fig, out_path)
     return total_b
 
 
@@ -723,7 +790,7 @@ def collect_nccl_ops(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 shape = args[k]
         ops.append(
             {
-                "ts_ms": (e["ts"] - events[0]["ts"]) / 1000.0,
+                "ts_ms": (e["ts"] - _plot_t0(events)) / 1000.0,
                 "name": name,
                 "dur_us": e["dur"],
                 "bytes": _extract_comm_bytes(e),
@@ -760,8 +827,7 @@ def plot_window_cdf(
     ax.set_title(title)
     ax.grid(True, linestyle="--", alpha=0.35)
     plt.tight_layout()
-    fig.savefig(out_path, dpi=200)
-    plt.close(fig)
+    save_figure(fig, out_path)
 
 
 def nocomm_windows(events: list[dict[str, Any]]) -> list[float]:
@@ -836,8 +902,7 @@ def plot_collective_ops_breakdown_stats(
 
     fig.suptitle(title, fontsize=12, y=1.02)
     plt.tight_layout()
-    fig.savefig(out_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
+    save_figure(fig, out_path)
 
 
 def plot_duty_by_node(
@@ -874,8 +939,7 @@ def plot_duty_by_node(
     ax.legend(title="Node")
     ax.grid(True, axis="y", linestyle="--", alpha=0.3)
     plt.tight_layout()
-    fig.savefig(out_path, dpi=200)
-    plt.close(fig)
+    save_figure(fig, out_path)
 
 
 def plot_average_duty_pct(
@@ -916,8 +980,7 @@ def plot_average_duty_pct(
     ax.set_title(f"{title}\n{parallel_label}")
     ax.grid(True, axis="y", linestyle="--", alpha=0.3)
     plt.tight_layout()
-    fig.savefig(out_path, dpi=200)
-    plt.close(fig)
+    save_figure(fig, out_path)
 
 
 def plot_multi_window_cdf(
@@ -944,8 +1007,7 @@ def plot_multi_window_cdf(
     ax.legend()
     ax.grid(True, linestyle="--", alpha=0.35)
     plt.tight_layout()
-    fig.savefig(out_path, dpi=200)
-    plt.close(fig)
+    save_figure(fig, out_path)
 
 
 def plot_expert_traffic_by_node(
@@ -962,8 +1024,53 @@ def plot_expert_traffic_by_node(
     ax.set_ylabel("Volume (GB)")
     ax.set_title(title)
     plt.tight_layout()
-    fig.savefig(out_path, dpi=200)
-    plt.close(fig)
+    save_figure(fig, out_path)
+
+
+def plot_multi_node_decomposed(
+    node_events: dict[str, list[dict[str, Any]]],
+    out_path: Path,
+    *,
+    title: str,
+    max_ms: float | None = None,
+    time_origin_us: int,
+    pp_comm_split: bool = False,
+) -> None:
+    """Stacked decomposed timelines with a shared x-axis (global alignment)."""
+    nodes = sorted(node_events)
+    if not nodes:
+        return
+    layers = _decomposed_layers(pp_comm_split)
+    fig, axes = plt.subplots(len(nodes), 1, sharex=True, figsize=(18, 2.8 * len(nodes)))
+    if len(nodes) == 1:
+        axes = [axes]
+    y_positions = {spec[0]: i for i, spec in enumerate(layers)}
+    for ax, node in zip(axes, nodes):
+        events = node_events[node]
+        for sub, _label, color in layers:
+            intervals: list[tuple[float, float]] = []
+            for e in events:
+                if _decomposed_plot_sub(e, pp_comm_split=pp_comm_split) != sub:
+                    continue
+                iv = _timeline_interval_ms(e, time_origin_us)
+                if iv is not None:
+                    intervals.append(iv)
+            if not intervals:
+                continue
+            y = y_positions[sub]
+            ax.broken_barh(intervals, (y, 0.85), facecolors=color, edgecolors="none")
+        ax.set_yticks([i + 0.4 for i in range(len(layers))])
+        ax.set_yticklabels([spec[1] for spec in layers], fontsize=8)
+        ax.set_ylabel(node, rotation=0, ha="right", va="center")
+        ax.grid(True, axis="x", linestyle="--", alpha=0.3)
+    axes[-1].set_xlabel("Time (ms, global)")
+    fig.suptitle(title)
+    if max_ms is not None:
+        axes[-1].set_xlim(0, max_ms)
+    else:
+        axes[-1].set_xlim(left=0)
+    plt.tight_layout()
+    save_figure(fig, out_path)
 
 
 def plot_classic_timeline(
@@ -971,8 +1078,9 @@ def plot_classic_timeline(
     out_path: Path,
     *,
     title: str,
+    time_origin_us: int | None = None,
 ) -> None:
-    t0 = events[0]["ts"]
+    t0 = _plot_t0(events, time_origin_us=time_origin_us)
     bands = {
         "compute": (2.0, "tab:blue"),
         "comm": (1.0, "tab:orange"),
@@ -980,13 +1088,16 @@ def plot_classic_timeline(
     }
     fig, ax = plt.subplots(figsize=(16, 4))
     for kind, (y, color) in bands.items():
-        intervals = [
-            ((e["ts"] - t0) / 1000.0, e["dur"] / 1000.0)
-            for e in events
-            if e["kind"] == kind
-        ]
+        intervals: list[tuple[float, float]] = []
+        for e in events:
+            if e["kind"] != kind:
+                continue
+            iv = _timeline_interval_ms(e, t0)
+            if iv is not None:
+                intervals.append(iv)
         if intervals:
             ax.broken_barh(intervals, (y, 0.7), facecolors=color, label=kind)
+    ax.set_xlim(left=0)
     ax.set_xlabel("Time (ms)")
     ax.set_yticks([0.35, 1.35, 2.35])
     ax.set_yticklabels(["control", "communication", "compute"])
@@ -994,8 +1105,7 @@ def plot_classic_timeline(
     ax.legend(loc="upper right")
     ax.grid(True, axis="x", linestyle="--", alpha=0.35)
     plt.tight_layout()
-    fig.savefig(out_path, dpi=200)
-    plt.close(fig)
+    save_figure(fig, out_path)
 
 
 def write_summary_json(

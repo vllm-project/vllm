@@ -36,19 +36,19 @@ results/<job-id>/plots/
 
 | Plot | Per-node dir | Summary dir |
 |------|--------------|-------------|
-| Decomposed timeline | `decomposed_timeline.png` | — |
-| Category time share (%) | `traffic_volume_pct.png` | `duty_by_node.png`, `traffic_volume_pct_mean.png` |
-| Classic compute / comm / control | `compute_comm_control_timeline.png` | — |
-| Expert traffic heuristic (GB) | `expert_traffic_gb.png` | `expert_traffic_gb_by_node.png` |
-| Rank-to-rank comm heatmap | `rank_traffic_heatmap.png` | `rank_traffic_heatmap.png` (merged) |
-| GPU-to-GPU comm heatmap (on-node TP) | `gpu_traffic_heatmap.png` | — |
-| All-to-all heatmap (alias) | `all2all_traffic_heatmap.png` | — |
-| Prefill / decode / all comm counts & avg size | `message_stats_prefill_decode.png` | — |
+| Decomposed timeline | `decomposed_timeline.pdf` | `decomposed_timeline_aligned.pdf` (multi-node) |
+| Category time share (%) | `traffic_volume_pct.pdf` | `duty_by_node.pdf`, `traffic_volume_pct_mean.pdf` |
+| Classic compute / comm / control | `compute_comm_control_timeline.pdf` | — |
+| Expert traffic heuristic (GB) | `expert_traffic_gb.pdf` | `expert_traffic_gb_by_node.pdf` |
+| Rank-to-rank comm heatmap | `rank_traffic_heatmap.pdf` | `rank_traffic_heatmap.pdf` (merged) |
+| GPU-to-GPU comm heatmap (on-node TP) | `gpu_traffic_heatmap.pdf` | — |
+| All-to-all heatmap (alias) | `all2all_traffic_heatmap.pdf` | — |
+| Prefill / decode / all comm counts & avg size | `message_stats_prefill_decode.pdf` | — |
 | NCCL ops (timestamp, name, bytes, shape) | `collective_ops.json` | — |
-| No-comm window CDF | `nocomm_windows_cdf.png` | `nocomm_windows_cdf.png` (per node + pooled) |
-| Comm start delta CDF | `comm_start_delta_cdf.png` | `comm_start_delta_cdf.png` (per node + pooled) |
-| GPU idle window CDF | `gpu_idle_windows_cdf.png` | `gpu_idle_windows_cdf.png` (per node + pooled) |
-| Idle before/after activity | `idle_transitions_by_time.png`, `idle_transition_heatmap.png` | `idle_transition_heatmap.png` (merged) |
+| No-comm window CDF | `nocomm_windows_cdf.pdf` | `nocomm_windows_cdf.pdf` (per node + pooled) |
+| Comm start delta CDF | `comm_start_delta_cdf.pdf` | `comm_start_delta_cdf.pdf` (per node + pooled) |
+| GPU idle window CDF | `gpu_idle_windows_cdf.pdf` | `gpu_idle_windows_cdf.pdf` (per node + pooled) |
+| Idle before/after activity | `idle_transitions_by_time.pdf`, `idle_transition_heatmap.pdf` | `idle_transition_heatmap.pdf` (merged) |
 | Per-gap idle context (JSON) | `idle_gaps.json` | `idle_gaps.json` (merged) |
 | Collective op breakdown (bar) | `collective_ops_breakdown.png` | `collective_ops_breakdown.png` (summed) |
 
@@ -73,6 +73,10 @@ Use `--strict-classify` to fail on unknown event strings.
 - **Heatmap bytes** use NCCL event args when present; otherwise duration is used as a proxy.
 
 ## Options
+
+Multi-node jobs use **synced timelines by default** (shared wall clock; x-axis starts when
+the last worker capture began). All figures are written as **PDF**. Use `--local-timeline`
+for per-trace `t=0`. Use `--pp-comm-split` to separate PP SendRecv from local memcpy.
 
 ```bash
 .venv/bin/python plotting_tools/analyze_job.py \
