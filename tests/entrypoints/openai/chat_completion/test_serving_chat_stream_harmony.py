@@ -56,9 +56,9 @@ class TestProcessHarmonyStreamTokens:
     def test_processes_all_tokens(self):
         parser = ProcessableMockStreamableParser()
 
-        token_states, failed = process_harmony_stream_tokens(parser, [1, 2, 3])
+        token_states, error = process_harmony_stream_tokens(parser, [1, 2, 3])
 
-        assert failed is False
+        assert error is None
         assert parser.processed_tokens == [1, 2, 3]
         assert token_states == [
             TokenState("final", None, "1"),
@@ -69,9 +69,10 @@ class TestProcessHarmonyStreamTokens:
     def test_stops_at_first_parser_error(self):
         parser = ProcessableMockStreamableParser(fail_on=2)
 
-        token_states, failed = process_harmony_stream_tokens(parser, [1, 2, 3])
+        token_states, error = process_harmony_stream_tokens(parser, [1, 2, 3])
 
-        assert failed is True
+        assert isinstance(error, RuntimeError)
+        assert str(error) == "invalid harmony token"
         assert parser.processed_tokens == [1]
         assert token_states == [TokenState("final", None, "1")]
 

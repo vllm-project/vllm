@@ -5,7 +5,7 @@ import json
 from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
@@ -1269,6 +1269,22 @@ class TestServingChatWithHarmony:
             },
         ]
 
+    @dataclass
+    class MockFailingHarmonyParser:
+        token_deltas: dict[int, str] = field(default_factory=dict)
+        fail_on: set[int] = field(default_factory=set)
+        messages: list[Any] = field(default_factory=list)
+        current_channel: str | None = None
+        current_recipient: str | None = None
+        last_content_delta: str = ""
+
+        def process(self, token_id: int) -> None:
+            if token_id in self.fail_on:
+                raise RuntimeError(f"invalid harmony token {token_id}")
+            self.current_channel = "final"
+            self.current_recipient = None
+            self.last_content_delta = self.token_deltas.get(token_id, "")
+
     async def generate_response_from_harmony_str(
         self,
         serving_chat: OpenAIServingChat,
@@ -1314,6 +1330,228 @@ class TestServingChatWithHarmony:
         if stream:
             return await accumulate_streaming_response(result)
         return await result
+
+    def mock_request_output_for_choices(
+        self,
+        req: ChatCompletionRequest,
+        outputs: list[CompletionOutput],
+        *,
+        finished: bool = False,
+    ) -> RequestOutput:
+        return RequestOutput(
+            request_id=req.request_id,
+            prompt=[],
+            prompt_token_ids=[],
+            prompt_logprobs=None,
+            outputs=outputs,
+            finished=finished,
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.skip_global_cleanup
+    async def test_streaming_choice_level_parser_failures_do_not_block_success(
+        self, serving_chat
+    ):
+        req = ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": "hello"}],
+            n=2,
+            stream=True,
+        )
+        parsers = [
+            self.MockFailingHarmonyParser(token_deltas={1: "A"}),
+            self.MockFailingHarmonyParser(fail_on={99}),
+        ]
+        consumed_outputs = 0
+
+        async def result_generator():
+            nonlocal consumed_outputs
+            consumed_outputs += 1
+            yield self.mock_request_output_for_choices(
+                req,
+                [
+                    CompletionOutput(
+                        index=0,
+                        text="",
+                        token_ids=[1],
+                        cumulative_logprob=0.0,
+                        logprobs=None,
+                    ),
+                    CompletionOutput(
+                        index=1,
+                        text="",
+                        token_ids=[99],
+                        cumulative_logprob=0.0,
+                        logprobs=None,
+                    ),
+                ],
+            )
+            consumed_outputs += 1
+            yield self.mock_request_output_for_choices(
+                req,
+                [
+                    CompletionOutput(
+                        index=0,
+                        text="",
+                        token_ids=[],
+                        cumulative_logprob=0.0,
+                        logprobs=None,
+                        finish_reason="stop",
+                    ),
+                ],
+            )
+            consumed_outputs += 1
+            yield self.mock_request_output_for_choices(
+                req,
+                [
+                    CompletionOutput(
+                        index=1,
+                        text="",
+                        token_ids=[100],
+                        cumulative_logprob=0.0,
+                        logprobs=None,
+                    ),
+                ],
+            )
+
+        chunks = []
+        with patch(
+            "vllm.entrypoints.openai.chat_completion.serving."
+            "get_streamable_parser_for_assistant",
+            side_effect=parsers,
+        ):
+            async for chunk in serving_chat.chat_completion_stream_generator(
+                request=req,
+                result_generator=result_generator(),
+                request_id=req.request_id,
+                model_name=req.model,
+                conversation=[],
+                tokenizer=get_tokenizer(req.model),
+                request_metadata=RequestResponseMetadata(
+                    request_id=req.request_id,
+                    model_name=req.model,
+                ),
+            ):
+                chunks.append(chunk)
+
+        assert consumed_outputs == 2
+        assert chunks[-1] == "data: [DONE]\n\n"
+        assert not any(
+            "All Harmony parser choices failed during streaming" in chunk
+            for chunk in chunks
+        )
+
+        content_by_choice: dict[int, str] = {0: "", 1: ""}
+        finish_reason_by_choice: dict[int, str] = {}
+        stop_reason_by_choice: dict[int, str] = {}
+        for chunk in chunks:
+            if not chunk.startswith("data: {"):
+                continue
+            data = json.loads(chunk[6:].strip())
+            for choice in data.get("choices", []):
+                idx = choice["index"]
+                delta = choice.get("delta", {})
+                content_by_choice[idx] += delta.get("content") or ""
+                if choice.get("finish_reason") is not None:
+                    finish_reason_by_choice[idx] = choice["finish_reason"]
+                if choice.get("stop_reason") is not None:
+                    stop_reason_by_choice[idx] = choice["stop_reason"]
+
+        assert content_by_choice[0] == "A"
+        assert content_by_choice[1] == ""
+        assert finish_reason_by_choice == {0: "stop", 1: "error"}
+        assert stop_reason_by_choice[1] == "error"
+
+    @pytest.mark.asyncio
+    @pytest.mark.skip_global_cleanup
+    async def test_streaming_fails_fast_when_all_harmony_choices_fail(
+        self, serving_chat
+    ):
+        req = ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": "hello"}],
+            n=2,
+            stream=True,
+        )
+        parsers = [
+            self.MockFailingHarmonyParser(fail_on={11}),
+            self.MockFailingHarmonyParser(fail_on={22}),
+        ]
+        consumed_outputs = 0
+
+        async def result_generator():
+            nonlocal consumed_outputs
+            consumed_outputs += 1
+            yield self.mock_request_output_for_choices(
+                req,
+                [
+                    CompletionOutput(
+                        index=0,
+                        text="",
+                        token_ids=[11],
+                        cumulative_logprob=0.0,
+                        logprobs=None,
+                    ),
+                    CompletionOutput(
+                        index=1,
+                        text="",
+                        token_ids=[22],
+                        cumulative_logprob=0.0,
+                        logprobs=None,
+                    ),
+                ],
+            )
+            consumed_outputs += 1
+            yield self.mock_request_output_for_choices(
+                req,
+                [
+                    CompletionOutput(
+                        index=0,
+                        text="",
+                        token_ids=[33],
+                        cumulative_logprob=0.0,
+                        logprobs=None,
+                    ),
+                ],
+            )
+
+        chunks = []
+        with patch(
+            "vllm.entrypoints.openai.chat_completion.serving."
+            "get_streamable_parser_for_assistant",
+            side_effect=parsers,
+        ):
+            async for chunk in serving_chat.chat_completion_stream_generator(
+                request=req,
+                result_generator=result_generator(),
+                request_id=req.request_id,
+                model_name=req.model,
+                conversation=[],
+                tokenizer=get_tokenizer(req.model),
+                request_metadata=RequestResponseMetadata(
+                    request_id=req.request_id,
+                    model_name=req.model,
+                ),
+            ):
+                chunks.append(chunk)
+
+        assert consumed_outputs == 1
+        assert chunks[-1] == "data: [DONE]\n\n"
+
+        finish_reason_by_choice: dict[int, str] = {}
+        stop_reason_by_choice: dict[int, str] = {}
+        for chunk in chunks:
+            if not chunk.startswith("data: {"):
+                continue
+            data = json.loads(chunk[6:].strip())
+            for choice in data.get("choices", []):
+                if choice.get("finish_reason") is not None:
+                    finish_reason_by_choice[choice["index"]] = choice["finish_reason"]
+                if choice.get("stop_reason") is not None:
+                    stop_reason_by_choice[choice["index"]] = choice["stop_reason"]
+
+        assert finish_reason_by_choice == {0: "error", 1: "error"}
+        assert stop_reason_by_choice == {0: "error", 1: "error"}
 
     @pytest.mark.asyncio
     async def test_simple_chat(self, serving_chat, stream):
