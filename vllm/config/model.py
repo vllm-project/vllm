@@ -227,6 +227,10 @@ class ModelConfig:
     Processed means the values after applying all processors, including
     temperature and top_k/top_p.
     """
+    use_fp64_gumbel: bool = False
+    """Whether to use FP64 (instead of FP32) for the Gumbel noise used by the
+    sampler. FP64 reduces the chance of ties in Gumbel-max sampling at the cost
+    of significantly lower kernel throughput on most GPUs."""
     disable_sliding_window: bool = False
     """Whether to disable sliding window. If True, we will disable the sliding
     window functionality of the model, capping to sliding window size. If the
@@ -359,6 +363,7 @@ class ModelConfig:
             "spec_target_max_model_len",
             "enforce_eager",
             "logprobs_mode",
+            "use_fp64_gumbel",
             "disable_cascade_attn",
             "skip_tokenizer_init",
             "served_model_name",
@@ -530,7 +535,9 @@ class ModelConfig:
         is_generative_model = registry.is_text_generation_model(architectures, self)
         is_pooling_model = registry.is_pooling_model(architectures, self)
 
-        self.runner_type = self._get_runner_type(architectures, self.runner)
+        self.runner_type = self._get_runner_type(
+            architectures, self.runner, self.convert
+        )
         self.convert_type = self._get_convert_type(
             architectures, self.runner_type, self.convert
         )
@@ -857,11 +864,15 @@ class ModelConfig:
         self,
         architectures: list[str],
         runner: RunnerOption,
+        convert: ConvertOption,
     ) -> RunnerType:
         if runner != "auto":
             return runner
 
-        runner_type = self._get_default_runner_type(architectures)
+        if convert in {"auto", "none"}:
+            runner_type = self._get_default_runner_type(architectures)
+        else:
+            runner_type = "pooling"
 
         # Don't log the most common case
         if runner_type != "generate":
@@ -939,6 +950,8 @@ class ModelConfig:
             # `override_quantization_method` method) must be checked in order
             # of preference (this is particularly important for GPTQ).
             overrides = [
+                "auto_gptq",
+                "gptq",
                 "gptq_marlin",
                 "awq_marlin",
                 "inc",
