@@ -39,7 +39,7 @@ class ProcessorInputs:
         for modality, data_items in mm_data_items.items():
             if modality in shared_key_set:
 
-                def hash_item(item_to_hash: object) -> str:
+                def hash_item(item_to_hash: object, modality: str = modality) -> str:
                     # Preserve dict unpack overwrite semantics in the unlikely
                     # case of a key collision with processor kwargs.
                     return hasher.hash_kwargs(
@@ -53,7 +53,12 @@ class ProcessorInputs:
                 prefix = shared_items[:insert_idx]
                 suffix = shared_items[insert_idx:]
 
-                def hash_item(item_to_hash: object) -> str:
+                def hash_item(
+                    item_to_hash: object,
+                    prefix: list[tuple[str, object]] = prefix,
+                    modality: str = modality,
+                    suffix: list[tuple[str, object]] = suffix,
+                ) -> str:
                     return hasher.hash_ordered_items(
                         chain(prefix, ((modality, item_to_hash),), suffix)
                     )

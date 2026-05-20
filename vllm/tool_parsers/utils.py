@@ -243,8 +243,7 @@ def _get_json_schema_from_tool_infos(
         "items": {
             "type": "object",
             "anyOf": [
-                _get_tool_schema_from_info(name, params)
-                for name, params in tool_infos
+                _get_tool_schema_from_info(name, params) for name, params in tool_infos
             ],
         },
     }
@@ -278,8 +277,7 @@ def _get_json_schema_from_tools(
 @lru_cache(maxsize=128)
 def _get_cached_json_schema_from_tools(tools_key: tuple[str, ...]) -> str:
     tool_infos = [
-        _extract_tool_info_from_data(json.loads(tool_json))
-        for tool_json in tools_key
+        _extract_tool_info_from_data(json.loads(tool_json)) for tool_json in tools_key
     ]
     return json.dumps(
         _get_json_schema_from_tool_infos(tool_infos),

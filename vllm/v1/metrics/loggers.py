@@ -26,7 +26,6 @@ from vllm.v1.metrics.stats import (
     MultiModalCacheStats,
     PromptTokenStats,
     SchedulerStats,
-    StructuredOutputCacheStats,
 )
 from vllm.v1.metrics.utils import create_metric_per_engine
 from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingProm

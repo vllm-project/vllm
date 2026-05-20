@@ -925,9 +925,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         kv_abs_max = torch.abs(kv_c_normed).max()
         self._k_scale.copy_(kv_abs_max / k_range)
         self._v_scale.copy_(kv_abs_max / v_range)
-        scales_cpu = torch.stack(
-            (self._q_scale, self._k_scale, self._v_scale)
-        ).to("cpu")
+        scales_cpu = torch.stack((self._q_scale, self._k_scale, self._v_scale)).to(
+            "cpu"
+        )
         (
             self._q_scale_float,
             self._k_scale_float,

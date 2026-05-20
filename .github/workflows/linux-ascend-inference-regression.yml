@@ -34,10 +34,12 @@ jobs:
       TRANSFORMERS_CACHE: ${{ github.workspace }}/../.hf-cache/transformers
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       SOC_VERSION: ascend910b3
-      TARGET_REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
+      TARGET_REPO_URL: git@github.com:${{ github.repository }}.git
       TARGET_REPO_SHA: ${{ github.sha }}
       VLLM_ASCEND_HUST_REPO: ${{ github.workspace }}/vllm-ascend-hust
+      VLLM_ASCEND_HUST_REPO_URL: git@github.com:vLLM-HUST/vllm-ascend-hust.git
       HUST_ASCEND_MANAGER_REPO: ${{ github.workspace }}/ascend-runtime-manager
+      HUST_ASCEND_MANAGER_REPO_URL: git@github.com:vLLM-HUST/ascend-runtime-manager.git
 
     steps:
       - name: Checkout target repo with retry
@@ -119,7 +121,7 @@ jobs:
             return 1
           }
 
-          clone_with_retry "${{ github.server_url }}/vLLM-HUST/vllm-ascend-hust.git" "$VLLM_ASCEND_HUST_REPO"
+          clone_with_retry "$VLLM_ASCEND_HUST_REPO_URL" "$VLLM_ASCEND_HUST_REPO"
 
       - name: Checkout ascend-runtime-manager repo
         run: |
@@ -146,7 +148,7 @@ jobs:
             return 1
           }
 
-          clone_with_retry "${{ github.server_url }}/vLLM-HUST/ascend-runtime-manager.git" "$HUST_ASCEND_MANAGER_REPO"
+          clone_with_retry "$HUST_ASCEND_MANAGER_REPO_URL" "$HUST_ASCEND_MANAGER_REPO"
 
       - name: Resolve Ascend Python runtime
         run: |

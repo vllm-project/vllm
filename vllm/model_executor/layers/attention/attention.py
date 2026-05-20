@@ -504,9 +504,9 @@ class Attention(nn.Module, AttentionLayerBase):
         self._q_scale.copy_(torch.abs(query).max() / self.q_range)
         self._k_scale.copy_(torch.abs(key).max() / self.k_range)
         self._v_scale.copy_(torch.abs(value).max() / self.v_range)
-        scales_cpu = torch.stack(
-            (self._q_scale, self._k_scale, self._v_scale)
-        ).to("cpu")
+        scales_cpu = torch.stack((self._q_scale, self._k_scale, self._v_scale)).to(
+            "cpu"
+        )
         (
             self._q_scale_float,
             self._k_scale_float,

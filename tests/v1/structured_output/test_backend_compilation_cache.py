@@ -191,6 +191,7 @@ def test_lmfe_post_init_falls_back_to_transformers_builder(monkeypatch):
     assert backend.tokenizer_data is sentinel
     assert len(vllm_builder_calls) == 1
     assert len(transformers_builder_calls) == 1
-    assert "falling back to the generic transformers tokenizer-data builder" in (
-        warning_messages[0]
+    assert (
+        "falling back to the generic transformers tokenizer-data builder"
+        in (warning_messages[0])
     )

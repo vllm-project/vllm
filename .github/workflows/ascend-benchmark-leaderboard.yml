@@ -119,8 +119,12 @@ jobs:
       ALLOW_RANDOM_HF_PUBLISH: ${{ vars.VLLM_HUST_ALLOW_RANDOM_HF_PUBLISH || '0' }}
       WEBSITE_LEADERBOARD_URL: ${{ vars.VLLM_HUST_LEADERBOARD_URL || '' }}
       PUBLISH_TO_HF: ${{ (((github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.VLLM_HUST_PUBLISH_BENCHMARK_ON_MAIN == '1') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && vars.VLLM_HUST_PUBLISH_BENCHMARK_ON_PR == '1') || (github.event_name == 'workflow_dispatch' && inputs.publish_to_hf)) && secrets.HF_TOKEN != '') && '1' || '0' }}
-      TARGET_REPO_URL: https://github.com/${{ github.repository }}.git
+      TARGET_REPO_URL: git@github.com:${{ github.repository }}.git
       TARGET_REPO_SHA: ${{ github.sha }}
+      BENCHMARK_REPO_URL: git@github.com:vLLM-HUST/vllm-hust-benchmark.git
+      WEBSITE_REPO_URL: git@github.com:vLLM-HUST/vllm-hust-website.git
+      VLLM_ASCEND_HUST_REPO_URL: git@github.com:vLLM-HUST/vllm-ascend-hust.git
+      HUST_ASCEND_MANAGER_REPO_URL: git@github.com:vLLM-HUST/ascend-runtime-manager.git
       HUST_ASCEND_MANAGER_REPO: ${{ github.workspace }}/ascend-runtime-manager
 
     steps:
@@ -191,7 +195,7 @@ jobs:
             return 1
           }
 
-          clone_with_retry "https://github.com/vLLM-HUST/vllm-hust-benchmark.git" "$GITHUB_WORKSPACE/vllm-hust-benchmark"
+          clone_with_retry "$BENCHMARK_REPO_URL" "$GITHUB_WORKSPACE/vllm-hust-benchmark"
 
       - name: Checkout website repo
         run: |
@@ -218,7 +222,7 @@ jobs:
             return 1
           }
 
-          clone_with_retry "https://github.com/vLLM-HUST/vllm-hust-website.git" "$GITHUB_WORKSPACE/vllm-hust-website"
+          clone_with_retry "$WEBSITE_REPO_URL" "$GITHUB_WORKSPACE/vllm-hust-website"
 
       - name: Checkout vllm-ascend-hust repo
         run: |
@@ -245,7 +249,7 @@ jobs:
             return 1
           }
 
-          clone_with_retry "https://github.com/vLLM-HUST/vllm-ascend-hust.git" "$GITHUB_WORKSPACE/vllm-ascend-hust"
+          clone_with_retry "$VLLM_ASCEND_HUST_REPO_URL" "$GITHUB_WORKSPACE/vllm-ascend-hust"
 
       - name: Checkout ascend-runtime-manager repo
         run: |
@@ -272,7 +276,7 @@ jobs:
             return 1
           }
 
-          clone_with_retry "https://github.com/vLLM-HUST/ascend-runtime-manager.git" "$GITHUB_WORKSPACE/ascend-runtime-manager"
+          clone_with_retry "$HUST_ASCEND_MANAGER_REPO_URL" "$GITHUB_WORKSPACE/ascend-runtime-manager"
 
       - name: Prepare Hugging Face cache directories
         run: |

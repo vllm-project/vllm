@@ -1,9 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import argparse
 import importlib
-from importlib import metadata as importlib_metadata
-from pathlib import Path
 import subprocess
 import sys
+from importlib import metadata as importlib_metadata
+from pathlib import Path
 
 
 def parse_args() -> argparse.Namespace:
@@ -11,7 +13,8 @@ def parse_args() -> argparse.Namespace:
         description=(
             "Ensure that the active Python environment exposes the top-level "
             "vllm package from exactly one installed distribution."
-        ))
+        )
+    )
     parser.add_argument(
         "--module-name",
         default="vllm",
@@ -37,8 +40,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def providers_for_module(module_name: str) -> list[str]:
-    return sorted(
-        set(importlib_metadata.packages_distributions().get(module_name, [])))
+    return sorted(set(importlib_metadata.packages_distributions().get(module_name, [])))
 
 
 def distribution_metadata_path(distribution_name: str) -> Path:
@@ -52,8 +54,7 @@ def filter_repo_local_shadow_metadata(
 ) -> list[str]:
     repo_root = Path(__file__).resolve().parent.parent
     metadata_paths = {
-        provider: distribution_metadata_path(provider)
-        for provider in providers
+        provider: distribution_metadata_path(provider) for provider in providers
     }
     expected_path = metadata_paths.get(expected_distribution)
 
@@ -108,22 +109,21 @@ def main() -> int:
         return 1
 
     conflicts = [
-        provider for provider in providers
-        if provider != args.expected_distribution
+        provider for provider in providers if provider != args.expected_distribution
     ]
     if conflicts and args.remove_conflicts:
         for provider in conflicts:
             print(
                 f"Removing conflicting distribution {provider!r} because it also "
-                f"provides top-level {args.module_name!r}")
+                f"provides top-level {args.module_name!r}"
+            )
             uninstall_distribution(provider)
         providers = filter_repo_local_shadow_metadata(
             providers_for_module(args.module_name),
             args.expected_distribution,
         )
         conflicts = [
-            provider for provider in providers
-            if provider != args.expected_distribution
+            provider for provider in providers if provider != args.expected_distribution
         ]
 
     if conflicts:

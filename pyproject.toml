@@ -153,7 +153,10 @@ python = "./.venv"
 [tool.typos.files]
 # these files may be written in non english words
 extend-exclude = ["tests/models/fixtures/*", "tests/prompts/*", "tests/tokenizers_/*",
+    "tests/models/language/pooling/test_jina_reranker_v3.py",
     "benchmarks/sonnet.txt", "tests/lora/data/*", "examples/pooling/token_embed/*", "build/*",
+    "docs/assets/contributing/vllm_bench_serve_timeline.html",
+    "paper/allocator_state_accounting/.tectonic-cache/**/*",
     "vllm/third_party/*", "vllm/entrypoints/serve/instrumentator/static/*", "tests/entrypoints/openai/speech_to_text/test_transcription_validation.py",
     "docs/governance/process.md", "tests/v1/engine/test_fast_incdec_prefix_err.py", ".git/*"]
 ignore-hidden = false
@@ -181,6 +184,8 @@ inverse_std_variences = "inverse_std_variences"
 CANN = "CANN"
 iy = "iy"
 indx = "indx"
+VALU = "VALU"
+WHT = "WHT"
 # intel cpu features
 tme = "tme"
 dout = "dout"
