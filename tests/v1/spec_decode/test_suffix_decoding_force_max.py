@@ -52,7 +52,7 @@ def _make_vllm_config(
     return cfg
 
 
-def _make_mock_tokenizer(eos_token_id: int = PAD_TOKEN_ID):
+def _make_mock_tokenizer(eos_token_id: int | None = PAD_TOKEN_ID):
     mock_tokenizer = MagicMock()
     mock_tokenizer.eos_token_id = eos_token_id
     return mock_tokenizer
@@ -81,6 +81,21 @@ class TestSuffixDecodingForceMaxSpecTokens:
             patch(
                 CACHED_TOKENIZER_FROM_CONFIG,
                 return_value=None,
+            ),
+        ):
+            proposer = SuffixDecodingProposer(vllm_config)
+            assert proposer.force_max_spec_tokens is False
+            assert proposer._pad_token_id == -1
+            assert proposer._pad_template == []
+
+    def test_init_tokenizer_no_eos_disables_force(self):
+        vllm_config = _make_vllm_config(force_max_spec_tokens=True)
+        mock_tokenizer = _make_mock_tokenizer(eos_token_id=None)
+        with (
+            patch(SUFFIX_DECODING_CACHE, autospec=True),
+            patch(
+                CACHED_TOKENIZER_FROM_CONFIG,
+                return_value=mock_tokenizer,
             ),
         ):
             proposer = SuffixDecodingProposer(vllm_config)

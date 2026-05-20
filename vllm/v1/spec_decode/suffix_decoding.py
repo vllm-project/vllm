@@ -41,10 +41,10 @@ class SuffixDecodingProposer:
         self._pad_template = []
         if self.force_max_spec_tokens:
             tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
-            if tokenizer is None:
+            if tokenizer is None or tokenizer.eos_token_id is None:
                 logger.warning(
                     "force_max_spec_tokens is enabled but tokenizer is not "
-                    "available (skip_tokenizer_init=True). "
+                    "available or does not have an eos_token_id. "
                     "Disabling force_max_spec_tokens."
                 )
                 self.force_max_spec_tokens = False
@@ -98,19 +98,26 @@ class SuffixDecodingProposer:
             # we extract the pattern from the end of the input.
             start = max(0, num_tokens - self.max_tree_depth)
             pattern = input_batch.token_ids_cpu[i, start:num_tokens]
+            max_spec_tokens = min(
+                self.num_speculative_tokens, self.max_model_len - num_tokens - 1
+            )
             draft = self.suffix_cache.speculate(
                 req_id,
                 pattern,
-                max_spec_tokens=min(
-                    self.num_speculative_tokens, self.max_model_len - num_tokens - 1
-                ),
+                max_spec_tokens=max_spec_tokens,
                 max_spec_factor=self.max_spec_factor,
                 min_token_prob=self.min_token_prob,
             )
 
-            draft_token_ids.append(draft.token_ids)
-            if self.force_max_spec_tokens:
-                draft_token_ids[-1].extend(self._pad_template[len(draft.token_ids) :])
+            if (
+                self.force_max_spec_tokens
+                and max_spec_tokens >= self.num_speculative_tokens
+            ):
+                draft_token_ids.append(
+                    draft.token_ids + self._pad_template[len(draft.token_ids) :]
+                )
+            else:
+                draft_token_ids.append(draft.token_ids)
 
         # Stop requests that were not seen in the input batch.
         for req_id in (
