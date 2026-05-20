@@ -495,14 +495,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert self.intermediate_tensors is not None
             intermediate_tensors = self.intermediate_tensors[:num_tokens]
 
-        # Execute the model.
-        self.execute_model(
-            dummy_scheduler_output,
-            intermediate_tensors=intermediate_tensors,
-            dummy_run=True,
-            skip_attn_for_dummy_run=skip_attn,
-            is_profile=is_profile,
-        )
+        # Make sure that we set up dummy LoRAs and dummy mappings so that
+        # LoRA paths are correctly activated during warmup.
+        num_tokens_per_request_np = np.array(num_tokens_per_request, dtype=np.int32)
+        with self.maybe_setup_dummy_loras(self.lora_config, remove_lora=True):
+            with self.maybe_select_dummy_loras(
+                self.lora_config,
+                num_tokens_per_request_np,
+                num_sampled_tokens=np.ones_like(num_tokens_per_request_np, dtype=np.int32),
+                num_active_loras=self.lora_config.max_loras if self.lora_config else 0,
+            ):
+                # Execute the model.
+                self.execute_model(
+                    dummy_scheduler_output,
+                    intermediate_tensors=intermediate_tensors,
+                    dummy_run=True,
+                    skip_attn_for_dummy_run=skip_attn,
+                    is_profile=is_profile,
+                )
         self.kv_connector.set_disabled(False)
 
         # Non-last PP ranks don't produce output for sampling.
@@ -639,17 +649,29 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         start_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
         with self.maybe_setup_dummy_loras(self.lora_config):
-            captured_attn_states = self.cudagraph_manager.capture(
-                self.model,
-                self.model_state,
-                self.input_buffers,
-                self.intermediate_tensors,
-                self.block_tables,
-                self.attn_groups,
-                self.kv_cache_config,
-                has_lora=self.lora_config is not None,
-                use_aux_hidden_state_outputs=self.use_aux_hidden_state_outputs,
-            )
+            # Construct a realistic dummy scheduled token array instead of a single element.
+            # This matches the shape expected by downstream components.
+            num_reqs = min(self.max_num_tokens, self.max_num_reqs)
+            num_tokens_per_request = [self.max_num_tokens // num_reqs] * num_reqs
+            num_tokens_per_request[-1] += self.max_num_tokens % num_reqs
+            dummy_num_scheduled_tokens = np.array(num_tokens_per_request, dtype=np.int32)
+
+            with self.maybe_select_dummy_loras(
+                self.lora_config,
+                num_scheduled_tokens=dummy_num_scheduled_tokens,
+                num_active_loras=self.lora_config.max_loras if self.lora_config else 0,
+            ):
+                captured_attn_states = self.cudagraph_manager.capture(
+                    self.model,
+                    self.model_state,
+                    self.input_buffers,
+                    self.intermediate_tensors,
+                    self.block_tables,
+                    self.attn_groups,
+                    self.kv_cache_config,
+                    has_lora=self.lora_config is not None,
+                    use_aux_hidden_state_outputs=self.use_aux_hidden_state_outputs,
+                )
             if self.speculator is not None:
                 self.speculator.capture(captured_attn_states)
 
@@ -1084,7 +1106,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
                 block_tables = None
                 slot_mappings = None
-            # FIXME(woosuk): Fix warmup for LoRA.
 
         attn_metadata = None
         slot_mappings_by_layer = None
