@@ -17,6 +17,9 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.experts.lora_experts_mixin import (
     LoRAExpertsMixin,
 )
+from vllm.model_executor.layers.fused_moe.fused_topk_weight_reduce import (
+    fused_topk_reduce,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -747,7 +750,10 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
         return (workspace1, workspace2, output)
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor):
-        ops.moe_sum(input, output)
+        if input.ndim == 3 and input.shape[1] > 4:
+            fused_topk_reduce(input, output)
+        else:
+            ops.moe_sum(input, output)
 
     def activation(
         self,
