@@ -3560,8 +3560,8 @@ class GPUModelRunner(
                     for i in discard_sampled_tokens_req_indices:
                         valid_sampled_token_ids[int(i)].clear()
 
-                        if logprobs_tensors is not None:
-                            logprobs_lists = logprobs_tensors.tolists()
+                    if logprobs_tensors is not None:
+                        logprobs_lists = logprobs_tensors.tolists()
                 else:
                     # Includes spec decode tokens.
                     valid_sampled_token_ids, logprobs_lists = (
