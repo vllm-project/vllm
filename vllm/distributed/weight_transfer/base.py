@@ -65,7 +65,10 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
     update_info_cls: type[TUpdateInfo]
 
     def __init__(
-        self, config: WeightTransferConfig, parallel_config: ParallelConfig
+        self,
+        config: WeightTransferConfig,
+        parallel_config: ParallelConfig,
+        model: torch.nn.Module,
     ) -> None:
         """
         Initialize the weight transfer engine.
@@ -73,9 +76,14 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         Args:
             config: The configuration for the weight transfer engine
             parallel_config: The configuration for the parallel setup
+            model: The local model instance which will receive the weights.
+                Backends that need to inspect the module graph (e.g. to
+                infer per-parameter sharding placements) consume it;
+                backends that don't can ignore it.
         """
         self.config = config
         self.parallel_config = parallel_config
+        self.model = model
 
     def parse_init_info(self, init_dict: dict[str, Any]) -> TInitInfo:
         """
@@ -118,21 +126,13 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
             ) from e
 
     @abstractmethod
-    def init_transfer_engine(
-        self,
-        init_info: TInitInfo,
-        model: "torch.nn.Module | None" = None,
-    ) -> None:
+    def init_transfer_engine(self, init_info: TInitInfo) -> None:
         """
         Initialize the weight transfer mechanism.
         This is called once at the beginning of training.
 
         Args:
             init_info: Backend-specific initialization info
-            model: Optional reference to the loaded inference model.
-                Backends that need to inspect the model graph (e.g. to
-                infer per-parameter sharding placements) may consume
-                this; backends that don't can ignore it.
         """
         raise NotImplementedError
 

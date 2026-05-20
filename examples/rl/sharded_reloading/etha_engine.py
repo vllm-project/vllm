@@ -233,9 +233,12 @@ class EthaWeightTransferEngine(
     update_info_cls = EthaWeightTransferUpdateInfo
 
     def __init__(
-        self, config: WeightTransferConfig, parallel_config: ParallelConfig
+        self,
+        config: WeightTransferConfig,
+        parallel_config: ParallelConfig,
+        model: torch.nn.Module,
     ) -> None:
-        super().__init__(config, parallel_config)
+        super().__init__(config, parallel_config, model)
         self.stateless_pg: StatelessProcessGroup | None = None
         self.pynccl: PyNcclCommunicator | None = None
         self._recv_chunks: list[Chunk] = []
@@ -244,17 +247,7 @@ class EthaWeightTransferEngine(
     def init_transfer_engine(
         self,
         init_info: EthaWeightTransferInitInfo,
-        model: torch.nn.Module | None = None,
     ) -> None:
-        # We need the model to walk the module graph for per-parameter
-        # placement inference. The gpu_worker passes this in for us.
-        if model is None:
-            raise RuntimeError(
-                "EthaWeightTransferEngine.init_transfer_engine requires the "
-                "loaded model — gpu_worker passes this for you. If you're "
-                "calling the engine directly, pass model=<your inference model>."
-            )
-
         # 1. Rendezvous (same shape as NCCLWeightTransferEngine).
         worker_rank = (
             self.parallel_config.data_parallel_index * self.parallel_config.world_size
@@ -283,7 +276,7 @@ class EthaWeightTransferEngine(
             init_info.trainer_attn_dp_replicate * init_info.trainer_attn_dp_shard
         )
         strategy = VllmEthaShardingStrategy(
-            model=model,
+            model=self.model,
             parallel_config=self.parallel_config,
             trainer_world_size=trainer_world_size,
             trainer_attn_dp_replicate=init_info.trainer_attn_dp_replicate,
