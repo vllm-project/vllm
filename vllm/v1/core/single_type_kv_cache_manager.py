@@ -1283,9 +1283,7 @@ def register_all_kvcache_specs(vllm_config):
         uniform_type_base_spec=FullAttentionSpec,
     )
     KVCacheSpecRegistry.register(
-        MLAAttentionSpec,
-        FullAttentionManager,
-        uniform_type_base_spec=FullAttentionSpec
+        MLAAttentionSpec, FullAttentionManager, uniform_type_base_spec=FullAttentionSpec
     )
     # NOTE(Mengqing): HiddenStateCacheSpec won't take part in
     # grouping, thus the uniform_type_base_spec is just a
@@ -1293,7 +1291,7 @@ def register_all_kvcache_specs(vllm_config):
     KVCacheSpecRegistry.register(
         HiddenStateCacheSpec,
         FullAttentionManager,
-        uniform_type_base_spec=FullAttentionSpec
+        uniform_type_base_spec=FullAttentionSpec,
     )
     KVCacheSpecRegistry.register(
         SinkFullAttentionSpec,
