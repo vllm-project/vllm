@@ -76,6 +76,22 @@ Next, make a request to the model that should return the reasoning content in th
 
 The `reasoning` field contains the reasoning steps that led to the final conclusion, while the `content` field contains the final conclusion.
 
+### Merging Reasoning into Content
+
+By default, reasoning is returned as a separate `reasoning` field. If you prefer reasoning text to be merged into the `content` field instead, set `separate_reasoning=False` in the request:
+
+```python
+response = client.chat.completions.create(
+    model=model,
+    messages=messages,
+    extra_body={"separate_reasoning": False},
+)
+# response.choices[0].message.content now includes reasoning + content
+# response.choices[0].message.reasoning is None
+```
+
+This also works with streaming — reasoning deltas will be merged into `content` deltas.
+
 ## Streaming chat completions
 
 Streaming chat completions are also supported for reasoning models. The `reasoning` field is available in the `delta` field in [chat completion response chunks](https://platform.openai.com/docs/api-reference/chat/streaming).

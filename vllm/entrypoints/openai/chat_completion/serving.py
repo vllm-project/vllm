@@ -762,6 +762,15 @@ class OpenAIServingChat(OpenAIServing):
                             continue
                         delta_message = DeltaMessage()
 
+                    # Merge reasoning into content if separate_reasoning is False
+                    if not request.separate_reasoning and delta_message.reasoning:
+                        delta_message = DeltaMessage(
+                            content=(delta_message.reasoning or "")
+                            + (delta_message.content or ""),
+                            reasoning=None,
+                            tool_calls=delta_message.tool_calls,
+                        )
+
                     # Log streaming delta if output logging is enabled
                     if self.enable_log_outputs and self.request_logger:
                         delta_content_parts = []
@@ -1058,6 +1067,9 @@ class OpenAIServingChat(OpenAIServing):
                 reasoning, content, _ = parse_chat_output(token_ids)
                 if not request.include_reasoning:
                     reasoning = None
+                if not request.separate_reasoning and reasoning:
+                    content = reasoning + (content or "")
+                    reasoning = None
 
                 if self.tool_parser is not None:
                     if tokenizer is None:
@@ -1112,6 +1124,9 @@ class OpenAIServingChat(OpenAIServing):
                     output.text, request=request
                 )
                 if not request.include_reasoning:
+                    reasoning = None
+                if not request.separate_reasoning and reasoning:
+                    content = reasoning + (content or "")
                     reasoning = None
             else:
                 reasoning = None

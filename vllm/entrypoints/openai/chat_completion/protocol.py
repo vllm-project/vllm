@@ -217,6 +217,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
     )
     thinking_token_budget: int | None = None
     include_reasoning: bool = True
+    separate_reasoning: bool = Field(
+        default=True,
+        description=(
+            "If true, reasoning is returned as a separate 'reasoning' field. "
+            "If false, reasoning text is merged into the 'content' field."
+        ),
+    )
     parallel_tool_calls: bool | None = True
 
     # NOTE this will be ignored by vLLM
