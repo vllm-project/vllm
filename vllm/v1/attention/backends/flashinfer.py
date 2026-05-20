@@ -1371,7 +1371,7 @@ class FlashInferImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: FlashInferMetadata,
-        output: torch.Tensor,
+        output: torch.Tensor | None = None,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -1392,6 +1392,7 @@ class FlashInferImpl(AttentionImpl):
             # Profiling run.
             return output.fill_(0)
 
+        assert output is not None, "Output tensor must be provided."
         # Ensure query dtype matches the expected dtype from attention metadata
         assert attn_metadata.q_data_type == query.dtype, (
             f"Query dtype mismatch: expected {attn_metadata.q_data_type}, "
