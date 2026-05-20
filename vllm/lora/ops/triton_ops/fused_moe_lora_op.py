@@ -3,7 +3,6 @@
 
 import torch
 
-from vllm import envs
 from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
@@ -1467,26 +1466,8 @@ def _fused_moe_lora(
     assert output.shape[0] == topk_weights.shape[0]
     assert top_k_num == topk_weights.shape[1]
 
-    # Fast path: single fused kernel keeps the rank-dim intermediate in
-    # registers and avoids the HBM round-trip of the legacy two-kernel
-    # implementation. fully_sharded=True still needs the materialised
-    # intermediate cache so that an all_reduce / all_gather can flow
-    # between shrink and expand, so it falls through to the legacy path.
-    # VLLM_LORA_USE_ONE_SHOT_MOE=0 also forces the legacy path for
-    # debugging / benchmarking.
-    if not fully_sharded and envs.VLLM_LORA_USE_ONE_SHOT_MOE:
-        # Inside the one_shot fast path we further split between two
-        # kernels:
-        #   * small-batch persistent GEMV — when the caller picked
-        #     naive_block_assignment (sorted_token_ids is None — happens
-        #     whenever num_tokens*top_k is sparse vs num_experts*max_loras,
-        #     see SPARSITY_FACTOR in punica_gpu.add_lora_fused_moe), AND
-        #     M_pairs * rank ≤ 1024 (cutoff from a GB200 sweep over ranks
-        #     {16,32,64} — below this, the persistent GEMV path is
-        #     1.0-1.7x faster than the one_shot GEMM tile kernel).
-        #   * one_shot GEMM tile kernel — everything else (prefill / large
-        #     batch). Both are "fused" in that shrink+expand stay in
-        #     registers; they differ only in tiling strategy.
+    # Fast path: single fused kernel
+    if not fully_sharded:
         M_pairs = topk_weights.numel()
         if (
             sorted_token_ids is None
@@ -1532,11 +1513,6 @@ def _fused_moe_lora(
         )
         return
 
-    # The legacy two-kernel path keeps the historical in-place semantics --
-    # `_fused_moe_lora_expand` always sets `ADD_INPUTS=True` so the rank-dim
-    # cache flowing through all_reduce/all_gather stays consistent. The
-    # add_inputs=False contract is only wired for the one-shot fast path
-    # above, so reject it here rather than silently writing wrong results.
     assert add_inputs, (
         "fused_moe_lora(add_inputs=False) is only supported on the "
         "fully_sharded=False fast path"

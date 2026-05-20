@@ -16,10 +16,6 @@ _lora_aux_cuda_stream: torch.cuda.Stream | None = None
 
 
 def _get_lora_aux_cuda_stream() -> torch.cuda.Stream | None:
-    # Gate stream creation on the dual-stream master switch so a stray call
-    # from a future code path cannot silently allocate a CUDA stream when the
-    # feature is turned off. MoE LoRA layers an additional VLLM_LORA_USE_ONE_SHOT_MOE
-    # gate at their call site.
     if not envs.VLLM_LORA_ENABLE_DUAL_STREAM:
         return None
     global _lora_aux_cuda_stream

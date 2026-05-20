@@ -35,16 +35,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.tp_size = self.base_layer.tp_size
         self.tp_rank = self.base_layer.tp_rank
         self.device = _get_lora_device(base_layer)
-        # Reuses VLLM_LORA_ENABLE_DUAL_STREAM (the same env that controls
-        # the linear-LoRA dual-stream path in
-        # vllm/lora/layers/base_linear.py); enabling it for a deployment
-        # turns dual-stream on for both linear and MoE LoRA layers in one
-        # switch. Dual-stream relies on the one-shot kernel's
-        # add_inputs=False contract, so it is force-disabled when the
-        # one-shot path is turned off via VLLM_LORA_USE_ONE_SHOT_MOE=0.
-        self._enable_aux_cuda_stream = (
-            envs.VLLM_LORA_ENABLE_DUAL_STREAM and envs.VLLM_LORA_USE_ONE_SHOT_MOE
-        )
+
+        self._enable_aux_cuda_stream = envs.VLLM_LORA_ENABLE_DUAL_STREAM
         self._init_lora_stream_context()
         # For non-gated MoE (is_act_and_mul=False), only 1 slice is needed
         # since there's only up_proj (w1), not gate_proj + up_proj (w1 + w3)
@@ -78,12 +70,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         )
 
     def _init_lora_stream_context(self) -> None:
-        # Dual-stream is incompatible with fully_sharded MoE LoRA: that path
-        # routes through the legacy two-kernel flow with an embedded
-        # all_reduce / all_gather between shrink and expand, where the
-        # add_inputs=False contract is not wired (see _fused_moe_lora).
-        # When fully_sharded is enabled at LoRA-config time, we silently
-        # disable the dual-stream path here so the env var still works.
         self._lora_stream: torch.cuda.Stream | None = None
         self._events: tuple[torch.cuda.Event, ...] | None = None
         if not self._enable_aux_cuda_stream:
@@ -97,10 +83,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self._events = tuple(torch.cuda.Event() for _ in range(4))
 
     def _build_lora_context(self):
-        # Hand the stream/events to the experts only when fully_sharded is
-        # off (the path the one-shot kernel + add_inputs=False contract
-        # supports). For fully_sharded we leave aux_stream=None so
-        # experts.apply() takes the original sequential schedule.
         use_dual_stream = (
             self._enable_aux_cuda_stream
             and not self.fully_sharded
