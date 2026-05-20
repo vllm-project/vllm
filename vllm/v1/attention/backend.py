@@ -55,12 +55,7 @@ class MultipleOf:
 class AttentionBackend(ABC):
     """Abstract class for attention backends."""
 
-    # For attention backends that support pre-allocated output tensors, we
-    # allocate the output tensor before calling the attention op. When piecewise
-    # cudagraph is enabled, this ensures the tensor is allocated inside the
-    # cudagraph capture region. All built-in vLLM attention backends support
-    # this behavior, though some custom backends or vLLM plugins may not, in
-    # which case this should be set to False in the plugin's configuration.
+    # Some OOT backends override as `False`
     accept_output_buffer: bool = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list["CacheDType"]] = [
