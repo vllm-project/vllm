@@ -2067,24 +2067,6 @@ class Gemma4ForConditionalGeneration(
             tower_model=tower_models,
         )
 
-    def get_num_mm_encoder_tokens(
-        self,
-        num_image_tokens: int,
-    ) -> int:
-        hf_config = self.config
-        vision_config = hf_config.vision_config
-        pooling_kernel_size = vision_config.pooling_kernel_size
-        return num_image_tokens * pooling_kernel_size**2
-
-    def get_num_mm_connector_tokens(
-        self,
-        num_vision_tokens: int,
-    ) -> int:
-        hf_config = self.config
-        vision_config = hf_config.vision_config
-        pooling_kernel_size = vision_config.pooling_kernel_size
-        return num_vision_tokens // pooling_kernel_size**2
-
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality == "image":
