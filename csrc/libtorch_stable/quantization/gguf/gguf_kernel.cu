@@ -1,17 +1,20 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
-#include <torch/all.h>
-#include <c10/cuda/CUDAGuard.h>
+#include "../../../cuda_compat.h"
+#include "../../dispatch_utils.h"
+#include "../../torch_utils.h"
 
-#include "../../cuda_compat.h"
-#include "dispatch_utils.h"
+#include <torch/csrc/stable/ops.h>
 
-#include "ggml-common.h"
-#include "vecdotq.cuh"
-#include "dequantize.cuh"
-#include "mmvq.cuh"
-#include "mmq.cuh"
+// NOTE: These headers are intentionally kept in csrc/quantization/gguf/ (not
+// moved to libtorch_stable) to avoid unnecessary reformatting that would break
+// git rename detection and pollute blame history.
+#include "../../../quantization/gguf/ggml-common.h"
+#include "../../../quantization/gguf/vecdotq.cuh"
+#include "../../../quantization/gguf/dequantize.cuh"
+#include "../../../quantization/gguf/mmvq.cuh"
+#include "../../../quantization/gguf/mmq.cuh"
 #include "moe.cuh"
 #include "moe_vec.cuh"
 
@@ -71,16 +74,17 @@ static void quantize_row_q8_1_cuda(const scalar_t* x, void* vy, const int kx,
   }
 }
 
-torch::Tensor ggml_dequantize(torch::Tensor W,  // quant weight
-                              int64_t type, int64_t m, int64_t n,
-                              std::optional<at::ScalarType> const& dtype) {
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(W));
-  auto dtype_ = dtype.value_or(torch::kFloat16);
-  auto options = torch::TensorOptions().dtype(dtype_).device(W.device());
-  at::Tensor DW = torch::empty({m, n}, options);
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
+torch::stable::Tensor ggml_dequantize(
+    torch::stable::Tensor W,  // quant weight
+    int64_t type, int64_t m, int64_t n,
+    std::optional<torch::headeronly::ScalarType> const& dtype) {
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      W.get_device_index());
+  auto dtype_ = dtype.value_or(torch::headeronly::ScalarType::Half);
+  auto DW = torch::stable::empty({m, n}, dtype_, std::nullopt, W.device());
+  cudaStream_t stream = get_current_cuda_stream();
 
-  VLLM_DISPATCH_FLOATING_TYPES(DW.scalar_type(), "ggml_dequantize", [&] {
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(DW.scalar_type(), "ggml_dequantize", [&] {
     auto to_cuda = ggml_get_to_cuda<scalar_t>(type);
     to_cuda((void*)W.data_ptr(), (scalar_t*)DW.data_ptr(), m * n, stream);
   });
@@ -88,135 +92,142 @@ torch::Tensor ggml_dequantize(torch::Tensor W,  // quant weight
   return DW;
 }
 
-torch::Tensor ggml_mul_mat_vec_a8(torch::Tensor W,  // quant weight
-                                  torch::Tensor X,  // input
-                                  int64_t type, int64_t row) {
+torch::stable::Tensor ggml_mul_mat_vec_a8(
+    torch::stable::Tensor W,  // quant weight
+    torch::stable::Tensor X,  // input
+    int64_t type, int64_t row) {
   int col = X.sizes()[1];
   int vecs = X.sizes()[0];
   const int padded = (col + 512 - 1) / 512 * 512;
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(X));
-  auto options = torch::TensorOptions().dtype(X.dtype()).device(W.device());
-  at::Tensor Y = torch::empty({vecs, row}, options);
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
-  options = torch::TensorOptions().dtype(torch::kInt32).device(W.device());
-  at::Tensor quant_X = torch::empty({vecs, padded / 32 * 9}, options);
-  VLLM_DISPATCH_FLOATING_TYPES(X.scalar_type(), "ggml_mul_mat_vec_a8", [&] {
-    quantize_row_q8_1_cuda<scalar_t>(
-        (scalar_t*)X.data_ptr(), (void*)quant_X.data_ptr(), col, vecs, stream);
-    switch (type) {
-      case 2:
-        mul_mat_vec_q4_0_q8_1_cuda<scalar_t>(
-            (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
-            (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
-        break;
-      case 3:
-        mul_mat_vec_q4_1_q8_1_cuda<scalar_t>(
-            (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
-            (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
-        break;
-      case 6:
-        mul_mat_vec_q5_0_q8_1_cuda<scalar_t>(
-            (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
-            (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
-        break;
-      case 7:
-        mul_mat_vec_q5_1_q8_1_cuda<scalar_t>(
-            (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
-            (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
-        break;
-      case 8:
-        mul_mat_vec_q8_0_q8_1_cuda<scalar_t>(
-            (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
-            (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
-        break;
-      case 10:
-        mul_mat_vec_q2_K_q8_1_cuda<scalar_t>(
-            (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
-            (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
-        break;
-      case 11:
-        mul_mat_vec_q3_K_q8_1_cuda<scalar_t>(
-            (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
-            (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
-        break;
-      case 12:
-        mul_mat_vec_q4_K_q8_1_cuda<scalar_t>(
-            (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
-            (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
-        break;
-      case 13:
-        mul_mat_vec_q5_K_q8_1_cuda<scalar_t>(
-            (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
-            (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
-        break;
-      case 14:
-        mul_mat_vec_q6_K_q8_1_cuda<scalar_t>(
-            (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
-            (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
-        break;
-      case 16:
-        mul_mat_vec_iq2_xxs_q8_1_cuda<scalar_t>(
-            (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
-            (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
-        break;
-      case 17:
-        mul_mat_vec_iq2_xs_q8_1_cuda<scalar_t>(
-            (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
-            (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
-        break;
-      case 18:
-        mul_mat_vec_iq3_xxs_q8_1_cuda<scalar_t>(
-            (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
-            (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
-        break;
-      case 19:
-        mul_mat_vec_iq1_s_q8_1_cuda<scalar_t>(
-            (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
-            (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
-        break;
-      case 20:
-        mul_mat_vec_iq4_nl_q8_1_cuda<scalar_t>(
-            (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
-            (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
-        break;
-      case 21:
-        mul_mat_vec_iq3_s_q8_1_cuda<scalar_t>(
-            (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
-            (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
-        break;
-      case 22:
-        mul_mat_vec_iq2_s_q8_1_cuda<scalar_t>(
-            (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
-            (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
-        break;
-      case 23:
-        mul_mat_vec_iq4_xs_q8_1_cuda<scalar_t>(
-            (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
-            (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
-        break;
-      case 29:
-        mul_mat_vec_iq1_m_q8_1_cuda<scalar_t>(
-            (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
-            (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
-        break;
-    }
-  });
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      X.get_device_index());
+  auto Y = torch::stable::empty({vecs, row}, X.scalar_type(), std::nullopt,
+                                W.device());
+  cudaStream_t stream = get_current_cuda_stream();
+  auto quant_X = torch::stable::empty({vecs, padded / 32 * 9},
+                                      torch::headeronly::ScalarType::Int,
+                                      std::nullopt, W.device());
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(
+      X.scalar_type(), "ggml_mul_mat_vec_a8", [&] {
+        quantize_row_q8_1_cuda<scalar_t>((scalar_t*)X.data_ptr(),
+                                         (void*)quant_X.data_ptr(), col, vecs,
+                                         stream);
+        switch (type) {
+          case 2:
+            mul_mat_vec_q4_0_q8_1_cuda<scalar_t>(
+                (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+                (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
+            break;
+          case 3:
+            mul_mat_vec_q4_1_q8_1_cuda<scalar_t>(
+                (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+                (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
+            break;
+          case 6:
+            mul_mat_vec_q5_0_q8_1_cuda<scalar_t>(
+                (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+                (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
+            break;
+          case 7:
+            mul_mat_vec_q5_1_q8_1_cuda<scalar_t>(
+                (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+                (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
+            break;
+          case 8:
+            mul_mat_vec_q8_0_q8_1_cuda<scalar_t>(
+                (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+                (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
+            break;
+          case 10:
+            mul_mat_vec_q2_K_q8_1_cuda<scalar_t>(
+                (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+                (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
+            break;
+          case 11:
+            mul_mat_vec_q3_K_q8_1_cuda<scalar_t>(
+                (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+                (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
+            break;
+          case 12:
+            mul_mat_vec_q4_K_q8_1_cuda<scalar_t>(
+                (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+                (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
+            break;
+          case 13:
+            mul_mat_vec_q5_K_q8_1_cuda<scalar_t>(
+                (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+                (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
+            break;
+          case 14:
+            mul_mat_vec_q6_K_q8_1_cuda<scalar_t>(
+                (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+                (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
+            break;
+          case 16:
+            mul_mat_vec_iq2_xxs_q8_1_cuda<scalar_t>(
+                (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+                (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
+            break;
+          case 17:
+            mul_mat_vec_iq2_xs_q8_1_cuda<scalar_t>(
+                (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+                (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
+            break;
+          case 18:
+            mul_mat_vec_iq3_xxs_q8_1_cuda<scalar_t>(
+                (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+                (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
+            break;
+          case 19:
+            mul_mat_vec_iq1_s_q8_1_cuda<scalar_t>(
+                (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+                (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
+            break;
+          case 20:
+            mul_mat_vec_iq4_nl_q8_1_cuda<scalar_t>(
+                (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+                (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
+            break;
+          case 21:
+            mul_mat_vec_iq3_s_q8_1_cuda<scalar_t>(
+                (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+                (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
+            break;
+          case 22:
+            mul_mat_vec_iq2_s_q8_1_cuda<scalar_t>(
+                (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+                (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
+            break;
+          case 23:
+            mul_mat_vec_iq4_xs_q8_1_cuda<scalar_t>(
+                (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+                (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
+            break;
+          case 29:
+            mul_mat_vec_iq1_m_q8_1_cuda<scalar_t>(
+                (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+                (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
+            break;
+        }
+      });
   return Y;
 }
 
-torch::Tensor ggml_mul_mat_a8(torch::Tensor W,  // quant weight
-                              torch::Tensor X,  // input
-                              int64_t type, int64_t row) {
+torch::stable::Tensor ggml_mul_mat_a8(torch::stable::Tensor W,  // quant weight
+                                      torch::stable::Tensor X,  // input
+                                      int64_t type, int64_t row) {
   int col = X.sizes()[1];
   int padded = (col + 512 - 1) / 512 * 512;
   int batch = X.sizes()[0];
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(X));
-  auto options = torch::TensorOptions().dtype(X.dtype()).device(W.device());
-  at::Tensor Y = torch::empty({batch, row}, options);
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
-  options = torch::TensorOptions().dtype(torch::kInt32).device(W.device());
-  at::Tensor quant_X = torch::empty({batch, padded / 32 * 9}, options);
-  VLLM_DISPATCH_FLOATING_TYPES(X.scalar_type(), "ggml_mul_mat_a8", [&] {
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      X.get_device_index());
+  auto Y = torch::stable::empty({batch, row}, X.scalar_type(), std::nullopt,
+                                W.device());
+  cudaStream_t stream = get_current_cuda_stream();
+  auto quant_X = torch::stable::empty({batch, padded / 32 * 9},
+                                      torch::headeronly::ScalarType::Int,
+                                      std::nullopt, W.device());
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(X.scalar_type(), "ggml_mul_mat_a8", [&] {
     quantize_row_q8_1_cuda((scalar_t*)X.data_ptr(), (void*)quant_X.data_ptr(),
                            col, batch, stream);
 
@@ -276,21 +287,24 @@ torch::Tensor ggml_mul_mat_a8(torch::Tensor W,  // quant weight
   return Y;
 }
 
-torch::Tensor ggml_moe_a8(torch::Tensor X,  // input
-                          torch::Tensor W,  // expert weights
-                          torch::Tensor sorted_token_ids,
-                          torch::Tensor expert_ids,
-                          torch::Tensor num_tokens_post_padded, int64_t type,
-                          int64_t row, int64_t top_k, int64_t tokens) {
+torch::stable::Tensor ggml_moe_a8(torch::stable::Tensor X,  // input
+                                  torch::stable::Tensor W,  // expert weights
+                                  torch::stable::Tensor sorted_token_ids,
+                                  torch::stable::Tensor expert_ids,
+                                  torch::stable::Tensor num_tokens_post_padded,
+                                  int64_t type, int64_t row, int64_t top_k,
+                                  int64_t tokens) {
   int col = X.sizes()[1];
   int padded = (col + 512 - 1) / 512 * 512;
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(X));
-  auto options = torch::TensorOptions().dtype(X.dtype()).device(W.device());
-  at::Tensor Y = torch::empty({tokens * top_k, row}, options);
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
-  options = torch::TensorOptions().dtype(torch::kInt32).device(W.device());
-  at::Tensor quant_X = torch::empty({tokens, padded / 32 * 9}, options);
-  VLLM_DISPATCH_FLOATING_TYPES(X.scalar_type(), "ggml_moe_a8", [&] {
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      X.get_device_index());
+  auto Y = torch::stable::empty({tokens * top_k, row}, X.scalar_type(),
+                                std::nullopt, W.device());
+  cudaStream_t stream = get_current_cuda_stream();
+  auto quant_X = torch::stable::empty({tokens, padded / 32 * 9},
+                                      torch::headeronly::ScalarType::Int,
+                                      std::nullopt, W.device());
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(X.scalar_type(), "ggml_moe_a8", [&] {
     quantize_row_q8_1_cuda((scalar_t*)X.data_ptr(), (void*)quant_X.data_ptr(),
                            col, tokens, stream);
     switch (type) {
@@ -379,19 +393,23 @@ torch::Tensor ggml_moe_a8(torch::Tensor X,  // input
   return Y;
 }
 
-torch::Tensor ggml_moe_a8_vec(torch::Tensor X,  // input
-                              torch::Tensor W,  // expert weights
-                              torch::Tensor topk_ids, int64_t top_k,
-                              int64_t type, int64_t row, int64_t tokens) {
+torch::stable::Tensor ggml_moe_a8_vec(
+    torch::stable::Tensor X,  // input
+    torch::stable::Tensor W,  // expert weights
+    torch::stable::Tensor topk_ids, int64_t top_k, int64_t type, int64_t row,
+    int64_t tokens) {
   int col = X.sizes()[1];
   const int padded = (col + 512 - 1) / 512 * 512;
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(X));
-  auto options = torch::TensorOptions().dtype(X.dtype()).device(W.device());
-  at::Tensor Y = torch::zeros({tokens * top_k, row}, options);
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
-  options = torch::TensorOptions().dtype(torch::kInt32).device(W.device());
-  at::Tensor quant_X = torch::empty({tokens, padded / 32 * 9}, options);
-  VLLM_DISPATCH_FLOATING_TYPES(X.scalar_type(), "ggml_moe_vec_a8", [&] {
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      X.get_device_index());
+  auto Y = torch::stable::empty({tokens * top_k, row}, X.scalar_type(),
+                                std::nullopt, W.device());
+  torch::stable::fill_(Y, 0.0);
+  cudaStream_t stream = get_current_cuda_stream();
+  auto quant_X = torch::stable::empty({tokens, padded / 32 * 9},
+                                      torch::headeronly::ScalarType::Int,
+                                      std::nullopt, W.device());
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(X.scalar_type(), "ggml_moe_vec_a8", [&] {
     quantize_row_q8_1_cuda<scalar_t>((scalar_t*)X.data_ptr(),
                                      (void*)quant_X.data_ptr(), col, tokens,
                                      stream);
