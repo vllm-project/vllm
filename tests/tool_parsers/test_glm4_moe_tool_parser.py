@@ -1363,3 +1363,259 @@ def test_stream_interval_content_between_tool_calls(
     args1 = json.loads("".join(tools_found[1]["args_fragments"]))
     assert args0 == {"city": "Beijing"}
     assert args1 == {"city": "Shanghai"}
+
+
+# --- Regression tests for streaming argument corruption -------------------
+# Prior to this fix, Optional[str] schemas (rendered as anyOf / list-type by
+# Pydantic) caused `_is_string_type` to return False.  The streaming partial
+# path would then emit the bare value (no quotes), and the completed-pair
+# path would emit `json.dumps(...)` (with quotes), causing the length-based
+# diff to produce garbage such as `{"sender": Smithh"}` — missing opening
+# quote, last char duplicated.  Non-string values (arrays, etc.) suffered
+# the same class of bug when `json.dumps` normalized whitespace.
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        {"oneOf": [{"type": "string"}, {"type": "null"}]},
+        {"type": ["string", "null"]},
+    ],
+    ids=["anyOf_nullable_string", "oneOf_nullable_string", "type_list_string"],
+)
+@pytest.mark.parametrize("stream_interval", [1, 2, 3, 5, 8])
+def test_streaming_optional_string_not_corrupted(
+    glm4_moe_tokenizer, schema, stream_interval
+):
+    """Optional[str] fields must be detected as string types at any
+    stream_interval / real-tokenizer boundary, and streamed as properly
+    quoted JSON (no missing opening quote, no duplicated last char)."""
+    tools = [
+        ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="search_email",
+                parameters={
+                    "type": "object",
+                    "properties": {"sender": schema},
+                },
+            ),
+        ),
+    ]
+    parser = Glm4MoeModelToolParser(glm4_moe_tokenizer, tools=tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+
+    text = (
+        "<tool_call>search_email\n"
+        "<arg_key>sender</arg_key>"
+        "<arg_value>Smith</arg_value>"
+        "</tool_call>"
+    )
+
+    deltas = _simulate_streaming(
+        glm4_moe_tokenizer, parser, request, text, stream_interval
+    )
+    _, tools_found = _collect_from_deltas(deltas)
+
+    assert 0 in tools_found
+    args = json.loads("".join(tools_found[0]["args_fragments"]))
+    assert args == {"sender": "Smith"}
+
+
+@pytest.mark.parametrize("stream_interval", [1, 2, 3, 5, 8])
+def test_streaming_array_arg_preserves_raw_json(glm4_moe_tokenizer, stream_interval):
+    """Non-string values (arrays/objects) must stream through without the
+    whitespace-divergence corruption (``["Acme","Beta"]]`` pattern) that
+    used to result from json.dumps normalizing the partial path's raw
+    output (`[a,b]`) into a differently-spaced complete-path render
+    (`[a, b]`).  Verified across real tokenizer boundaries."""
+    tools = [
+        ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="search_email",
+                parameters={
+                    "type": "object",
+                    "properties": {"companies": {"type": "array"}},
+                },
+            ),
+        ),
+    ]
+    parser = Glm4MoeModelToolParser(glm4_moe_tokenizer, tools=tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+
+    text = (
+        "<tool_call>search_email\n"
+        "<arg_key>companies</arg_key>"
+        '<arg_value>["Acme","Beta"]</arg_value>'
+        "</tool_call>"
+    )
+
+    deltas = _simulate_streaming(
+        glm4_moe_tokenizer, parser, request, text, stream_interval
+    )
+    _, tools_found = _collect_from_deltas(deltas)
+
+    assert 0 in tools_found
+    args = json.loads("".join(tools_found[0]["args_fragments"]))
+    assert args == {"companies": ["Acme", "Beta"]}
+
+
+@pytest.mark.parametrize("stream_interval", [1, 3, 8])
+def test_streaming_large_object_arg_streams_incrementally(
+    glm4_moe_tokenizer, stream_interval
+):
+    """A non-string (object) arg must stream *incrementally* — the client
+    should receive at least one args delta before the closing tag, not be
+    held until </arg_value>.  This guards against a throughput regression
+    where non-string partials would otherwise be suppressed."""
+    tools = [
+        ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="do_thing",
+                parameters={
+                    "type": "object",
+                    "properties": {"payload": {"type": "object"}},
+                },
+            ),
+        ),
+    ]
+    parser = Glm4MoeModelToolParser(glm4_moe_tokenizer, tools=tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+
+    # Use a body long enough to span multiple tokenizer boundaries.
+    body = '{"a":1,"b":[1,2,3,4,5],"c":"hello world","d":true,"e":null}'
+    text = (
+        "<tool_call>do_thing\n"
+        "<arg_key>payload</arg_key>"
+        f"<arg_value>{body}</arg_value>"
+        "</tool_call>"
+    )
+
+    deltas = _simulate_streaming(
+        glm4_moe_tokenizer, parser, request, text, stream_interval
+    )
+    _, tools_found = _collect_from_deltas(deltas)
+
+    assert 0 in tools_found
+    fragments = tools_found[0]["args_fragments"]
+    # Final rendering must parse.  The arguments object wraps the body
+    # under the declared "payload" key.
+    args = json.loads("".join(fragments))
+    assert args == {"payload": json.loads(body)}
+
+    # At least one fragment must arrive before the trailing `}` that
+    # closes the outer arguments object — otherwise the client is held
+    # hostage to the </arg_value> tag for non-string args.  (stream_interval=8
+    # may legitimately batch everything together if the whole tool call
+    # fits in fewer than 8 tokens, so only assert for interval=1.)
+    if stream_interval == 1:
+        combined = "".join(fragments)
+        assert combined.endswith("}")
+        assert len(fragments) >= 2, (
+            f"expected non-string arg to stream incrementally, got fragments="
+            f"{fragments!r}"
+        )
+
+
+def test_extract_tool_calls_optional_string_preserves_literal(
+    glm4_moe_tool_parser,
+):
+    """Non-streaming behavior-change test for ``extract_tool_calls``:
+    Optional[str] fields now preserve the model's emitted text as a
+    string (e.g. "true"), rather than coercing it via ``_deserialize``
+    into a bool/int.  Pre-fix, ``_is_string_type`` returned False for
+    Optional[str], sending the value through ``ast.literal_eval`` /
+    ``json.loads`` and silently converting ``"true"`` → ``True``.  The
+    new behavior matches the declared schema type (string)."""
+    tools = [
+        ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="note_flag",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "label": {
+                            "anyOf": [
+                                {"type": "string"},
+                                {"type": "null"},
+                            ]
+                        },
+                    },
+                },
+            ),
+        ),
+    ]
+    parser = Glm4MoeModelToolParser(glm4_moe_tool_parser.model_tokenizer, tools=tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+
+    model_output = (
+        "<tool_call>note_flag\n"
+        "<arg_key>label</arg_key>"
+        "<arg_value>true</arg_value>"
+        "</tool_call>"
+    )
+    result = parser.extract_tool_calls(model_output, request=request)
+    assert result.tools_called
+    args = json.loads(result.tool_calls[0].function.arguments)
+    assert args == {"label": "true"}, (
+        "Optional[str] value must remain a string, not be coerced to bool"
+    )
+
+
+@pytest.mark.parametrize("stream_interval", [1, 2, 3, 5, 8])
+def test_streaming_undeclared_arg_defaults_to_string(
+    glm4_moe_tokenizer, stream_interval
+):
+    """A tool whose schema declares some args but not others must still
+    stream the undeclared args correctly.  Reproduces the production
+    divergence-guard warning seen when GLM-5.1 emits text fields
+    (e.g. edit-tool ``new_text``) that the tool schema did not list.
+
+    Pre-fix: ``_is_string_type`` returns False for the undeclared arg,
+    the non-string partial path emits bare text, the complete path
+    wraps with ``json.dumps``, the prefix-divergence guard fires, and
+    the client never receives the trailing ``"`` / ``}`` — leading to
+    ``json.loads`` failure on the concatenated deltas.
+
+    Post-fix: undeclared args default to string-type (matching
+    minimax_m2 / qwen3xml parsers), partial and complete renderings
+    stay prefix-consistent, client gets valid JSON.
+    """
+    tools = [
+        ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="edit_memory",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string"},
+                        "target": {"type": "string"},
+                        # new_text intentionally undeclared
+                    },
+                },
+            ),
+        ),
+    ]
+    parser = Glm4MoeModelToolParser(glm4_moe_tokenizer, tools=tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+
+    text = (
+        "<tool_call>edit_memory\n"
+        "<arg_key>action</arg_key><arg_value>replace</arg_value>"
+        "<arg_key>target</arg_key><arg_value>memory</arg_value>"
+        "<arg_key>new_text</arg_key>"
+        "<arg_value>A long body of replacement text.</arg_value>"
+        "</tool_call>"
+    )
+
+    deltas = _simulate_streaming(
+        glm4_moe_tokenizer, parser, request, text, stream_interval
+    )
+    _, tools_found = _collect_from_deltas(deltas)
+    assert 0 in tools_found
+    args = json.loads("".join(tools_found[0]["args_fragments"]))
+    assert args == {
+        "action": "replace",
+        "target": "memory",
+        "new_text": "A long body of replacement text.",
+    }
