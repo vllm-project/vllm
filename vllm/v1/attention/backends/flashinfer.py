@@ -105,9 +105,11 @@ def _trtllm_prefill_attn_kvfp8_dequant(
     src_stride_page,
     src_stride_kv,
     src_stride_head,
+    src_stride_n,
     DST_K_CACHE_STRIDE: tl.constexpr,
     DST_KV_CACHE_STRIDE: tl.constexpr,
-    HEAD_STRIDE: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
+    HEAD_SIZE: tl.constexpr,
     NUM_KV_HEADS: tl.constexpr,
 ):
     batch_idx = tl.program_id(0).to(tl.int64)
@@ -123,36 +125,42 @@ def _trtllm_prefill_attn_kvfp8_dequant(
     v_scale_val = tl.load(v_scale_ptr)
 
     mock_page_idx = batch_idx * block_table_stride + mock_block_table_idx + 1
-    head_offsets = tl.arange(0, HEAD_STRIDE)
+    HEAD_STRIDE: tl.constexpr = PAGE_SIZE * HEAD_SIZE
+    # 2D indexing: source may have non-contiguous block_size stride.
+    n_idx = tl.arange(0, PAGE_SIZE)[:, None]
+    d_idx = tl.arange(0, HEAD_SIZE)[None, :]
+    dst_nd = n_idx * HEAD_SIZE + d_idx
 
     for h in range(NUM_KV_HEADS):
         h_off = tl.cast(h, tl.int64)
 
-        # Read K from source (supports non-contiguous page/kv/head strides)
-        src_k = orig_page_num * src_stride_page + h_off * src_stride_head + head_offsets
+        src_k = (
+            orig_page_num * src_stride_page
+            + h_off * src_stride_head
+            + n_idx * src_stride_n
+            + d_idx
+        )
         fp8_k = tl.load(kv_cache_ptr + src_k)
         dequant_k = (fp8_k.to(tl.float32) * k_scale_val).to(dequant_dtype)
 
-        # Write K to contiguous mock cache
-        dst_k = mock_page_idx * DST_KV_CACHE_STRIDE + h * HEAD_STRIDE + head_offsets
+        dst_k = mock_page_idx * DST_KV_CACHE_STRIDE + h * HEAD_STRIDE + dst_nd
         tl.store(mock_kv_cache_ptr + dst_k, dequant_k)
 
-        # Read V from source (offset by src_stride_kv for the V half)
         src_v = (
             orig_page_num * src_stride_page
             + src_stride_kv
             + h_off * src_stride_head
-            + head_offsets
+            + n_idx * src_stride_n
+            + d_idx
         )
         fp8_v = tl.load(kv_cache_ptr + src_v)
         dequant_v = (fp8_v.to(tl.float32) * v_scale_val).to(dequant_dtype)
 
-        # Write V to contiguous mock cache
         dst_v = (
             mock_page_idx * DST_KV_CACHE_STRIDE
             + DST_K_CACHE_STRIDE
             + h * HEAD_STRIDE
-            + head_offsets
+            + dst_nd
         )
         tl.store(mock_kv_cache_ptr + dst_v, dequant_v)
 
@@ -175,9 +183,8 @@ def trtllm_prefill_attn_kvfp8_dequant(
     kv_cache_stride = k_cache_stride * s[1]
 
     strides = kv_cache.stride()
-    assert strides[3] == head_size and strides[4] == 1, (
-        "For kv cache layouts, (block_size, head_size) "
-        f"dimensions must be contiguous, got strides {strides}"
+    assert strides[4] == 1, (
+        f"The head_size dimension must be contiguous, got strides {strides}"
     )
 
     new_s = (batch_size * num_of_page_per_token + 1, s[1], s[2], s[3], s[4])
@@ -201,9 +208,11 @@ def trtllm_prefill_attn_kvfp8_dequant(
         strides[0],
         strides[1],
         strides[2],
+        strides[3],
         k_cache_stride,
         kv_cache_stride,
-        head_stride,
+        block_size,
+        head_size,
         num_kv_heads,
     )
     return mock_kv_cache, mock_block_table
@@ -1598,14 +1607,10 @@ class FlashInferImpl(AttentionImpl):
                     # and fp8 kv cache. So to enable prefill attention
                     # with fp8 kv cache, we can construct a mock block
                     # and mock kv cache with BF16 KV involved in the prefill.
-                    # The dequant kernel needs a contiguous 5D tensor
-                    # (B, 2, H, N, hs).
                     B_kv, H_kv, N_kv = kv_cache_permute.shape[:3]
-                    kv_cache_5d = (
-                        kv_cache_permute.view(B_kv, H_kv, N_kv, 2, self.head_size)
-                        .permute(0, 3, 1, 2, 4)
-                        .contiguous()
-                    )
+                    kv_cache_5d = kv_cache_permute.view(
+                        B_kv, H_kv, N_kv, 2, self.head_size
+                    ).permute(0, 3, 1, 2, 4)
                     mock_kv_cache, mock_block_table = trtllm_prefill_attn_kvfp8_dequant(
                         kv_cache_5d,
                         block_tables_prefill,

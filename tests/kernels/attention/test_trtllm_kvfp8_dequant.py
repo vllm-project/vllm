@@ -81,6 +81,32 @@ def make_cross_layer_kv_cache(
     return layer_view, scale
 
 
+def make_permuted_kv_cache(num_blocks, num_kv_heads, block_size, head_size):
+    """Create a KV cache where the block_size dim has non-contiguous stride.
+
+    Mimics the actual forward path: a 4D (B, H, N, 2*hs) cache is viewed
+    as 5D (B, H, N, 2, hs) then permuted to (B, 2, H, N, hs).  The
+    resulting dim-3 stride is 2*hs instead of hs, so (N, hs) are NOT
+    contiguous.
+    """
+    raw_4d = torch.randn(
+        num_blocks,
+        num_kv_heads,
+        block_size,
+        2 * head_size,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    fp8_4d, scale = to_float8(raw_4d)
+    kv_5d = fp8_4d.view(num_blocks, num_kv_heads, block_size, 2, head_size).permute(
+        0, 3, 1, 2, 4
+    )
+    assert kv_5d.stride()[3] != head_size, (
+        f"Expected non-contiguous block_size stride, got strides {kv_5d.stride()}"
+    )
+    return kv_5d, scale
+
+
 def ref_dequant(kv_cache, block_tables, k_scale, v_scale, dequant_dtype):
     """Pure PyTorch reference: gather pages and dequantize fp8 -> dequant_dtype."""
     batch_size, num_pages_per_seq = block_tables.shape
@@ -114,7 +140,7 @@ def ref_dequant(kv_cache, block_tables, k_scale, v_scale, dequant_dtype):
 @pytest.mark.parametrize("block_size", [16, 32])
 @pytest.mark.parametrize("batch_size", [1, 4])
 @pytest.mark.parametrize("num_pages_per_seq", [3, 8])
-@pytest.mark.parametrize("contiguous", [True, False])
+@pytest.mark.parametrize("layout", ["contiguous", "cross_layer", "permuted"])
 @torch.inference_mode()
 def test_trtllm_kvfp8_dequant(
     num_kv_heads: int,
@@ -122,7 +148,7 @@ def test_trtllm_kvfp8_dequant(
     block_size: int,
     batch_size: int,
     num_pages_per_seq: int,
-    contiguous: bool,
+    layout: str,
 ):
     from vllm.v1.attention.backends.flashinfer import (
         trtllm_prefill_attn_kvfp8_dequant,
@@ -130,15 +156,22 @@ def test_trtllm_kvfp8_dequant(
 
     torch.set_default_device("cuda")
 
-    if contiguous:
+    if layout == "contiguous":
         kv_cache, scale = make_contiguous_kv_cache(
             NUM_BLOCKS,
             num_kv_heads,
             block_size,
             head_size,
         )
-    else:
+    elif layout == "cross_layer":
         kv_cache, scale = make_cross_layer_kv_cache(
+            NUM_BLOCKS,
+            num_kv_heads,
+            block_size,
+            head_size,
+        )
+    else:
+        kv_cache, scale = make_permuted_kv_cache(
             NUM_BLOCKS,
             num_kv_heads,
             block_size,
