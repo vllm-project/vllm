@@ -34,6 +34,7 @@ QuantizationMethods = Literal[
     "mxfp4",
     "gpt_oss_mxfp4",
     "deepseek_v4_fp8",
+    "svdquant",
     "cpu_awq",
     "online",
     # Below are online quant shorthand names (see vllm.config.quantization).
@@ -139,6 +140,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .moe_wna16 import MoeWNA16Config
     from .mxfp4 import GptOssMxfp4Config, Mxfp4Config
     from .online.base import OnlineQuantizationConfig
+    from .svdquant import SVDQuantConfig
     from .torchao import TorchAOConfig
 
     method_to_config: dict[str, type[QuantizationConfig]] = {
@@ -166,6 +168,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "mxfp4": Mxfp4Config,
         "gpt_oss_mxfp4": GptOssMxfp4Config,
         "deepseek_v4_fp8": DeepseekV4FP8Config,
+        "svdquant": SVDQuantConfig,
         "cpu_awq": CPUAWQConfig,
         "humming": HummingConfig,
         "online": OnlineQuantizationConfig,
