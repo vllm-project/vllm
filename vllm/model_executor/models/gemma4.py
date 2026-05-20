@@ -1596,13 +1596,14 @@ class Gemma4ForCausalLM(
         self.num_redundant_experts = 0
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        num_experts = getattr(self.config, "num_experts", None) or 0
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=num_experts,
+            num_experts=self.num_logical_experts,
+        )
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
