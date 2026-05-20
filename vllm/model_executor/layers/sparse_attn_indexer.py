@@ -28,6 +28,7 @@ from vllm.v1.attention.backends.mla.indexer import (
 )
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.worker.workspace import current_workspace_manager
+
 logger = init_logger(__name__)
 
 RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
@@ -306,10 +307,10 @@ def sparse_attn_indexer(
         )
         if current_platform.is_xpu():
             if padded_q_scale is not None:
-                raise RuntimeError(
-                    "XPU fp8_paged_mqa_logits does not support FP4 Q"
-                )
-            seq_lens_xpu = seq_lens[:, -1].contiguous() if seq_lens.ndim == 2 else seq_lens
+                raise RuntimeError("XPU fp8_paged_mqa_logits does not support FP4 Q")
+            seq_lens_xpu = (
+                seq_lens[:, -1].contiguous() if seq_lens.ndim == 2 else seq_lens
+            )
             logits = torch.ops.vllm.xpu_fp8_paged_mqa_logits(
                 padded_q_quant_cast,
                 kv_cache,
