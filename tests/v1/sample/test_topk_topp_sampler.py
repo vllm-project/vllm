@@ -979,11 +979,6 @@ class TestCpuTopkTopp:
         # ternary search handles this regime; the CPU kernel does not
         # yet. Skip the small-vocab combined cases until the Pass-0
         # PAD-skip refinement lands.
-        if vocab_size == 1024 and batch_size >= 32:
-            pytest.xfail(
-                "CPU kernel: PATH-A boundary noise after top-k pre-masking "
-                "at small vocab"
-            )
         logits = torch.randn(
             batch_size, vocab_size, generator=self.generator, dtype=torch.float32
         )
@@ -1044,22 +1039,10 @@ class TestCpuTopkTopp:
         p = torch.tensor([0.1, 0.5, 0.9, 1.0] * 4, dtype=torch.float32)
         self._compare_results(logits.clone(), k=None, p=p)
 
-        # p close to 0: optimal survivor count is ~1–2 tokens, where
-        # the GPU's "≤3 absolute OR <0.5% of max_kept" tolerance
-        # collapses to near-exact match. The CPU kernel's binary-search
-        # threshold can land wider — assert the looser invariants
-        # (≥ ref kept, never zero, no NaN).
+        # p close to 0: kernel diff vs. sort-based ref is ≤2 tokens at
+        # vocab=1024 with no PAD inputs (standard binary-search precision).
         p = torch.full((batch_size,), 0.01, dtype=torch.float32)
-        ref = apply_top_k_top_p_pytorch(logits.clone(), None, p, allow_cpu_sync=True)
-        out = apply_top_k_top_p_cpu(logits.clone(), None, p)
-        assert not out.isnan().any()
-        ref_kept = (ref != float("-inf")).sum(dim=-1)
-        out_kept = (out != float("-inf")).sum(dim=-1)
-        assert (out_kept >= ref_kept).all(), (
-            f"CPU kept fewer tokens than ref at p=0.01: "
-            f"ref={ref_kept.tolist()}, cpu={out_kept.tolist()}"
-        )
-        assert (out_kept >= 1).all()
+        self._compare_results(logits.clone(), k=None, p=p)
 
     def test_large_batch(self):
         """Test with a large batch size."""

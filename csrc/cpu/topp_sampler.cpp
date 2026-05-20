@@ -224,11 +224,10 @@ static void top_p_row(float* __restrict__ row, int V, float p_val,
                       float* __restrict__ outlier_buf) {
   if (p_val >= 1.0f) return;
 
-  // Pass 0: scalar mean/std estimate over up to kMeanStdSampleN logits.
-  int ns = V < kMeanStdSampleN ? V : kMeanStdSampleN;
+  // Pass 0: scalar mean/std estimate over up to kMeanStdSampleN valid logits.
   float sum_s = 0.f, sum_sq = 0.f;
   int nf = 0;
-  for (int i = 0; i < ns; ++i) {
+  for (int i = 0; i < V && nf < kMeanStdSampleN; ++i) {
     float v = row[i];
     if (v > kPadSentinel) {
       sum_s += v;
@@ -374,7 +373,6 @@ static void top_p_row(float* __restrict__ row, int V, float p_val,
       binary_search_buffer(sbuf, sn, p_val, buf_lo, buf_hi, &sum_above);
 
   float dup_logit = logf(boundary_prob * sum_exp) + max_l;
-  if (!(dup_logit < max_l)) return;
 
   int n_at_boundary = count_within_tol(row, V, dup_logit, kBoundaryTol);
 
