@@ -1328,18 +1328,23 @@ class MoRIIOConnectorWorker:
                 last = status_list[-1]
                 if last.Succeeded():
                     done_req_ids.add(req_id)
-                    try:
-                        self.moriio_wrapper.send_notify(
-                            req_id,
-                            self._recving_transfers_callback_addr[req_id][0],
-                            self._recving_transfers_callback_addr[req_id][1],
-                        )
-                    except Exception:
-                        logger.exception(
-                            "Failed to send completion notification for request %s",
+                    addr = self._recving_transfers_callback_addr.get(req_id)
+                    if addr is None:
+                        logger.warning(
+                            "Missing callback address for completed request %s; "
+                            "skipping completion notification",
                             req_id,
                         )
                         self.xfer_stats.record_failed_notification()
+                    else:
+                        try:
+                            self.moriio_wrapper.send_notify(req_id, addr[0], addr[1])
+                        except Exception:
+                            logger.exception(
+                                "Failed to send completion notification for request %s",
+                                req_id,
+                            )
+                            self.xfer_stats.record_failed_notification()
                     meta = self._recving_xfer_meta.get(req_id)
                     if meta is not None:
                         xfer_duration_s = (
