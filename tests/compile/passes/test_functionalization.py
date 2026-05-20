@@ -302,7 +302,7 @@ class TestFusedDeepseekV4QnormRopeKvInsert(torch.nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         num_slots = q.shape[0]
         position_ids = torch.arange(num_slots, dtype=torch.int32, device=q.device)
-        slot_mapping = position_ids.clone()
+        slot_mapping = torch.zeros(num_slots, dtype=torch.long, device=q.device)
         # cos_sin_cache shape: [max_positions, rope_dim=64]
         cos_sin_cache = torch.zeros(4096, 64, dtype=torch.float32, device=q.device)
         eps = 1e-5
