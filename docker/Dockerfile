@@ -41,6 +41,13 @@ ARG BUILD_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04
 # Using cuda base image with minimal dependencies necessary for JIT compilation (FlashInfer, DeepGEMM, EP kernels)
 ARG FINAL_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-base-ubuntu${UBUNTU_VERSION}
 
+# OS family of BUILD_BASE_IMAGE. Controls package manager (apt vs dnf) and
+# Python bootstrap. Set to "manylinux" alongside a manylinux build base such
+# as pytorch/manylinux2_28-builder:cuda13.0 to produce wheels with a glibc
+# 2.28 floor (matches PyTorch's own published wheels). Default stays on
+# Ubuntu for backwards compatibility.
+ARG BUILD_OS=ubuntu
+
 # By parameterizing the Deadsnakes repository URL, we allow third-party to use
 # their own mirror. When doing so, we don't benefit from the transparent
 # installation of the GPG key of the PPA, as done by add-apt-repository, so we
@@ -94,35 +101,64 @@ FROM ${BUILD_BASE_IMAGE} AS base
 
 ARG CUDA_VERSION
 ARG PYTHON_VERSION
+ARG BUILD_OS
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install system dependencies including build tools
-RUN apt-get update -y \
-    && apt-get install -y --no-install-recommends \
-        ccache \
-        software-properties-common \
-        git \
-        curl \
-        sudo \
-        python3-pip \
-        libibverbs-dev \
-        # Upgrade to GCC 10 to avoid https://gcc.gnu.org/bugzilla/show_bug.cgi?id=92519
-        # as it was causing spam when compiling the CUTLASS kernels
-        gcc-10 \
-        g++-10 \
-    && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 110 --slave /usr/bin/g++ g++ /usr/bin/g++-10 \
-    # Install python dev headers if available (needed for cmake FindPython on Ubuntu 24.04
-    # which ships cmake 3.28 and requires Development.SABIModule; silently skipped on
-    # Ubuntu 20.04/22.04 where python3.x-dev is not available without a PPA)
-    && (apt-get install -y --no-install-recommends python${PYTHON_VERSION}-dev 2>/dev/null || true) \
-    && rm -rf /var/lib/apt/lists/* \
-    && curl -LsSf https://astral.sh/uv/install.sh | sh \
-    && $HOME/.local/bin/uv venv /opt/venv --python ${PYTHON_VERSION} \
+# Install system dependencies including build tools.
+# The Ubuntu path uses apt + deadsnakes-via-uv for Python; the manylinux path
+# (AlmaLinux 8, e.g. pytorch/manylinux2_28-builder) uses dnf and the Python
+# interpreters pre-installed at /opt/python/cpXY-cpXY/.
+RUN if [ "${BUILD_OS}" = "manylinux" ]; then \
+        # rdma-core-devel provides libibverbs headers; ccache lives in EPEL,
+        # which the pytorch manylinux image already enables. git/curl/sudo
+        # are typically pre-installed but listed defensively.
+        dnf install -y --setopt=install_weak_deps=False \
+            ccache \
+            git \
+            curl \
+            sudo \
+            rdma-core-devel \
+        && dnf clean all \
+        && rm -rf /var/cache/dnf; \
+    else \
+        apt-get update -y \
+        && apt-get install -y --no-install-recommends \
+            ccache \
+            software-properties-common \
+            git \
+            curl \
+            sudo \
+            python3-pip \
+            libibverbs-dev \
+            # Upgrade to GCC 10 to avoid https://gcc.gnu.org/bugzilla/show_bug.cgi?id=92519
+            # as it was causing spam when compiling the CUTLASS kernels
+            gcc-10 \
+            g++-10 \
+        && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 110 --slave /usr/bin/g++ g++ /usr/bin/g++-10 \
+        # Install python dev headers if available (needed for cmake FindPython on Ubuntu 24.04
+        # which ships cmake 3.28 and requires Development.SABIModule; silently skipped on
+        # Ubuntu 20.04/22.04 where python3.x-dev is not available without a PPA)
+        && (apt-get install -y --no-install-recommends python${PYTHON_VERSION}-dev 2>/dev/null || true) \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
+
+# Install uv and bootstrap /opt/venv. Both paths converge on /opt/venv so all
+# downstream stages stay distro-agnostic.
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
+    && if [ "${BUILD_OS}" = "manylinux" ]; then \
+           # manylinux images ship Python at /opt/python/cpXY-cpXY/; point uv
+           # at the matching interpreter rather than letting it fetch one.
+           PYV_NODOT=$(echo ${PYTHON_VERSION} | tr -d '.') \
+           && MANYLINUX_PY=/opt/python/cp${PYV_NODOT}-cp${PYV_NODOT}/bin/python${PYTHON_VERSION} \
+           && $HOME/.local/bin/uv venv /opt/venv --python "$MANYLINUX_PY"; \
+       else \
+           $HOME/.local/bin/uv venv /opt/venv --python ${PYTHON_VERSION}; \
+       fi \
     && rm -f /usr/bin/python3 /usr/bin/python3-config /usr/bin/pip \
-    && ln -s /opt/venv/bin/python3 /usr/bin/python3 \
-    && ln -s /opt/venv/bin/python3-config /usr/bin/python3-config \
-    && ln -s /opt/venv/bin/pip /usr/bin/pip \
+    && ln -sf /opt/venv/bin/python3 /usr/bin/python3 \
+    && ln -sf /opt/venv/bin/python3-config /usr/bin/python3-config \
+    && ln -sf /opt/venv/bin/pip /usr/bin/pip \
     && python3 --version && python3 -m pip --version
 
 # Activate virtual environment and add uv to PATH
@@ -163,7 +199,10 @@ COPY requirements/cuda.txt requirements/cuda.txt
 COPY use_existing_torch.py use_existing_torch.py
 COPY pyproject.toml pyproject.toml
 RUN --mount=type=cache,target=/root/.cache/uv \
-    if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
+    if [ "$(echo $CUDA_VERSION | cut -d. -f1)" = "12" ]; then \
+        sed -i 's/^nvidia-cutlass-dsl\[cu13\]>=/nvidia-cutlass-dsl>=/' requirements/cuda.txt; \
+    fi \
+    && if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
         echo "Installing torch nightly..." \
         && uv pip install --python /opt/venv/bin/python3 torch torchaudio torchvision --pre \
         --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
@@ -265,6 +304,14 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         python3 use_existing_torch.py --prefix; \
     fi
 
+# Provision one bare Python per `requires-python` entry; cmake reads
+# DEEPGEMM_PYTHON_INTERPRETERS to build DeepGEMM `_C` for each. See
+# cmake/external_projects/deepgemm.cmake for the full picture.
+COPY tools/setup_deepgemm_pythons.sh tools/build_deepgemm_C.py tools/
+ENV DEEPGEMM_VENV_PREFIX=/opt/dgenv
+RUN --mount=type=cache,target=/root/.cache/uv \
+    tools/setup_deepgemm_pythons.sh > /tmp/dg_pythons.txt
+
 # Build the vLLM wheel
 # if USE_SCCACHE is set, use sccache to speed up compilation
 # AWS credentials mounted at ~/.aws/credentials for sccache S3 auth (optional)
@@ -292,6 +339,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         && export VLLM_PRECOMPILED_WHEEL_COMMIT="${VLLM_MERGE_BASE_COMMIT}" \
         && export VLLM_MAIN_CUDA_VERSION="${VLLM_MAIN_CUDA_VERSION}" \
         && export VLLM_DOCKER_BUILD_CONTEXT=1 \
+        && export DEEPGEMM_PYTHON_INTERPRETERS=$(cat /tmp/dg_pythons.txt) \
         && sccache --show-stats \
         && python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38 \
         && sccache --show-stats; \
@@ -309,6 +357,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
         export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED}" && \
         export VLLM_PRECOMPILED_WHEEL_COMMIT="${VLLM_MERGE_BASE_COMMIT}" && \
         export VLLM_DOCKER_BUILD_CONTEXT=1 && \
+        export DEEPGEMM_PYTHON_INTERPRETERS=$(cat /tmp/dg_pythons.txt) && \
         python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38; \
     fi
 
@@ -433,6 +482,7 @@ FROM base AS dev
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 ARG PYTORCH_CUDA_INDEX_BASE_URL
+ARG BUILD_OS
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
@@ -442,7 +492,11 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_LINK_MODE=copy
 
 # Install libnuma-dev, required by fastsafetensors (fixes #20384)
-RUN apt-get update && apt-get install -y --no-install-recommends libnuma-dev && rm -rf /var/lib/apt/lists/*
+RUN if [ "${BUILD_OS}" = "manylinux" ]; then \
+        dnf install -y numactl-devel && dnf clean all && rm -rf /var/cache/dnf; \
+    else \
+        apt-get update && apt-get install -y --no-install-recommends libnuma-dev && rm -rf /var/lib/apt/lists/*; \
+    fi
 
 
 # We can specify the standard or nightly build of PyTorch
@@ -575,6 +629,9 @@ ARG PYTORCH_CUDA_INDEX_BASE_URL
 COPY requirements/common.txt /tmp/common.txt
 COPY requirements/cuda.txt /tmp/requirements-cuda.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
+    if [ "$(echo $CUDA_VERSION | cut -d. -f1)" = "12" ]; then \
+        sed -i 's/^nvidia-cutlass-dsl\[cu13\]>=/nvidia-cutlass-dsl>=/' /tmp/requirements-cuda.txt; \
+    fi && \
     uv pip install --system -r /tmp/requirements-cuda.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') && \
     rm /tmp/requirements-cuda.txt /tmp/common.txt
@@ -582,7 +639,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Install FlashInfer JIT cache (requires CUDA-version-specific index URL)
 # https://docs.flashinfer.ai/installation.html
 # From versions.json: .flashinfer.version
-ARG FLASHINFER_VERSION=0.6.8.post1
+ARG FLASHINFER_VERSION=0.6.11.post2
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
         --extra-index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
@@ -788,9 +845,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
                 libcublas-dev-${CUDA_VERSION_DASH} \
                 libcusolver-dev-${CUDA_VERSION_DASH}"; \
     if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
-        if [ "$CUDA_MAJOR" -ge 13 ]; then \
-            uv pip install --system nixl-cu13; \
-        fi; \
         uv pip install --system -r /tmp/kv_connectors.txt --no-build || ( \
             # if the above fails, install from source
             apt-get update -y && \
@@ -800,6 +854,30 @@ RUN --mount=type=cache,target=/root/.cache/uv \
             # clean up -dev packages, keep runtime libraries
             rm -rf /var/lib/apt/lists/* \
         ); \
+        # Force-reinstall the matching CUDA wheel so the correct nixl_ep_cpp.so is installed.
+        uv pip install --system --force-reinstall --no-deps nixl-cu${CUDA_MAJOR}; \
+    fi
+
+# Optional override: install mooncake-transfer-engine from a URL instead of the
+# PyPI release pulled in above. Use this for wheels built with non-default CMake
+# flags (e.g. `STORE_USE_ETCD=ON` for master HA). The URL's manylinux glibc
+# floor must be <= the FINAL_BASE_IMAGE's glibc.
+ARG MOONCAKE_WHEEL_AARCH64
+ARG MOONCAKE_WHEEL_X86_64
+RUN if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
+        if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
+            WHEEL="${MOONCAKE_WHEEL_AARCH64}"; \
+        else \
+            WHEEL="${MOONCAKE_WHEEL_X86_64}"; \
+        fi && \
+        if [ -n "${WHEEL}" ]; then \
+            uv pip install --system "${WHEEL}" && \
+            CUDA_MAJOR="${CUDA_VERSION%%.*}" && \
+            if [ ! -f /usr/local/cuda/lib64/libcudart.so ] && \
+               [ -f "/usr/local/cuda/lib64/libcudart.so.${CUDA_MAJOR}" ]; then \
+                ln -s "libcudart.so.${CUDA_MAJOR}" /usr/local/cuda/lib64/libcudart.so; \
+            fi; \
+        fi; \
     fi
 
 ENV VLLM_USAGE_SOURCE production-docker-image
@@ -819,7 +897,7 @@ LABEL org.opencontainers.image.source="https://github.com/vllm-project/vllm" \
 # define sagemaker first, so it is not default from `docker build`
 FROM vllm-openai-base AS vllm-sagemaker
 
-COPY examples/online_serving/sagemaker-entrypoint.sh .
+COPY examples/deployment/sagemaker-entrypoint.sh .
 RUN chmod +x sagemaker-entrypoint.sh
 ENTRYPOINT ["./sagemaker-entrypoint.sh"]
 

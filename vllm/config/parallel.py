@@ -135,8 +135,10 @@ class ParallelConfig:
     data_parallel_external_lb: bool = False
     """Whether to use "external" DP LB mode. Applies only to online serving
     and when data_parallel_size > 0. This is useful for a "one-pod-per-rank"
-    wide-EP setup in Kubernetes. Set implicitly when --data-parallel-rank
-    is provided explicitly to vllm serve."""
+    wide-EP setup in Kubernetes. Supported only for MoE deployments; non-MoE
+    models should use independent vLLM instances without --data-parallel-*
+    arguments. Set implicitly when --data-parallel-rank is provided explicitly
+    to vllm serve."""
     data_parallel_hybrid_lb: bool = False
     """Whether to use "hybrid" DP LB mode. Applies only to online serving
     and when data_parallel_size > 0. Enables running an AsyncLLM

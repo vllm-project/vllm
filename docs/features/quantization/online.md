@@ -42,18 +42,59 @@ vllm serve meta-llama/Llama-3.1-8B --quantization mxfp8
 
 For fine-grained control, use a `quantization_config` dictionary.
 
+### Schema
+
+```yaml
+quantization_config:
+  linear:
+    weight: <name>      # see QUANT_KEY_NAMES in vllm/config/quantization.py
+    activation: <name>
+  moe:
+    weight: <name>
+    activation: <name>
+  ignore: [<layer-name-or-regex>, ...]
+```
+
+`linear` and `moe` accept a full `{weight, activation}` dict, or a bare
+string. A string resolves first against the `--quantization` shorthands
+(taking the matching layer-kind slot), then against `QUANT_KEY_NAMES` as a
+weight name. Unset fields fall back to the `--quantization` shorthand's
+defaults, or for already-quantized checkpoints to whatever the checkpoint
+declares.
+
+The CLI accepts the same shape as JSON or as dotted keys:
+
+```bash
+vllm serve <model> --quantization-config '{"moe":{"activation":"mxfp8"}}'
+vllm serve <model> --quantization-config.moe.activation mxfp8
+```
+
+### Activation overrides on already-quantized checkpoints
+
+For checkpoint-quantized models, `quantization_config` lets you pick an
+activation format independently of the baked-in weights. The supported
+overrides are checkpoint-specific; today this is wired up for MXFP4 MoE
+checkpoints (gpt-oss) where you can opt into FP8 activations:
+
+```bash
+vllm serve openai/gpt-oss-20b --quantization-config.moe.activation mxfp8
+```
+
+Combine with `--moe-backend` to pin a specific kernel family.
+
 ### Separate Schemes for Dense and MoE Layers
 
-You can apply different quantization schemes to dense linear layers and MoE expert layers:
+You can apply different quantization schemes to dense linear layers and MoE expert layers via the `linear` and `moe` fields. Each accepts either a full spec dict, or a bare string naming an online shorthand (e.g. `"fp8_per_block"`) or weight format (e.g. `"fp8_per_block_static"`); fields not set fall back to the shorthand defaults.
 
 ```python
 from vllm import LLM
 
+# Linear: per-block FP8; MoE: per-tensor FP8 (inherited from the shorthand)
 llm = LLM(
     "ibm-granite/granite-3.0-1b-a400m-base",
     quantization="fp8_per_tensor",
     quantization_config={
-        "linear_scheme_override": "fp8_per_block",
+        "linear": "fp8_per_block",
     },
 )
 ```
@@ -63,11 +104,12 @@ Or,
 ```python
 from vllm import LLM
 
+# Linear: per-tensor FP8 (inherited); MoE: per-block FP8
 llm = LLM(
     "ibm-granite/granite-3.0-1b-a400m-base",
     quantization="fp8_per_tensor",
     quantization_config={
-        "moe_scheme_override": "fp8_per_block",
+        "moe": "fp8_per_block",
     },
 )
 ```
