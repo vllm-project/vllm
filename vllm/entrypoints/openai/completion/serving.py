@@ -551,11 +551,6 @@ class OpenAIServingCompletion(OpenAIServing):
                     token_ids=(
                         as_list(output.token_ids) if request.return_token_ids else None
                     ),
-                    routed_experts=(
-                        output.routed_experts.tolist()
-                        if output.routed_experts is not None
-                        else None
-                    ),
                 )
                 choices.append(choice_data)
 
@@ -579,13 +574,8 @@ class OpenAIServingCompletion(OpenAIServing):
             )
 
         request_metadata.final_usage_info = usage
-        prompt_routed_experts = None
         if final_res_batch:
             kv_transfer_params = final_res_batch[0].kv_transfer_params
-            pre = final_res_batch[0].prompt_routed_experts
-            if pre is not None:
-                prompt_routed_experts = pre.tolist()
-
         return CompletionResponse(
             id=request_id,
             created=created_time,
@@ -594,7 +584,6 @@ class OpenAIServingCompletion(OpenAIServing):
             usage=usage,
             system_fingerprint=self.system_fingerprint,
             kv_transfer_params=kv_transfer_params,
-            prompt_routed_experts=prompt_routed_experts,
         )
 
     def _create_completion_logprobs(

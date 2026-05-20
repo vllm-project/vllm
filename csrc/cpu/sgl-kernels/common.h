@@ -348,6 +348,13 @@ inline int get_cache_blocks<at::Float8_e4m3fn>(int chunk_size) {
   return std::min(MAX_CACHE_BLOCK_SIZE, cache_block_size);
 }
 
+template <>
+inline int get_cache_blocks<uint8_t>(int chunk_size) {
+  // mxfp4 uses bf16 as accumulate type
+  int cache_block_size = get_cache_blocks<at::BFloat16>(chunk_size);
+  return std::min(MAX_CACHE_BLOCK_SIZE, cache_block_size);
+}
+
 // 2d sequential loop in range : [mb0, mb1), [nb0, nb1)
 template <typename T, typename func_t>
 inline void loop_2d(int64_t mb0, int64_t mb1, int64_t nb0, int64_t nb1, int64_t chunk_size, const func_t& f) {

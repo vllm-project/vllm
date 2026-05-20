@@ -30,10 +30,8 @@ from vllm.model_executor.models.interfaces import supports_any_eagle
 from vllm.multimodal import NestedTensors
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
-from vllm.utils.platform_utils import (
-    is_pin_memory_available,
-)
 from vllm.utils.torch_utils import (
+    async_tensor_h2d,
     direct_register_custom_op,
 )
 
@@ -498,10 +496,9 @@ def isin_list(
     elements: torch.Tensor,
     test_elements_list: list[int],
 ) -> torch.Tensor:
-    test_elements = torch.tensor(
-        test_elements_list,
-        pin_memory=is_pin_memory_available(),
-    ).to(device=elements.device, non_blocking=True)
+    test_elements = async_tensor_h2d(
+        test_elements_list, dtype=torch.int64, device=elements.device
+    )
 
     return torch.isin(elements, test_elements)
 
@@ -807,14 +804,9 @@ def extract_layer_index(layer_name: str, num_attn_module: int = 1) -> int:
         return layer_index
 
 
-def cast_overflow_tensors(
-    tensors: torch.Tensor,
-    offset: float = 1000,
-) -> torch.Tensor:
-    if tensors.isinf().any() or tensors.isnan().any():
-        clamp_value = torch.finfo(tensors.dtype).max - offset
-        tensors = torch.clamp(tensors, min=-clamp_value, max=clamp_value)
-    return tensors
+def cast_overflow_tensors(tensors: torch.Tensor, offset: float = 1000) -> torch.Tensor:
+    clamp_value = torch.finfo(tensors.dtype).max - offset
+    return torch.clamp(tensors, min=-clamp_value, max=clamp_value)
 
 
 def fast_topk(
@@ -919,3 +911,19 @@ def get_layer_index(feature_layer_index: int, num_hidden_layers: int) -> int:
     if feature_layer_index < 0:
         return num_hidden_layers + feature_layer_index + 1
     return feature_layer_index
+
+
+def scatter_output_slices(
+    output: torch.Tensor,
+    indices: list[int],
+    per_item_out_tokens: list[int],
+    dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
+    clone: bool = False,
+) -> None:
+    """Slice a concatenated output tensor and scatter into dest by index."""
+    offset = 0
+    for idx in indices:
+        n_tok = per_item_out_tokens[idx]
+        sliced = output[offset : offset + n_tok]
+        dest[idx] = sliced.clone() if clone else sliced
+        offset += n_tok
