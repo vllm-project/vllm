@@ -14,7 +14,7 @@ import numpy as np
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.v1.kv_offload.base import OffloadingSpec
 
 # Type alias for job IDs used in async transfer tracking
 JobId = int
@@ -55,18 +55,18 @@ class SecondaryTierManager(ABC):
 
     def __init__(
         self,
-        vllm_config: "VllmConfig",
+        offloading_spec: "OffloadingSpec",
         primary_kv_view: memoryview,
         tier_type: str,
     ) -> None:
         """
         Args:
-            vllm_config: Global vLLM configuration.
+            offloading_spec: Offloading configuration.
             primary_kv_view: Memoryview of the primary tier's CPU KV cache.
             tier_type: Tier type identifier, set by SecondaryTierFactory
                 from the registered tier type.
         """
-        self._vllm_config = vllm_config
+        self._offloading_spec = offloading_spec
         self._primary_kv_view: memoryview = primary_kv_view
         self.tier_type = tier_type
 
