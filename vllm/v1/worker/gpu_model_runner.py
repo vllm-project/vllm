@@ -134,6 +134,7 @@ from vllm.v1.attention.backends.utils import (
     create_fast_prefill_custom_backend,
     get_dcp_local_seq_lens,
     reorder_batch_to_split_decodes_and_prefills,
+    resolve_kv_cache_layout,
 )
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
@@ -6873,8 +6874,6 @@ class GPUModelRunner(
             corresponding memory buffer for KV cache.
         """
         if layout is None:
-            from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
-
             layout = resolve_kv_cache_layout()
         kv_caches: dict[str, torch.Tensor] = {}
         for group in self._kv_cache_spec_attn_group_iterator():
@@ -6888,12 +6887,13 @@ class GPUModelRunner(
                     continue
                 raw_tensor = kv_cache_raw_tensors[layer_name]
                 num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
-
                 if isinstance(kv_cache_spec, AttentionSpec):
                     num_blocks_per_kv_block = (
                         kv_cache_spec.block_size // kernel_block_size
                     )
                     kernel_num_blocks = num_blocks * num_blocks_per_kv_block
+
+                    # For MLA with compression, storage_block_size != block_size
                     if kv_cache_spec.storage_block_size != kv_cache_spec.block_size:
                         shape_block_size = kv_cache_spec.storage_block_size
                     else:

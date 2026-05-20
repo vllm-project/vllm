@@ -279,7 +279,8 @@ class GPULoadStoreSpec(BlockIDsLoadStoreSpec):
 
 @dataclass
 class CanonicalKVCacheTensor:
-    """A canonicalized KV cache tensor whose first dimension is num_blocks.
+    """
+    A canonicalized KV cache tensor whose first dimension is num_blocks.
 
     With standardized layouts (RFC #42082) num_blocks is always the
     leading logical dimension.  Legacy backends with K/V outermost are

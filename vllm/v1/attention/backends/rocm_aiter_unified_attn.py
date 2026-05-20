@@ -186,8 +186,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             )
 
         kv_cache = kv_cache.transpose(1, 2)
-        hs = self.head_size
-        key_cache, value_cache = kv_cache.split(hs, dim=-1)
+        key_cache, value_cache = kv_cache.split(self.head_size, dim=-1)
 
         softmax_scale = self.scale
         if is_quantized_kv_cache(self.kv_cache_dtype):
@@ -237,8 +236,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             # we use direct Q, K, V tensors without caching
             return
         kv_cache = kv_cache.transpose(1, 2)
-        hs = self.head_size
-        key_cache, value_cache = kv_cache.split(hs, dim=-1)
+        key_cache, value_cache = kv_cache.split(self.head_size, dim=-1)
 
         # Reshape the input keys and values and store them in the cache.
         ops.reshape_and_cache_flash(
@@ -272,8 +270,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             # we use direct Q, K, V tensors without caching
             return
         kv_cache = kv_cache.transpose(1, 2)
-        hs = self.head_size
-        key_cache, value_cache = kv_cache.split(hs, dim=-1)
+        key_cache, value_cache = kv_cache.split(self.head_size, dim=-1)
         flash_layout = True
 
         is_fp8_kv_cache = is_quantized_kv_cache(self.kv_cache_dtype)

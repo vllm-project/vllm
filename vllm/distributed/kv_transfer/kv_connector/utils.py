@@ -16,6 +16,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
@@ -411,8 +412,6 @@ class TransferTopology:
         # Cross-layer layouts (BLHNC) have B outermost, so all layers
         # for a block are contiguous — transfers can coalesce multiple
         # layers into one operation.
-        from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
-
         self._is_kv_layout_blocks_first = not resolve_kv_cache_layout().is_layer_compact
 
     # ============================================================

@@ -1042,8 +1042,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         # performance to make sure it does not introduce any overhead.
         num_actual_tokens = attn_metadata.num_actual_tokens
         kv_cache = kv_cache.transpose(1, 2)
-        hs = self.head_size
-        key_cache, value_cache = kv_cache.split(hs, dim=-1)
+        key_cache, value_cache = kv_cache.split(self.head_size, dim=-1)
 
         if is_quantized_kv_cache(self.kv_cache_dtype):
             key_cache = key_cache.view(current_platform.fp8_dtype())
@@ -1369,8 +1368,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         slot_mapping: torch.Tensor,
     ):
         kv_cache = kv_cache.transpose(1, 2)
-        hs = self.head_size
-        key_cache, value_cache = kv_cache.split(hs, dim=-1)
+        key_cache, value_cache = kv_cache.split(self.head_size, dim=-1)
 
         # key and value may be None in the case of cross attention. They are
         # calculated once based on the output from the encoder and then cached
@@ -1439,8 +1437,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         layer_slot_mapping: torch.Tensor,
     ):
         kv_cache = kv_cache.transpose(1, 2)
-        hs = self.head_size
-        key_cache, value_cache = kv_cache.split(hs, dim=-1)
+        key_cache, value_cache = kv_cache.split(self.head_size, dim=-1)
         flash_layout = True
 
         is_fp8_kv_cache = is_quantized_kv_cache(self.kv_cache_dtype)

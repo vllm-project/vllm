@@ -1046,8 +1046,7 @@ class FlexAttentionImpl(AttentionImpl):
             return
 
         kv_cache = kv_cache.transpose(1, 2)
-        hs = self.head_size
-        key_cache, value_cache = kv_cache.split(hs, dim=-1)
+        key_cache, value_cache = kv_cache.split(self.head_size, dim=-1)
         torch.ops._C_cache_ops.reshape_and_cache_flash(
             key,
             value,
@@ -1153,8 +1152,7 @@ class FlexAttentionImpl(AttentionImpl):
         else:
             assert self.attn_type == AttentionType.DECODER
             kv_cache = kv_cache.transpose(1, 2)
-            hs = self.head_size
-            key_cache, value_cache = kv_cache.split(hs, dim=-1)
+            key_cache, value_cache = kv_cache.split(self.head_size, dim=-1)
 
             # Flatten (num_blocks, block_size) into a single token dim
             key_cache = key_cache.reshape(-1, self.num_kv_heads, self.head_size)

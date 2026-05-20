@@ -322,8 +322,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
                 self.attn_type,
             )
 
-        hs = self.head_size
-        key_cache, value_cache = kv_cache.split(hs, dim=-1)
+        key_cache, value_cache = kv_cache.split(self.head_size, dim=-1)
 
         # key and value may be None in the case of cross attention. They are
         # calculated once based on the output from the encoder and then cached

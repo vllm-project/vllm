@@ -1423,25 +1423,7 @@ class FlashInferImpl(AttentionImpl):
         output_padded = output
         output = output[:num_actual_tokens]
 
-        if attn_metadata.use_cascade:
-            # Cascade attention (rare case).
-            assert attn_metadata.cascade_wrapper is not None
-            stride_order = resolve_kv_cache_layout().layer_stride_order
-            kv_perm = kv_cache.permute(*stride_order)
-            hs_c = self.head_size
-            output.copy_(
-                attn_metadata.cascade_wrapper.run(
-                    query,
-                    (kv_perm[..., :hs_c], kv_perm[..., hs_c:]),
-                )
-            )
-            return output
-
-        # When using spec decoding, num_decodes can be < num_decode_tokens
-        # because some decode requests may have more than one query token.
-        num_decode_tokens = attn_metadata.num_decode_tokens
-        num_prefill_tokens = attn_metadata.num_prefill_tokens
-
+        # Permute to FlashInfer's expected layout (metadata-only).
         stride_order = resolve_kv_cache_layout().layer_stride_order
         kv_cache_permute = kv_cache.permute(*stride_order)
         # Fix degenerate strides on any size-1 dimension (e.g. num_kv_heads=1
@@ -1462,8 +1444,18 @@ class FlashInferImpl(AttentionImpl):
 
         # Split K/V from the packed content dim via narrow — zero-copy views.
         # FlashInfer accepts non-contiguous K/V tensors through its tuple API.
-        hs = self.head_size
-        kv_cache_tuple = kv_cache_permute.split(hs, dim=-1)
+        kv_cache_tuple = kv_cache_permute.split(self.head_size, dim=-1)
+
+        if attn_metadata.use_cascade:
+            # Cascade attention (rare case).
+            assert attn_metadata.cascade_wrapper is not None
+            output.copy_(attn_metadata.cascade_wrapper.run(query, kv_cache_tuple))
+            return output
+
+        # When using spec decoding, num_decodes can be < num_decode_tokens
+        # because some decode requests may have more than one query token.
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        num_prefill_tokens = attn_metadata.num_prefill_tokens
 
         # For NVFP4, the kv_cache last dim is full_dim (data + scale packed).
         # Split into correctly-strided data and scale views.
@@ -1610,7 +1602,7 @@ class FlashInferImpl(AttentionImpl):
                     # (B, 2, H, N, hs).
                     B_kv, H_kv, N_kv = kv_cache_permute.shape[:3]
                     kv_cache_5d = (
-                        kv_cache_permute.view(B_kv, H_kv, N_kv, 2, hs)
+                        kv_cache_permute.view(B_kv, H_kv, N_kv, 2, self.head_size)
                         .permute(0, 3, 1, 2, 4)
                         .contiguous()
                     )
@@ -1796,8 +1788,7 @@ class FlashInferImpl(AttentionImpl):
             # op uses the slot_mapping's shape to determine the number of
             # actual tokens.
             kv_cache = kv_cache.transpose(1, 2)
-            hs = self.head_size
-            k_cache, v_cache = kv_cache.split(hs, dim=-1)
+            k_cache, v_cache = kv_cache.split(self.head_size, dim=-1)
             torch.ops._C_cache_ops.reshape_and_cache_flash(
                 key,
                 value,

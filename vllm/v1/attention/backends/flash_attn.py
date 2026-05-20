@@ -133,13 +133,6 @@ class FlashAttentionBackend(AttentionBackend):
     def get_builder_cls() -> type["FlashAttentionMetadataBuilder"]:
         return FlashAttentionMetadataBuilder
 
-    @staticmethod
-    def get_fp8_dtype_for_flashattn(kv_cache_dtype: str) -> torch.dtype:
-        if kv_cache_dtype in ("fp8", "fp8_e4m3"):
-            return torch.float8_e4m3fn
-        else:
-            raise ValueError(f"Unrecognized FP8 dtype: {kv_cache_dtype}")
-
     @classmethod
     def supports_head_size(cls, head_size: int) -> bool:
         if head_size % 8 != 0:
@@ -705,8 +698,7 @@ class FlashAttentionImpl(AttentionImpl):
         # (B, N, H, C) = (num_blocks, block_size, num_heads, head_size)
         # which FlashAttention expects, then split K/V on the content dim.
         kv_cache = kv_cache.transpose(1, 2)
-        hs = self.head_size
-        key_cache, value_cache = kv_cache.split(hs, dim=-1)
+        key_cache, value_cache = kv_cache.split(self.head_size, dim=-1)
         # Fix degenerate strides on size-1 dims (e.g. num_kv_heads=1 with TP).
         # FA3/4 on H100+ uses TMA, which requires ≥16-byte stride alignment.
         # See vllm.utils.torch_utils.canonicalize_singleton_dim_strides.
@@ -837,8 +829,7 @@ class FlashAttentionImpl(AttentionImpl):
 
         # Scatter write into the KV cache using slot_mapping indices.
         kv_cache = kv_cache.transpose(1, 2)
-        hs = self.head_size
-        key_cache, value_cache = kv_cache.split(hs, dim=-1)
+        key_cache, value_cache = kv_cache.split(self.head_size, dim=-1)
 
         # Reshape the input keys and values and store them in the cache.
         # Skip this if sharing KV cache with an earlier attention layer.

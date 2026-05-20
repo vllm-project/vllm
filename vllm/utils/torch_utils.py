@@ -478,7 +478,8 @@ def nvfp4_kv_cache_split_views(kv_cache: torch.Tensor) -> tuple[tuple, tuple]:
 
     Args:
         kv_cache: 4D uint8 tensor where the last dimension is
-            ``2 * full_dim`` with ``full_dim = 9 * head_size / 16``.
+            ``2 * full_dim`` with
+            ``full_dim = data_dim + scale_dim = 9 * head_size / 16``.
 
     Returns:
         ``(k_data, v_data), (k_scale, v_scale)``

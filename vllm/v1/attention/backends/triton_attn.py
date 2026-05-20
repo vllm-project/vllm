@@ -534,10 +534,9 @@ class TritonAttentionImpl(AttentionImpl):
 
         # (B, H, N, C) -> (B, N, H, C) for kernel compatibility.
         kv_cache = kv_cache.transpose(1, 2)
-        hs = self.head_size
         if self._is_per_token_head_quant:
             self._ensure_scale_caches(kv_cache)
-            key_cache, value_cache = kv_cache.split(hs, dim=-1)
+            key_cache, value_cache = kv_cache.split(self.head_size, dim=-1)
             if key_cache.dtype == torch.uint8:
                 key_cache = key_cache.view(self.fp8_dtype)
                 value_cache = value_cache.view(self.fp8_dtype)
@@ -548,7 +547,7 @@ class TritonAttentionImpl(AttentionImpl):
             v_scale_cache = self._v_scale_cache
         # FP8 per-tensor / auto path (original flow).
         else:
-            key_cache, value_cache = kv_cache.split(hs, dim=-1)
+            key_cache, value_cache = kv_cache.split(self.head_size, dim=-1)
             if (
                 is_quantized_kv_cache(self.kv_cache_dtype)
                 and key_cache.dtype != self.fp8_dtype
@@ -682,10 +681,9 @@ class TritonAttentionImpl(AttentionImpl):
             return
         # Reshape the input keys and values and store them in the cache.
         kv_cache = kv_cache.transpose(1, 2)
-        hs = self.head_size
         if self._is_per_token_head_quant:
             self._ensure_scale_caches(kv_cache)
-            key_cache, value_cache = kv_cache.split(hs, dim=-1)
+            key_cache, value_cache = kv_cache.split(self.head_size, dim=-1)
             if key_cache.dtype == torch.uint8:
                 key_cache = key_cache.view(self.fp8_dtype)
                 value_cache = value_cache.view(self.fp8_dtype)
@@ -700,7 +698,7 @@ class TritonAttentionImpl(AttentionImpl):
             )
             return
         # For decoder and cross-attention, use KV cache as before.
-        key_cache, value_cache = kv_cache.split(hs, dim=-1)
+        key_cache, value_cache = kv_cache.split(self.head_size, dim=-1)
         if is_quantized_kv_cache(self.kv_cache_dtype):
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
@@ -733,8 +731,7 @@ class TritonAttentionImpl(AttentionImpl):
         layer_slot_mapping: torch.Tensor,
     ):
         kv_cache = kv_cache.transpose(1, 2)
-        hs = self.head_size
-        key_cache, value_cache = kv_cache.split(hs, dim=-1)
+        key_cache, value_cache = kv_cache.split(self.head_size, dim=-1)
         flash_layout = True
 
         is_fp8_kv_cache = is_quantized_kv_cache(self.kv_cache_dtype)
