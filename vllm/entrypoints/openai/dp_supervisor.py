@@ -260,7 +260,6 @@ class DPSupervisor:
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
-        # asyncio.get_running_loop().set_debug(True)
 
         # K8s sends SIGTERM for shutdown - begin graceful termination.
         for sig in (signal.SIGTERM, signal.SIGINT):

@@ -22,6 +22,7 @@ def _make_args(**overrides) -> argparse.Namespace:
         "data_parallel_supervisor_port": 9256,
         "dp_supervisor_probe_interval_s": 5.0,
         "dp_supervisor_probe_timeout_s": 5.0,
+        "dp_supervisor_probe_failure_threshold": 3,
         "data_parallel_size": 8,
         "data_parallel_size_local": 4,
         "data_parallel_start_rank": None,
@@ -111,7 +112,7 @@ async def test_handles_probe_failure(
     monkeypatch.setattr(dp_supervisor, "_probe_endpoint", fake_probe)
 
     await supervisor._monitor_children()
-    assert supervisor._is_ready is True
+    assert supervisor._is_ready is False
 
 
 @pytest.mark.asyncio
