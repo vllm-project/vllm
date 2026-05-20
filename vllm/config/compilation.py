@@ -1160,6 +1160,16 @@ class CompilationConfig:
                             "to enable RoPE+KV cache fusion."
                         )
                         self.pass_config.fuse_rope_kvcache = False
+                    if self.pass_config.fuse_qk_norm_rope_kvcache:
+                        logger.warning_once(
+                            "fuse_qk_norm_rope_kvcache is enabled, but "
+                            "splitting_ops is None and Inductor graph partition "
+                            "is not enabled. Disabling fuse_qk_norm_rope_kvcache. "
+                            "Please either set splitting_ops to an empty list [] "
+                            "or set use_inductor_graph_partition to True "
+                            "to enable QK-Norm+RoPE+KV cache fusion."
+                        )
+                        self.pass_config.fuse_qk_norm_rope_kvcache = False
                     self.splitting_ops.append("vllm::unified_kv_cache_update")
                     self.splitting_ops.append("vllm::unified_mla_kv_cache_update")
 
