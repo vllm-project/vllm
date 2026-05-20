@@ -21,11 +21,9 @@ import sys
 from io import StringIO
 from itertools import product
 from typing import Any
-from unittest.mock import patch
 
 import torch
 
-import vllm.model_executor.layers.mamba.ops.mamba_ssm as mamba_ssm_module
 from tests.kernels.mamba.test_mamba_ssm import selective_state_update_ref
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
     _CONFIGS_DIR,
@@ -33,6 +31,7 @@ from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
     _get_default_ssm_launch_config,
     get_ssm_config_file_name,
     get_ssm_device_name,
+    override_ssm_config,
     selective_state_update,
 )
 from vllm.triton_utils import triton
@@ -138,11 +137,6 @@ def benchmark_config(
         batch, nheads, dim, dstate, ngroups, dtype, state_dtype=state_dtype
     )
 
-    # Monkeypatch try_get_optimal_ssm_config to return the specific config
-    # without affecting the lru_cache on get_ssm_configs.
-    def _fixed_launch_config(*_args, **_kwargs):
-        return block_size_m, num_warps_val
-
     def _call_kernel() -> None:
         selective_state_update(
             state,
@@ -159,9 +153,7 @@ def benchmark_config(
         )
 
     try:
-        with patch.object(
-            mamba_ssm_module, "try_get_optimal_ssm_config", _fixed_launch_config
-        ):
+        with override_ssm_config((block_size_m, num_warps_val)):
             # Eager-mode warmup: triggers Triton autotune / JIT, primes caches.
             for _ in range(num_warmup):
                 _call_kernel()
@@ -384,11 +376,7 @@ def validate_configs(
         # Clone state before GPU kernel modifies it in-place
         state_ref = state.clone()
 
-        # GPU kernel output
-        def _fixed(*_args, _cfg=cfg, **_kwargs):
-            return _cfg["BLOCK_SIZE_M"], _cfg["num_warps"]
-
-        with patch.object(mamba_ssm_module, "try_get_optimal_ssm_config", _fixed):
+        with override_ssm_config((cfg["BLOCK_SIZE_M"], cfg["num_warps"])):
             selective_state_update(
                 state,
                 x,

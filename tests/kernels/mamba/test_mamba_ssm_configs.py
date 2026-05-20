@@ -14,6 +14,7 @@ Tests cover:
 import json
 
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
+    _try_get_optimal_ssm_config_cached,
     get_ssm_config_file_name,
     get_ssm_configs,
     get_ssm_device_name,
@@ -28,7 +29,7 @@ _CACHE_DTYPE = "float32"
 
 def _clear_caches() -> None:
     get_ssm_configs.cache_clear()
-    try_get_optimal_ssm_config.cache_clear()
+    _try_get_optimal_ssm_config_cached.cache_clear()
 
 
 def _write_config(tmp_path, dstate: int, payload: dict) -> None:

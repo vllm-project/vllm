@@ -7,6 +7,7 @@
 import functools
 import json
 import os
+from contextlib import contextmanager
 from typing import Any
 
 import torch
@@ -130,6 +131,44 @@ def _get_default_ssm_launch_config(
 
 
 @functools.cache
+def _try_get_optimal_ssm_config_cached(
+    headdim: int,
+    dstate: int,
+    batch: int,
+    nheads: int,
+    cache_dtype: str,
+    is_blackwell: bool,
+) -> tuple[int, int]:
+    """Cached resolution. See :func:`try_get_optimal_ssm_config`."""
+    effective_batch = batch * nheads
+    configs = get_ssm_configs(headdim, dstate, cache_dtype)
+    if configs:
+        # Pick the closest effective_batch in the tuned grid (MoE strategy).
+        closest = min(configs.keys(), key=lambda x: abs(x - effective_batch))
+        cfg = configs[closest]
+        return cfg["BLOCK_SIZE_M"], cfg["num_warps"]
+
+    return _get_default_ssm_launch_config(dstate, is_blackwell)
+
+
+# Override hook for benchmarks/tests, see `override_ssm_config`.
+_ssm_config_override: tuple[int, int] | None = None
+
+
+@contextmanager
+def override_ssm_config(config: tuple[int, int]):
+    """Force ``try_get_optimal_ssm_config`` to return ``config`` for the
+    duration of the context. Used by the tuning benchmark to time specific
+    (BLOCK_SIZE_M, num_warps) pairs."""
+    global _ssm_config_override
+    prev = _ssm_config_override
+    _ssm_config_override = config
+    try:
+        yield
+    finally:
+        _ssm_config_override = prev
+
+
 def try_get_optimal_ssm_config(
     headdim: int,
     dstate: int,
@@ -144,15 +183,11 @@ def try_get_optimal_ssm_config(
     scales with the product), so configs transfer across (model, TP) combos
     sharing ``(headdim, dstate, cache_dtype)``.
     """
-    effective_batch = batch * nheads
-    configs = get_ssm_configs(headdim, dstate, cache_dtype)
-    if configs:
-        # Pick the closest effective_batch in the tuned grid (MoE strategy).
-        closest = min(configs.keys(), key=lambda x: abs(x - effective_batch))
-        cfg = configs[closest]
-        return cfg["BLOCK_SIZE_M"], cfg["num_warps"]
-
-    return _get_default_ssm_launch_config(dstate, is_blackwell)
+    if _ssm_config_override is not None:
+        return _ssm_config_override
+    return _try_get_optimal_ssm_config_cached(
+        headdim, dstate, batch, nheads, cache_dtype, is_blackwell
+    )
 
 
 if TRITON3:
