@@ -52,14 +52,6 @@ def generate_eval_configs(
             server_params["tool_call_parser"] = "cohere_command4"
             server_params["reasoning_parser"] = "cohere_command4"
             server_params["enable_auto_tool_choice"] = ""
-            reasoning_config = json.dumps(
-                {
-                    "reasoning_start_str": "<|START_THINKING|>",
-                    "reasoning_end_str": "<|END_THINKING|>",
-                },
-                separators=(",", ":"),
-            )
-            server_params["reasoning-config"] = f"'{reasoning_config}'"
 
         # Add speculative decoding configuration if model path contains "eagle"
         if "eagle" in model_path.lower():

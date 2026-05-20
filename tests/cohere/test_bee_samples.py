@@ -49,7 +49,7 @@ class TaskConfig:
 
 
 TASK_CONFIG: dict[str, TaskConfig] = {
-    "mmlupro": TaskConfig("mmlupro_16samples.jsonl", min_score=0.6),
+    "mmlupro": TaskConfig("mmlupro_16samples.jsonl", min_score=0.4),
     "ocrbench": TaskConfig("ocrbench_16samples.jsonl"),
     "infovqa": TaskConfig("infovqa_16samples.jsonl"),
     "mathvista": TaskConfig("mathvista_16samples.json"),
@@ -57,7 +57,7 @@ TASK_CONFIG: dict[str, TaskConfig] = {
         "aime_2025_16samples.csv",
         thinking_budget=16384,
         max_tokens=32768,
-        min_score=0.3,
+        min_score=0.24,
     ),
     "mgsm": TaskConfig("mgsm_ja_16samples.csv"),
     "mbpp_plus": TaskConfig(

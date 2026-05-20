@@ -32,6 +32,9 @@ SAMPLE_YAML = textwrap.dedent(
           max-num-batched-tokens: "8192"
           max-num-seqs: "128"
           max-model-len: "256000"
+          reasoning-config: >-
+            {"reasoning_start_str":"<|START_THINKING|>",
+            "reasoning_end_str":"<|END_THINKING|>"}
         env:
           VLLM_USE_V1: "1"
       - name: vllm-b200
@@ -286,6 +289,9 @@ def test_post_init_applies_for_cohere(
     assert ea.max_num_batched_tokens == 8192
     assert ea.max_num_seqs == 128
     assert ea.max_model_len == 256000
+    assert ea.reasoning_config is not None
+    assert ea.reasoning_config.reasoning_start_str == "<|START_THINKING|>"
+    assert ea.reasoning_config.reasoning_end_str == "<|END_THINKING|>"
     # `attention_backend` lands as a string (matches `vllm serve` behavior;
     # downstream config validation resolves the string -> AttentionBackendEnum
     # the same way it does for CLI users).

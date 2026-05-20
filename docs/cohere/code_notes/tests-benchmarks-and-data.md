@@ -43,7 +43,7 @@ Why this is central:
 
 - **C5 models** (`"c5" in model_name`) receive additional server flags: `--tool-call-parser cohere_command4`, `--reasoning-parser cohere_command4`, and `--enable-auto-tool-choice`. These enable Melody tool-calling and reasoning parse support at the vLLM server level.
 - **C5 models** also receive `thinking_token_budget` (4096 for non-reasoning, 20480 for reasoning) in `eval_parameters`. `run-bee-eval.sh` reads these values and conditionally builds `--extra_body` args for the bee eval command; non-C5 models omit `--extra_body` entirely.
-- **All models with reasoning tests** (any test path containing `"reasoning"`) receive a `--reasoning-config` server flag with `think_start_str`/`think_end_str` markers.
+- **`--reasoning-config`** (Cohere thinking markers) is applied via Cohere auto-config (`hardware_profiles.yaml` → `vllm-default` profile) when `VLLM_ENABLE_COHERE_AUTO_CONFIG=1` (set by CI shells). It is not emitted in `serving-cohere-tests.json`.
 
 Why this matters:
 

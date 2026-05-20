@@ -428,7 +428,7 @@ run_thinking_budget() {
 
     # Thinking budget — SD BLS
     echo "Running thinking budget SD with BLS model: $BLS_MODEL_DIR"
-    python3 test_thinking_budget.py --reasoning_mode "reasoning" --model $BLS_MODEL_DIR --tensor_parallel_size 2 --draft_model $BLS_DRAFT_MODEL_DIR --num_spec_tokens 3 --draft_tp 1 --mode "speculative" || errors=1
+    python3 test_thinking_budget.py --reasoning_mode "reasoning" --model $BLS_MODEL_DIR --tensor_parallel_size 2 --draft_model $BLS_DRAFT_MODEL_DIR --num_spec_tokens 3 --draft_tp 2 --mode "speculative" || errors=1
 
     exit $errors
 }

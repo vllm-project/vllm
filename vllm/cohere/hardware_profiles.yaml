@@ -10,6 +10,8 @@ profiles:
       max-num-seqs: "128"
       max-model-len: "256000"
       max-cudagraph-capture-size: "128"
+      # Cohere thinking markers for ReasoningConfig / thinking-token-budget.
+      reasoning-config: '{"reasoning_start_str":"<|START_THINKING|>","reasoning_end_str":"<|END_THINKING|>"}'
     env:
       VLLM_USE_V1: "1"
       VLLM_WORKER_MULTIPROC_METHOD: spawn
