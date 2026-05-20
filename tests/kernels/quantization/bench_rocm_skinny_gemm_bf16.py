@@ -40,13 +40,9 @@ SHAPES = [
     (37888, 3584, "Qwen2.5VL-7B gate_up"),
     (3584, 18944, "Qwen2.5VL-7B down"),
     (152064, 3584, "Qwen2.5VL-7B lm_head"),
-    # Qwen3.5-35B-A3B (vocab=248320, hidden=2048).  The (M, K=2048, N=1)
-    # shapes here are the ones the gfx11 dispatcher routes through the
-    # tuned (W=32, AC=16, YT=1, UN=8) branch added by this PR.
-    (256, 2048, "Qwen3.5-35B-A3B router gate"),
-    (1024, 2048, "Qwen3.5-35B-A3B shared gate_up"),
-    (2048, 512, "Qwen3.5-35B-A3B shared down"),
+    # Qwen3.5-35B-A3B (vocab=248320, hidden=2048)
     (248320, 2048, "Qwen3.5-35B-A3B lm_head"),
+    (1024, 2048, "Qwen3.5-35B-A3B 1024 proj"),
     # Llama-3.1-8B (hidden=4096, intermediate=14336, vocab=128256)
     (4096, 4096, "Llama-8B q/o_proj"),
     (6144, 4096, "Llama-8B qkv"),
