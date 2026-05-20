@@ -60,7 +60,7 @@ curl -s http://localhost:8000/score -H "Content-Type: application/json" -d '{
 }'
 ```
 
-You can also get the raw token embeddings using the pooling API with `token_embed` task:
+You can also get the raw token embeddings using the Pooling API with `token_embed` task:
 
 ```shell
 curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
@@ -174,7 +174,7 @@ curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
 }'
 ```
 
-For **image inputs** via the pooling API, use the chat-style `messages` field:
+For **image inputs** via the Pooling API, use the chat-style `messages` field:
 
 ```shell
 curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{

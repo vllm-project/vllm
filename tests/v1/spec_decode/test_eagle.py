@@ -50,6 +50,8 @@ def _create_proposer(
     num_speculative_tokens: int,
     attention_backend: str | None = None,
     parallel_drafting: bool = False,
+    rejection_sample_method: str = "standard",
+    draft_sample_method: str = "greedy",
 ) -> EagleProposer:
     # Method-dependent setup
     if method == "eagle":
@@ -81,6 +83,8 @@ def _create_proposer(
         method=method,
         num_speculative_tokens=num_speculative_tokens,
         parallel_drafting=parallel_drafting,
+        rejection_sample_method=rejection_sample_method,
+        draft_sample_method=draft_sample_method,
     )
     if parallel_drafting:
         # Overwrite pard_token to avoid crash during init
@@ -995,6 +999,103 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
 
     # Verify all tokens match our expectations
     assert torch.equal(result, expected_tokens)
+
+
+def test_propose_stores_probabilistic_draft_probs(monkeypatch):
+    device = torch.device(DEVICE_TYPE)
+    batch_size = 2
+    seq_lens = [5, 3]
+    total_tokens = sum(seq_lens)
+    num_speculative_tokens = 3
+    vocab_size = 8
+
+    proposer = _create_proposer(
+        "draft_model",
+        num_speculative_tokens,
+        rejection_sample_method="standard",
+        draft_sample_method="probabilistic",
+    )
+    hidden_size = proposer.hidden_size
+    expanded_total_tokens = total_tokens + batch_size
+
+    model_mock = mock.MagicMock()
+    forward_returns = []
+    logits_returns = []
+    for step in range(num_speculative_tokens):
+        token_count = expanded_total_tokens if step == 0 else batch_size
+        forward_returns.append(torch.zeros(token_count, hidden_size, device=device))
+        logits = torch.full((batch_size, vocab_size), -10.0, device=device)
+        logits[0, step + 1] = 5.0
+        logits[1, step + 3] = 4.0
+        logits_returns.append(logits)
+
+    model_mock.side_effect = forward_returns
+    model_mock.compute_logits.side_effect = logits_returns
+    proposer.model = model_mock
+    proposer._draft_attn_layer_names = {"layer.0"}
+
+    def fake_compute_probs(logits, sampling_metadata):
+        probs = torch.softmax(logits, dim=-1)
+        return probs.argmax(dim=-1), probs
+
+    monkeypatch.setattr(
+        "vllm.v1.spec_decode.llm_base_proposer.compute_probs_and_sample_next_token",
+        fake_compute_probs,
+    )
+
+    batch_spec = BatchSpec(seq_lens=seq_lens, query_lens=seq_lens)
+    common_attn_metadata = create_common_attn_metadata(
+        batch_spec,
+        block_size=BLOCK_SIZE,
+        device=device,
+    )
+
+    attn_metadata_builder_cls, _ = try_get_attention_backend(
+        AttentionBackendEnum.FLASH_ATTN
+    )
+    attn_metadata_builder = attn_metadata_builder_cls(
+        kv_cache_spec=create_standard_kv_cache_spec(proposer.vllm_config),
+        layer_names=proposer._draft_attn_layer_names,
+        vllm_config=proposer.vllm_config,
+        device=device,
+    )
+    proposer.runner = mock.MagicMock()
+    mock_attn_group = mock.MagicMock()
+    mock_attn_group.get_metadata_builder.return_value = attn_metadata_builder
+    mock_attn_group.layer_names = list(proposer._draft_attn_layer_names)
+    mock_attn_group.kv_cache_spec = attn_metadata_builder.kv_cache_spec
+    proposer.draft_attn_groups = [mock_attn_group]
+
+    sampling_metadata = mock.MagicMock()
+    sampling_metadata.all_greedy = False
+
+    result = proposer.propose(
+        target_token_ids=torch.randint(0, vocab_size, (total_tokens,), device=device),
+        target_positions=torch.cat(
+            [
+                torch.arange(seq_lens[0], device=device),
+                torch.arange(seq_lens[1], device=device),
+            ]
+        ),
+        target_hidden_states=torch.randn(total_tokens, hidden_size, device=device),
+        next_token_ids=torch.randint(
+            0, vocab_size, (batch_size,), dtype=torch.int32, device=device
+        ),
+        token_indices_to_sample=None,
+        common_attn_metadata=common_attn_metadata,
+        sampling_metadata=sampling_metadata,
+    )
+
+    assert result.shape == (batch_size, num_speculative_tokens)
+
+    draft_probs = proposer.take_last_draft_probs()
+    assert draft_probs is not None
+    assert draft_probs.shape == (batch_size, num_speculative_tokens, vocab_size)
+    for step, expected_logits in enumerate(logits_returns):
+        assert torch.allclose(
+            draft_probs[:, step, :],
+            torch.softmax(expected_logits, dim=-1),
+        )
 
 
 def test_set_inputs_first_pass_dflash():
