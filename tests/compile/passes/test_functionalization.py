@@ -312,10 +312,13 @@ class TestFusedDeepseekV4QnormRopeKvInsert(torch.nn.Module):
         self, q: torch.Tensor, k_cache: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Create dummy inputs that the real kernel would use (but we mock)
-        batch_size = q.shape[0]
+        # q shape: [N, H, HEAD_DIM=512]
+        num_slots = q.shape[0]
+        num_heads = q.shape[1]
         kv = torch.empty_like(q)
-        slot_mapping = torch.zeros(batch_size, dtype=torch.long, device=q.device)
-        position_ids = torch.arange(batch_size, device=q.device)
+        slot_mapping = torch.zeros(num_slots, dtype=torch.long, device=q.device)
+        position_ids = torch.arange(num_slots, device=q.device)
+        # cos_sin_cache shape: [max_positions, rope_dim=64]
         cos_sin_cache = torch.zeros(4096, 64, dtype=q.dtype, device=q.device)
         eps = 1e-5
         cache_block_size = 16
@@ -326,10 +329,12 @@ class TestFusedDeepseekV4QnormRopeKvInsert(torch.nn.Module):
         )
         return q, k_cache
 
-    def example_inputs(self, num_tokens=32, hidden_size=128):
+    def example_inputs(self, num_slots=32, num_heads=1):
+        # q shape: [N, H, HEAD_DIM=512]
+        head_dim = 512
         return (
-            torch.randn(num_tokens, hidden_size),
-            torch.randn(num_tokens, hidden_size),
+            torch.randn(num_slots, num_heads, head_dim),
+            torch.randn(num_slots, num_heads, head_dim),
         )
 
     def ops_in_model(self, do_fusion):
