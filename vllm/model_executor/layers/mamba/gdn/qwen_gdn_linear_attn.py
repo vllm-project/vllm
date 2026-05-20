@@ -191,7 +191,7 @@ def _resolve_gdn_prefill_backend(
 
     supports_cutedsl = (
         is_cuda
-        and current_platform.has_device_capability(100)
+        and current_platform.is_device_capability_family(100)
         and head_k_dim == 128
         and current_platform.get_cuda_runtime_major() >= 13
     )
