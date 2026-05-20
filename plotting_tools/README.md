@@ -25,33 +25,40 @@ uv pip install -r plotting_tools/requirements.txt
 .venv/bin/python plotting_tools/analyze_job.py --job-dir results/7651157
 ```
 
-Outputs: `results/7651157/plots/<trace_stem>/`
+Outputs:
 
-| Plot | File |
-|------|------|
-| Decomposed timeline (Attention / Gate / Experts / Norm / Comm / Control) | `decomposed_timeline.png` |
-| Category time share (%) | `traffic_volume_pct.png` |
-| Classic compute / comm / control | `compute_comm_control_timeline.png` |
-| Expert traffic heuristic (GB) | `expert_traffic_gb.png` |
-| Rank-to-rank comm heatmap (PP/TP; per trace + merged job) | `rank_traffic_heatmap.png`, `job-level rank_traffic_heatmap.png` |
-| GPU-to-GPU comm heatmap (on-node TP) | `gpu_traffic_heatmap.png` |
-| All-to-all heatmap (alias, white → green → dark blue) | `all2all_traffic_heatmap.png` |
-| Prefill / decode / all comm counts & avg size | `message_stats_prefill_decode.png` |
-| NCCL ops (timestamp, name, bytes, shape) | `collective_ops.json` |
-| No-comm window CDF | `nocomm_windows_cdf.png` |
-| Comm start delta CDF | `comm_start_delta_cdf.png` |
-| GPU idle window CDF | `gpu_idle_windows_cdf.png` |
-| Idle before/after activity (bars + heatmap) | `idle_transitions_by_time.png`, `idle_transition_heatmap.png` |
-| Per-gap idle context (JSON) | `idle_gaps.json` |
-| Collective op breakdown (bar) | `collective_ops_breakdown.png` |
+```
+results/<job-id>/plots/
+├── htc-g059/              # per-node (hostname from trace path)
+├── htc-g060/
+└── summary_plots/         # cross-node combined metrics
+```
+
+| Plot | Per-node dir | Summary dir |
+|------|--------------|-------------|
+| Decomposed timeline | `decomposed_timeline.png` | — |
+| Category time share (%) | `traffic_volume_pct.png` | `duty_by_node.png`, `traffic_volume_pct_mean.png` |
+| Classic compute / comm / control | `compute_comm_control_timeline.png` | — |
+| Expert traffic heuristic (GB) | `expert_traffic_gb.png` | `expert_traffic_gb_by_node.png` |
+| Rank-to-rank comm heatmap | `rank_traffic_heatmap.png` | `rank_traffic_heatmap.png` (merged) |
+| GPU-to-GPU comm heatmap (on-node TP) | `gpu_traffic_heatmap.png` | — |
+| All-to-all heatmap (alias) | `all2all_traffic_heatmap.png` | — |
+| Prefill / decode / all comm counts & avg size | `message_stats_prefill_decode.png` | — |
+| NCCL ops (timestamp, name, bytes, shape) | `collective_ops.json` | — |
+| No-comm window CDF | `nocomm_windows_cdf.png` | `nocomm_windows_cdf.png` (per node + pooled) |
+| Comm start delta CDF | `comm_start_delta_cdf.png` | `comm_start_delta_cdf.png` (per node + pooled) |
+| GPU idle window CDF | `gpu_idle_windows_cdf.png` | `gpu_idle_windows_cdf.png` (per node + pooled) |
+| Idle before/after activity | `idle_transitions_by_time.png`, `idle_transition_heatmap.png` | `idle_transition_heatmap.png` (merged) |
+| Per-gap idle context (JSON) | `idle_gaps.json` | `idle_gaps.json` (merged) |
+| Collective op breakdown (bar) | `collective_ops_breakdown.png` | `collective_ops_breakdown.png` (summed) |
 
 Nsight GUI **JSONL** export is supported directly (no `nsys export` step):
 
 ```bash
-.venv/bin/python plotting_tools/analyze_job.py \
-  --job-dir results/7651157 \
-  --trace results/7651157/ray_worker_nsight/htc-g060/worker_process_2184846.jsonl
+.venv/bin/python plotting_tools/analyze_job.py --job-dir results/7692897
 ```
+
+Auto-discovers `ray_worker_nsight/**/*.jsonl`, plots each node under `plots/htc-g059/` etc., and writes combined charts to `plots/summary_plots/`.
 
 ## Classification
 

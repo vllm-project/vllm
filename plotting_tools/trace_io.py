@@ -156,6 +156,14 @@ def pp_rank_order(job_meta: dict[str, Any]) -> list[str]:
     return workers
 
 
+def infer_node_name(trace_path: Path, *, default: str | None = None) -> str | None:
+    """Extract cluster node id from trace path (e.g. htc-g059)."""
+    m = re.search(r"(htc-g\d+)", trace_path.as_posix(), re.I)
+    if m:
+        return m.group(1).lower()
+    return default
+
+
 def infer_local_rank(
     trace_path: Path,
     job_meta: dict[str, Any],
@@ -163,10 +171,9 @@ def infer_local_rank(
     default: int = 0,
 ) -> int:
     """Map trace path hostname (e.g. htc-g060) to PP rank using Slurm log order."""
-    m = re.search(r"(htc-g\d+)", trace_path.as_posix(), re.I)
-    if not m:
+    node = infer_node_name(trace_path)
+    if not node:
         return default
-    node = m.group(1).lower()
     order = [n.lower() for n in pp_rank_order(job_meta)]
     if node in order:
         return order.index(node)

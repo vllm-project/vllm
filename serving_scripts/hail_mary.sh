@@ -7,7 +7,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=256G
-#SBATCH --time=00:45:10
+#SBATCH --time=00:30:10
 #SBATCH --output=results/%x-%j.out
 #SBATCH --error=results/%x-%j.err
 #SBATCH --mail-user=jason.miller@eng.ox.ac.uk
@@ -17,7 +17,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="no-overlapped-sruns"
+SCRIPT_VERSION="arc-ray-qwen3-30b-a3b-instruct-clean-copy-no-overlap-v3-search-both-ray-tmp-roots"
 
 # Set DEBUG_SLURM_SCRIPT=1 for extra diagnostics.
 # Set NSYS_COPY_DEBUG=1 for verbose Nsight copy traces.
@@ -25,7 +25,7 @@ DEBUG_SLURM_SCRIPT="${DEBUG_SLURM_SCRIPT:-0}"
 NSYS_COPY_DEBUG="${NSYS_COPY_DEBUG:-0}"
 
 # Post-run copy should not hang the whole batch forever.
-SRUN_COPY_TIMEOUT="${SRUN_COPY_TIMEOUT:-180s}"
+SRUN_COPY_TIMEOUT="${SRUN_COPY_TIMEOUT:-480s}"
 
 slurm_debug() {
   if [ "${DEBUG_SLURM_SCRIPT}" = "1" ]; then
@@ -69,6 +69,17 @@ nsight_summarize_dest() {
 
 # Plain, non-overlapped copy step.
 # This must only be called after the long-lived Ray srun steps have exited.
+#
+# IMPORTANT FOR ARC / SLURM:
+#   Nsight worker reports are not guaranteed to appear under /tmp/ray.
+#   In observed runs, htc-g060 wrote under /tmp/ray, while htc-g059 wrote under
+#   Slurm's job-local tmp directory /tmp/slurm-${SLURM_JOB_ID}/tmp/ray.
+#
+#   Therefore, when looking for *.nsys-rep or *.qdstrm files, ALWAYS search BOTH:
+#     1. /tmp/ray/session_*/logs/nsight/*
+#     2. /tmp/slurm-${SLURM_JOB_ID}/tmp/ray/session_*/logs/nsight/*
+#
+#   Do not trust /tmp/ray/session_latest. It can be stale and point to an old job.
 copy_ray_nsight_from_node() {
   local NODE="$1"
   local dest="${TRACE_RUN_DIR}/ray_worker_nsight/${NODE}"
@@ -87,36 +98,52 @@ copy_ray_nsight_from_node() {
       --mem=1G \
       bash -lc "
         set +e
+
         echo '[nsight-copy] on '\$(hostname)' expected ${NODE}'
         echo '[nsight-copy] dest=${dest}'
+        echo '[nsight-copy] SLURM_JOB_ID=${SLURM_JOB_ID:-unknown}'
         mkdir -p '${dest}'
 
         echo '[nsight-copy] session_latest ->' \$(readlink -f /tmp/ray/session_latest 2>/dev/null || echo MISSING)
 
-        if [ -d /tmp/ray/session_latest/logs/nsight ]; then
-          echo '[nsight-copy] copying from /tmp/ray/session_latest/logs/nsight'
-          ls -la /tmp/ray/session_latest/logs/nsight/ 2>/dev/null || true
+        echo '[nsight-copy] candidate nsight dirs:'
+        for d in \
+          /tmp/ray/session_*/logs/nsight \
+          /tmp/slurm-${SLURM_JOB_ID}/tmp/ray/session_*/logs/nsight
+        do
+          [ -d \"\$d\" ] || continue
+          echo '[nsight-copy]   dir='\$d
+          ls -la \"\$d\" 2>/dev/null || true
+        done
 
-          cp -v /tmp/ray/session_latest/logs/nsight/*.nsys-rep '${dest}/' 2>&1 || true
-          cp -v /tmp/ray/session_latest/logs/nsight/*.qdstrm '${dest}/' 2>&1 || true
-        else
-          echo '[nsight-copy] session_latest nsight dir missing; searching /tmp/ray'
-          find /tmp/ray -type f \( -name '*.nsys-rep' -o -name '*.qdstrm' \) \
-            -printf '[nsight-copy] found %p %s bytes\n' 2>/dev/null | sort || true
+        echo '[nsight-copy] candidate report files:'
+        find \
+          /tmp/ray/session_*/logs/nsight \
+          /tmp/slurm-${SLURM_JOB_ID}/tmp/ray/session_*/logs/nsight \
+          -maxdepth 1 -type f \( -name '*.nsys-rep' -o -name '*.qdstrm' \) \
+          -printf '[nsight-copy]   %p %s bytes\n' 2>/dev/null | sort || true
 
-          # Fallback: copy all reports/partials from /tmp/ray.
-          # Prefix with parent session directory when possible to reduce filename collisions.
-          find /tmp/ray -type f \( -name '*.nsys-rep' -o -name '*.qdstrm' \) -print0 2>/dev/null |
-            while IFS= read -r -d '' f; do
-              session=\$(echo \"\$f\" | sed -n 's#^/tmp/ray/\\([^/]*\\)/.*#\\1#p')
-              base=\$(basename \"\$f\")
-              if [ -n \"\$session\" ]; then
-                cp -v \"\$f\" '${dest}'/\"\${session}_\${base}\" 2>&1 || true
-              else
-                cp -v \"\$f\" '${dest}'/\"\${base}\" 2>&1 || true
-              fi
-            done
-        fi
+        copied=0
+
+        find \
+          /tmp/ray/session_*/logs/nsight \
+          /tmp/slurm-${SLURM_JOB_ID}/tmp/ray/session_*/logs/nsight \
+          -maxdepth 1 -type f \( -name '*.nsys-rep' -o -name '*.qdstrm' \) \
+          -print0 2>/dev/null |
+          while IFS= read -r -d '' f; do
+            base=\$(basename \"\$f\")
+
+            # Extract a useful session identifier from either:
+            #   /tmp/ray/session_.../logs/nsight/file
+            #   /tmp/slurm-JOB/tmp/ray/session_.../logs/nsight/file
+            session=\$(echo \"\$f\" | sed -n 's#^.*\(/tmp/ray/\|/tmp/slurm-[^/]*/tmp/ray/\)\(session_[^/]*\)/.*#\2#p')
+            [ -n \"\$session\" ] || session=unknown_session
+
+            # Include the node name and session to avoid collisions across nodes/sessions.
+            out='${dest}'/\"\$(hostname -s)_\${session}_\${base}\"
+
+            cp -v \"\$f\" \"\$out\" 2>&1 && copied=\$((copied + 1)) || true
+          done
 
         echo '[nsight-copy] dest after copy:'
         ls -la '${dest}/' 2>/dev/null || true

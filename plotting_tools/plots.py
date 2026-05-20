@@ -704,39 +704,7 @@ def plot_collective_ops_breakdown(
 ) -> dict[str, dict[str, float | int]]:
     """Bar chart: comm op type vs event count and vs total time (ms)."""
     stats = comm_operation_breakdown(events)
-    if not stats:
-        return stats
-
-    ops = sorted(
-        stats.keys(),
-        key=lambda k: stats[k]["dur_us"],
-        reverse=True,
-    )
-    labels = [comm_operation_label(o) for o in ops]
-    counts = [stats[o]["count"] for o in ops]
-    dur_ms = [stats[o]["dur_us"] / 1000.0 for o in ops]
-
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-
-    x = np.arange(len(ops))
-    axes[0].bar(x, counts, color="#e45756")
-    axes[0].set_xticks(x)
-    axes[0].set_xticklabels(labels, rotation=35, ha="right")
-    axes[0].set_ylabel("Event count")
-    axes[0].set_title("Count by comm op")
-    axes[0].grid(True, axis="y", linestyle="--", alpha=0.3)
-
-    axes[1].bar(x, dur_ms, color="#4c78a8")
-    axes[1].set_xticks(x)
-    axes[1].set_xticklabels(labels, rotation=35, ha="right")
-    axes[1].set_ylabel("Total time (ms)")
-    axes[1].set_title("GPU time by comm op")
-    axes[1].grid(True, axis="y", linestyle="--", alpha=0.3)
-
-    fig.suptitle(title, fontsize=12, y=1.02)
-    plt.tight_layout()
-    fig.savefig(out_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
+    plot_collective_ops_breakdown_stats(stats, out_path, title=title)
     return stats
 
 
@@ -820,6 +788,182 @@ def comm_delta(events: list[dict[str, Any]]) -> list[float]:
     if len(comms) < 2:
         return []
     return [(comms[i + 1]["ts"] - comms[i]["ts"]) / 1000.0 for i in range(len(comms) - 1)]
+
+
+def merge_comm_operation_breakdowns(
+    breakdowns: list[dict[str, dict[str, float | int]]],
+) -> dict[str, dict[str, float | int]]:
+    merged: dict[str, dict[str, float | int]] = defaultdict(
+        lambda: {"count": 0, "dur_us": 0, "bytes": 0}
+    )
+    for stats in breakdowns:
+        for op, vals in stats.items():
+            merged[op]["count"] += vals.get("count", 0)
+            merged[op]["dur_us"] += vals.get("dur_us", 0)
+            merged[op]["bytes"] += vals.get("bytes", 0)
+    return dict(merged)
+
+
+def plot_collective_ops_breakdown_stats(
+    stats: dict[str, dict[str, float | int]],
+    out_path: Path,
+    *,
+    title: str,
+) -> None:
+    """Bar chart from pre-aggregated comm_operation_breakdown stats."""
+    if not stats:
+        return
+    ops = sorted(stats.keys(), key=lambda k: stats[k]["dur_us"], reverse=True)
+    labels = [comm_operation_label(o) for o in ops]
+    counts = [stats[o]["count"] for o in ops]
+    dur_ms = [stats[o]["dur_us"] / 1000.0 for o in ops]
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    x = np.arange(len(ops))
+    axes[0].bar(x, counts, color="#e45756")
+    axes[0].set_xticks(x)
+    axes[0].set_xticklabels(labels, rotation=35, ha="right")
+    axes[0].set_ylabel("Event count")
+    axes[0].set_title("Count by comm op")
+    axes[0].grid(True, axis="y", linestyle="--", alpha=0.3)
+
+    axes[1].bar(x, dur_ms, color="#4c78a8")
+    axes[1].set_xticks(x)
+    axes[1].set_xticklabels(labels, rotation=35, ha="right")
+    axes[1].set_ylabel("Total time (ms)")
+    axes[1].set_title("GPU time by comm op")
+    axes[1].grid(True, axis="y", linestyle="--", alpha=0.3)
+
+    fig.suptitle(title, fontsize=12, y=1.02)
+    plt.tight_layout()
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_duty_by_node(
+    node_duty: dict[str, dict[str, float]],
+    out_path: Path,
+    *,
+    title: str,
+) -> None:
+    """Grouped bar chart: category duty % per node."""
+    if not node_duty:
+        return
+    nodes = sorted(node_duty)
+    labels: list[str] = []
+    for sub, label, _ in DECOMPOSED_LAYERS:
+        if any(node_duty[n].get(sub, 0) > 0 for n in nodes):
+            labels.append(label)
+    if not labels:
+        return
+
+    sub_by_label = {label: sub for sub, label, _ in DECOMPOSED_LAYERS}
+    x = np.arange(len(labels))
+    width = 0.8 / max(len(nodes), 1)
+    fig, ax = plt.subplots(figsize=(12, 5))
+    for i, node in enumerate(nodes):
+        vals = [node_duty[node].get(sub_by_label[label], 0) * 100 for label in labels]
+        offset = (i - (len(nodes) - 1) / 2) * width
+        bars = ax.bar(x + offset, vals, width, label=node)
+        ax.bar_label(bars, labels=[f"{v:.1f}" for v in vals], fontsize=7, padding=1)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=25, ha="right")
+    ax.set_ylabel("Summed duration / trace span (%)")
+    ax.set_title(title)
+    ax.legend(title="Node")
+    ax.grid(True, axis="y", linestyle="--", alpha=0.3)
+    plt.tight_layout()
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
+
+
+def plot_average_duty_pct(
+    node_duty: dict[str, dict[str, float]],
+    out_path: Path,
+    *,
+    title: str,
+    parallel_label: str,
+) -> None:
+    """Mean category duty % across nodes."""
+    if not node_duty:
+        return
+    nodes = list(node_duty)
+    avg: dict[str, float] = {}
+    for sub, label, _ in DECOMPOSED_LAYERS:
+        vals = [node_duty[n].get(sub, 0) for n in nodes]
+        if vals:
+            avg[sub] = sum(vals) / len(vals)
+
+    labels: list[str] = []
+    vals: list[float] = []
+    colors: list[str] = []
+    for sub, label, color in DECOMPOSED_LAYERS:
+        v = avg.get(sub, 0) * 100
+        if v <= 0:
+            continue
+        labels.append(label)
+        vals.append(v)
+        colors.append(color)
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    x = np.arange(len(labels))
+    bars = ax.bar(x, vals, color=colors)
+    ax.bar_label(bars, labels=[f"{v:.1f}%" for v in vals], fontsize=8, padding=2)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=25, ha="right")
+    ax.set_ylabel("Mean duty across nodes (%)")
+    ax.set_title(f"{title}\n{parallel_label}")
+    ax.grid(True, axis="y", linestyle="--", alpha=0.3)
+    plt.tight_layout()
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
+
+
+def plot_multi_window_cdf(
+    series: dict[str, list[float]],
+    out_path: Path,
+    *,
+    xlabel: str,
+    title: str,
+) -> None:
+    """Overlay CDFs for multiple nodes (or pooled if one key 'all')."""
+    if not series:
+        return
+    fig, ax = plt.subplots(figsize=(7, 4))
+    for label, vals in sorted(series.items()):
+        if not vals:
+            continue
+        vals = sorted(vals)
+        n = len(vals)
+        cdf = [(i + 1) / n for i in range(n)]
+        ax.plot(vals, cdf, label=label)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("CDF")
+    ax.set_title(title)
+    ax.legend()
+    ax.grid(True, linestyle="--", alpha=0.35)
+    plt.tight_layout()
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
+
+
+def plot_expert_traffic_by_node(
+    node_gb: dict[str, float],
+    out_path: Path,
+    *,
+    title: str,
+) -> None:
+    if not node_gb:
+        return
+    nodes = sorted(node_gb)
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.bar(nodes, [node_gb[n] for n in nodes], color="#54a24b")
+    ax.set_ylabel("Volume (GB)")
+    ax.set_title(title)
+    plt.tight_layout()
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
 
 
 def plot_classic_timeline(
