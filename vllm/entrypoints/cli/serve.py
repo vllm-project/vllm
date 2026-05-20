@@ -68,13 +68,21 @@ class ServeSubcommand(CLISubcommand):
         # Multi-port: --data-parallel-multi-port-external-lb
         # External LB: --data-parallel-external-lb or --data-parallel-rank
         # Hybrid LB: --data-parallel-hybrid-lb or --data-parallel-start-rank
-        is_multi_port = getattr(args, "data_parallel_multi_port_external_lb", False)
         is_external_lb = (
             args.data_parallel_external_lb or args.data_parallel_rank is not None
         )
-        is_hybrid_lb = (
-            args.data_parallel_hybrid_lb or args.data_parallel_start_rank is not None
-        )
+
+        # If --data_parallel_multi_port_external_lb and --data_parallel_hybrid_lb
+        # are unset, default to hybrid if --data-parallel-start-rank is set
+        is_hybrid_lb = is_multi_port = False
+        if (
+            not args.data_parallel_hybrid_lb
+            and not args.data_parallel_multi_port_external_lb
+        ):
+            is_hybrid_lb = args.data_parallel_start_rank is not None
+        else:
+            is_hybrid_lb = args.data_parallel_hybrid_lb
+            is_multi_port = args.data_parallel_multi_port_external_lb
 
         if sum([is_multi_port, is_external_lb, is_hybrid_lb]) > 1:
             raise ValueError(

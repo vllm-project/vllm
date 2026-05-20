@@ -421,7 +421,7 @@ class DPSupervisor:
                 # 1. Check for dead processes
                 n_failed = len([p for p in self._processes if not p.is_alive()])
                 if n_failed > 0:
-                    logger.error("DPSupervisor found %s exited DP Servers.", n_failed)
+                    logger.info("DPSupervisor found %s exited DP Servers.", n_failed)
                     break
 
                 # 2. Check if the probe background task crashed or failed.
@@ -432,7 +432,7 @@ class DPSupervisor:
                         if probe_task.cancelled() is False
                         else None
                     )
-                    logger.error("DPSupervisor probe task stopped. Exception: %s", exc)
+                    logger.info("DPSupervisor probe task stopped. Exception: %s", exc)
                     break
 
                 # Sleep for probe_interval seconds or until a shutdown.
