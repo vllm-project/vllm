@@ -67,42 +67,12 @@ def _block_size_m_choices(headdim: int) -> list[int]:
     return [b for b in _BSM_CHOICES_ALL if b <= ceiling]
 
 
-# effective_batch = batch * nheads_per_rank — the kernel grid scales with
-# the product, so configs transfer across (model, TP) combos sharing
-# (headdim, dstate, cache_dtype).
-# Ceiling 262144 covers 256-head at TP1, max BS=1024 (256 * 1024).
-EFFECTIVE_BATCH_SIZES = [
-    8,
-    16,
-    24,
-    32,
-    48,
-    64,
-    96,
-    128,
-    192,
-    256,
-    384,
-    512,
-    768,
-    1024,
-    1536,
-    2048,
-    3072,
-    4096,
-    6144,
-    8192,
-    12288,
-    16384,
-    24576,
-    32768,
-    49152,
-    65536,
-    98304,
-    131072,
-    196608,
-    262144,
-]
+# Default deployment shapes. effective_batch = batch * nheads scales the
+# kernel grid, so configs transfer across (model, TP) combos sharing
+# (headdim, dstate, cache_dtype). nheads=128 and 256 cover common Mamba2
+# deployment shapes (Nemotron-class with/without TP).
+DEFAULT_BATCH_SIZES = [1, 8, 16, 32, 64, 128, 256, 512, 1024, 1536, 2048]
+DEFAULT_NHEADS = [128, 256]
 
 ALL_DSTATES = [16, 32, 64, 128, 256]
 
@@ -250,61 +220,44 @@ def benchmark_config(
 # ---------------------------------------------------------------------------
 
 
-# CUDA grid Y/Z dim limit — both `batch` and `nheads` must fit individually,
-# so effective_batch > 65535 has to be split across the two.
+# CUDA grid Y/Z dim limit — both `batch` and `nheads` must fit individually.
 _CUDA_MAX_GRID_DIM = 65535
 
 
-def _factor_effective_batch(
-    effective_batch: int, ngroups: int
-) -> tuple[int, int] | None:
-    """Return (batch, nheads) with batch*nheads == effective_batch such that
-    both fit the CUDA grid Y/Z dim limit and nheads is a positive multiple of
-    ngroups. Prefers batch=1 (the cheapest split) when it fits.
-
-    Returns None if no valid factorization exists.
-    """
-    for batch in range(1, _CUDA_MAX_GRID_DIM + 1):
-        if batch > effective_batch or effective_batch % batch != 0:
-            continue
-        nheads = effective_batch // batch
-        if nheads > _CUDA_MAX_GRID_DIM:
-            continue
-        if nheads % ngroups != 0:
-            continue
-        return batch, nheads
-    return None
-
-
-def _resolve_effective_batches(
-    user_supplied: list[int] | None,
+def expand_batch_x_nheads(
+    batch_sizes: list[int],
+    nheads_list: list[int],
     ngroups: int,
 ) -> list[tuple[int, int, int]]:
-    """Return [(effective_batch, batch, nheads)] for each valid sweep point.
-
-    Drops any effective_batch with no valid (batch, nheads) factorization
-    that satisfies both the CUDA grid dim limit and nheads % ngroups == 0.
+    """Cross-product batch_sizes × nheads_list → sorted [(effective_batch,
+    batch, nheads)], deduped by effective_batch. Filters pairs that exceed
+    the CUDA grid dim limit or where nheads is not a positive multiple of
+    ngroups.
     """
-    candidates = user_supplied if user_supplied is not None else EFFECTIVE_BATCH_SIZES
-    valid: list[tuple[int, int, int]] = []
-    skipped: list[int] = []
-    for eb in candidates:
-        if eb <= 0:
-            skipped.append(eb)
+    seen: dict[int, tuple[int, int]] = {}
+    skipped_grid: list[tuple[int, int]] = []
+    skipped_ngroups: list[tuple[int, int]] = []
+    for b, n in product(batch_sizes, nheads_list):
+        if b <= 0 or n <= 0:
             continue
-        factored = _factor_effective_batch(eb, ngroups)
-        if factored is None:
-            skipped.append(eb)
+        if b > _CUDA_MAX_GRID_DIM or n > _CUDA_MAX_GRID_DIM:
+            skipped_grid.append((b, n))
             continue
-        batch, nheads = factored
-        valid.append((eb, batch, nheads))
-    if skipped:
+        if n % ngroups != 0:
+            skipped_ngroups.append((b, n))
+            continue
+        seen.setdefault(b * n, (b, n))
+    if skipped_grid:
         print(
-            f"  Note: skipping effective_batch values with no valid "
-            f"(batch, nheads) factorization for ngroups={ngroups} "
-            f"under CUDA grid dim {_CUDA_MAX_GRID_DIM}: {skipped}"
+            f"  Note: skipping (batch, nheads) pairs exceeding CUDA grid dim "
+            f"{_CUDA_MAX_GRID_DIM}: {skipped_grid}"
         )
-    return valid
+    if skipped_ngroups:
+        print(
+            f"  Note: skipping (batch, nheads) pairs where nheads % ngroups != 0 "
+            f"for ngroups={ngroups}: {skipped_ngroups}"
+        )
+    return sorted((eb, b, n) for eb, (b, n) in seen.items())
 
 
 def tune_dstate(
@@ -314,16 +267,15 @@ def tune_dstate(
     dtype: torch.dtype,
     num_iters: int,
     verbose: bool,
-    effective_batches: list[int] | None = None,
+    active: list[tuple[int, int, int]],
     state_dtype: torch.dtype | None = None,
 ) -> tuple[dict[int, dict], dict[int, dict[tuple[int, int], float]]]:
-    """For each effective_batch, sweep (BLOCK_SIZE_M, num_warps) and return
+    """For each (effective_batch, batch, nheads) in *active*, sweep
+    (BLOCK_SIZE_M, num_warps) and return
     ({effective_batch: best_config}, {effective_batch: {(bsm, nw): us}}).
     The second map is the full timing grid, used downstream so we don't
     re-measure the same config in the comparison phase.
     """
-    active = _resolve_effective_batches(effective_batches, ngroups)
-
     best_per_eb: dict[int, dict] = {}
     timings: dict[int, dict[tuple[int, int], float]] = {}
 
@@ -401,14 +353,16 @@ def validate_configs(
     headdim: int,
     ngroups: int,
     tuned: dict[int, dict],
+    active: list[tuple[int, int, int]],
     dtype: torch.dtype,
     atol: float = 1e-2,
     rtol: float = 1e-2,
     state_dtype: torch.dtype | None = None,
 ) -> dict[int, bool]:
     """
-    For every effective_batch in *tuned*, run the kernel with the tuned config
-    and compare against the reference. Returns {effective_batch: passed}.
+    For every (effective_batch, batch, nheads) in *active* that has a tuned
+    config, run the kernel with that config and compare against the reference.
+    Returns {effective_batch: passed}.
     """
     # Disable TF32 in the reference's matmul: at larger effective_batch the
     # worst output value grows, so TF32 rounding shows up as a bf16-quantum
@@ -427,11 +381,10 @@ def validate_configs(
 
     results: dict[int, bool] = {}
 
-    for eb, cfg in sorted(tuned.items()):
-        factored = _factor_effective_batch(eb, ngroups)
-        if factored is None:
+    for eb, batch, nheads in active:
+        cfg = tuned.get(eb)
+        if cfg is None:
             continue
-        batch, nheads = factored
         state, x, dt, A, B, C, D, dt_bias, out = _make_inputs(
             batch=batch,
             nheads=nheads,
@@ -544,13 +497,12 @@ def compare_heuristic_vs_tuned(
     ngroups: int,
     tuned: dict[int, dict],
     timings: dict[int, dict[tuple[int, int], float]],
+    active: list[tuple[int, int, int]],
     dtype: torch.dtype,
     num_iters: int,
     is_blackwell: bool,
-    effective_batches: list[int] | None = None,
     state_dtype: torch.dtype | None = None,
 ):
-    active = _resolve_effective_batches(effective_batches, ngroups)
     heur_cfg = current_heuristic(dstate, is_blackwell)
     heur_key = (heur_cfg["BLOCK_SIZE_M"], heur_cfg["num_warps"])
 
@@ -701,12 +653,21 @@ def main():
         help=f"Number of B/C groups (default: {DEFAULT_NGROUPS})",
     )
     parser.add_argument(
-        "--effective-batches",
+        "--batch-sizes",
         type=int,
         nargs="+",
-        default=None,
-        metavar="EB",
-        help="Tune only these effective_batch values (default: full sweep)",
+        default=DEFAULT_BATCH_SIZES,
+        metavar="B",
+        help=f"Decoder batch sizes to sweep (default: {DEFAULT_BATCH_SIZES})",
+    )
+    parser.add_argument(
+        "--nheads",
+        type=int,
+        nargs="+",
+        default=DEFAULT_NHEADS,
+        metavar="N",
+        help=f"Number of heads per rank to sweep (default: {DEFAULT_NHEADS}). "
+        "effective_batch = batch * nheads; cross-product is deduped by eb.",
     )
     parser.add_argument(
         "--validate",
@@ -753,6 +714,7 @@ def main():
         print(f"triton : {triton.__version__}")
 
         dstates = ALL_DSTATES if args.all_dstates else [args.dstate]
+        active = expand_batch_x_nheads(args.batch_sizes, args.nheads, args.ngroups)
 
         for dstate in dstates:
             tuned, timings = tune_dstate(
@@ -762,7 +724,7 @@ def main():
                 dtype=dtype,
                 num_iters=args.num_iters,
                 verbose=args.verbose,
-                effective_batches=args.effective_batches,
+                active=active,
                 state_dtype=state_dtype,
             )
 
@@ -774,10 +736,10 @@ def main():
                     ngroups=args.ngroups,
                     tuned=tuned,
                     timings=timings,
+                    active=active,
                     dtype=dtype,
                     num_iters=args.num_iters,
                     is_blackwell=is_blackwell,
-                    effective_batches=args.effective_batches,
                     state_dtype=state_dtype,
                 )
 
@@ -787,6 +749,7 @@ def main():
                     headdim=args.headdim,
                     ngroups=args.ngroups,
                     tuned=tuned,
+                    active=active,
                     dtype=dtype,
                     atol=args.atol,
                     state_dtype=state_dtype,
