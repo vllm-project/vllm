@@ -1341,7 +1341,14 @@ class MoRIIOConnectorWorker:
                 self._unmatched_write_completions |= fresh
                 done_recving = self._unmatched_write_completions
             else:
-                done_recving = self._pop_done_transfers()
+                # READ mode: the scheduler treats KV loads as synchronous
+                # (load_kv_async=False), so requests go directly to RUNNING
+                # instead of WAITING_FOR_REMOTE_KVS. We still call
+                # _pop_done_transfers() to send the notify to the prefill
+                # side and clean up internal state, but we must NOT report
+                # these as done_recving because the scheduler doesn't
+                # expect a finished_recving signal for RUNNING requests.
+                self._pop_done_transfers()
 
         done_recving = {
             self.transfer_id_to_request_id[id]
