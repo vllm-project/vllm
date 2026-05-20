@@ -233,11 +233,11 @@ void launch_persistent_topk(const torch::Tensor& logits,
 // Falls back to persistent_topk on pre-SM90 hardware.
 // ============================================================================
 
-template <uint32_t CS>
-void launch_cluster_impl(cluster_topk::Params& params, uint32_t num_sms, size_t smem,
+template <uint32_t K_VAL, uint32_t CS>
+void launch_cluster_impl(cluster_topk::Params<K_VAL>& params, uint32_t num_sms, size_t smem,
                           cudaStream_t stream) {
   const uint32_t nc = params.num_rows;
-  auto kernel = &cluster_topk::cluster_persistent_topk_impl<CS>;
+  auto kernel = (CS == 8) ? &cluster_topk::cluster_topk_cs8<K_VAL> : &cluster_topk::cluster_topk_cs4<K_VAL>;
   static bool s = false;
   if (!s) { cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem); s = true; }
   cudaLaunchConfig_t cfg = {};
@@ -253,8 +253,9 @@ void launch_cluster_impl(cluster_topk::Params& params, uint32_t num_sms, size_t 
   TORCH_CHECK(err == cudaSuccess, "cluster_topk launch failed: ", cudaGetErrorString(err));
 }
 
-void launch_register_topk(cluster_topk::Params& params, size_t smem, cudaStream_t stream) {
-  auto kernel = &cluster_topk::register_topk_kernel;
+template <uint32_t K_VAL>
+void launch_register_topk(cluster_topk::Params<K_VAL>& params, size_t smem, cudaStream_t stream) {
+  auto kernel = &cluster_topk::register_topk_kernel<K_VAL>;
   static bool s = false;
   if (!s) { cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem); s = true; }
   kernel<<<params.num_rows, cluster_topk::kBlockSize, smem, stream>>>(params);
@@ -262,7 +263,8 @@ void launch_register_topk(cluster_topk::Params& params, size_t smem, cudaStream_
   TORCH_CHECK(err == cudaSuccess, "register_topk launch failed: ", cudaGetErrorString(err));
 }
 
-void launch_cluster_topk_1024(const torch::Tensor& logits,
+template <uint32_t K_VAL>
+void launch_cluster_topk(const torch::Tensor& logits,
                                const torch::Tensor& lengths,
                                torch::Tensor& output,
                                torch::Tensor& workspace,
@@ -283,11 +285,10 @@ void launch_cluster_topk_1024(const torch::Tensor& logits,
   // Large batch: FilteredTopK (single CTA per row, CG-safe)
   // Includes register_topk<12,8> fast path for sl <= 32K
   if (num_rows > 48) {
-    constexpr int TopK = 1024;
-    cudaError_t status = vllm::FilteredTopKRaggedTransform<float, int32_t, TopK>(
+    cudaError_t status = vllm::FilteredTopKRaggedTransform<float, int32_t, K_VAL>(
         logits.data_ptr<float>(), output.data_ptr<int32_t>(),
         lengths.data_ptr<int32_t>(), static_cast<uint32_t>(num_rows),
-        static_cast<uint32_t>(TopK), static_cast<uint32_t>(logits.size(1)), stream);
+        static_cast<uint32_t>(K_VAL), static_cast<uint32_t>(logits.size(1)), stream);
     TORCH_CHECK(status == cudaSuccess,
                 "FilteredTopK failed: ", cudaGetErrorString(status));
     return;
@@ -298,7 +299,7 @@ void launch_cluster_topk_1024(const torch::Tensor& logits,
   TORCH_CHECK(workspace.size(0) >= (int64_t)(tie_ws_offset + num_rows * ct::kMaxTies * sizeof(ct::Tie)),
               "workspace too small for cluster_topk");
 
-  ct::Params params;
+  ct::Params<K_VAL> params;
   params.input = logits.data_ptr<float>();
   params.output = output.data_ptr<int32_t>();
   params.lengths = lengths.data_ptr<int32_t>();
@@ -308,9 +309,9 @@ void launch_cluster_topk_1024(const torch::Tensor& logits,
   params.stride = static_cast<uint32_t>(logits.size(1));
 
   if (num_rows <= 8)
-    launch_cluster_impl<8>(params, num_sms, ct::kSmemSize8, stream);
+    launch_cluster_impl<K_VAL, 8>(params, num_sms, ct::kSmemSize8, stream);
   else
-    launch_cluster_impl<4>(params, num_sms, ct::kSmemSize4, stream);
+    launch_cluster_impl<K_VAL, 4>(params, num_sms, ct::kSmemSize4, stream);
 }
 
 }  // anonymous namespace
@@ -340,22 +341,17 @@ void persistent_topk(const torch::Tensor& logits, const torch::Tensor& lengths,
   TORCH_CHECK(k == 512 || k == 1024 || k == 2048,
               "persistent_topk supports k=512, k=1024, or k=2048, got k=", k);
 
+  static int cc = 0;
+  if (cc == 0) {
+    int device;
+    cudaGetDevice(&device);
+    cudaDeviceGetAttribute(&cc, cudaDevAttrComputeCapabilityMajor, device);
+  }
+
   if (k == 512) {
-    launch_persistent_topk<512>(logits, lengths, output, workspace,
-                                max_seq_len);
+      launch_cluster_topk<512>(logits, lengths, output, workspace, max_seq_len);    
   } else if (k == 1024) {
-    static int cc = 0;
-    if (cc == 0) {
-      int device;
-      cudaGetDevice(&device);
-      cudaDeviceGetAttribute(&cc, cudaDevAttrComputeCapabilityMajor, device);
-    }
-    if (cc >= 9) {
-      launch_cluster_topk_1024(logits, lengths, output, workspace, max_seq_len);
-    } else {
-      launch_persistent_topk<1024>(logits, lengths, output, workspace,
-                                   max_seq_len);
-    }
+      launch_cluster_topk<1024>(logits, lengths, output, workspace, max_seq_len);    
   } else {
     launch_persistent_topk<2048>(logits, lengths, output, workspace,
                                  max_seq_len);

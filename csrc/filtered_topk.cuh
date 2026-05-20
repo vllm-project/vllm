@@ -415,6 +415,7 @@ __device__ __noinline__ void histogram_2048_topk(
 // ============================================================================
 
 // Adapted from:
+// https://github.com/sgl-project/sglang/blob/v0.5.8/sgl-kernel/csrc/elementwise/topk.cu#L87
 // by: DarkSharpness
 // which at the same time is an optimized topk kernel copied from tilelang
 // kernel
@@ -1057,7 +1058,7 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
   // Short rows: use register_topk (much faster than radix for sl <= 16K)
   if (length <= 32768) {
     extern __shared__ uint8_t _smem_reg[];
-    cluster_topk::register_topk<12, 8>(score, dst, length, _smem_reg);
+    cluster_topk::register_topk<MAX_K, 12, 8>(score, dst, length, _smem_reg);
     return;
   }
 
