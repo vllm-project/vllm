@@ -819,9 +819,7 @@ def _build_flashinfer_mixed_sparse_indices_kernel(
                 block_offsets = values % compressed_block_size
                 values = block_numbers * compressed_block_size + block_offsets
                 values = tl.where(is_valid, values, -1)
-                compressed_len += tl.sum(
-                    (is_valid & token_valid).to(tl.int32), axis=0
-                )
+                compressed_len += tl.sum((is_valid & token_valid).to(tl.int32), axis=0)
             tl.store(
                 sparse_indices_ptr
                 + token_idx * sparse_indices_stride

@@ -201,7 +201,7 @@ def deepseek_v4_flashinfer_sparse_mla_warmup(worker: "Worker") -> None:
             decode_compressed_indices_are_local=decode_compressed_indices_are_local,
             decode_is_valid_token=decode_is_valid_token,
         )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
 
 def flashinfer_autotune(runner: "GPUModelRunner") -> None:
