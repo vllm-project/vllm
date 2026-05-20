@@ -31,7 +31,7 @@ on:
       models:
         required: false
         type: string
-        default: 'command-r7b_fp8,command-a-vision_fp8,c4-25a218t_fp8,c4-25a218t_int4a16,c4-v2-25a218t_int4a16_gs32_gptq,c4-v2-25a218t_int4a16_gs32_awq_gptq,c4-25a218t_w4a8,c4-25a218t_fp8_eagle_l5,c5-3a30t_fp8'
+        default: 'command-r7b_fp8,command-a-vision_fp8,c4-25a218t_fp8,c4-25a218t_int4a16,c4-v2-25a218t_int4a16_gs32_gptq,c4-v2-25a218t_int4a16_gs32_awq_gptq,c4-25a218t_w4a8,c4-25a218t_fp8_eagle_l5,c5-3a30t_fp8,c5-3a30t-base_bf16'
         description: 'Models to run eval on (comma-separated). Optional tensor parallel override per entry: model:tpN (e.g. command-r7b_fp8:tp1). If omitted, uses each model recommended_tp from tp_model_map.json. When any entry uses :tpN, every entry must use the same :tpN.'
       evaluations:
         required: false
@@ -72,7 +72,7 @@ on:
         default: all
       models:
         required: false
-        default: 'command-r7b_fp8,command-a-vision_fp8,c4-25a218t_fp8,c4-25a218t_int4a16,c4-v2-25a218t_int4a16_gs32_gptq,c4-v2-25a218t_int4a16_gs32_awq_gptq,c4-25a218t_w4a8,c4-25a218t_fp8_eagle_l5,c5-3a30t_fp8'
+        default: 'command-r7b_fp8,command-a-vision_fp8,c4-25a218t_fp8,c4-25a218t_int4a16,c4-v2-25a218t_int4a16_gs32_gptq,c4-v2-25a218t_int4a16_gs32_awq_gptq,c4-25a218t_w4a8,c4-25a218t_fp8_eagle_l5,c5-3a30t_fp8,c5-3a30t-base_bf16'
         type: string
         description: 'Models to run eval on (comma-separated). Optional :tpN suffix per entry; same rules as workflow_dispatch.'
       evaluations:

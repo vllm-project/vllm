@@ -45,6 +45,10 @@
       "minimum_tp": 1,
       "recommended_tp": 1
     },
+    "c5-3a30t-base_bf16": {
+      "minimum_tp": 1,
+      "recommended_tp": 1
+    },
     "c5-8a133t_fp8": {
       "minimum_tp": 4,
       "recommended_tp": 4
@@ -83,6 +87,10 @@
       "minimum_tp": 1,
       "recommended_tp": 1
     },
+    "c5-3a30t-base_bf16": {
+      "minimum_tp": 1,
+      "recommended_tp": 1
+    },
     "c5-8a133t_fp8": {
       "minimum_tp": 2,
       "recommended_tp": 2
@@ -114,6 +122,10 @@
       "recommended_tp": 4
     },
     "c5-3a30t_fp8": {
+      "minimum_tp": 1,
+      "recommended_tp": 1
+    },
+    "c5-3a30t-base_bf16": {
       "minimum_tp": 1,
       "recommended_tp": 1
     },
@@ -160,6 +172,10 @@
       "recommended_tp": 4
     },
     "c5-3a30t_fp8": {
+      "minimum_tp": 1,
+      "recommended_tp": 1
+    },
+    "c5-3a30t-base_bf16": {
       "minimum_tp": 1,
       "recommended_tp": 1
     },

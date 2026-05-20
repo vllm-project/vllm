@@ -3,5 +3,11 @@
   "MMLUProAA\\.1000_prompt_subset": "MMLUPro_subset_AA",
   "MathVista\\.MathVista": "MathVista_acc",
   "HeuristicMathGeneration\\.aime_2025_aa": "aime_2025_AA",
-  "AnyVQAGeneration\\.OCRBench": "OCRBench_soft_acc"
+  "AnyVQAGeneration\\.OCRBench": "OCRBench_soft_acc",
+  "GSM8k\\.GSM8k_chain": "GSM8k_chain_maj",
+  "MMLULikelihood\\.MMLU": "MMLU_llh",
+  "RulerRetrieval\\.niah_single_2": "ruler_retrieval_niah_single_2",
+  "RulerRetrieval\\.niah_multikey_1": "ruler_retrieval_niah_multikey_1",
+  "RulerRetrieval\\.niah_multivalue": "ruler_retrieval_niah_multivalue",
+  "RulerRetrieval\\.niah_multiquery": "ruler_retrieval_niah_multiquery"
 }

@@ -8,5 +8,6 @@
   "c4-v2-25a218t_int4a16_gs32_awq_gptq": ["include/vllm-ci/instruct_ci.toml", "include/vllm-ci/vision_ci.toml", "include/vllm-ci/reasoning_ci.toml"],
   "c4-25a218t_w4a8": ["include/vllm-ci/instruct_ci.toml", "include/vllm-ci/vision_ci.toml", "include/vllm-ci/reasoning_ci.toml"],
   "c4-25a218t_fp8_eagle_l5": ["include/vllm-ci/instruct_ci.toml", "include/vllm-ci/vision_ci.toml"],
-  "c5-3a30t_fp8": ["include/vllm-ci/instruct_ci.toml", "include/vllm-ci/vision_ci.toml", "include/vllm-ci/reasoning_ci.toml"]
+  "c5-3a30t_fp8": ["include/vllm-ci/instruct_ci.toml", "include/vllm-ci/vision_ci.toml", "include/vllm-ci/reasoning_ci.toml"],
+  "c5-3a30t-base_bf16": ["include/vllm-ci/base_llh_ci.toml", "include/vllm-ci/base_gen_ci.toml", "include/vllm-ci/base_long_context_ci.toml"]
 }

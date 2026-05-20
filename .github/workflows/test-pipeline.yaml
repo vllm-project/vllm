@@ -110,8 +110,8 @@ jobs:
           set -eo pipefail
           git clone git@github.com:cohere-ai/apiary.git ${{ github.workspace }}/apiary
           cd ${{ github.workspace }}/apiary
-          # Apr 29 main commit
-          git checkout 640a7b2ccb0f7adcaa8f3ec57a29b0dfa13f4cf4
+          # vLLM base eval commit
+          git checkout b2ec159bf1a068db16ec17ffdc1880dc3ad1440d
 
     - name: Download Model Artifacts
       if: ${{ inputs.test_group != 'cpu_check' }}

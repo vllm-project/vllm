@@ -39,6 +39,9 @@ def generate_eval_configs(
 ) -> list[dict[str, Any]]:
     configs: list[dict[str, Any]] = []
     for model_name, model_path in models.items():
+        is_base_model = "base" in model_name
+        is_c5_model = "c5" in model_name
+
         server_params: dict[str, Any] = {
             **SERVER_DEFAULTS,
             "model": model_path,
@@ -47,8 +50,12 @@ def generate_eval_configs(
             "mm_processor_cache_type": "shm",
         }
 
-        # Melody for C5 models
-        if "c5" in model_name:
+        # For LLH eval, we need to set the gpu memory utilization to 0.85 to avoid OOM
+        if is_base_model:
+            server_params["gpu_memory_utilization"] = 0.85
+
+        # Melody for C5 instruct models (skip for base models)
+        if is_c5_model and not is_base_model:
             server_params["tool_call_parser"] = "cohere_command4"
             server_params["reasoning_parser"] = "cohere_command4"
             server_params["enable_auto_tool_choice"] = ""
@@ -78,6 +85,12 @@ def generate_eval_configs(
                 "Please check your eval-config.json and ensure this model is listed."
             ) from err
 
+        settings_toml = (
+            "include/vllm-ci/base_settings.toml"
+            if is_base_model
+            else "include/vllm-ci/settings.toml"
+        )
+
         test_names = [
             "_".join(PurePosixPath(p).with_suffix("").parts[1:]) for p in tests
         ]
@@ -88,14 +101,19 @@ def generate_eval_configs(
                 "server_parameters": server_params,
                 "eval_parameters": {
                     "model": model_name,
+                    "settings_toml": settings_toml,
                     "tests": tests,
-                    # Only pass thinking_token_budget for C5 models
+                    # Base models have no chat template; run bee with raw
+                    # prompting so requests hit /v1/completions and the prompt
+                    # is sent verbatim (no chat template applied server-side).
+                    **({"raw_prompting": True} if is_base_model else {}),
+                    # Only pass thinking_token_budget for C5 instruct models
                     **(
                         {
                             "thinking_token_budget": 4096,
                             "reasoning_thinking_token_budget": 20480,
                         }
-                        if "c5" in model_name
+                        if is_c5_model and not is_base_model
                         else {}
                     ),
                 },

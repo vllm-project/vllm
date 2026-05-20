@@ -112,6 +112,12 @@ run_bee_eval() {
       reasoning_thinking_budget_arg="--thinking_token_budget $reasoning_thinking_budget"
     fi
 
+    # Base models are emitted with raw_prompting=true by
+    # generate-serving-config.py. Forward it to bee so requests go to
+    # /v1/completions instead of /v1/chat/completions.
+    raw_prompting_arg=$(echo "$eval_params" | jq -r 'if .raw_prompting then "--raw_prompting True" else "" end')
+    settings_toml=$(echo "$eval_params" | jq -r '.settings_toml')
+
 
     # Once bee has its packages fixed we use this command instead
     # eval_command="uvx --python 3.11 \
@@ -126,14 +132,14 @@ run_bee_eval() {
         --enable_local_disk True \
         --skip_completed_tasks False \
         --log_samples_n 1 \
-        --log_every_n_seconds 1800 \
+        -I $settings_toml \
         $non_reasoning_test_args \
         --estimator VLLMEstimator \
         --timeout 900 \
         --max_retries 3 \
         --model $eval_model \
         --base_url http://127.0.0.1:8000/v1 \
-        --temperature 0.6 \
+        $raw_prompting_arg \
         $non_reasoning_thinking_budget_arg"
     fi
 
@@ -144,7 +150,7 @@ run_bee_eval() {
         --enable_local_disk True \
         --skip_completed_tasks False \
         --log_samples_n 1 \
-        --log_every_n_seconds 1800 \
+        -I $settings_toml \
         $reasoning_test_args \
         --estimator VLLMEstimator \
         --num_workers 16 \
@@ -152,7 +158,7 @@ run_bee_eval() {
         --max_retries 3 \
         --model $eval_model \
         --base_url http://127.0.0.1:8000/v1 \
-        --temperature 0.6 \
+        $raw_prompting_arg \
         $reasoning_thinking_budget_arg"
     fi
 
