@@ -12,6 +12,7 @@ import pytest
 from pydantic import ValidationError
 
 import vllm.config.vllm as vllm_config_module
+import vllm.envs as envs
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (
     CompilationConfig,
@@ -47,6 +48,104 @@ def test_compile_config_repr_succeeds():
     val = repr(config)
     assert "VllmConfig" in val
     assert "inductor_passes" in val
+
+
+@pytest.mark.parametrize(
+    ("env_value", "expected"),
+    [
+        (None, None),
+        ("0", False),
+        ("1", True),
+    ],
+)
+def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
+    if env_value is None:
+        monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", env_value)
+
+    assert envs.VLLM_USE_V2_MODEL_RUNNER is expected
+
+
+@pytest.mark.parametrize(
+    ("model_config", "expected"),
+    [
+        (
+            SimpleNamespace(
+                model="Qwen/Qwen3-1.7B-Base",
+                architectures=["Qwen3ForCausalLM"],
+                runner_type="generate",
+                is_moe=False,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="Qwen/Qwen3-32B",
+                architectures=["Qwen3ForCausalLM"],
+                runner_type="generate",
+                is_moe=False,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="facebook/opt-125m",
+                architectures=["OPTForCausalLM"],
+                runner_type="generate",
+                is_moe=False,
+                is_quantized=False,
+            ),
+            False,
+        ),
+        (
+            SimpleNamespace(
+                model="Qwen/Qwen3-30B-A3B",
+                architectures=["Qwen3MoeForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            False,
+        ),
+        (
+            SimpleNamespace(
+                model="Qwen/Qwen3-1.7B-FP8",
+                architectures=["Qwen3ForCausalLM"],
+                runner_type="generate",
+                is_moe=False,
+                is_quantized=True,
+            ),
+            False,
+        ),
+        (
+            SimpleNamespace(
+                model="Qwen/Qwen3.5-4B",
+                architectures=["Qwen3_5ForConditionalGeneration"],
+                runner_type="generate",
+                is_moe=False,
+                is_quantized=False,
+            ),
+            False,
+        ),
+        (
+            SimpleNamespace(
+                model="Qwen/Qwen3-Embedding-0.6B",
+                architectures=["Qwen3ForCausalLM"],
+                runner_type="pooling",
+                is_moe=False,
+                is_quantized=False,
+            ),
+            False,
+        ),
+    ],
+)
+def test_is_default_v2_model_runner_model(model_config, expected):
+    config = SimpleNamespace(model_config=model_config)
+
+    assert VllmConfig._is_default_v2_model_runner_model(config) is expected
 
 
 @pytest.mark.skip_global_cleanup

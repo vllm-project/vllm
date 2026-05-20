@@ -44,7 +44,7 @@ llm.apply_model(lambda model: print(type(model)))
 
 If the printed type starts with `Transformers...` then it's using the Transformers model implementation!
 
-If a model has a vLLM implementation but you would prefer to use the Transformers implementation via the Transformers modeling backend, set `model_impl="transformers"` for [offline inference](../serving/offline_inference.md) or `--model-impl transformers` for the [online serving](../serving/openai_compatible_server.md).
+If a model has a vLLM implementation but you would prefer to use the Transformers implementation via the Transformers modeling backend, set `model_impl="transformers"` for [offline inference](../serving/offline_inference.md) or `--model-impl transformers` for the [online serving](../serving/online_serving/README.md).
 
 !!! note
     For vision-language models, if you are loading with `dtype="auto"`, vLLM loads the whole model with config's `dtype` if it exists. In contrast the native Transformers will respect the `dtype` attribute of each backbone in the model. That might cause a slight difference in performance.
@@ -63,8 +63,8 @@ For a model to be compatible with the Transformers modeling backend for vLLM it 
 
 If the compatible model is:
 
-- on the Hugging Face Model Hub, simply set `trust_remote_code=True` for [offline-inference](../serving/offline_inference.md) or `--trust-remote-code` for the [openai-compatible-server](../serving/openai_compatible_server.md).
-- in a local directory, simply pass directory path to `model=<MODEL_DIR>` for [offline-inference](../serving/offline_inference.md) or `vllm serve <MODEL_DIR>` for the [openai-compatible-server](../serving/openai_compatible_server.md).
+- on the Hugging Face Model Hub, simply set `trust_remote_code=True` for [offline-inference](../serving/offline_inference.md) or `--trust-remote-code` for the [online serving](../serving/online_serving/README.md).
+- in a local directory, simply pass directory path to `model=<MODEL_DIR>` for [offline-inference](../serving/offline_inference.md) or `vllm serve <MODEL_DIR>` for the [online serving](../serving/online_serving/README.md).
 
 This means that, with the Transformers modeling backend for vLLM, new models can be used before they are officially supported in Transformers or vLLM!
 
@@ -378,7 +378,7 @@ th {
 | `BloomForCausalLM` | BLOOM, BLOOMZ, BLOOMChat | `bigscience/bloom`, `bigscience/bloomz`, etc. | | ✅︎ |
 | `ChatGLMModel`, `ChatGLMForConditionalGeneration` | ChatGLM | `zai-org/chatglm2-6b`, `zai-org/chatglm3-6b`, `thu-coai/ShieldLM-6B-chatglm3`, etc. | ✅︎ | ✅︎ |
 | `CohereForCausalLM`, `Cohere2ForCausalLM` | Command-R, Command-A | `CohereLabs/c4ai-command-r-v01`, `CohereLabs/c4ai-command-r7b-12-2024`, `CohereLabs/c4ai-command-a-03-2025`, `CohereLabs/command-a-reasoning-08-2025`, etc. | ✅︎ | ✅︎ |
-| `Cohere2MoeForCausalLM` | Command (MoE) | (model checkpoints loaded with `trust_remote_code=True`) | ✅︎ | ✅︎ |
+| `Cohere2MoeForCausalLM` | Command-A+ | `CohereLabs/command-a-plus-05-2026`, etc. | ✅︎ | ✅︎ |
 | `CwmForCausalLM` | CWM | `facebook/cwm`, etc. | ✅︎ | ✅︎ |
 | `DbrxForCausalLM` | DBRX | `databricks/dbrx-base`, `databricks/dbrx-instruct`, etc. | | ✅︎ |
 | `DeciLMForCausalLM` | DeciLM | `nvidia/Llama-3_3-Nemotron-Super-49B-v1`, etc. | ✅︎ | ✅︎ |
@@ -575,6 +575,7 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `IsaacForConditionalGeneration` | Isaac | T + I<sup>+</sup> | `PerceptronAI/Isaac-0.1` | ✅︎ | ✅︎ |
 | `InternS1ForConditionalGeneration` | Intern-S1 | T + I<sup>E+</sup> + V<sup>E+</sup> | `internlm/Intern-S1`, `internlm/Intern-S1-mini`, etc. | ✅︎ | ✅︎ |
 | `InternS1ProForConditionalGeneration` | Intern-S1-Pro | T + I<sup>E+</sup> + V<sup>E+</sup> | `internlm/Intern-S1-Pro`, etc. | ✅︎ | ✅︎ |
+| `InternS2PreviewForConditionalGeneration` | Intern-S2-Preview | T + I<sup>E+</sup> + V<sup>E+</sup> | `internlm/Intern-S2-Preview`, etc. | ✅︎ | ✅︎ |
 | `InternVLChatModel` | InternVL 3.5, InternVL 3.0, InternVideo 2.5, InternVL 2.5, Mono-InternVL, InternVL 2.0 | T + I<sup>E+</sup> + (V<sup>E+</sup>) | `OpenGVLab/InternVL3_5-14B`, `OpenGVLab/InternVL3-9B`, `OpenGVLab/InternVideo2_5_Chat_8B`, `OpenGVLab/InternVL2_5-4B`, `OpenGVLab/Mono-InternVL-2B`, `OpenGVLab/InternVL2-4B`, etc. | ✅︎ | ✅︎ |
 | `InternVLForConditionalGeneration` | InternVL 3.0 (HF format) | T + I<sup>E+</sup> + V<sup>E+</sup> | `OpenGVLab/InternVL3-1B-hf`, etc. | ✅︎ | ✅︎ |
 | `KananaVForConditionalGeneration` | Kanana-V | T + I<sup>+</sup> | `kakaocorp/kanana-1.5-v-3b-instruct`, etc. | | ✅︎ |
@@ -604,6 +605,7 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `NVLM_D_Model` | NVLM-D 1.0 | T + I<sup>+</sup> | `nvidia/NVLM-D-72B`, etc. | | ✅︎ |
 | `OpenCUAForConditionalGeneration` | OpenCUA-7B | T + I<sup>E+</sup> | `xlangai/OpenCUA-7B` | ✅︎ | ✅︎ |
 | `OpenPanguVLForConditionalGeneration` | openpangu-VL | T + I<sup>E+</sup> + V<sup>E+</sup> | `FreedomIntelligence/openPangu-VL-7B` | ✅︎ | ✅︎ |
+| `OpenVLAForActionPrediction` | OpenVLA | T + I | `openvla/openvla-7b` | | ✅︎ |
 | `Ovis` | Ovis2, Ovis1.6 | T + I<sup>+</sup> | `AIDC-AI/Ovis2-1B`, `AIDC-AI/Ovis1.6-Llama3.2-3B`, etc. | | ✅︎ |
 | `Ovis2_5` | Ovis2.5 | T + I<sup>+</sup> + V | `AIDC-AI/Ovis2.5-9B`, etc. | | |
 | `Ovis2_6ForCausalLM` | Ovis2.6 | T + I<sup>+</sup> + V | `AIDC-AI/Ovis2.6-2B`, etc. | | |
@@ -708,7 +710,7 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
 #### Realtime Transcription
 
 Speech models that support streaming transcription via the
-[`/v1/realtime`](../serving/openai_compatible_server.md#realtime-api)
+[`/v1/realtime`](../serving/online_serving/speech_to_text.md#realtime-api)
 WebSocket endpoint.
 
 | Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
