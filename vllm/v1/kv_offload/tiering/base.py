@@ -177,9 +177,6 @@ class SecondaryTierManager(ABC):
         """
         return RequestOffloadingContext()
 
-    # PR NOTE: "request_finished" and "get_finished" are easy to confuse.
-    # get_finished() polls for completed async jobs; request_finished() is
-    # a request lifecycle hook. Consider renaming one of them.
     def request_finished(self, req_context: ReqContext) -> None:
         """
         Called when a request has finished.

@@ -749,10 +749,6 @@ class TestSlidingWindowLookup:
         )
 
 
-# PR NOTE: This test was renamed from test_do_remote_decode_stores_all_blocks.
-# The old test relied on do_remote_decode logic in the scheduler; now it uses
-# the get_request_offloading_context policy mechanism. Should this test remain
-# here, or should it move to the P/D Secondary Tier integration tests once in-place?
 @pytest.mark.parametrize("async_scheduling", [True, False])
 def test_request_level_policy_stores_all_blocks(request_runner, async_scheduling: bool):
     """With REQUEST_LEVEL policy, all blocks are stored — including prefix hits."""
