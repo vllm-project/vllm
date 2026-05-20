@@ -39,6 +39,8 @@ Outputs: `results/7651157/plots/<trace_stem>/`
 | No-comm window CDF | `nocomm_windows_cdf.png` |
 | Comm start delta CDF | `comm_start_delta_cdf.png` |
 | GPU idle window CDF | `gpu_idle_windows_cdf.png` |
+| Idle before/after activity (bars + heatmap) | `idle_transitions_by_time.png`, `idle_transition_heatmap.png` |
+| Per-gap idle context (JSON) | `idle_gaps.json` |
 | Collective op breakdown (bar) | `collective_ops_breakdown.png` |
 
 Nsight GUI **JSONL** export is supported directly (no `nsys export` step):

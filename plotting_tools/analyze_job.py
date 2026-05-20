@@ -25,6 +25,7 @@ from plotting_tools.plots import (  # noqa: E402
     plot_traffic_heatmap,
     plot_traffic_volume_pct,
     gpu_idle_windows_ms,
+    plot_idle_context,
     plot_window_cdf,
     write_collective_ops_table,
     write_summary_json,
@@ -154,6 +155,13 @@ def analyze_trace(
             title=f"{prefix}: CDF of GPU idle gaps",
         )
 
+    idle_ctx = plot_idle_context(events, trace_out, prefix=prefix, min_gap_us=1000)
+    if idle_ctx.get("gap_count", 0):
+        print(
+            f"  idle context: {idle_ctx['gap_count']} gaps, "
+            f"top transition by time: {idle_ctx['top_transitions_by_ms'][:1]}"
+        )
+
     summary = {
         "trace": str(trace_path),
         "event_count": len(events),
@@ -162,6 +170,7 @@ def analyze_trace(
         "message_stats": msg_stats,
         "comm_ops_breakdown": comm_breakdown,
         "nccl_op_count": len(nccl_ops),
+        "idle_context": idle_ctx,
         "job_metadata": job_meta,
         "parallel_label": parallel_label,
     }

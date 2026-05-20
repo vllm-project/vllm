@@ -115,6 +115,245 @@ def gpu_idle_fraction(events: list[dict[str, Any]]) -> float:
     return max(0.0, (span - busy) / span)
 
 
+def _short_name(name: str, width: int = 48) -> str:
+    name = name.strip()
+    if len(name) <= width:
+        return name
+    return name[: width - 3] + "..."
+
+
+def _dominant_sub_in_window(
+    events: list[dict[str, Any]],
+    start: int,
+    end: int,
+) -> tuple[str, str, str]:
+    """Return (kind, sub, short_name) with largest overlap duration in [start, end]."""
+    totals: dict[str, int] = defaultdict(int)
+    names: dict[str, str] = {}
+    kinds: dict[str, str] = {}
+    for e in events:
+        overlap = min(e["end"], end) - max(e["ts"], start)
+        if overlap <= 0:
+            continue
+        sub = e.get("sub", e["kind"])
+        totals[sub] += overlap
+        names[sub] = _short_name(e.get("name", sub))
+        kinds[sub] = e["kind"]
+    if not totals:
+        return ("none", "none", "none")
+    sub = max(totals, key=totals.get)
+    return (kinds[sub], sub, names[sub])
+
+
+def analyze_idle_gaps(
+    events: list[dict[str, Any]],
+    *,
+    min_gap_us: int = 10,
+) -> list[dict[str, Any]]:
+    """
+    For each GPU-idle gap, record dominant activity in the busy slab before/after.
+
+    Busy = GPU kernels + device memcpy/NCCL (same as gpu_idle_windows_ms).
+  """
+    if not events:
+        return []
+
+    t0 = min(e["ts"] for e in events)
+    t1 = max(e["end"] for e in events)
+    busy = merge_intervals(_gpu_active_intervals(events))
+    gaps: list[dict[str, Any]] = []
+
+    def record(gap_start: int, gap_end: int, before_win: tuple[int, int], after_win: tuple[int, int]):
+        gap_us = gap_end - gap_start
+        if gap_us < min_gap_us:
+            return
+        bk, bs, bn = _dominant_sub_in_window(events, *before_win)
+        ak, a_sub, an = _dominant_sub_in_window(events, *after_win)
+        gaps.append(
+            {
+                "gap_start_us": gap_start,
+                "gap_end_us": gap_end,
+                "gap_ms": gap_us / 1000.0,
+                "before_kind": bk,
+                "before_sub": bs,
+                "before_label": SUBCATEGORY_LABELS.get(bs, bs),
+                "before_name": bn,
+                "after_kind": ak,
+                "after_sub": a_sub,
+                "after_label": SUBCATEGORY_LABELS.get(a_sub, a_sub),
+                "after_name": an,
+                "transition": f"{SUBCATEGORY_LABELS.get(bs, bs)} → idle → {SUBCATEGORY_LABELS.get(a_sub, a_sub)}",
+            }
+        )
+
+    if not busy:
+        record(t0, t1, (t0, t1), (t0, t1))
+        return gaps
+
+    if busy[0][0] > t0:
+        record(t0, busy[0][0], (t0, t0), busy[0])
+
+    for i in range(len(busy) - 1):
+        gap_start, gap_end = busy[i][1], busy[i + 1][0]
+        record(gap_start, gap_end, busy[i], busy[i + 1])
+
+    if busy[-1][1] < t1:
+        record(busy[-1][1], t1, busy[-1], (t1, t1))
+
+    return gaps
+
+
+def summarize_idle_transitions(
+    gaps: list[dict[str, Any]],
+) -> dict[str, Any]:
+    by_transition: Counter[str] = Counter()
+    time_by_transition: dict[str, float] = defaultdict(float)
+    by_before: Counter[str] = Counter()
+    by_after: Counter[str] = Counter()
+    time_by_before: dict[str, float] = defaultdict(float)
+    time_by_after: dict[str, float] = defaultdict(float)
+
+    for g in gaps:
+        tr = g["transition"]
+        ms = g["gap_ms"]
+        by_transition[tr] += 1
+        time_by_transition[tr] += ms
+        by_before[g["before_label"]] += 1
+        time_by_before[g["before_label"]] += ms
+        by_after[g["after_label"]] += 1
+        time_by_after[g["after_label"]] += ms
+
+    longest = sorted(gaps, key=lambda g: g["gap_ms"], reverse=True)[:30]
+    return {
+        "gap_count": len(gaps),
+        "top_transitions_by_count": by_transition.most_common(20),
+        "top_transitions_by_ms": sorted(
+            time_by_transition.items(), key=lambda x: x[1], reverse=True
+        )[:20],
+        "idle_ms_after": sorted(time_by_before.items(), key=lambda x: x[1], reverse=True)[:15],
+        "idle_ms_before": sorted(time_by_after.items(), key=lambda x: x[1], reverse=True)[:15],
+        "longest_gaps": longest,
+    }
+
+
+def plot_idle_transition_bars(
+    gaps: list[dict[str, Any]],
+    out_path: Path,
+    *,
+    title: str,
+    top_n: int = 12,
+) -> None:
+    """Bar chart: total idle ms per (busy_before → busy_after) transition."""
+    time_by_tr: dict[str, float] = defaultdict(float)
+    count_by_tr: dict[str, int] = defaultdict(int)
+    for g in gaps:
+        time_by_tr[g["transition"]] += g["gap_ms"]
+        count_by_tr[g["transition"]] += 1
+
+    items = sorted(time_by_tr.items(), key=lambda x: x[1], reverse=True)[:top_n]
+    if not items:
+        return
+
+    labels = [k for k, _ in items]
+    ms_vals = [v for _, v in items]
+    counts = [count_by_tr[k] for k in labels]
+
+    fig, ax = plt.subplots(figsize=(12, max(4, 0.45 * len(labels))))
+    y = np.arange(len(labels))
+    bars = ax.barh(y, ms_vals, color="#9ecae9")
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels, fontsize=9)
+    ax.set_xlabel("Total idle time in gaps (ms)")
+    ax.set_title(f"{title}\n(dominant GPU activity slab before idle → after)")
+    for bar, c in zip(bars, counts):
+        ax.text(
+            bar.get_width(),
+            bar.get_y() + bar.get_height() / 2,
+            f"  n={c}",
+            va="center",
+            fontsize=8,
+        )
+    ax.grid(True, axis="x", linestyle="--", alpha=0.3)
+    plt.tight_layout()
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_idle_transition_heatmap(
+    gaps: list[dict[str, Any]],
+    out_path: Path,
+    *,
+    title: str,
+) -> None:
+    """Heatmap: rows = activity before idle, cols = activity after idle (total idle ms)."""
+    matrix: dict[tuple[str, str], float] = defaultdict(float)
+    rows: set[str] = set()
+    cols: set[str] = set()
+    for g in gaps:
+        b, a = g["before_label"], g["after_label"]
+        rows.add(b)
+        cols.add(a)
+        matrix[(b, a)] += g["gap_ms"]
+
+    row_labels = sorted(rows)
+    col_labels = sorted(cols)
+    if not row_labels or not col_labels:
+        return
+
+    data = np.zeros((len(row_labels), len(col_labels)))
+    for i, b in enumerate(row_labels):
+        for j, a in enumerate(col_labels):
+            data[i, j] = matrix.get((b, a), 0.0)
+
+    fig, ax = plt.subplots(figsize=(max(8, len(col_labels) * 0.9), max(6, len(row_labels) * 0.5)))
+    vmax = data.max() if data.size else 1.0
+    im = ax.imshow(data, cmap=TRAFFIC_CMAP, vmin=0, vmax=max(vmax, 1e-6), aspect="auto")
+    ax.set_xticks(range(len(col_labels)))
+    ax.set_yticks(range(len(row_labels)))
+    ax.set_xticklabels(col_labels, rotation=35, ha="right", fontsize=8)
+    ax.set_yticklabels(row_labels, fontsize=8)
+    ax.set_xlabel("GPU activity after idle (dominant in next busy slab)")
+    ax.set_ylabel("GPU activity before idle (dominant in prior busy slab)")
+    ax.set_title(title)
+    plt.colorbar(im, ax=ax, label="Total idle time (ms)")
+    plt.tight_layout()
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_idle_context(
+    events: list[dict[str, Any]],
+    out_dir: Path,
+    *,
+    prefix: str,
+    min_gap_us: int = 1000,
+) -> dict[str, Any]:
+    """Analyze and plot idle gap context; write idle_gaps.json."""
+    gaps = analyze_idle_gaps(events, min_gap_us=min_gap_us)
+    summary = summarize_idle_transitions(gaps)
+
+    plot_idle_transition_bars(
+        gaps,
+        out_dir / "idle_transitions_by_time.png",
+        title=f"{prefix}: idle gaps by before→after activity",
+    )
+    plot_idle_transition_heatmap(
+        gaps,
+        out_dir / "idle_transition_heatmap.png",
+        title=f"{prefix}: idle time (ms) by before/after activity",
+    )
+
+    write_summary_json(
+        out_dir / "idle_gaps.json",
+        {
+            "summary": summary,
+            "gaps_sample": summary.get("longest_gaps", []),
+            "note": "Full per-gap list omitted if >500 gaps; see longest_gaps in summary.",
+        },
+    )
+    return summary
+
+
 def plot_traffic_volume_pct(
     events: list[dict[str, Any]],
     out_path: Path,
