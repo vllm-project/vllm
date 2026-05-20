@@ -30,7 +30,7 @@ TRITON3 = HAS_TRITON and (version.parse(triton.__version__) >= version.parse("3.
 # ---------------------------------------------------------------------------
 
 _CONFIGS_DIR = os.path.join(
-    os.path.dirname(os.path.realpath(__file__)), "..", "configs"
+    os.path.dirname(os.path.realpath(__file__)), "configs", "selective_state_update"
 )
 
 
@@ -97,7 +97,9 @@ def get_ssm_configs(
                 if isinstance(raw, dict):
                     # triton_version included in the config file only for reference
                     raw.pop("triton_version", None)
-                    return {int(k): v for k, v in raw.items()}
+                    # Filter to integer-string keys to tolerate hand-edited
+                    # configs with extra annotation fields.
+                    return {int(k): v for k, v in raw.items() if k.isdigit()}
 
     logger.warning_once(
         "Using default Mamba SSU config. Performance might be sub-optimal! "

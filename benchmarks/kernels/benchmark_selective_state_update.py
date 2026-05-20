@@ -28,6 +28,7 @@ import torch
 import vllm.model_executor.layers.mamba.ops.mamba_ssm as mamba_ssm_module
 from tests.kernels.mamba.test_mamba_ssm import selective_state_update_ref
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
+    _CONFIGS_DIR,
     _canonical_cache_dtype,
     _get_default_ssm_launch_config,
     get_ssm_config_file_name,
@@ -80,20 +81,6 @@ ALL_DSTATES = [16, 32, 64, 128, 256]
 # Override with CLI flags for other architectures.
 DEFAULT_HEADDIM = 64
 DEFAULT_NGROUPS = 8
-
-
-# ---------------------------------------------------------------------------
-# Config file naming
-# ---------------------------------------------------------------------------
-
-
-def get_ssm_configs_dir() -> str:
-    return os.path.normpath(
-        os.path.join(
-            os.path.dirname(os.path.realpath(__file__)),
-            "../../vllm/model_executor/layers/mamba/configs",
-        )
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -464,7 +451,7 @@ def save_configs(
     # bf16 shares configs with fp16, use common filename for both
     cache_dtype = _canonical_cache_dtype(cache_dtype)
 
-    base_dir = save_dir if save_dir else get_ssm_configs_dir()
+    base_dir = save_dir if save_dir else _CONFIGS_DIR
     os.makedirs(base_dir, exist_ok=True)
     file_path = os.path.join(
         base_dir,
@@ -614,7 +601,7 @@ def main():
     parser.add_argument(
         "--save-configs",
         action="store_true",
-        help="Save best configs to JSON in mamba/configs/",
+        help=f"Save best configs to JSON in {_CONFIGS_DIR}",
     )
     parser.add_argument(
         "--compare",
@@ -637,8 +624,7 @@ def main():
         "--save-dir",
         type=str,
         default=None,
-        help="Directory to save JSON configs. "
-        "(default: vllm/model_executor/layers/mamba/configs/)",
+        help=f"Directory to save JSON configs (default: {_CONFIGS_DIR})",
     )
     parser.add_argument(
         "--headdim",
