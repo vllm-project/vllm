@@ -3,6 +3,7 @@
 """Inference-only Qwen3-Next/Qwen3.5 model."""
 
 import functools
+from typing import Literal
 
 import torch
 from einops import rearrange
@@ -83,7 +84,7 @@ logger = init_logger(__name__)
 
 
 # TODO(arpera): remove ``_is_libs_cu13_install_intact`` and its caller in
-# ``_should_use_flashinfer_gdn_prefill`` once the upstream packaging bug is
+# ``_resolve_gdn_prefill_backend`` once the upstream packaging bug is
 # fixed and the broken wheels are yanked / superseded on PyPI:
 #   https://github.com/NVIDIA/cutlass/issues/3170
 #   https://github.com/NVIDIA/cutlass/issues/3259
@@ -146,7 +147,9 @@ def _is_libs_cu13_install_intact() -> bool:
     return True
 
 
-def _should_use_flashinfer_gdn_prefill(backend: str, head_k_dim: int | None) -> bool:
+def _resolve_gdn_prefill_backend(
+    backend: str, head_k_dim: int | None
+) -> Literal["flashinfer", "triton", "cutedsl"]:
     """Whether to use FlashInfer's GDN prefill kernel instead of the
     Triton/FLA fallback.
 
@@ -159,46 +162,57 @@ def _should_use_flashinfer_gdn_prefill(backend: str, head_k_dim: int | None) -> 
         and an intact ``nvidia-cutlass-dsl-libs-cu13`` install on disk
         (see :func:`_is_libs_cu13_install_intact`).
     """
-    if backend not in ["flashinfer", "auto"]:
-        return False
-    if not current_platform.is_cuda():
-        return False
-    if current_platform.is_device_capability(90):
-        return True  # Hopper — no further constraints.
-    if not current_platform.is_device_capability_family(100):
-        return False  # Neither Hopper nor Blackwell.
-    if head_k_dim != 128:
-        return False
-    if current_platform.get_cuda_runtime_major() < 13:
-        return False
-    if not _is_libs_cu13_install_intact():
-        logger.warning_once(
-            "FlashInfer Blackwell GDN requires an intact nvidia-cutlass-dsl"
-            "-libs-cu13 install, but some on-disk files do not match the "
-            "SHA-256 declared in its RECORD (install-order race in "
-            "nvidia-cutlass-dsl packaging — see "
-            "https://github.com/NVIDIA/cutlass/issues/3170 and "
-            "https://github.com/NVIDIA/cutlass/issues/3259). Falling back "
-            "to Triton/FLA. Repair with: pip install --force-reinstall "
-            "--no-deps nvidia-cutlass-dsl-libs-cu13"
-        )
-        return False
-    return True
+    is_cuda = current_platform.is_cuda()
+    supports_cutedsl = is_cuda and current_platform.has_device_capability(100)
+
+    supports_flashinfer = False
+    if is_cuda and current_platform.is_device_capability(90):
+        supports_flashinfer = True
+    elif (
+        is_cuda
+        and current_platform.is_device_capability_family(100)
+        and head_k_dim == 128
+        and current_platform.get_cuda_runtime_major() >= 13
+    ):
+        supports_flashinfer = _is_libs_cu13_install_intact()
+        if not supports_flashinfer:
+            logger.warning_once(
+                "FlashInfer Blackwell GDN requires an intact nvidia-cutlass-dsl"
+                "-libs-cu13 install, but some on-disk files do not match the "
+                "SHA-256 declared in its RECORD (install-order race in "
+                "nvidia-cutlass-dsl packaging -- see "
+                "https://github.com/NVIDIA/cutlass/issues/3170 and "
+                "https://github.com/NVIDIA/cutlass/issues/3259). Falling back "
+                "to Triton/FLA. Repair with: pip install --force-reinstall "
+                "--no-deps nvidia-cutlass-dsl-libs-cu13"
+            )
+
+    if backend == "cutedsl" and supports_cutedsl:
+        return "cutedsl"
+    if backend in ["flashinfer", "auto"] and supports_flashinfer:
+        return "flashinfer"
+    return "triton"
+
 
 
 def _log_gdn_backend_decision(
-    backend: str, head_k_dim: int | None, use_flashinfer: bool
+    requested_backend: str,
+    active_backend: str,
+    head_k_dim: int | None,
 ) -> None:
     """Log the GDN prefill backend choice in the attention-selector style."""
-    chosen = "FlashInfer" if use_flashinfer else "Triton/FLA"
+    chosen = {
+        "flashinfer": "FlashInfer",
+        "cutedsl": "CuteDSL",
+        "triton": "Triton/FLA",
+    }[active_backend]
     logger.info_once(
         "Using %s GDN prefill kernel (requested=%s, head_k_dim=%s).",
         chosen,
-        backend,
+        requested_backend,
         head_k_dim,
     )
-    # JIT-compiled cutlass path is only used on SM90 (Hopper).
-    if use_flashinfer and current_platform.is_device_capability(90):
+    if active_backend == "flashinfer" and current_platform.is_device_capability(90):
         logger.warning_once(
             "FlashInfer GDN prefill is JIT-compiled; first run may take a "
             "while. Set --gdn-prefill-backend triton to skip JIT.",
@@ -262,19 +276,23 @@ class ChunkGatedDeltaRule(CustomOp):
         assert isinstance(additional_config, dict)
         backend_cfg = additional_config.get("gdn_prefill_backend", "auto")
         backend = str(backend_cfg).strip().lower()
+        active_backend = _resolve_gdn_prefill_backend(backend, head_k_dim)
+        self.gdn_prefill_backend = active_backend
 
-        use_flashinfer = _should_use_flashinfer_gdn_prefill(backend, head_k_dim)
-        if backend == "flashinfer" and not use_flashinfer:
+        if backend in ("flashinfer", "cutedsl") and active_backend != backend:
             logger.warning_once(
-                "GDN prefill backend 'flashinfer' is selected but "
-                "cannot use this kernel on the current platform. "
-                "Falling back to Triton/FLA."
+                "GDN prefill backend '%s' is selected but cannot use this "
+                "kernel on the current platform. Falling back to Triton/FLA.",
+                backend,
             )
-        _log_gdn_backend_decision(backend, head_k_dim, use_flashinfer)
+        _log_gdn_backend_decision(backend, active_backend, head_k_dim)
 
-        self._forward_method = (
-            self.forward_cuda if use_flashinfer else self.forward_native
-        )
+        if active_backend == "flashinfer":
+            self._forward_method = self.forward_cuda
+        elif active_backend == "cutedsl":
+            self._forward_method = self.forward_cutedsl
+        else:
+            self._forward_method = self.forward_native
 
     def forward_cuda(
         self,
@@ -337,6 +355,49 @@ class ChunkGatedDeltaRule(CustomOp):
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
             core_attn_out=core_attn_out,
         )
+
+    def forward_cutedsl(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        initial_state: torch.Tensor,
+        output_final_state: bool,
+        cu_seqlens: torch.Tensor | None = None,
+        chunk_indices: torch.Tensor | None = None,
+        chunk_offsets: torch.Tensor | None = None,
+        use_qk_l2norm_in_kernel: bool = True,
+        core_attn_out: torch.Tensor | None = None,
+    ):
+        from vllm.model_executor.layers.mamba.ops.gdn_chunk_cutedsl import (
+            chunk_gated_delta_rule_cutedsl,
+        )
+
+        if use_qk_l2norm_in_kernel:
+            q = l2norm_fwd(q)
+            k = l2norm_fwd(k)
+
+        assert cu_seqlens is not None
+        assert chunk_indices is not None
+        assert chunk_offsets is not None
+
+        o, final_state = chunk_gated_delta_rule_cutedsl(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            initial_state=initial_state,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            chunk_offsets=chunk_offsets,
+            core_attn_out=core_attn_out,
+        )
+        if not output_final_state:
+            final_state = None
+        return o, final_state
 
 
 @PluggableLayer.register("qwen_gated_delta_net_attention")
@@ -475,6 +536,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         )
 
         self.chunk_gated_delta_rule = ChunkGatedDeltaRule(head_k_dim=self.head_k_dim)
+        self.gdn_prefill_backend = self.chunk_gated_delta_rule.gdn_prefill_backend
         self._prefill_kernels_warmed_up = False
         self.enable_packed_recurrent_decode = (
             envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
@@ -1060,6 +1122,16 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         )
         cu_seqlens = torch.tensor([0, T], device=device, dtype=torch.int32)
 
+        # CuteDSL kernels require metadata
+        chunk_indices = None
+        chunk_offsets = None
+        if self.gdn_prefill_backend == "cutedsl":
+            from vllm.model_executor.layers.mamba.ops.gdn_chunk_cutedsl import (
+                prepare_metadata_cutedsl,
+            )
+
+            chunk_indices, chunk_offsets = prepare_metadata_cutedsl(cu_seqlens, T)
+
         try:
             self.chunk_gated_delta_rule(
                 q=q,
@@ -1070,6 +1142,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 initial_state=state,
                 output_final_state=True,
                 cu_seqlens=cu_seqlens,
+                chunk_indices=chunk_indices,
+                chunk_offsets=chunk_offsets,
                 use_qk_l2norm_in_kernel=False,
             )
         except Exception:
@@ -1088,7 +1162,20 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 self.prefix,
             )
         finally:
-            del dummy_mixed_qkv, q, k, v, dummy_a, dummy_b, g, beta, state, cu_seqlens
+            del (
+                dummy_mixed_qkv,
+                q,
+                k,
+                v,
+                dummy_a,
+                dummy_b,
+                g,
+                beta,
+                state,
+                cu_seqlens,
+                chunk_indices,
+                chunk_offsets,
+            )
 
         torch.accelerator.empty_cache()
 

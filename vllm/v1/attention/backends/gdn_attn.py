@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import torch
 
 from vllm.config import VllmConfig
+from vllm.platforms import current_platform
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -90,6 +91,19 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         self.compilation_config = vllm_config.compilation_config
         self.speculative_config = vllm_config.speculative_config
         self.kv_cache_spec = kv_cache_spec
+        additional_config = vllm_config.additional_config
+        backend_cfg = (
+            additional_config.get("gdn_prefill_backend", "auto")
+            if isinstance(additional_config, dict)
+            else "auto"
+        )
+        backend = str(backend_cfg).strip().lower()
+        self.use_cutedsl_gdn_prefill = (
+            backend == "cutedsl"
+            and current_platform.is_cuda()
+            and device.type == "cuda"
+            and current_platform.has_device_capability(100)
+        )
 
         if self.speculative_config:
             assert self.speculative_config.num_speculative_tokens is not None
@@ -316,22 +330,38 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         chunk_indices: torch.Tensor | None = None
         chunk_offsets: torch.Tensor | None = None
         if num_prefills > 0:
-            # Only prefill batches use FLA chunk ops.
-            # Pre-compute on CPU and async-copy to GPU to avoid
-            # GPU→CPU sync (.tolist()) in prepare_chunk_indices.
-            from vllm.model_executor.layers.fla.ops.index import (
-                prepare_chunk_indices,
-                prepare_chunk_offsets,
-            )
             from vllm.model_executor.layers.fla.ops.utils import FLA_CHUNK_SIZE
 
-            gpu_device = query_start_loc.device
-            chunk_indices = prepare_chunk_indices(
-                non_spec_query_start_loc_cpu, FLA_CHUNK_SIZE
-            ).to(device=gpu_device, non_blocking=True)
-            chunk_offsets = prepare_chunk_offsets(
-                non_spec_query_start_loc_cpu, FLA_CHUNK_SIZE
-            ).to(device=gpu_device, non_blocking=True)
+            if self.use_cutedsl_gdn_prefill:
+                from vllm.model_executor.layers.mamba.ops.gdn_chunk_cutedsl import (
+                    prepare_metadata_cutedsl,
+                )
+
+                assert non_spec_query_start_loc is not None
+                assert non_spec_query_start_loc_cpu is not None
+                total_tokens = int(non_spec_query_start_loc_cpu[-1].item())
+                chunk_indices, chunk_offsets = prepare_metadata_cutedsl(
+                    non_spec_query_start_loc,
+                    total_tokens,
+                    FLA_CHUNK_SIZE,
+                )
+            else:
+                gpu_device = query_start_loc.device
+                # Only prefill batches use FLA chunk ops.
+                # Pre-compute on CPU and async-copy to GPU to avoid
+                # GPU→CPU sync (.tolist()) in prepare_chunk_indices.
+                from vllm.model_executor.layers.fla.ops.index import (
+                    prepare_chunk_indices,
+                    prepare_chunk_offsets,
+                )
+
+                assert non_spec_query_start_loc_cpu is not None
+                chunk_indices = prepare_chunk_indices(
+                    non_spec_query_start_loc_cpu, FLA_CHUNK_SIZE
+                ).to(device=gpu_device, non_blocking=True)
+                chunk_offsets = prepare_chunk_offsets(
+                    non_spec_query_start_loc_cpu, FLA_CHUNK_SIZE
+                ).to(device=gpu_device, non_blocking=True)
 
         if num_prefills > 0:
             has_initial_state = context_lens_tensor > 0
