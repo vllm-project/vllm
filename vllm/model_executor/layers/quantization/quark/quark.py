@@ -8,7 +8,10 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import RoutedExperts
+from vllm.model_executor.layers.fused_moe import (
+    RoutedExperts,
+    UnquantizedFusedMoEMethod,
+)
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -115,6 +118,8 @@ class QuarkConfig(QuantizationConfig):
         if should_ignore_layer(
             prefix, ignore=exclude_layers, fused_mapping=self.packed_modules_mapping
         ):
+            if isinstance(layer, RoutedExperts):
+                return UnquantizedFusedMoEMethod(layer.moe_config)
             if (
                 "self_attn" not in prefix  # only quantize attention projections
                 or not getattr(self, "dynamic_mxfp4_quant", False)
