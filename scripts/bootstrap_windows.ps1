@@ -19,7 +19,7 @@ param(
     [string]$RepoUrl = "https://github.com/ericleigh007/vllm-windows.git",
     [string]$Branch = "windows-compat",
     [string]$RepoPath = "",
-    [string]$VenvPath = "C:\tmp\vllmvenv",
+    [string]$VenvPath = "",
     [string]$CudaPath = "C:\tmp\cuda13",
     [string]$CudaArch = "120",
     [string]$FetchContentBaseDir = "C:\tmp\vllm_deps",
@@ -230,6 +230,9 @@ if (-not $RepoPath) {
     else {
         $RepoPath = Join-Path $InstallRoot "vllm-windows"
     }
+}
+if (-not $VenvPath) {
+    $VenvPath = Join-Path $InstallRoot "venv"
 }
 
 Write-Step "Checking host tools"
