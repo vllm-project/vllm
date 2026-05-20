@@ -131,6 +131,9 @@ from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
 from vllm.model_executor.kernels.linear.scaled_mm.deep_gemm import (
     DeepGemmFp8BlockScaledMMKernel,
 )
+from vllm.model_executor.kernels.linear.scaled_mm.ll_fp8_block import (
+    LLFp8BlockScaledMMKernel,
+)
 from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import (
     FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
     FlashInferFP8ScaledMMLinearKernel,
@@ -200,6 +203,7 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
     PlatformEnum, list[type[Fp8BlockScaledMMLinearKernel | FP8ScaledMMLinearKernel]]
 ] = {
     PlatformEnum.CUDA: [
+        LLFp8BlockScaledMMKernel,
         FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
         DeepGemmFp8BlockScaledMMKernel,
         CutlassFp8BlockScaledMMKernel,
@@ -857,6 +861,7 @@ __all__ = [
     "FlashInferCudnnNvFp4LinearKernel",
     "MarlinNvFp4LinearKernel",
     "_KernelT",
+    "LLFp8BlockScaledMMKernel",
     "DeepGemmFp8BlockScaledMMKernel",
     "FlashInferFp8DeepGEMMDynamicBlockScaledKernel",
 ]
