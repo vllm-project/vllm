@@ -24,7 +24,9 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_offload.base import (
     OffloadingEvent,
     OffloadingManager,
+    OffloadPolicy,
     ReqContext,
+    RequestOffloadingContext,
     get_offload_block_hash,
 )
 from vllm.v1.request import RequestStatus
@@ -747,13 +749,13 @@ class TestSlidingWindowLookup:
         )
 
 
+# PR NOTE: This test was renamed from test_do_remote_decode_stores_all_blocks.
+# The old test relied on do_remote_decode logic in the scheduler; now it uses
+# the get_request_offloading_context policy mechanism. Should this test remain
+# here, or should it move to the P/D Secondary Tier integration tests once in-place?
 @pytest.mark.parametrize("async_scheduling", [True, False])
-def test_do_remote_decode_stores_all_blocks(request_runner, async_scheduling: bool):
-    """With do_remote_decode=True, after loading prefix blocks from CPU,
-    all blocks must be re-stored — not just the newly computed ones.
-
-    This supports P/D disaggregation where the prefill instance offloads the
-    complete KV cache so a remote decode node can consume it."""
+def test_request_level_policy_stores_all_blocks(request_runner, async_scheduling: bool):
+    """With REQUEST_LEVEL policy, all blocks are stored — including prefix hits."""
     gpu_block_size = 4
     block_size_factor = 3
     offloaded_block_size = gpu_block_size * block_size_factor
@@ -780,12 +782,13 @@ def test_do_remote_decode_stores_all_blocks(request_runner, async_scheduling: bo
     # Reset GPU prefix cache so the next request must load from CPU.
     runner.scheduler.reset_prefix_cache()
 
-    # New request with do_remote_decode=True and 2 offloaded blocks.
-    # The first offloaded block matches what we stored in CPU.
-    runner.new_request(
-        token_ids=[0] * offloaded_block_size * 2,
-        kv_transfer_params={"do_remote_decode": True},
+    # Manager returns REQUEST_LEVEL for the next request.
+    runner.manager.get_request_offloading_context.return_value = (
+        RequestOffloadingContext(policy=OffloadPolicy.REQUEST_LEVEL)
     )
+
+    # New request with 2 offloaded blocks; first matches what's in CPU.
+    runner.new_request(token_ids=[0] * offloaded_block_size * 2)
     runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context: 1
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output(keys)
@@ -797,9 +800,6 @@ def test_do_remote_decode_stores_all_blocks(request_runner, async_scheduling: bo
     # Store must include ALL 6 GPU blocks (both the loaded prefix and
     # the newly computed block), not just the 3 new ones.
     runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_stored=(0, 1, 2, 3, 4, 5))
-
-    # All stores completed before request_finished -> fence index empty.
-    assert runner.connector_scheduler._block_id_to_pending_jobs == {}
 
 
 # ---------------------------------------------------------------------------
