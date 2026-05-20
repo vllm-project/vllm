@@ -1,32 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Tests that triton_kernel_moe_forward selects the correct routing path on
-the legacy (v3.5.1) triton_kernels API:
+Tests that triton_kernel_moe_forward correctly applies expert_map
+remapping when expert parallelism (EP) is enabled.
 
-- With no expert map (no EP), it uses the fused
-  `triton_kernels.routing.routing()` kernel directly.
-- With an expert map (EP), it falls back to topk + expert_map remap +
-  make_routing_data so global expert IDs are translated to local IDs
-  before building routing structures.
+When expert_map is provided, global expert IDs are remapped to local IDs
+via topk + expert_map remap + make_routing_data before building routing
+structures, and the expert_map passed downstream to triton_kernel_fused_experts
+is None (already applied).
 """
 
 from unittest.mock import MagicMock, patch
 
-import pytest
 import torch
 
 
 class TestTritonMoeForwardExpertMap:
-    """Test that triton_kernel_moe_forward dispatches to the right routing
-    path depending on whether expert parallelism is active."""
+    """Test that triton_kernel_moe_forward applies expert_map remapping
+    when expert_map is provided (EP active)."""
 
-    @pytest.mark.parametrize("expert_map_present", [False, True])
-    def test_routing_path_selection(self, expert_map_present):
+    def test_expert_map_remap(self):
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        mock_expert_map = (
-            torch.tensor([0, -1, 1, -1], device=device) if expert_map_present else None
-        )
+        mock_expert_map = torch.tensor([0, -1, 1, -1], device=device)
 
         from vllm.utils.import_utils import import_triton_kernels
 
@@ -37,12 +32,6 @@ class TestTritonMoeForwardExpertMap:
         mock_scatter = MagicMock()
 
         with (
-            patch(
-                "vllm.model_executor.layers.fused_moe.experts."
-                "gpt_oss_triton_kernels_moe.use_legacy_triton_kernels",
-                True,
-            ),
-            patch("triton_kernels.routing.routing") as mock_fused_routing,
             patch("triton_kernels.topk.topk") as mock_topk,
             patch(
                 "vllm.model_executor.layers.fused_moe.experts."
@@ -55,12 +44,6 @@ class TestTritonMoeForwardExpertMap:
         ):
             from vllm.model_executor.layers.fused_moe.experts.gpt_oss_triton_kernels_moe import (  # noqa: E501
                 triton_kernel_moe_forward,
-            )
-
-            mock_fused_routing.return_value = (
-                mock_routing_data,
-                mock_gather,
-                mock_scatter,
             )
 
             sparse_result = MagicMock()
@@ -91,20 +74,10 @@ class TestTritonMoeForwardExpertMap:
                 expert_map=mock_expert_map,
             )
 
-            if expert_map_present:
-                # EP: topk + expert_map remap + make_routing_data.
-                mock_topk.assert_called_once()
-                mock_make_routing.assert_called_once()
-                mock_fused_routing.assert_not_called()
+            mock_topk.assert_called_once()
+            mock_make_routing.assert_called_once()
 
-                # expert_map should be None in the fused_experts call
-                # (already applied).
-                call_kwargs = mock_fused_experts.call_args
-                assert call_kwargs[1].get("expert_map") is None or (
-                    len(call_kwargs[0]) > 0
-                )
-            else:
-                # No EP: single fused routing() call, no topk/make_routing.
-                mock_fused_routing.assert_called_once()
-                mock_topk.assert_not_called()
-                mock_make_routing.assert_not_called()
+            # expert_map should be None in the fused_experts call
+            # (already applied).
+            call_kwargs = mock_fused_experts.call_args
+            assert call_kwargs[1].get("expert_map") is None or (len(call_kwargs[0]) > 0)
