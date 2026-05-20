@@ -2351,6 +2351,7 @@ class NixlConnectorWorker:
                     # Partial prefix cache hit for FA group.
                     remote_block_ids[i] = remote_group[-num_local_blocks:]
                 else:
+                    # TODO Handle prefix caching with different block_sizes
                     max_padding = max(
                         self._physical_blocks_per_logical_kv_block,
                         remote_physical_per_logical,
