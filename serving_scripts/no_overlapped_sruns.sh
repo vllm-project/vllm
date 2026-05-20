@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+#SBATCH --nodelist=htc-g[059-060]
 #SBATCH --job-name=vllm-host-qwen3-30b
 #SBATCH --nodes=2
 #SBATCH --partition=short
@@ -6,7 +7,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=256G
-#SBATCH --time=01:00:10
+#SBATCH --time=02:00:10
 #SBATCH --output=results/%x-%j.out
 #SBATCH --error=results/%x-%j.err
 #SBATCH --mail-user=jason.miller@eng.ox.ac.uk
@@ -16,12 +17,15 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="arc-ray-qwen3-30b-a3b-instruct"
+SCRIPT_VERSION="no-overlapped-sruns"
 
-# Set DEBUG_SLURM_SCRIPT=1 for extra diagnostics (DNS probes, PATH, ray location).
-# Set NSYS_COPY_DEBUG=1 for verbose Nsight copy traces (per-node ls/stat/find).
+# Set DEBUG_SLURM_SCRIPT=1 for extra diagnostics.
+# Set NSYS_COPY_DEBUG=1 for verbose Nsight copy traces.
 DEBUG_SLURM_SCRIPT="${DEBUG_SLURM_SCRIPT:-0}"
 NSYS_COPY_DEBUG="${NSYS_COPY_DEBUG:-0}"
+
+# Post-run copy should not hang the whole batch forever.
+SRUN_COPY_TIMEOUT="${SRUN_COPY_TIMEOUT:-180s}"
 
 slurm_debug() {
   if [ "${DEBUG_SLURM_SCRIPT}" = "1" ]; then
@@ -35,116 +39,18 @@ nsight_debug() {
   fi
 }
 
-# Always printed during Nsight copy/shutdown (lightweight progress markers).
 nsight_copy_msg() {
   echo "[nsight-copy] $*"
 }
 
-# Audit Nsight artifacts on a compute node: hunt beyond session_latest so we can
-# tell "file exists elsewhere" vs "never written" vs "copy path wrong".
-nsight_audit_on_node() {
-  local node="$1"
-  local label="${2:-audit}"
-  local job_id="${SLURM_JOB_ID:-unknown}"
-
-  nsight_copy_msg "${label}: full Nsight hunt on ${node} (job ${job_id})..."
-  srun \
-    --overlap \
-    --nodelist "${node}" \
-    --nodes=1 \
-    --ntasks=1 \
-    --ntasks-per-node=1 \
-    --cpus-per-task=1 \
-    --mem=4G \
-    bash -lc "
-      set +e
-      COPY_GLOB='/tmp/ray/session_latest/logs/nsight/*.nsys-rep'
-      COPY_DIR='/tmp/ray/session_latest/logs/nsight'
-
-      echo '[nsight-copy] === ${label} audit host='\$(hostname)' expected_node=${node} job=${job_id} ==='
-      echo '[nsight-copy] copy script ONLY reads: '\${COPY_GLOB}
-
-      echo '[nsight-copy] session_latest symlink:'
-      ls -la /tmp/ray/session_latest 2>/dev/null || echo '  MISSING /tmp/ray/session_latest'
-      echo '[nsight-copy] session_latest resolved ->' \$(readlink -f /tmp/ray/session_latest 2>/dev/null || echo MISSING)
-
-      if [ -d \"\${COPY_DIR}\" ]; then
-        echo '[nsight-copy] COPY_DIR listing (what cp uses):'
-        ls -la \"\${COPY_DIR}/\" 2>/dev/null || true
-        for f in \"\${COPY_DIR}\"/*; do
-          [ -f \"\$f\" ] && stat -c '[nsight-copy]   copy-target %n %s bytes' \"\$f\" 2>/dev/null || true
-        done
-      else
-        echo '[nsight-copy] COPY_DIR missing: '\${COPY_DIR}
-      fi
-
-      echo '[nsight-copy] --- HUNT: every *.nsys-rep under /tmp/ray ---'
-      ray_rep_count=\$(find /tmp/ray -type f -name '*.nsys-rep' 2>/dev/null | wc -l | tr -d ' ')
-      echo '[nsight-copy] count='\${ray_rep_count}
-      find /tmp/ray -type f -name '*.nsys-rep' -printf '[nsight-copy]   %p %s bytes\n' 2>/dev/null | sort || true
-
-      echo '[nsight-copy] --- HUNT: every *.qdstrm (unfinished reports) under /tmp/ray ---'
-      find /tmp/ray -type f -name '*.qdstrm' -printf '[nsight-copy]   %p %s bytes\n' 2>/dev/null | sort || true
-
-      echo '[nsight-copy] --- HUNT: worker_process_* under /tmp (any path) ---'
-      find /tmp -maxdepth 8 -type f -name 'worker_process*.nsys-rep' \
-        -printf '[nsight-copy]   %p %s bytes\n' 2>/dev/null | sort || true
-
-      echo '[nsight-copy] --- HUNT: /tmp/vray-${job_id}* (custom Ray temp dirs) ---'
-      for vroot in /tmp/vray-${job_id}-* /tmp/vray-${job_id}; do
-        [ -e \"\${vroot}\" ] || continue
-        echo '[nsight-copy]   scanning '\${vroot}
-        find \"\${vroot}\" -type f \\( -name '*.nsys-rep' -o -name '*.qdstrm' \\) \
-          -printf '[nsight-copy]     %p %s bytes\n' 2>/dev/null | sort || true
-      done
-
-      echo '[nsight-copy] --- HUNT: shared TRACE dir on this node (if visible) ---'
-      find '${TRACE_RUN_DIR}' -maxdepth 4 -type f \\( -name '*.nsys-rep' -o -name '*.qdstrm' \\) \
-        -printf '[nsight-copy]   %p %s bytes\n' 2>/dev/null | sort || true
-
-      echo '[nsight-copy] --- HUNT: API-server nsys under ${NSYS_DIR} (head only) ---'
-      find '${NSYS_DIR}' -maxdepth 2 -type f -name '*.nsys-rep' \
-        -printf '[nsight-copy]   %p %s bytes\n' 2>/dev/null | sort || true
-
-      copy_n=\$(find \"\${COPY_DIR}\" -type f -name '*.nsys-rep' 2>/dev/null | wc -l | tr -d ' ')
-      ray_n=\$(find /tmp/ray -type f -name '*.nsys-rep' 2>/dev/null | wc -l | tr -d ' ')
-      tmp_n=\$(find /tmp -maxdepth 8 -type f -name '*.nsys-rep' 2>/dev/null | wc -l | tr -d ' ')
-      echo '[nsight-copy] SUMMARY on '\$(hostname)': copy_dir='\${copy_n}' /tmp/ray='\${ray_n}' /tmp(all)='\${tmp_n}'
-
-      if [ \"\${ray_n}\" -gt \"\${copy_n}\" ]; then
-        echo '[nsight-copy] WARNING: .nsys-rep exist under /tmp/ray OUTSIDE copy_dir — cp may miss them:'
-        find /tmp/ray -type f -name '*.nsys-rep' ! -path \"\${COPY_DIR}/*\" \
-          -printf '[nsight-copy]   MISSED %p %s bytes\n' 2>/dev/null | sort || true
-      fi
-      if [ \"\${copy_n}\" -eq 0 ] && [ \"\${ray_n}\" -gt 0 ]; then
-        echo '[nsight-copy] WARNING: copy_dir empty but other /tmp/ray reports exist (wrong session_latest?)'
-      fi
-      if [ \"\${copy_n}\" -eq 0 ] && [ \"\${tmp_n}\" -eq 0 ]; then
-        echo '[nsight-copy] WARNING: no .nsys-rep anywhere under /tmp on this node (not written or already deleted)'
-      fi
-      zero_n=\$(find /tmp/ray -type f -name '*.nsys-rep' -size 0 2>/dev/null | wc -l | tr -d ' ')
-      if [ \"\${zero_n}\" -gt 0 ]; then
-        echo '[nsight-copy] WARNING: zero-byte .nsys-rep present (finalize failed):'
-        find /tmp/ray -type f -name '*.nsys-rep' -size 0 \
-          -printf '[nsight-copy]   ZERO %p\n' 2>/dev/null || true
-      fi
-
-      if [ \"${NSYS_COPY_DEBUG}\" = \"1\" ] || [ \"${DEBUG_SLURM_SCRIPT}\" = \"1\" ]; then
-        echo '[nsight-debug] all Ray sessions by mtime on '\$(hostname)':'
-        ls -lt /tmp/ray 2>/dev/null | head -12 || true
-        echo '[nsight-debug] nsight dirs under every session:'
-        find /tmp/ray -type d -path '*/logs/nsight' 2>/dev/null | while read -r d; do
-          echo \"[nsight-debug]   \${d}:\"
-          ls -la \"\${d}\" 2>/dev/null | sed 's/^/[nsight-debug]     /' || true
-        done
-      fi
-    " || nsight_copy_msg "${label}: srun audit failed on ${node} (exit $?)"
-}
-
-nsight_peek_on_node() {
-  local node="$1"
-  local label="${2:-peek}"
-  nsight_audit_on_node "${node}" "${label}"
+run_with_timeout() {
+  local limit="$1"
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "${limit}" "$@"
+  else
+    "$@"
+  fi
 }
 
 nsight_summarize_dest() {
@@ -161,14 +67,77 @@ nsight_summarize_dest() {
   fi
 }
 
+# Plain, non-overlapped copy step.
+# This must only be called after the long-lived Ray srun steps have exited.
+copy_ray_nsight_from_node() {
+  local NODE="$1"
+  local dest="${TRACE_RUN_DIR}/ray_worker_nsight/${NODE}"
+  local srun_status=0
+
+  nsight_copy_msg "=== copy start: ${NODE} -> ${dest} ==="
+
+  set +e
+  run_with_timeout "${SRUN_COPY_TIMEOUT}" \
+    srun \
+      --nodelist "${NODE}" \
+      --nodes=1 \
+      --ntasks=1 \
+      --ntasks-per-node=1 \
+      --cpus-per-task=1 \
+      --mem=1G \
+      bash -lc "
+        set +e
+        echo '[nsight-copy] on '\$(hostname)' expected ${NODE}'
+        echo '[nsight-copy] dest=${dest}'
+        mkdir -p '${dest}'
+
+        echo '[nsight-copy] session_latest ->' \$(readlink -f /tmp/ray/session_latest 2>/dev/null || echo MISSING)
+
+        if [ -d /tmp/ray/session_latest/logs/nsight ]; then
+          echo '[nsight-copy] copying from /tmp/ray/session_latest/logs/nsight'
+          ls -la /tmp/ray/session_latest/logs/nsight/ 2>/dev/null || true
+
+          cp -v /tmp/ray/session_latest/logs/nsight/*.nsys-rep '${dest}/' 2>&1 || true
+          cp -v /tmp/ray/session_latest/logs/nsight/*.qdstrm '${dest}/' 2>&1 || true
+        else
+          echo '[nsight-copy] session_latest nsight dir missing; searching /tmp/ray'
+          find /tmp/ray -type f \( -name '*.nsys-rep' -o -name '*.qdstrm' \) \
+            -printf '[nsight-copy] found %p %s bytes\n' 2>/dev/null | sort || true
+
+          # Fallback: copy all reports/partials from /tmp/ray.
+          # Prefix with parent session directory when possible to reduce filename collisions.
+          find /tmp/ray -type f \( -name '*.nsys-rep' -o -name '*.qdstrm' \) -print0 2>/dev/null |
+            while IFS= read -r -d '' f; do
+              session=\$(echo \"\$f\" | sed -n 's#^/tmp/ray/\\([^/]*\\)/.*#\\1#p')
+              base=\$(basename \"\$f\")
+              if [ -n \"\$session\" ]; then
+                cp -v \"\$f\" '${dest}'/\"\${session}_\${base}\" 2>&1 || true
+              else
+                cp -v \"\$f\" '${dest}'/\"\${base}\" 2>&1 || true
+              fi
+            done
+        fi
+
+        echo '[nsight-copy] dest after copy:'
+        ls -la '${dest}/' 2>/dev/null || true
+        find '${dest}' -type f \( -name '*.nsys-rep' -o -name '*.qdstrm' \) \
+          -printf '[nsight-copy] copied %p %s bytes\n' 2>/dev/null | sort || true
+      "
+  srun_status=$?
+  set -e
+
+  nsight_copy_msg "=== copy end: ${NODE} srun_status=${srun_status} ==="
+  nsight_summarize_dest "${NODE}"
+}
+
 # SP = prompt / prefill token bucket
 # SD = decode / output tokens per request
 SP="${SP:-128}"
 SD="${SD:-128}"
 export NSYS_ENABLE="${NSYS_ENABLE:-1}"
 
-export HEAD_NODE=$(scontrol show hostnames $SLURM_NODELIST | head -n1)
-export WORKER_NODES=$(scontrol show hostnames $SLURM_NODELIST | tail -n+2)
+export HEAD_NODE=$(scontrol show hostnames "$SLURM_NODELIST" | head -n1)
+export WORKER_NODES=$(scontrol show hostnames "$SLURM_NODELIST" | tail -n+2)
 
 echo "=== vLLM multi-node host job ==="
 echo "SCRIPT_VERSION=${SCRIPT_VERSION}"
@@ -212,23 +181,6 @@ resolve_host_ip() {
 
   slurm_debug "resolve_host_ip(${nodename}) -> ${ip:-<empty>} [${method:-failed}]"
   printf '%s' "${ip}"
-}
-
-resolve_node_ib_ip() {
-  local nodename="$1"
-  local ip=""
-
-  ip=$(
-    srun --nodelist="${nodename}" --nodes=1 --ntasks=1 \
-      --cpus-per-task="${SLURM_CPUS_PER_TASK:-1}" \
-      bash -lc '
-        ip -o -4 addr show scope global up \
-          | awk '"'"'$2 ~ /^ib/ {split($4,a,"/"); print a[1]; exit}'"'"'
-      ' 2>/dev/null || true
-  )
-
-  slurm_debug "resolve_node_ib_ip(${nodename}) -> ${ip:-<empty>}"
-  printf "%s" "${ip}"
 }
 
 interface_for_ip() {
@@ -345,10 +297,10 @@ echo "NSYS_TRACE=${NSYS_TRACE}"
 echo "NSYS_DELAY=${NSYS_DELAY}"
 echo "NSYS_PROFILE_SERVER=${NSYS_PROFILE_SERVER}"
 echo "NSYS_PROFILE_RAY=${NSYS_PROFILE_RAY}"
-echo "NSYS_COPY_DEBUG=${NSYS_COPY_DEBUG} (set to 1 with DEBUG_SLURM_SCRIPT=1 for verbose Nsight copy logs)"
+echo "NSYS_COPY_DEBUG=${NSYS_COPY_DEBUG}"
+echo "SRUN_COPY_TIMEOUT=${SRUN_COPY_TIMEOUT}"
 echo "nsys path: $(command -v nsys || echo '<not found>')"
 nsys --version || true
-
 
 if [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
   REPO_ROOT="${SLURM_SUBMIT_DIR}"
@@ -435,6 +387,7 @@ HEAD_RAY_PID=""
 WORKER_RAY_PIDS=""
 
 cleanup() {
+  set +e
   if [ -n "${SERVER_STEP_PID}" ] && kill -0 "${SERVER_STEP_PID}" 2>/dev/null; then
     kill "${SERVER_STEP_PID}" 2>/dev/null || true
     wait "${SERVER_STEP_PID}" 2>/dev/null || true
@@ -572,6 +525,7 @@ for node in nodes:
         f"resources={node.get('Resources')}"
     )
 PY
+
 echo "=== vLLM api_server (background process) ==="
 echo "Starting vLLM server on head node..."
 
@@ -632,13 +586,13 @@ until curl -fsS "http://${HEAD_NODE_IP}:${PORT}/health" >/dev/null 2>&1; do
     exit 1
   fi
   _health_wait_n=$((_health_wait_n + 1))
-  # Every ~60s by default; every loop if DEBUG_SLURM_SCRIPT=1
   if [ "${DEBUG_SLURM_SCRIPT}" = "1" ] || [ "$((_health_wait_n % 12))" -eq 0 ]; then
     echo "Still waiting for http://${HEAD_NODE_IP}:${PORT}/health (attempt ${_health_wait_n}) ..."
   fi
   sleep 5
 done
 unset _health_wait_n
+
 echo "Server is healthy. Running ${SERVE_SCRIPT} ..."
 echo "SP=${SP} SD=${SD}"
 HOST="${HEAD_NODE_IP}" PORT="${PORT}" MODEL_ID="${MODEL_ID}" \
@@ -646,21 +600,35 @@ HOST="${HEAD_NODE_IP}" PORT="${PORT}" MODEL_ID="${MODEL_ID}" \
   HEAD_NODE_IP="${HEAD_NODE_IP}" \
   GPUS_PER_NODE="${GPUS_PER_NODE}" CPUS_PER_TASK="${CPUS_PER_TASK}" \
   RAY_PORT="${RAY_PORT}" bash "${SERVE_SCRIPT}" "${SLURM_JOB_ID}" "${HEAD_NODE}"
-  
-echo "Workload finished. Stopping vLLM/Nsight server process cleanly..."
-nsight_copy_msg "pre-shutdown: API server nsight (if any) under ${NSYS_DIR}"
-ls -la "${NSYS_DIR}/" 2>/dev/null || nsight_copy_msg "  (no ${NSYS_DIR} yet)"
-nsight_peek_on_node "${HEAD_NODE}" "pre-shutdown"
-for WORKER in ${WORKER_NODES}; do
-  nsight_peek_on_node "${WORKER}" "pre-shutdown"
-done
 
+# -----------------------------------------------------------------------------
+# Clean shutdown and trace collection.
+#
+# Important ordering:
+#   1. Stop profiled vLLM API server so the outer nsys profile can finalize.
+#   2. Stop Ray head/worker srun --block steps.
+#   3. Wait briefly for files to flush.
+#   4. Launch plain, non-overlapped copy srun steps.
+#
+# Do not call extra diagnostic srun steps before Ray exits.
+# Do not use --overlap in the copy path.
+# -----------------------------------------------------------------------------
+
+echo "Workload finished. Stopping vLLM/Nsight server process cleanly..."
+
+# 1. Stop profiled API server first.
+# This causes nsys to write/finalize vllm_api_server_*.nsys-rep.
 if [ -n "${SERVER_STEP_PID}" ] && kill -0 "${SERVER_STEP_PID}" 2>/dev/null; then
+  echo "Sending SIGINT to vLLM/Nsight server pid=${SERVER_STEP_PID}..."
   kill -INT "${SERVER_STEP_PID}" 2>/dev/null || true
   wait "${SERVER_STEP_PID}" 2>/dev/null || true
   SERVER_STEP_PID=""
 fi
 
+echo "API server Nsight dir after server shutdown:"
+ls -la "${NSYS_DIR}/" 2>/dev/null || true
+
+# 2. Now stop Ray srun steps.
 echo "Stopping Ray background srun steps before copying Nsight reports..."
 
 if [ -n "${HEAD_RAY_PID}" ] && kill -0 "${HEAD_RAY_PID}" 2>/dev/null; then
@@ -677,79 +645,15 @@ for pid in ${WORKER_RAY_PIDS}; do
 done
 WORKER_RAY_PIDS=""
 
-nsight_copy_msg "post-ray-stop: peek nodes before flush sleep"
-nsight_peek_on_node "${HEAD_NODE}" "post-ray-stop"
-for WORKER in ${WORKER_NODES}; do
-  nsight_peek_on_node "${WORKER}" "post-ray-stop"
-done
-
+# 3. Give Nsight/Ray files time to flush.
 echo "Waiting briefly for Ray/Nsight files to flush..."
 sleep 10
 
-nsight_copy_msg "post-flush: peek nodes before copy"
-nsight_peek_on_node "${HEAD_NODE}" "post-flush"
-for WORKER in ${WORKER_NODES}; do
-  nsight_peek_on_node "${WORKER}" "post-flush"
-done
-
+# 4. Only now do plain, non-overlapped srun-based copy.
 echo "Copying Ray worker Nsight reports..."
 mkdir -p "${TRACE_RUN_DIR}/ray_worker_nsight"
 
-copy_ray_nsight_from_node() {
-  local NODE="$1"
-  local dest="${TRACE_RUN_DIR}/ray_worker_nsight/${NODE}"
-
-  nsight_copy_msg "=== copy start: ${NODE} -> ${dest} ==="
-  nsight_peek_on_node "${NODE}" "immediately-before-cp"
-
-  srun \
-    --overlap \
-    --nodelist "${NODE}" \
-    --nodes=1 \
-    --ntasks=1 \
-    --ntasks-per-node=1 \
-    --cpus-per-task=1 \
-    --mem=1G \
-    bash -lc "
-      set +e
-      echo '[nsight-copy] on '\$(hostname)' (expected ${NODE})'
-      echo '[nsight-copy] dest=${dest}'
-      echo '[nsight-copy] session_latest ->' \$(readlink -f /tmp/ray/session_latest 2>/dev/null || echo MISSING)
-      mkdir -p '${dest}'
-      if [ -d /tmp/ray/session_latest/logs/nsight ]; then
-        echo '[nsight-copy] source dir listing:'
-        ls -la /tmp/ray/session_latest/logs/nsight/ 2>/dev/null || true
-        for f in /tmp/ray/session_latest/logs/nsight/*; do
-          [ -f \"\$f\" ] && stat -c '[nsight-copy] src %n %s bytes' \"\$f\" 2>/dev/null || true
-        done
-        echo '[nsight-copy] running cp -v ...'
-        cp -v /tmp/ray/session_latest/logs/nsight/*.nsys-rep '${dest}/' 2>&1
-        cp_status=\$?
-        echo '[nsight-copy] cp exit status='\$cp_status
-        echo '[nsight-copy] dest after cp:'
-        ls -la '${dest}/' 2>/dev/null || true
-        for f in '${dest}'/*; do
-          [ -f \"\$f\" ] && stat -c '[nsight-copy] dest %n %s bytes' \"\$f\" 2>/dev/null || true
-        done
-      else
-        echo '[nsight-copy] No /tmp/ray/session_latest/logs/nsight on '\$(hostname)' (slurm node ${NODE})'
-        echo '[nsight-copy] /tmp/ray top-level:'
-        ls -la /tmp/ray/ 2>/dev/null | head -10 || true
-        echo '[nsight-copy] HUNT after failed copy path (may be elsewhere on disk):'
-        find /tmp/ray -type f -name '*.nsys-rep' -printf '[nsight-copy]   found %p %s bytes\n' 2>/dev/null | sort || true
-        find /tmp -maxdepth 8 -type f -name 'worker_process*.nsys-rep' \
-          -printf '[nsight-copy]   found %p %s bytes\n' 2>/dev/null | sort || true
-        find /tmp -type f -name '*.qdstrm' -printf '[nsight-copy]   partial %p %s bytes\n' 2>/dev/null | sort || true
-      fi
-    "
-  local srun_status=$?
-  nsight_copy_msg "=== copy end: ${NODE} (srun exit ${srun_status}) ==="
-  nsight_audit_on_node "${NODE}" "after-copy"
-  nsight_summarize_dest "${NODE}"
-}
-
 copy_ray_nsight_from_node "${HEAD_NODE}"
-
 for WORKER in ${WORKER_NODES}; do
   copy_ray_nsight_from_node "${WORKER}"
 done
