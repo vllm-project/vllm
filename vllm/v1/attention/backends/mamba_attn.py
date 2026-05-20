@@ -385,28 +385,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             self.reorder_batch_threshold if num_accepted_tokens is not None else 1
         )
 
-        # FULL-CG dispatch is shape-based, so one-token prefills with
-        # prior Mamba state can replay a decode graph while `is_prefilling`
-        # is still true. Treat them as decode/update rows. This is required
-        # for NIXL disagg's h(N-1)->N recompute path and for sporadic
-        # final single-token prefill chunks that land in a `uniform` FULL-CG
-        # batch. Relies on `reorder` putting short extends before pure prefills.
-        is_prefilling = common_attn_metadata.is_prefilling
-        assert is_prefilling is not None
-        seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
-        assert seq_lens_cpu is not None
-        query_lens_cpu = torch.diff(common_attn_metadata.query_start_loc_cpu)
-        single_token_prefill_rows = is_prefilling & (query_lens_cpu == 1)
-        # First-token prefills have no prior Mamba state and must stay prefills.
-        has_prior_state = seq_lens_cpu > 1
-        prefill_to_decode = single_token_prefill_rows & has_prior_state
-        if torch.any(prefill_to_decode).item():
-            is_prefilling = is_prefilling.clone()
-            is_prefilling[prefill_to_decode] = False
-            common_attn_metadata = common_attn_metadata.replace(
-                is_prefilling=is_prefilling
-            )
-
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
                 common_attn_metadata,
