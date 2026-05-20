@@ -89,6 +89,27 @@ def _remap_gemma4_expert_weight_name(name: str) -> str:
     return re.sub(r"(?<!\.moe)\.experts\.(\d+)\.", r".moe.experts.\1.", name)
 
 
+def _maybe_add_k_eq_v_quant_config(
+    config,
+    quant_config: QuantizationConfig | None,
+    prefix: str,
+) -> None:
+    if quant_config is None or not getattr(config, "attention_k_eq_v", False):
+        return
+
+    extra_config = getattr(quant_config, "extra_config", None)
+    if not isinstance(extra_config, dict):
+        return
+
+    for layer_idx, layer_type in enumerate(config.layer_types):
+        if layer_type != "full_attention":
+            continue
+        k_proj = maybe_prefix(prefix, f"layers.{layer_idx}.self_attn.k_proj")
+        v_proj = maybe_prefix(prefix, f"layers.{layer_idx}.self_attn.v_proj")
+        if k_proj in extra_config and v_proj not in extra_config:
+            extra_config[v_proj] = dict(extra_config[k_proj])
+
+
 @triton.jit
 def _gemma4_routing_kernel(
     gating_ptr,
@@ -286,6 +307,7 @@ class Gemma4Router(nn.Module):
             config.num_experts,
             bias=False,
             out_dtype=torch.float32,
+            quant_config=quant_config,
             prefix=f"{prefix}.proj",
         )
 
@@ -961,6 +983,7 @@ class Gemma4Model(nn.Module, EagleModelMixin):
         config = _get_text_config(vllm_config.model_config.hf_config)
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
+        _maybe_add_k_eq_v_quant_config(config, quant_config, prefix)
         self.config = config
         self.quant_config = quant_config
 

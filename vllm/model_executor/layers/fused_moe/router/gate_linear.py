@@ -1,11 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import TYPE_CHECKING
+
 import torch
 from torch.nn.parameter import Parameter
 
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.platforms import current_platform
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization import QuantizationConfig
 
 
 @PluggableLayer.register("gate_linear")
@@ -32,6 +37,7 @@ class GateLinear(ReplicatedLinear):
         bias: bool = False,
         out_dtype: torch.dtype | None = None,
         params_dtype: torch.dtype | None = None,
+        quant_config: "QuantizationConfig | None" = None,
         force_fp32_compute: bool = False,
         prefix: str = "",
     ):
@@ -39,7 +45,10 @@ class GateLinear(ReplicatedLinear):
             (9, 0)
         ) or current_platform.is_device_capability_family(100)
         can_use_specialized_kernels = (
-            current_platform.is_cuda() and is_hopper_or_blackwell and not bias
+            quant_config is None
+            and current_platform.is_cuda()
+            and is_hopper_or_blackwell
+            and not bias
         )
 
         # If fp32 compute is required and no specialized kernel is available,
@@ -52,7 +61,7 @@ class GateLinear(ReplicatedLinear):
             output_size,
             bias=bias,
             params_dtype=params_dtype,
-            quant_config=None,
+            quant_config=quant_config,
             prefix=prefix,
         )
         self.out_dtype = out_dtype
@@ -109,7 +118,11 @@ class GateLinear(ReplicatedLinear):
             return output, None
 
         # Tier 3: F.linear (ReplicatedLinear)
-        if self.out_dtype is not None and x.dtype != self.weight.dtype:
+        if (
+            self.out_dtype is not None
+            and hasattr(self, "weight")
+            and x.dtype != self.weight.dtype
+        ):
             x = x.to(self.weight.dtype)
         output, output_bias = super().forward(x)
         if self.out_dtype is not None and output.dtype != self.out_dtype:
