@@ -29,8 +29,8 @@ from vllm.v1.kv_offload.tiering.base import (
     JobResult,
     SecondaryTierManager,
 )
+from vllm.v1.kv_offload.tiering.fs.io import load_block, store_block
 from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool
-from vllm.v1.kv_offload.tiering.fs.io import store_block, load_block
 
 if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import OffloadingSpec
@@ -57,50 +57,54 @@ class FileSystemTierManager(SecondaryTierManager):
         primary_kv_view: memoryview,
         tier_type: str,
         root_dir: str,
-        gpu_blocks_per_file: int = 1,
+        cpu_blocks_per_file: int = 1,
         n_read_threads: int = 16,
         n_write_threads: int = 16,
     ):
         """
         Args:
-            vllm_config: Global vLLM configuration.
+            offloading_specs: contains the vllm_config, kv_cache_config
+                and block_size_factor.
             primary_kv_view: Memoryview of the primary tier's CPU KV cache.
             tier_type: Tier type identifier, set by SecondaryTierFactory.
             root_dir: Root directory for block files.
-            kv_cache_config: KV cache configuration. When None (factory path),
-                kv_cache_groups defaults to [].
-            gpu_blocks_per_file: Number of GPU blocks per file.
+            cpu_blocks_per_file: Number of cpu blocks per file.
             n_read_threads: Number of read-priority I/O threads.
             n_write_threads: Number of write-priority I/O threads.
         """
         super().__init__(offloading_spec, primary_kv_view, tier_type)
 
         # Extract block size from primary view
-        assert primary_kv_view.strides is not None, "primary_kv_view.strides cannot be None"
+        assert primary_kv_view.strides is not None, (
+            "primary_kv_view.strides cannot be None"
+        )
         self._block_size: int = primary_kv_view.strides[0]
 
         # Create file mapper
-        self.file_mapper = FileMapper.from_vllm_config(
+        self.file_mapper = FileMapper.from_offloading_spec(
             root_dir=root_dir,
-            vllm_config=offloading_spec.vllm_config,
-            kv_cache_config=offloading_spec.kv_cache_config,
-            gpu_blocks_per_file=gpu_blocks_per_file,
+            offloading_spec=offloading_spec,
+            gpu_blocks_per_file=cpu_blocks_per_file * offloading_spec.block_size_factor,
         )
-        
+
         # Write config file
         config_path = self.file_mapper.get_config_file_path()
         os.makedirs(os.path.dirname(config_path), exist_ok=True)
         if not os.path.exists(config_path):
             with open(config_path, "w") as f:
-                json.dump(self.file_mapper.get_run_config(), f, indent=2, sort_keys=True)
-        
+                json.dump(
+                    self.file_mapper.get_run_config(), f, indent=2, sort_keys=True
+                )
+
         self._pool = DualQueueThreadPool(
             n_read_threads,
             n_write_threads,
             thread_name_prefix="vllm_kv_py_fs",
         )
 
-    def lookup(self, key: OffloadKey, req_context: ReqContext | None = None) -> bool | None:
+    def lookup(
+        self, key: OffloadKey, req_context: ReqContext | None = None
+    ) -> bool | None:
         return os.path.exists(self.file_mapper.get_file_name(key))
 
     def submit_store(self, job_metadata: JobMetadata) -> None:
@@ -137,7 +141,3 @@ class FileSystemTierManager(SecondaryTierManager):
             JobResult(job_id=job_id, success=success)
             for job_id, success in self._pool.get_finished()
         )
-
-    @staticmethod
-    def get_tier_type() -> str:
-        return "fs_python"

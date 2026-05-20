@@ -3,11 +3,9 @@
 
 import hashlib
 import json
-import os
 
-from vllm.config import VllmConfig
-from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.base import (
+    OffloadingSpec,
     OffloadKey,
     get_offload_block_hash,
     get_offload_group_idx,
@@ -63,15 +61,17 @@ class FileMapper:
         self.base_path: str = self._compute_base_path(root_dir, self.fields)
 
     @classmethod
-    def from_vllm_config(
+    def from_offloading_spec(
         cls,
         root_dir: str,
-        vllm_config: VllmConfig,
-        kv_cache_config: KVCacheConfig,
-        gpu_blocks_per_file: int,
+        offloading_spec: OffloadingSpec,
+        gpu_blocks_per_file: int = 1,
         parallel_agnostic: bool = False,
     ) -> "FileMapper":
-        """Build a FileMapper from a vllm VllmConfig + KVCacheConfig."""
+        """Build a FileMapper from an OffloadingSpec."""
+        vllm_config = offloading_spec.vllm_config
+        kv_cache_config = offloading_spec.kv_cache_config
+
         parallel_config = vllm_config.parallel_config
         dtype = str(vllm_config.cache_config.cache_dtype).replace("torch.", "")
         kv_cache_groups = [
@@ -108,7 +108,7 @@ class FileMapper:
 
     def get_run_config(self) -> dict:
         return dict(self.fields)
-    
+
     def get_config_file_path(self) -> str:
         return f"{self.base_path}/{_CONFIG_FILENAME}"
 

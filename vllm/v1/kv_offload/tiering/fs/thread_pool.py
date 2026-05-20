@@ -7,14 +7,16 @@ Thread pool:
       - Store-priority threads: drain the store queue first, then the load queue.
     Load jobs are enqueued to the load queue; store jobs to the store queue.
 """
+
+import threading
 from collections import deque
 from collections.abc import Callable, Iterable
-import threading
-from typing import Any, Callable
-from vllm.v1.kv_offload.tiering.base import JobId
+
 from vllm.logger import init_logger
+from vllm.v1.kv_offload.tiering.base import JobId
 
 logger = init_logger(__name__)
+
 
 class JobState:
     """
@@ -22,6 +24,7 @@ class JobState:
 
     Each task calls task_done(success) when it finishes.
     """
+
     __slots__ = ("_job_id", "_n_tasks", "_completed", "_success", "_lock")
 
     def __init__(self, job_id: JobId, n_tasks: int) -> None:
@@ -36,12 +39,13 @@ class JobState:
         return self._job_id
 
     def task_done(self, success: bool) -> tuple[bool, bool]:
-        """ Returns if job completed and success flag """
+        """Returns if job completed and success flag"""
         with self._lock:
             self._completed += 1
             if not success:
                 self._success = False
             return self._completed == self._n_tasks, self._success
+
 
 class DualQueueThreadPool:
     """
@@ -136,7 +140,7 @@ class DualQueueThreadPool:
                 )
                 if self._stop:
                     return
-                primary   = self._load_q  if load_priority else self._store_q
+                primary = self._load_q if load_priority else self._store_q
                 secondary = self._store_q if load_priority else self._load_q
                 task, state = primary.popleft() if primary else secondary.popleft()
             try:
@@ -144,8 +148,7 @@ class DualQueueThreadPool:
                 job_finished, success = state.task_done(True)
             except Exception as exc:
                 logger.error(
-                    "FileSystemTierManagerPython: job %s block I/O "
-                    "failed: %s",
+                    "FileSystemTierManagerPython: job %s block I/O failed: %s",
                     state.job_id,
                     exc,
                 )

@@ -6,9 +6,11 @@ import os
 
 logger = logging.getLogger(__name__)
 
+
 def _ensure_dirs(path: str) -> None:
     """Create parent directories of *path* if they don't exist."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
+
 
 def store_block(
     dest_path: str,
@@ -22,14 +24,14 @@ def store_block(
     # Check if block already exists to avoid redundant writes
     if os.path.exists(dest_path):
         return
-    
+
     tmp_path = dest_path + ".tmp"
     # Ensure parent directories exist
     _ensure_dirs(dest_path)
-    
+
     # Write block atomically. Cast to a flat byte view so the slice uses byte
     # indices; the raw memoryview may be multi-dimensional with itemsize > 1.
-    view_slice = buffer.cast('B')[offset: offset + block_size]
+    view_slice = buffer.cast("B")[offset : offset + block_size]
     try:
         fd = os.open(
             tmp_path,
@@ -49,8 +51,7 @@ def store_block(
         try:
             os.remove(tmp_path)
         except OSError as cleanup_exc:
-            logger.warning("Failed to remove temp file %s: %s",
-                           tmp_path, cleanup_exc)
+            logger.warning("Failed to remove temp file %s: %s", tmp_path, cleanup_exc)
         raise
 
 
@@ -64,7 +65,7 @@ def load_block(
     Load callback: read one KV block from disk. Remove the file on failure.
     """
     fd: int | None = None
-    view_slice = view.cast('B')[offset: offset + block_size]
+    view_slice = view.cast("B")[offset : offset + block_size]
     try:
         fd = os.open(source_path, os.O_RDONLY | os.O_DIRECT)
         bytes_read = os.readv(fd, [view_slice])
@@ -74,8 +75,9 @@ def load_block(
         try:
             os.remove(source_path)
         except OSError as cleanup_exc:
-            logger.warning("Failed to remove unreadable file %s: %s",
-                           source_path, cleanup_exc)
+            logger.warning(
+                "Failed to remove unreadable file %s: %s", source_path, cleanup_exc
+            )
         raise
     finally:
         if fd is not None:

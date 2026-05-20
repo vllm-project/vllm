@@ -13,7 +13,6 @@ import time
 from unittest.mock import MagicMock
 
 import numpy as np
-
 import pytest
 import torch
 
@@ -48,8 +47,10 @@ _MOCK_OFFLOADING_SPEC = MagicMock()
 _MOCK_OFFLOADING_SPEC.vllm_config = _MOCK_VLLM_CONFIG
 _MOCK_OFFLOADING_SPEC.kv_cache_config = _MOCK_KV_CACHE_CONFIG
 
+
 def key(n: int) -> OffloadKey:
     return make_offload_key(n.to_bytes(8, "big"), 0)
+
 
 def make_job(
     job_id: int,
@@ -92,6 +93,7 @@ def drain(tier: FileSystemTierManager, max_rounds: int = 40) -> list:
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def fs_tier(tmp_path):
     tensor = torch.zeros((4, _BLOCK_ELEMENTS), dtype=_DTYPE)
@@ -109,9 +111,6 @@ def fs_tier(tmp_path):
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
-
-def test_get_tier_type():
-    assert FileSystemTierManager.get_tier_type() == "fs_python"
 
 
 def test_lookup_empty_tier(fs_tier):
@@ -190,7 +189,9 @@ def test_multi_block_job_partial_failure(fs_tier):
     assert all(r.success for r in drain(fs_tier))
 
     # Load all three — key(99) was never stored
-    fs_tier.submit_load(make_job(2, [key(10), key(11), key(99)], [0, 1, 2], is_promotion=True))
+    fs_tier.submit_load(
+        make_job(2, [key(10), key(11), key(99)], [0, 1, 2], is_promotion=True)
+    )
     results = drain(fs_tier)
 
     assert len(results) == 1
@@ -256,6 +257,6 @@ def test_store_load_data_integrity(tmp_path):
     assert all(r.success for r in results)
 
     for i, bid in enumerate(load_ids):
-        assert torch.allclose(
-            tensor[bid], expected[i]
-        ), f"Block {bid} data mismatch after store+load"
+        assert torch.allclose(tensor[bid], expected[i]), (
+            f"Block {bid} data mismatch after store+load"
+        )

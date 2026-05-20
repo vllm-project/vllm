@@ -4,7 +4,11 @@
 
 from unittest.mock import MagicMock
 
-from vllm.v1.kv_offload.base import get_offload_block_hash, make_offload_key
+from vllm.v1.kv_offload.base import (
+    OffloadingSpec,
+    get_offload_block_hash,
+    make_offload_key,
+)
 from vllm.v1.kv_offload.file_mapper import FileMapper
 
 # ---------------------------------------------------------------------------
@@ -24,10 +28,15 @@ _MOCK_VLLM_CONFIG.parallel_config.rank = 0
 _MOCK_KV_CACHE_CONFIG = MagicMock()
 _MOCK_KV_CACHE_CONFIG.kv_cache_groups = []
 
+_MOCK_OFFLOADING_SPEC = MagicMock(spec=OffloadingSpec)
+_MOCK_OFFLOADING_SPEC.vllm_config = _MOCK_VLLM_CONFIG
+_MOCK_OFFLOADING_SPEC.kv_cache_config = _MOCK_KV_CACHE_CONFIG
+
 
 # ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
+
 
 def make_mapper(**kwargs) -> FileMapper:
     defaults = dict(
@@ -50,11 +59,6 @@ def make_mapper(**kwargs) -> FileMapper:
 # Tests
 # ---------------------------------------------------------------------------
 
-def test_get_file_name_ends_with_bin():
-    fm = make_mapper()
-    key = make_offload_key(b"\xab" * 8, 0)
-    assert fm.get_file_name(key).endswith(".bin")
-
 
 def test_get_file_name_full_structure():
     """
@@ -74,19 +78,11 @@ def test_get_file_name_full_structure():
     path = fm.get_file_name(key)
 
     hash_hex = get_offload_block_hash(key).hex()
-
-    # base_path ends before _r<rank>; path starts with base_path
-    assert path.startswith(fm.base_path + f"_r{rank}/")
-
-    # Strip the base prefix to inspect the remainder
-    remainder = path[len(fm.base_path) + len(f"_r{rank}/"):]
-    parts = remainder.split("/")
-    assert len(parts) == 3, f"Expected 3 path segments after base, got: {parts}"
-
-    subdir1, subdir2, filename = parts
-    assert subdir1 == hash_hex[:3]
-    assert subdir2 == f"{hash_hex[3:5]}_g{group_idx}"
-    assert filename == f"{hash_hex}.bin"
+    expected_path = (
+        f"{fm.base_path}_r{rank}/{hash_hex[:3]}/"
+        f"{hash_hex[3:5]}_g{group_idx}/{hash_hex}.bin"
+    )
+    assert path == expected_path
 
 
 def test_get_run_config_fields():
@@ -110,11 +106,10 @@ def test_get_config_file_path():
     assert config_path.startswith(fm.base_path)
 
 
-def test_from_vllm_config(tmp_path):
-    fm = FileMapper.from_vllm_config(
+def test_from_offloading_spec(tmp_path):
+    fm = FileMapper.from_offloading_spec(
         root_dir=str(tmp_path),
-        vllm_config=_MOCK_VLLM_CONFIG,
-        kv_cache_config=_MOCK_KV_CACHE_CONFIG,
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
         gpu_blocks_per_file=1,
     )
     assert fm.base_path.startswith(str(tmp_path))
