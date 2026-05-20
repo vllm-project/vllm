@@ -125,6 +125,10 @@ def test_nvfp4_builders_normalize_scales_and_kernel_builds_alpha(
     assert torch.equal(layer.input_global_scale_inv, torch.tensor(16.0))
     assert torch.equal(layer.alpha, torch.tensor(0.015625))
 
+    layer.input_global_scale = torch.nn.Parameter(torch.ones(2), requires_grad=False)
+    with pytest.raises(ValueError, match="scalar input and weight global scales"):
+        NvFp4LinearKernel._set_alpha_after_loading(layer)
+
 
 @pytest.mark.parametrize(
     "model_args",

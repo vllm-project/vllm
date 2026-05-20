@@ -55,6 +55,15 @@ class NvFp4LinearKernel(ABC):
             and hasattr(layer, "weight_global_scale")
         ):
             return
+        if (
+            layer.input_global_scale.numel() != 1
+            or layer.weight_global_scale.numel() != 1
+        ):
+            raise ValueError(
+                "NVFP4 alpha must be built from scalar input and weight global "
+                "scales. Ensure checkpoint global scales are normalized before "
+                "kernel processing."
+            )
         layer.alpha = Parameter(
             layer.input_global_scale * layer.weight_global_scale,
             requires_grad=False,

@@ -69,8 +69,10 @@ class NvFp4StaticWeightBuilder:
 
     def post_load(self, layer: torch.nn.Module) -> None:
         if self.wrap_weight:
+            # Marlin W4A16 expects an ordinary Parameter after checkpoint loading.
             layer.weight = Parameter(layer.weight_packed.data, requires_grad=False)
         else:
+            # Re-register the original ModelWeightParameter under the runtime name.
             layer.weight = layer.weight_packed
         del layer.weight_packed
 
