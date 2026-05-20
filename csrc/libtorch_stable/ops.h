@@ -231,6 +231,29 @@ void fused_qk_norm_rope(torch::stable::Tensor& qkv, int64_t num_heads_q,
                         torch::stable::Tensor& position_ids,
                         int64_t forced_token_heads_per_warp);
 
+// Sampler kernels (shared CUDA/ROCm)
+void apply_repetition_penalties_(
+    torch::stable::Tensor& logits, const torch::stable::Tensor& prompt_mask,
+    const torch::stable::Tensor& output_mask,
+    const torch::stable::Tensor& repetition_penalties);
+
+void top_k_per_row_prefill(const torch::stable::Tensor& logits,
+                           const torch::stable::Tensor& rowStarts,
+                           const torch::stable::Tensor& rowEnds,
+                           torch::stable::Tensor& indices, int64_t numRows,
+                           int64_t stride0, int64_t stride1, int64_t topK);
+
+void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
+                          const torch::stable::Tensor& seqLens,
+                          torch::stable::Tensor& indices, int64_t numRows,
+                          int64_t stride0, int64_t stride1, int64_t topK);
+
+void persistent_topk(const torch::stable::Tensor& logits,
+                     const torch::stable::Tensor& lengths,
+                     torch::stable::Tensor& output,
+                     torch::stable::Tensor& workspace, int64_t k,
+                     int64_t max_seq_len);
+
 // Activation kernels (shared CUDA/ROCm)
 void silu_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input);
 void silu_and_mul_clamp(torch::stable::Tensor& out,

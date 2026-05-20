@@ -333,6 +333,26 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "bool is_neox, Tensor position_ids, "
       "int forced_token_heads_per_warp=-1) -> ()");
 
+  // Apply repetition penalties to logits in-place.
+  ops.def(
+      "apply_repetition_penalties_(Tensor! logits, Tensor prompt_mask, "
+      "Tensor output_mask, Tensor repetition_penalties) -> ()");
+
+  // Optimized top-k per row operations.
+  ops.def(
+      "top_k_per_row_prefill(Tensor logits, Tensor rowStarts, Tensor rowEnds, "
+      "Tensor! indices, int numRows, int stride0, "
+      "int stride1, int topK) -> ()");
+
+  ops.def(
+      "top_k_per_row_decode(Tensor logits, int next_n, "
+      "Tensor seq_lens, Tensor! indices, "
+      "int numRows, int stride0, int stride1, int topK) -> ()");
+
+  ops.def(
+      "persistent_topk(Tensor logits, Tensor lengths, Tensor! output, "
+      "Tensor workspace, int k, int max_seq_len) -> ()");
+
   // Activation ops
   // Activation function used in SwiGLU.
   ops.def("silu_and_mul(Tensor! result, Tensor input) -> ()");
@@ -502,6 +522,13 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   // Positional encoding kernels (shared CUDA/ROCm)
   ops.impl("rotary_embedding", TORCH_BOX(&rotary_embedding));
   ops.impl("fused_qk_norm_rope", TORCH_BOX(&fused_qk_norm_rope));
+
+  // Sampler kernels (shared CUDA/ROCm)
+  ops.impl("apply_repetition_penalties_",
+           TORCH_BOX(&apply_repetition_penalties_));
+  ops.impl("top_k_per_row_prefill", TORCH_BOX(&top_k_per_row_prefill));
+  ops.impl("top_k_per_row_decode", TORCH_BOX(&top_k_per_row_decode));
+  ops.impl("persistent_topk", TORCH_BOX(&persistent_topk));
 
   // Activation kernels (shared CUDA/ROCm)
   ops.impl("silu_and_mul", TORCH_BOX(&silu_and_mul));

@@ -90,31 +90,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert", torch::kCUDA,
            &fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert);
 
-  // Apply repetition penalties to logits in-place
-  ops.def(
-      "apply_repetition_penalties_(Tensor! logits, Tensor prompt_mask, "
-      "Tensor output_mask, Tensor repetition_penalties) -> ()");
-  ops.impl("apply_repetition_penalties_", torch::kCUDA,
-           &apply_repetition_penalties_);
-
-  // Optimized top-k per row operation
-  ops.def(
-      "top_k_per_row_prefill(Tensor logits, Tensor rowStarts, Tensor rowEnds, "
-      "Tensor! indices, int numRows, int stride0, "
-      "int stride1, int topK) -> ()");
-  ops.impl("top_k_per_row_prefill", torch::kCUDA, &top_k_per_row_prefill);
-
-  ops.def(
-      "top_k_per_row_decode(Tensor logits, int next_n, "
-      "Tensor seq_lens, Tensor! indices, "
-      "int numRows, int stride0, int stride1, int topK) -> ()");
-  ops.impl("top_k_per_row_decode", torch::kCUDA, &top_k_per_row_decode);
-
-  ops.def(
-      "persistent_topk(Tensor logits, Tensor lengths, Tensor! output, "
-      "Tensor workspace, int k, int max_seq_len) -> ()");
-  ops.impl("persistent_topk", torch::kCUDA, &persistent_topk);
-
   // Quantization ops
 #ifndef USE_ROCM
 

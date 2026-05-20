@@ -68,26 +68,6 @@ void fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
     torch::Tensor const& slot_mapping, torch::Tensor const& position_ids,
     torch::Tensor const& cos_sin_cache, double eps, int64_t cache_block_size);
 
-void apply_repetition_penalties_(torch::Tensor& logits,
-                                 const torch::Tensor& prompt_mask,
-                                 const torch::Tensor& output_mask,
-                                 const torch::Tensor& repetition_penalties);
-
-void top_k_per_row_prefill(const torch::Tensor& logits,
-                           const torch::Tensor& rowStarts,
-                           const torch::Tensor& rowEnds, torch::Tensor& indices,
-                           int64_t numRows, int64_t stride0, int64_t stride1,
-                           int64_t topK);
-
-void top_k_per_row_decode(const torch::Tensor& logits, int64_t next_n,
-                          const torch::Tensor& seqLens, torch::Tensor& indices,
-                          int64_t numRows, int64_t stride0, int64_t stride1,
-                          int64_t topK);
-
-void persistent_topk(const torch::Tensor& logits, const torch::Tensor& lengths,
-                     torch::Tensor& output, torch::Tensor& workspace, int64_t k,
-                     int64_t max_seq_len);
-
 void silu_and_mul_per_block_quant(torch::Tensor& out,
                                   torch::Tensor const& input,
                                   torch::Tensor& scales, int64_t group_size,
