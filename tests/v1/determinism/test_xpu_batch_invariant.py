@@ -6,25 +6,40 @@ Test batch-invariant kernel overrides on Intel XPU.
 Verifies correctness (vs torch reference) and the batch-invariance property
 (result for one item is bitwise identical regardless of other items in the
 batch) for the ops registered with the "XPU" dispatch key:
+  - aten::mm (via matmul_persistent Triton kernel)
+  - aten::addmm / aten::matmul / aten::linear
   - aten::bmm
   - aten::_log_softmax
   - aten::softmax / aten::_softmax
   - aten::mean.dim
 
-Also tests the Triton rms_norm kernel (called directly, not via aten dispatch)
-and verifies that registering the XPU overrides correctly routes standard
-torch ops through the batch-invariant implementations.
+Also tests the Triton rms_norm kernel (called directly, not via aten dispatch),
+verifies that registering the XPU overrides correctly routes standard torch ops
+through the batch-invariant implementations, and includes an end-to-end LLM
+generation test demonstrating batch invariance at the inference level.
 """
+
+import contextlib
+import os
+import random
 
 import pytest
 import torch
-from utils import skip_unsupported_xpu
+from utils import (
+    TEST_MODEL,
+    _extract_step_logprobs,
+    _random_prompt,
+    skip_unsupported_xpu,
+)
 
+from vllm import LLM, SamplingParams
 from vllm.model_executor.layers.batch_invariant import (
     bmm_batch_invariant,
     log_softmax,
+    matmul_persistent,
     mean_batch_invariant,
     mean_dim,
+    mm_batch_invariant,
     rms_norm,
     softmax_batch_invariant,
 )
@@ -85,6 +100,97 @@ def test_bmm_batch_invariance(dtype):
     out_batch = bmm_batch_invariant(a_batch, b_batch)
 
     assert torch.equal(out_single[0], out_batch[5])
+
+
+# ---------------------------------------------------------------------------
+# Matmul (mm) tests — matmul_persistent Triton kernel
+# ---------------------------------------------------------------------------
+
+
+@skip_unsupported_xpu
+@pytest.mark.parametrize(
+    "M,K,N",
+    [
+        (128, 128, 128),
+        (256, 512, 256),
+        (1024, 1024, 1024),
+        (2048, 4096, 2048),
+    ],
+)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_matmul_persistent_correctness(M, K, N, dtype):
+    """matmul_persistent matches torch.matmul within tolerance."""
+    device = torch.device(DEVICE_TYPE)
+    torch.manual_seed(42)
+
+    a = torch.randn(M, K, dtype=dtype, device=device)
+    b = torch.randn(K, N, dtype=dtype, device=device)
+
+    expected = torch.matmul(a.float(), b.float()).to(dtype)
+    actual = matmul_persistent(a, b)
+
+    rtol, atol = (2e-2, 5e-2) if dtype == torch.bfloat16 else (1e-2, 2e-2)
+    torch.testing.assert_close(actual, expected, rtol=rtol, atol=atol)
+
+
+@skip_unsupported_xpu
+@pytest.mark.parametrize(
+    "K,N",
+    [
+        (4096, 4096),
+        (4096, 11008),
+        (1024, 4096),
+    ],
+)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_matmul_persistent_batch_invariance(K, N, dtype):
+    """Same row produces bitwise-identical result regardless of batch size.
+
+    This is the core property: result for a fixed input row must not change
+    when the M dimension (number of rows) changes. Non-batch-invariant BLAS
+    implementations (e.g. oneMKL with split-k) fail this test.
+    """
+    device = torch.device(DEVICE_TYPE)
+    torch.manual_seed(42)
+
+    weight = torch.randn(K, N, dtype=dtype, device=device)
+    probe_row = torch.randn(1, K, dtype=dtype, device=device)
+
+    # Reference: single-row matmul
+    ref = matmul_persistent(probe_row, weight)
+
+    # Embed the probe row into batches of varying sizes
+    batch_sizes = [2, 8, 32, 64, 128]
+    for bs in batch_sizes:
+        filler = torch.randn(bs - 1, K, dtype=dtype, device=device)
+        # Place probe at a non-trivial position
+        pos = min(3, bs - 1)
+        if pos == 0:
+            batch = torch.cat([probe_row, filler], dim=0)
+        else:
+            batch = torch.cat([filler[:pos], probe_row, filler[pos:]], dim=0)
+
+        result = matmul_persistent(batch, weight)
+        assert torch.equal(ref[0], result[pos]), (
+            f"Batch invariance violated at batch_size={bs}, pos={pos}: "
+            f"max_diff={(ref[0] - result[pos]).abs().max().item():.6e}"
+        )
+
+
+@skip_unsupported_xpu
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_mm_batch_invariant_via_dispatch(dtype):
+    """mm_batch_invariant (aten::mm override) delegates to matmul_persistent."""
+    device = torch.device(DEVICE_TYPE)
+    torch.manual_seed(42)
+
+    a = torch.randn(64, 1024, dtype=dtype, device=device)
+    b = torch.randn(1024, 512, dtype=dtype, device=device)
+
+    via_mm = mm_batch_invariant(a, b)
+    via_persistent = matmul_persistent(a, b)
+
+    assert torch.equal(via_mm, via_persistent)
 
 
 # ---------------------------------------------------------------------------
@@ -295,7 +401,9 @@ def xpu_batch_invariant_lib():
     )
 
     lib = torch.library.Library("aten", "IMPL")
-    lib.impl("aten::_log_softmax", _log_softmax_batch_invariant, "XPU", allow_override=True)
+    lib.impl(
+        "aten::_log_softmax", _log_softmax_batch_invariant, "XPU", allow_override=True
+    )
     lib.impl("aten::softmax", softmax_batch_invariant, "XPU", allow_override=True)
     lib.impl("aten::_softmax", softmax_batch_invariant, "XPU", allow_override=True)
     lib.impl("aten::mean.dim", mean_batch_invariant, "XPU", allow_override=True)
@@ -363,3 +471,150 @@ def test_override_mean(xpu_batch_invariant_lib, dtype):
     via_direct = mean_batch_invariant(x, dim=[1])
 
     assert torch.equal(via_torch, via_direct)
+
+
+# ---------------------------------------------------------------------------
+# End-to-end LLM generation: batch invariance at inference level
+# ---------------------------------------------------------------------------
+
+
+@skip_unsupported_xpu
+@pytest.mark.timeout(600)
+def test_e2e_generation_batch_invariance():
+    """Same prompt produces identical output at any position in a batch.
+
+    Runs a needle prompt alone (BS=1), then embeds it at random positions
+    within larger batches and verifies the output text is identical.
+    """
+    seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
+    random.seed(seed)
+
+    model = TEST_MODEL
+    num_trials = int(os.getenv("VLLM_NEEDLE_TRIALS", "3"))
+    max_batch_size = int(os.getenv("VLLM_NEEDLE_BATCH_SIZE", "32"))
+
+    sampling = SamplingParams(
+        temperature=0.0,
+        max_tokens=64,
+        seed=20240919,
+    )
+
+    needle_prompt = "The meaning of life is"
+
+    llm = None
+    try:
+        llm = LLM(
+            model=model,
+            max_num_seqs=max_batch_size,
+            gpu_memory_utilization=0.7,
+            max_model_len=2048,
+            dtype="auto",
+            enforce_eager=True,
+        )
+
+        # Baseline: needle alone
+        baseline_out = llm.generate([needle_prompt], sampling)
+        baseline_text = baseline_out[0].outputs[0].text
+
+        mismatches = 0
+        for trial in range(num_trials):
+            batch_size = random.randint(max_batch_size // 2, max_batch_size)
+            needle_pos = random.randint(0, batch_size - 1)
+            prompts: list[str] = []
+            for i in range(batch_size):
+                if i == needle_pos:
+                    prompts.append(needle_prompt)
+                else:
+                    prompts.append(_random_prompt(50, 200))
+
+            outputs = llm.generate(prompts, sampling)
+            text = outputs[needle_pos].outputs[0].text
+
+            if text != baseline_text:
+                print(
+                    f"Trial {trial}: mismatch at pos={needle_pos}, "
+                    f"bs={batch_size}\n"
+                    f"  Expected: {baseline_text[:80]}\n"
+                    f"  Got:      {text[:80]}"
+                )
+                mismatches += 1
+
+        if mismatches > 0:
+            pytest.fail(
+                f"E2E batch invariance violated: {mismatches}/{num_trials} "
+                f"trials produced different output."
+            )
+
+    finally:
+        if llm is not None:
+            with contextlib.suppress(Exception):
+                llm.shutdown()
+
+
+@skip_unsupported_xpu
+@pytest.mark.timeout(600)
+def test_e2e_logprobs_bs1_vs_bsN():
+    """Logprobs for each prompt must be bitwise identical in BS=1 vs BS=N.
+
+    Runs prompts individually (BS=1) and batched (BS=N), then compares
+    per-token logprobs to verify the batch composition does not affect results.
+    """
+    seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
+    random.seed(seed)
+
+    llm = LLM(
+        model=TEST_MODEL,
+        max_num_seqs=32,
+        max_model_len=4096,
+        dtype="auto",
+        gpu_memory_utilization=0.8,
+        enforce_eager=True,
+    )
+
+    prompts = [_random_prompt(10, 50) for _ in range(16)]
+
+    sp = SamplingParams(
+        temperature=0.0,
+        max_tokens=8,
+        logprobs=5,
+    )
+
+    # BS=1 runs
+    bs1_logprobs = []
+    bs1_tokens = []
+    for p in prompts:
+        outs = llm.generate([p], sp, use_tqdm=False)
+        step_logprobs, token_ids = _extract_step_logprobs(outs[0])
+        if step_logprobs is None:
+            pytest.skip("Logprobs not available on this configuration.")
+        bs1_logprobs.append(step_logprobs)
+        bs1_tokens.append(token_ids)
+
+    # BS=N run
+    outs_batched = llm.generate(prompts, sp, use_tqdm=False)
+    bsN_logprobs = []
+    bsN_tokens = []
+    for o in outs_batched:
+        step_logprobs, token_ids = _extract_step_logprobs(o)
+        if step_logprobs is None:
+            pytest.skip("Logprobs not available on this configuration.")
+        bsN_logprobs.append(step_logprobs)
+        bsN_tokens.append(token_ids)
+
+    # Compare
+    failed = []
+    for i, (lp1, lpN, t1, tN) in enumerate(
+        zip(bs1_logprobs, bsN_logprobs, bs1_tokens, bsN_tokens)
+    ):
+        if t1 != tN:
+            failed.append(f"Prompt {i}: different tokens bs1={t1} bsN={tN}")
+            continue
+        if not torch.equal(lp1, lpN):
+            max_diff = torch.abs(lp1 - lpN).max().item()
+            failed.append(f"Prompt {i}: logprob mismatch (max_diff={max_diff:.6e})")
+
+    if failed:
+        pytest.fail(
+            f"BS=1 vs BS=N logprob mismatch in {len(failed)}/{len(prompts)} "
+            f"prompts:\n" + "\n".join(failed[:5])
+        )
