@@ -894,6 +894,83 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin):
             mm_processor_kwargs=mm_processor_kwargs,
         )
 
+    def enqueue_chat(
+        self,
+        messages: list[ChatCompletionMessageParam]
+        | Sequence[list[ChatCompletionMessageParam]],
+        sampling_params: SamplingParams | Sequence[SamplingParams] | None = None,
+        use_tqdm: bool | Callable[..., tqdm] = True,
+        lora_request: Sequence[LoRARequest] | LoRARequest | None = None,
+        priority: list[int] | None = None,
+        chat_template: str | None = None,
+        chat_template_content_format: ChatTemplateContentFormatOption = "auto",
+        add_generation_prompt: bool = True,
+        continue_final_message: bool = False,
+        tools: list[dict[str, Any]] | None = None,
+        chat_template_kwargs: dict[str, Any] | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
+        mm_processor_kwargs: dict[str, Any] | None = None,
+    ) -> list[str]:
+        """Enqueue chat conversations for generation without waiting.
+
+        This method renders chat conversations and adds the resulting requests
+        to the engine queue. Use wait_for_completion() to get results. To
+        guarantee that all requests are queued before scheduling starts, pause
+        scheduling with sleep(level=0) before calling this method and resume it
+        with wake_up(tags=["scheduling"]) afterward.
+
+        Args:
+            messages: A sequence of conversations or a single conversation.
+                Each conversation is represented as a list of messages.
+            sampling_params: The sampling parameters for text generation.
+                If None, we use the default sampling parameters.
+            use_tqdm: If `True`, shows a tqdm progress bar while rendering
+                conversations.
+            lora_request: LoRA request to use for generation, if any.
+            priority: The priority of the requests, if any.
+            chat_template: The template to use for structuring the chat.
+            chat_template_content_format: The format to render message content.
+            add_generation_prompt: If True, adds a generation template
+                to each message.
+            continue_final_message: If True, continues the final message in
+                the conversation instead of starting a new one.
+            tools: Tools to make available to the model, if any.
+            chat_template_kwargs: Additional kwargs to pass to the chat
+                template.
+            tokenization_kwargs: Overrides for `tokenizer.encode`.
+            mm_processor_kwargs: Overrides for `processor.__call__`.
+
+        Returns:
+            A list of request IDs for the enqueued requests.
+        """
+        model_config = self.model_config
+        runner_type = model_config.runner_type
+        if runner_type != "generate":
+            raise ValueError(
+                "LLM.enqueue_chat() is only supported for generative models. "
+                "Try passing `--runner generate` to use the model as a "
+                "generative model."
+            )
+
+        if sampling_params is None:
+            sampling_params = self.get_default_sampling_params()
+
+        return self._add_chat_requests(
+            messages=messages,
+            params=sampling_params,
+            use_tqdm=use_tqdm,
+            lora_request=lora_request,
+            priority=priority,
+            chat_template=chat_template,
+            chat_template_content_format=chat_template_content_format,
+            chat_template_kwargs=chat_template_kwargs,
+            add_generation_prompt=add_generation_prompt,
+            continue_final_message=continue_final_message,
+            tools=tools,
+            tokenization_kwargs=tokenization_kwargs,
+            mm_processor_kwargs=mm_processor_kwargs,
+        )
+
     def start_profile(self, profile_prefix: str | None = None) -> None:
         """Start profiling with optional custom trace prefix.
 
@@ -1095,9 +1172,46 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin):
         tokenization_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
     ):
+        self._add_chat_requests(
+            messages=messages,
+            params=params,
+            use_tqdm=use_tqdm,
+            lora_request=lora_request,
+            chat_template=chat_template,
+            chat_template_content_format=chat_template_content_format,
+            chat_template_kwargs=chat_template_kwargs,
+            add_generation_prompt=add_generation_prompt,
+            continue_final_message=continue_final_message,
+            tools=tools,
+            tokenization_kwargs=tokenization_kwargs,
+            mm_processor_kwargs=mm_processor_kwargs,
+        )
+        return self._run_engine(output_type=output_type, use_tqdm=use_tqdm)
+
+    def _add_chat_requests(
+        self,
+        messages: list[ChatCompletionMessageParam]
+        | Sequence[list[ChatCompletionMessageParam]],
+        params: SamplingParams
+        | PoolingParams
+        | Sequence[SamplingParams | PoolingParams],
+        *,
+        use_tqdm: bool | Callable[..., tqdm] = True,
+        lora_request: Sequence[LoRARequest] | LoRARequest | None = None,
+        priority: list[int] | None = None,
+        chat_template: str | None = None,
+        chat_template_content_format: ChatTemplateContentFormatOption = "auto",
+        add_generation_prompt: bool = True,
+        continue_final_message: bool = False,
+        tools: list[dict[str, Any]] | None = None,
+        chat_template_kwargs: dict[str, Any] | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
+        mm_processor_kwargs: dict[str, Any] | None = None,
+    ) -> list[str]:
         seq_convs = conversation_to_seq(messages)
         seq_params = self._params_to_seq(params, len(seq_convs))
         seq_lora_requests = self._lora_request_to_seq(lora_request, len(seq_convs))
+        seq_priority = self._priority_to_seq(priority, len(seq_convs))
 
         # When thinking is enabled or tools are provided, and the model
         # uses special tokens for structured output (e.g. Gemma4's
@@ -1110,7 +1224,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin):
         if needs_parsing:
             self._adjust_params_for_parsing(seq_params)
 
-        return self._render_and_run_requests(
+        return self._render_and_add_requests(
             prompts=(
                 self._preprocess_chat_one(
                     conversation,
@@ -1130,9 +1244,8 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin):
                 )
             ),
             params=seq_params,
-            output_type=output_type,
             lora_requests=seq_lora_requests,
-            use_tqdm=use_tqdm,
+            priorities=seq_priority,
         )
 
     def _adjust_params_for_parsing(
