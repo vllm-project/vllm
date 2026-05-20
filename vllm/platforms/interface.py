@@ -645,11 +645,18 @@ class Platform:
             )
 
         if cache_config.block_size < attn_block_size:
+            # Preserve the user-requested block_size as hash_block_size
+            # before inflating block_size to attn_block_size, so prefix
+            # hashing keeps the finer granularity for hybrid models.
+            if cache_config.hash_block_size is None:
+                cache_config.hash_block_size = cache_config.block_size
             cache_config.block_size = attn_block_size
             logger.info(
                 "Setting attention block size to %d tokens "
-                "to ensure that attention page size is >= mamba page size.",
+                "to ensure that attention page size is >= mamba page size "
+                "(hash granularity preserved at %d).",
                 attn_block_size,
+                cache_config.hash_block_size,
             )
 
         if cache_config.mamba_cache_mode == "align":

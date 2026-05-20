@@ -273,6 +273,15 @@ class EngineCore:
         vllm_config.cache_config.num_gpu_blocks = scheduler_kv_cache_config.num_blocks
         kv_cache_groups = scheduler_kv_cache_config.kv_cache_groups
         if kv_cache_groups:
+            # Preserve the user --block-size as hash_block_size before
+            # worker-side block_size inflation flows back here, so
+            # resolve_kv_cache_block_sizes() returns hash_block_size !=
+            # block_size for hybrid models (gates sub-block BlockStored
+            # emission in SingleTypeKVCacheManager).
+            if vllm_config.cache_config.hash_block_size is None:
+                vllm_config.cache_config.hash_block_size = (
+                    vllm_config.cache_config.block_size
+                )
             vllm_config.cache_config.block_size = min(
                 g.kv_cache_spec.block_size for g in kv_cache_groups
             )

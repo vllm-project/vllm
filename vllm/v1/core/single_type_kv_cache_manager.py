@@ -79,6 +79,9 @@ class SingleTypeKVCacheManager(ABC):
         # data for preempted ones.
         self.num_cached_block: dict[str, int] = {}
 
+        # Per-request hash-block emission cursor for sub-block events.
+        self._last_emitted_hash_block: dict[str, int] = {}
+
         self.kv_cache_group_id = kv_cache_group_id
         self._null_block = block_pool.null_block
 
@@ -275,6 +278,63 @@ class SingleTypeKVCacheManager(ABC):
         self.new_block_ids = []
         return ids
 
+    def _maybe_emit_sub_block_events(self, request: Request, num_tokens: int) -> None:
+        """Emit synthetic BlockStored events at hash_block_size granularity.
+
+        When physical block_size is inflated for hybrid models (to satisfy
+        page-size constraints between Mamba and Attention groups), the
+        normal cache_full_blocks() path only fires events on full physical
+        blocks. For prompts smaller than the inflated block no events ever
+        flow. This emitter advances a per-request cursor over hash-block
+        boundaries (set upstream by resolve_kv_cache_block_sizes) and
+        appends BlockStored events to block_pool.kv_event_queue. Mamba
+        groups are suppressed via the MambaManager override below.
+        """
+        from vllm.distributed.kv_events import MEDIUM_GPU, BlockStored
+        from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
+
+        bp = self.block_pool
+        if not bp.enable_kv_cache_events:
+            return
+        hash_bs = bp.hash_block_size
+        if hash_bs >= self.block_size:
+            return  # only meaningful when block_size > hash_block_size (hybrid)
+
+        num_hash_blocks = num_tokens // hash_bs
+        last_emitted = self._last_emitted_hash_block.get(request.request_id, 0)
+        if num_hash_blocks <= last_emitted:
+            return
+        if len(request.block_hashes) < num_hash_blocks:
+            return  # block hashes not populated for these positions yet
+
+        new_hashes = [
+            maybe_convert_block_hash(request.block_hashes[i])
+            for i in range(last_emitted, num_hash_blocks)
+        ]
+        parent_hash = (
+            maybe_convert_block_hash(request.block_hashes[last_emitted - 1])
+            if last_emitted > 0
+            else None
+        )
+        start_tok = last_emitted * hash_bs
+        end_tok = num_hash_blocks * hash_bs
+        token_ids = list(request.all_token_ids[start_tok:end_tok])
+        bp.kv_event_queue.append(
+            BlockStored(
+                block_hashes=new_hashes,
+                parent_block_hash=parent_hash,
+                token_ids=token_ids,
+                block_size=hash_bs,
+                lora_id=(
+                    request.lora_request.adapter_id if request.lora_request else None
+                ),
+                medium=MEDIUM_GPU,
+                lora_name=(request.lora_request.name if request.lora_request else None),
+                group_idx=self.kv_cache_group_id,
+            )
+        )
+        self._last_emitted_hash_block[request.request_id] = num_hash_blocks
+
     def cache_blocks(
         self,
         request: Request,
@@ -298,27 +358,30 @@ class SingleTypeKVCacheManager(ABC):
         num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
         num_full_blocks = num_tokens // self.block_size
 
-        if num_cached_blocks >= num_full_blocks:
-            return
-
-        # Fast path: when the coordinator imposes no alignment constraint
-        if alignment_tokens is None or alignment_tokens <= self.block_size:
-            block_mask = None
-        else:
-            block_mask = self._cache_block_mask(
-                num_cached_blocks, num_full_blocks, alignment_tokens
+        if num_full_blocks > num_cached_blocks:
+            # Fast path: when the coordinator imposes no alignment constraint
+            if alignment_tokens is None or alignment_tokens <= self.block_size:
+                block_mask = None
+            else:
+                block_mask = self._cache_block_mask(
+                    num_cached_blocks, num_full_blocks, alignment_tokens
+                )
+            self.block_pool.cache_full_blocks(
+                request=request,
+                blocks=self.req_to_blocks[request.request_id],
+                num_cached_blocks=num_cached_blocks,
+                num_full_blocks=num_full_blocks,
+                block_size=self.block_size,
+                kv_cache_group_id=self.kv_cache_group_id,
+                block_mask=block_mask,
             )
-        self.block_pool.cache_full_blocks(
-            request=request,
-            blocks=self.req_to_blocks[request.request_id],
-            num_cached_blocks=num_cached_blocks,
-            num_full_blocks=num_full_blocks,
-            block_size=self.block_size,
-            kv_cache_group_id=self.kv_cache_group_id,
-            block_mask=block_mask,
-        )
+            self.num_cached_block[request.request_id] = num_full_blocks
 
-        self.num_cached_block[request.request_id] = num_full_blocks
+        # Also emit sub-block events so prompts smaller than the inflated
+        # physical block still produce a KV-event signal. Runs every call
+        # because hash-block boundaries can advance independently of full
+        # physical-block boundaries.
+        self._maybe_emit_sub_block_events(request, num_tokens)
 
     def _cache_block_mask(
         self,
@@ -351,6 +414,7 @@ class SingleTypeKVCacheManager(ABC):
 
         self.block_pool.free_blocks(ordered_blocks)
         self.num_cached_block.pop(request_id, None)
+        self._last_emitted_hash_block.pop(request_id, None)
 
     @abstractmethod
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
@@ -853,6 +917,11 @@ class MambaManager(SingleTypeKVCacheManager):
             self.last_state_block_idx: dict[str, int] = {}
             # The set of the requests that have been allocated blocks
             self._allocated_block_reqs: set[str] = set()
+
+    def _maybe_emit_sub_block_events(self, request: Request, num_tokens: int) -> None:
+        # Mamba state is recurrent — there is no token-level prefix-shareable
+        # hash block to surface on the kv-events stream.
+        return
 
     @classmethod
     def find_longest_cache_hit(
