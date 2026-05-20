@@ -40,8 +40,6 @@ audioread==3.0.1
     # via
     #   -r requirements/test/xpu.in
     #   librosa
-av==17.0.1
-    # via -r requirements/test/xpu.in
 blobfile==3.0.0
     # via -r requirements/test/xpu.in
 bm25s==0.2.13
@@ -557,7 +555,6 @@ scikit-learn==1.8.0
     #   sentence-transformers
 scipy==1.17.1
     # via
-    #   -r requirements/test/xpu.in
     #   albumentations
     #   bm25s
     #   librosa

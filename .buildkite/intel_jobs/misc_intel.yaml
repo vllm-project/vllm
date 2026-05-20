@@ -158,6 +158,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
+    pip install av &&
     pytest -v -s detokenizer &&
     pytest -v -s -m "not cpu_test" ./multimodal &&
     pytest -v -s utils_'
