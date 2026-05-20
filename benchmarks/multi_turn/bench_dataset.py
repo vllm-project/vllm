@@ -212,7 +212,7 @@ class ExponentialDistribution(Distribution):
         samples = np.random.exponential(self.scale, size=size)
         if self.max_val:
             samples = np.minimum(samples, self.max_val)
-        return samples
+        return np.round(samples).astype(int)
 
     def __repr__(self) -> str:
         return f"ExponentialDistribution[{self.scale}]"
