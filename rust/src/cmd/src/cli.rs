@@ -153,8 +153,8 @@ pub struct SharedRuntimeArgs {
     ///
     /// * "auto" detects the format from the template
     /// * "string" renders content as a string. Example: `"Hello World"`
-    /// * "openai" renders content as a list of dictionaries, similar to OpenAI
-    ///   schema. Example: `[{"type": "text", "text": "Hello world!"}]`
+    /// * "openai" renders content as a list of dictionaries, similar to OpenAI schema. Example:
+    ///   `[{"type": "text", "text": "Hello world!"}]`
     #[arg(long, default_value_t)]
     #[serde(default)]
     pub chat_template_content_format: ChatTemplateContentFormatOption,

@@ -45,8 +45,8 @@ pub(crate) fn init_tracing() {
 /// - Start from `VLLM_LOGGING_LEVEL` as the default level for all targets.
 /// - If `RUST_LOG` contains a global default level such as `warn`, it overrides
 ///   `VLLM_LOGGING_LEVEL`.
-/// - Any explicit target directives in `RUST_LOG`, such as `hyper=info`,
-///   override whichever default level is active for those targets only.
+/// - Any explicit target directives in `RUST_LOG`, such as `hyper=info`, override whichever default
+///   level is active for those targets only.
 fn build_targets_filter(vllm_logging_level: Option<&str>, rust_log: Option<&str>) -> Targets {
     let mut filter =
         Targets::new().with_default(map_python_log_level(vllm_logging_level.unwrap_or("INFO")));
@@ -224,8 +224,8 @@ where
 /// for common Rust entrypoint and module filenames.
 ///
 /// - For `mod.rs`, keep the parent directory as `parent/mod.rs`.
-/// - For `src/lib.rs` and `src/main.rs`, keep one additional component as
-///   `crate/src/lib.rs` or `crate/src/main.rs` when available.
+/// - For `src/lib.rs` and `src/main.rs`, keep one additional component as `crate/src/lib.rs` or
+///   `crate/src/main.rs` when available.
 /// - Other files are displayed as just the basename.
 fn shorten_file_path(file: &str) -> &str {
     let mut parts = file.rsplit('/');

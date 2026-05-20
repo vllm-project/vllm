@@ -21,10 +21,8 @@ pub(crate) use harmony::validate_harmony_parser_overrides;
 
 /// Internal assistant event before final assembly.
 ///
-/// - [`ContentEvent`]: subenum after reasoning parsing, carries only text
-///   content.
-/// - [`AssistantEvent`]: full event after tool parsing, adds tool-call
-///   variants.
+/// - [`ContentEvent`]: subenum after reasoning parsing, carries only text content.
+/// - [`AssistantEvent`]: full event after tool parsing, adds tool-call variants.
 #[subenum(ContentEvent)]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum AssistantEvent {

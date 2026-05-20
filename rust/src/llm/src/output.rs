@@ -180,10 +180,8 @@ impl GenerateOutput {
 
 /// Stream of per-request generate outputs for one request.
 ///
-/// - A normal termination of the stream represents a clean completion of the
-///   request.
-/// - For errors, unexpected closes, or explicit aborts, the stream terminates
-///   with an error.
+/// - A normal termination of the stream represents a clean completion of the request.
+/// - For errors, unexpected closes, or explicit aborts, the stream terminates with an error.
 pub struct GenerateOutputStream {
     pending_prompt_info: Option<GeneratePromptInfo>,
     raw_stream: EngineCoreOutputStream,

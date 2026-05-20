@@ -203,10 +203,9 @@ fn build_sampling_params(
 ///
 /// - `top_n(k)` → `(k, None)` — return top-k candidates by probability
 /// - `all` → `(-1, None)` — return the full vocabulary
-/// - `token_ids(n)` → `(1, Some(vec of n token ids))` — return logprobs for
-///   specific tokens (the count `n` is stored in the proto as the number of
-///   token IDs that follow, but the actual IDs are carried via
-///   `logprob_token_ids` on `SamplingParams`)
+/// - `token_ids(n)` → `(1, Some(vec of n token ids))` — return logprobs for specific tokens (the
+///   count `n` is stored in the proto as the number of token IDs that follow, but the actual IDs
+///   are carried via `logprob_token_ids` on `SamplingParams`)
 /// - absent → `(1, None)` — just the sampled/scored token
 fn candidate_logprob_spec(candidates: Option<&pb::CandidateTokens>) -> (i32, Option<Vec<u32>>) {
     match candidates.and_then(|c| c.select.as_ref()) {

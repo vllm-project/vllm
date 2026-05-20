@@ -462,19 +462,17 @@ impl Tokenizer for TiktokenTokenizer {
     fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> Result<String> {
         // Filter passes:
         //
-        // 1. The constructor registers every id in `[num_base_tokens,
-        //    vocab_upper_bound)` as a special token (named or `<|reserved_token_{id}|>`
-        //    placeholder, matching `tokenization_kimi.py`). The tiktoken-rs backend
-        //    additionally drops ids at or above that bound so
-        //    `_decode_native_and_split` cannot panic; riptoken's `decode_bytes` already
-        //    skips unknown ids.
+        // 1. The constructor registers every id in `[num_base_tokens, vocab_upper_bound)` as a
+        //    special token (named or `<|reserved_token_{id}|>` placeholder, matching
+        //    `tokenization_kimi.py`). The tiktoken-rs backend additionally drops ids at or above
+        //    that bound so `_decode_native_and_split` cannot panic; riptoken's `decode_bytes`
+        //    already skips unknown ids.
         //
-        // 2. When `skip_special_tokens = true`, ids in `[num_base_tokens,
-        //    vocab_upper_bound)` are dropped *unless* they were marked `"special":
-        //    false` in `added_tokens_decoder`. This matches HuggingFace's tokenizer
-        //    semantics: tool-call markers and `<think>` / `</think>` (which Kimi K2 /
-        //    K2.5 declare as non-special) stay in the output, while BOS/EOS/header
-        //    tokens and reserved-slot placeholders are stripped.
+        // 2. When `skip_special_tokens = true`, ids in `[num_base_tokens, vocab_upper_bound)` are
+        //    dropped *unless* they were marked `"special": false` in `added_tokens_decoder`. This
+        //    matches HuggingFace's tokenizer semantics: tool-call markers and `<think>` /
+        //    `</think>` (which Kimi K2 / K2.5 declare as non-special) stay in the output, while
+        //    BOS/EOS/header tokens and reserved-slot placeholders are stripped.
         //
         // Lossy UTF-8 decoding (instead of strict `String::from_utf8`) is used so
         // partial multi-byte sequences become `\u{FFFD}`, which `DecodeStream`
@@ -659,11 +657,9 @@ mod tests {
     /// Sparse/non-contiguous BPE ranks must still count as base-vocab ids.
     ///
     /// Regression shape:
-    /// - base vocabulary contains ids 0..=255 and also a normal BPE token at id
-    ///   1000
-    /// - if `num_base_tokens` were computed as `encoder.len()` (257), id 1000
-    ///   would be misclassified as special/reserved and disappear under
-    ///   `skip_special_tokens = true`
+    /// - base vocabulary contains ids 0..=255 and also a normal BPE token at id 1000
+    /// - if `num_base_tokens` were computed as `encoder.len()` (257), id 1000 would be
+    ///   misclassified as special/reserved and disappear under `skip_special_tokens = true`
     #[test]
     fn tiktoken_sparse_base_ranks_are_not_misclassified_as_special() {
         let dir = tempfile::tempdir().expect("create temp dir");
@@ -685,9 +681,8 @@ mod tests {
     ///  * keep regular BPE token text unchanged,
     ///  * drop ids whose `added_tokens_decoder` entry says `"special": true`,
     ///  * drop reserved-slot placeholder ids (which default to special),
-    ///  * keep ids whose `added_tokens_decoder` entry says `"special": false` —
-    ///    this is how Kimi K2 / K2.5 marks tool-call markers and `<think>` /
-    ///    `</think>`.
+    ///  * keep ids whose `added_tokens_decoder` entry says `"special": false` — this is how Kimi K2
+    ///    / K2.5 marks tool-call markers and `<think>` / `</think>`.
     ///
     /// Synthetic backend has `num_base_tokens = 256`. We write a
     /// `tokenizer_config.json` that names ids 257 (special) and 258

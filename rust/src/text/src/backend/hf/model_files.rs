@@ -242,14 +242,11 @@ fn resolve_local_tokenizer_source(
 /// Choose the tokenizer.
 ///
 /// Selection order:
-/// 1. `tekken.json` — Mistral native tokenizer (preferred over HF
-///    `tokenizer.json` because the HF version has a known regex bug for Mistral
-///    models).
-/// 2. File extension — `.tiktoken` / `tiktoken.model` files use tiktoken from
-///    BPE data.
-/// 3. `tokenizer_class` in `tokenizer_config.json` — classes containing
-///    "Tiktoken" (case- insensitive) trigger tiktoken loading from a sibling
-///    BPE file.
+/// 1. `tekken.json` — Mistral native tokenizer (preferred over HF `tokenizer.json` because the HF
+///    version has a known regex bug for Mistral models).
+/// 2. File extension — `.tiktoken` / `tiktoken.model` files use tiktoken from BPE data.
+/// 3. `tokenizer_class` in `tokenizer_config.json` — classes containing "Tiktoken" (case-
+///    insensitive) trigger tiktoken loading from a sibling BPE file.
 /// 4. Default — `tokenizer.json` in HuggingFace format.
 fn resolve_tokenizer_source(
     tokenizer_path: PathBuf,

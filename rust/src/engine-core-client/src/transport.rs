@@ -155,8 +155,8 @@ pub async fn connect_handshake(
         handshake_address, "waiting for engines to connect"
     );
 
-    // 1. Bind shared local input/output sockets first so every engine receives the
-    //    same data-plane addresses during handshake.
+    // 1. Bind shared local input/output sockets first so every engine receives the same data-plane
+    //    addresses during handshake.
     debug!(
         local_host,
         ?ready_timeout,
@@ -173,16 +173,15 @@ pub async fn connect_handshake(
         None
     };
 
-    // 2. Bind the shared handshake socket once. All engines connect to this socket
-    //    with their own identities, and startup order does not matter.
+    // 2. Bind the shared handshake socket once. All engines connect to this socket with their own
+    //    identities, and startup order does not matter.
     let mut handshake_socket = RouterSocket::new();
     handshake_socket.bind(handshake_address).await?;
 
     let mut engines = BTreeMap::new();
 
-    // 3. Receive HELLO from every engine and send a matching INIT. When coordinator
-    //    mode is enabled, the engines will not emit READY until the coordinator
-    //    barrier below completes.
+    // 3. Receive HELLO from every engine and send a matching INIT. When coordinator mode is
+    //    enabled, the engines will not emit READY until the coordinator barrier below completes.
     while engines.len() < engine_count {
         debug!(
             handshake_address,
@@ -246,8 +245,7 @@ pub async fn connect_handshake(
         }
     }
 
-    // 4. Optional coordinator startup gate. Without coordinator there is nothing to
-    //    do.
+    // 4. Optional coordinator startup gate. Without coordinator there is nothing to do.
     if let Some(coordinator) = coordinator.as_mut() {
         coordinator.wait_for_startup_gate(engine_count, ready_timeout).await?;
     }
@@ -297,9 +295,9 @@ pub async fn connect_handshake(
         }
     }
 
-    // 4. Wait for every engine to connect to the shared input socket and register
-    //    itself. The `ready_response` is a placeholder; it is populated for each
-    //    engine by `wait_for_input_registrations` below.
+    // 4. Wait for every engine to connect to the shared input socket and register itself. The
+    //    `ready_response` is a placeholder; it is populated for each engine by
+    //    `wait_for_input_registrations` below.
     let mut engines: Vec<_> = engines
         .into_keys()
         .map(|engine_id| ConnectedEngine {
