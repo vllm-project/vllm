@@ -23,16 +23,30 @@ steps:
     # logic is covered separately by the pre-commit hook
     # `test-nonroot-entrypoint` (see .pre-commit-config.yaml).
     - |
-      docker run --rm --user 2000:0 --entrypoint /bin/sh "$IMAGE_TAG" -c '
-        set -eu
-        getent passwd 2000 | grep -q "^vllm:" || { echo "FAIL: UID 2000 != vllm"; exit 1; }
-        [ "$(id -gn 2>/dev/null)" = "root" ] || { echo "FAIL: GID 0 not root group"; exit 1; }
+      docker run --rm --user 2000:0 --entrypoint /bin/sh "$IMAGE_TAG" -ec '
+        if ! getent passwd 2000 | grep -q ^vllm:; then
+          echo FAIL: UID 2000 != vllm
+          exit 1
+        fi
+        if ! id -gn 2>/dev/null | grep -qx root; then
+          echo FAIL: GID 0 not root group
+          exit 1
+        fi
         touch /home/vllm/.smoke && rm /home/vllm/.smoke
         touch /opt/uv/cache/.smoke && rm /opt/uv/cache/.smoke
-        test -x /usr/local/bin/vllm-nonroot-entrypoint.sh || { echo "FAIL: wrapper missing"; exit 1; }
-        test -w /etc/passwd || { echo "FAIL: /etc/passwd not group-writable"; exit 1; }
-        test -w /etc/group  || { echo "FAIL: /etc/group not group-writable"; exit 1; }
-        echo "non-root invariants OK"
+        if ! test -x /usr/local/bin/vllm-nonroot-entrypoint.sh; then
+          echo FAIL: wrapper missing
+          exit 1
+        fi
+        if ! test -w /etc/passwd; then
+          echo FAIL: /etc/passwd not group-writable
+          exit 1
+        fi
+        if ! test -w /etc/group; then
+          echo FAIL: /etc/group not group-writable
+          exit 1
+        fi
+        echo non-root invariants OK
       '
     retry:
       automatic:
