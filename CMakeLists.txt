@@ -1236,6 +1236,13 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     list(APPEND VLLM_ROCM_FLAGS "-DVLLM_SKINNY_GEMM_SWEEP=1")
     set(_ROCM_SWEEP_ENABLED TRUE)
     message(STATUS "Building with VLLM_SKINNY_GEMM_SWEEP enabled")
+    # Sweep wrappers split per-op so the TUs compile in parallel with the
+    # production wvSplitK_int4 TU (kernel templates live in the shared
+    # skinny_gemms_int4_kernels.cuh header).
+    list(APPEND VLLM_ROCM_EXT_SRC
+      "csrc/rocm/skinny_gemms_int4_sweep_wvsplitk.cu"
+      "csrc/rocm/skinny_gemms_int4_sweep_wvsplitk_hf.cu"
+      "csrc/rocm/skinny_gemms_int4_sweep_moe.cu")
   endif()
 
   define_extension_target(

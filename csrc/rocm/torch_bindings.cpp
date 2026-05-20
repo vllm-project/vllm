@@ -85,6 +85,17 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.impl("wvSplitK_int4g_hf_sweep", torch::kCUDA,
                 &wvSplitK_int4g_hf_sweep);
 
+  // MoE int4 sweep: same args as fused_moe_wvSplitK_int4_gemm plus
+  // (ytile, unrl, achunk, wvprgrp) as runtime knobs.
+  rocm_ops.def(
+      "fused_moe_wvSplitK_int4_gemm_sweep(Tensor a, Tensor w, Tensor scales, "
+      "Tensor c, Tensor expert_ids, int block_size_m, int CuCount, "
+      "int group_size, Tensor zero_points, Tensor sorted_token_ids, "
+      "int top_k, bool fuse_silu_mul, int ytile, int unrl, int achunk, "
+      "int wvprgrp) -> ()");
+  rocm_ops.impl("fused_moe_wvSplitK_int4_gemm_sweep", torch::kCUDA,
+                &fused_moe_wvSplitK_int4_gemm_sweep);
+
   // W8A8 skinny GEMM sweep: all tunable params as runtime args (benchmark only)
   rocm_ops.def(
       "wvSplitK_w8a8_sweep(Tensor in_a, Tensor in_b, Tensor in_w_scale, "

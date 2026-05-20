@@ -1334,6 +1334,154 @@
       ]
     },
     {
+      "in_features": 4096,
+      "out_features": 2048,
+      "group_size": 128,
+      "comment": "Qwen3.5-35B-A3B GDN out_proj",
+      "providers": [
+        {
+          "provider": "hybrid-w4a16",
+          "baselines": [
+            {
+              "batch_size": 1,
+              "kernel": "wvsplitk_int4",
+              "tflops": 0.9383
+            },
+            {
+              "batch_size": 2,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.6086
+            },
+            {
+              "batch_size": 4,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.9359
+            },
+            {
+              "batch_size": 8,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 3.0483
+            },
+            {
+              "batch_size": 16,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 5.989
+            },
+            {
+              "batch_size": 32,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 11.9035
+            },
+            {
+              "batch_size": 64,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 11.1658
+            },
+            {
+              "batch_size": 128,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 17.5029
+            },
+            {
+              "batch_size": 256,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 20.1903
+            },
+            {
+              "batch_size": 512,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 18.6465
+            },
+            {
+              "batch_size": 1024,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 20.4598
+            },
+            {
+              "batch_size": 2048,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 19.8067
+            },
+            {
+              "batch_size": 4096,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 18.49
+            }
+          ]
+        },
+        {
+          "provider": "hybrid-w4a16-zp",
+          "baselines": [
+            {
+              "batch_size": 1,
+              "kernel": "wvsplitk_int4",
+              "tflops": 0.8659
+            },
+            {
+              "batch_size": 2,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.5013
+            },
+            {
+              "batch_size": 4,
+              "kernel": "wvsplitk_int4",
+              "tflops": 1.9112
+            },
+            {
+              "batch_size": 8,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 2.6511
+            },
+            {
+              "batch_size": 16,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 5.2954
+            },
+            {
+              "batch_size": 32,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 10.1059
+            },
+            {
+              "batch_size": 64,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 10.0962
+            },
+            {
+              "batch_size": 128,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 16.4971
+            },
+            {
+              "batch_size": 256,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 18.023
+            },
+            {
+              "batch_size": 512,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 18.0744
+            },
+            {
+              "batch_size": 1024,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 20.0834
+            },
+            {
+              "batch_size": 2048,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 19.0754
+            },
+            {
+              "batch_size": 4096,
+              "kernel": "hybrid_triton_w4a16",
+              "tflops": 17.7431
+            }
+          ]
+        }
+      ]
+    },
+    {
       "in_features": 8192,
       "out_features": 512,
       "group_size": 128,

@@ -146,6 +146,14 @@ SHAPES: list[dict[str, Any]] = [
         "group_size": 128,
         "comment": "Qwen3-4B down_proj",
     },
+    # Intel/Qwen3.5-35B-A3B-int4-AutoRound -- exercises the gfx11 K=4096 N=1
+    # wvSplitK_int4 dispatch branch added by this PR (W=16, AC=32, YT=1, UN=4).
+    {
+        "in_features": 4096,
+        "out_features": 2048,
+        "group_size": 128,
+        "comment": "Qwen3.5-35B-A3B GDN out_proj",
+    },
     # Qwen/Qwen2.5-7B-Instruct
     {
         "in_features": 3584,
