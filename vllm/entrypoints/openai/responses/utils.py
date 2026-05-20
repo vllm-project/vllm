@@ -99,17 +99,8 @@ def construct_input_messages(
         # The current request's instructions (if any) were already added above.
         messages.extend(m for m in prev_msg if m.get("role") != "system")
     if prev_response_output is not None:
-        # Add the previous output.
-        for output_item in prev_response_output:
-            # NOTE: We skip the reasoning output.
-            if isinstance(output_item, ResponseOutputMessage):
-                for content in output_item.content:
-                    messages.append(
-                        {
-                            "role": "assistant",
-                            "content": content.text,
-                        }
-                    )
+        output_messages = construct_chat_messages_with_tool_call(prev_response_output)
+        messages.extend(output_messages)
 
     # Append the new input.
     # Responses API supports simple text inputs without chat format.
