@@ -71,6 +71,7 @@ class BenchmarkArgs(NamedTuple):
     url: str
     num_clients: int
     early_stop: bool
+    max_duration_sec: int
 
 
 class ServerResponse(NamedTuple):
@@ -973,6 +974,20 @@ async def main_mp(
             finished_convs = len(output_conv)
             percent = finished_convs / total_convs
 
+            runtime_sec = nanosec_to_sec(time.perf_counter_ns() - start_time)
+            if (
+                not stop_event.is_set() and
+                not task_queue.empty() and
+                bench_args.max_duration_sec > 0 and
+                runtime_sec > bench_args.max_duration_sec
+            ):
+                logger.info(
+                    f"{Color.CYAN}Runtime is {runtime_sec:.3f} sec and "
+                    f"--max-duration-s={bench_args.max_duration_sec}, "
+                    f"stopping the benchmark{Color.RESET}"
+                )
+                stop_event.set()
+
             # Tuned to control the print rate (can be changed if required)
             print_cycle = max(3, int(bench_args.num_clients / 4))
 
@@ -1362,6 +1377,12 @@ async def main() -> None:
         "(a positive number, e.g: 2, 4, 6, etc.), disabled by default",
     )
     parser.add_argument(
+        "--max-duration-sec",
+        type=int,
+        default=-1,
+        help="Maximum duration of the benchmark (seconds).",
+    )
+    parser.add_argument(
         "--no-early-stop",
         default=False,
         action="store_true",
@@ -1574,7 +1595,8 @@ async def main() -> None:
     client_args, req_args = get_client_config(args, conversations)
 
     bench_args = BenchmarkArgs(
-        url=args.url, num_clients=args.num_clients, early_stop=not args.no_early_stop
+        url=args.url, num_clients=args.num_clients, early_stop=not args.no_early_stop,
+        max_duration_sec=args.max_duration_sec,
     )
 
     warmup_runtime_sec: float | None = None
