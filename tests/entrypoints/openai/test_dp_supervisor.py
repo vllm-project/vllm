@@ -20,8 +20,8 @@ def _make_args(**overrides) -> argparse.Namespace:
         "port": 8000,
         "data_parallel_multi_port_external_lb": True,
         "data_parallel_supervisor_port": 9256,
-        "data_parallel_probe_interval_s": 5.0,
-        "data_parallel_probe_timeout_s": 5.0,
+        "dp_supervisor_probe_interval_s": 5.0,
+        "dp_supervisor_probe_timeout_s": 5.0,
         "data_parallel_size": 8,
         "data_parallel_size_local": 4,
         "data_parallel_start_rank": None,
@@ -101,7 +101,7 @@ async def test_handles_child_exit(
 async def test_handles_probe_failure(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    supervisor = DPSupervisor(_make_args(data_parallel_probe_interval_s=0.0))
+    supervisor = DPSupervisor(_make_args(dp_supervisor_probe_interval_s=0.0))
     supervisor.child_ports = [8000]
     probe_results = iter([True, False])
 

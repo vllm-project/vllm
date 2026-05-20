@@ -160,8 +160,7 @@ def _join_processes_with_timeout(processes: list[BaseProcess], timeout: float) -
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
-        if process.is_alive():
-            process.join(timeout=remaining)
+        process.join(timeout=remaining)
 
 
 async def _probe_endpoint(
@@ -261,6 +260,7 @@ class DPSupervisor:
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
+        # asyncio.get_running_loop().set_debug(True)
 
         # K8s sends SIGTERM for shutdown - begin graceful termination.
         for sig in (signal.SIGTERM, signal.SIGINT):
@@ -281,11 +281,9 @@ class DPSupervisor:
             supervisor_server.serve(),
             name="dp-supervisor",
         )
-
-        def _set_shutdown_event(_task: asyncio.Task[None]) -> None:
-            self._shutdown_event.set()
-
-        supervisor_server_task.add_done_callback(_set_shutdown_event)
+        supervisor_server_task.add_done_callback(
+            lambda _task: self._shutdown_event.set()
+        )
 
         # Ensure DPSupervisor task starts on the event loop.
         while not supervisor_server.started:
@@ -321,7 +319,7 @@ class DPSupervisor:
 
         self._shutdown_signal = signal.Signals(signum)
         logger.info(
-            "DPSupervisor received signal %s, starting shutdown.",
+            "DPSupervisor received %s, shutting down.",
             self._shutdown_signal.name,
         )
 
@@ -344,32 +342,21 @@ class DPSupervisor:
             process.start()
             self._processes.append(process)
 
-    async def _monitor_children(self) -> None:
+    async def _probe_all_children(self) -> None:
         """
-        Main coroutine task that monitors the children vLLM servers.
+        Background coroutine: probes all child endpoints on each interval.
 
-        Before the vLLM servers are /ready:
-        - if the pid is dead, we will shut down
-        - if the probe fails, we try again after data_parallel_probe_interval_s
-
-        After the vLLM servers are /ready:
-        - if the pid is dead, we will shut down
-        - if the probe fails, we will shut down
+        Exits when any server becomes unhealthy after being ready, signalling
+        _monitor_children to initiate shutdown.
         """
-
-        timeout = aiohttp.ClientTimeout(total=self.args.data_parallel_probe_timeout_s)
+        timeout = aiohttp.ClientTimeout(total=self.args.dp_supervisor_probe_timeout_s)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            # Monitor the vLLM workers until:
-            # - shutdown triggered by external event
-            # - an error is detected in the vLLM processes
             while not self._shutdown_event.is_set():
-                # Monitor for any processes that died.
-                n_failed = len([p for p in self._processes if not p.is_alive()])
-                if n_failed > 0:
-                    logger.info("DPSupervisor found %s exited DP Servers.", n_failed)
-                    return
-
-                # Probe the endpoint to confirm the server is still active.
+                threshold = (
+                    self.args.dp_supervisor_probe_failure_threshold
+                    if self._is_ready
+                    else 1
+                )
                 results = await asyncio.gather(
                     *(
                         _probe_endpoint(
@@ -377,7 +364,8 @@ class DPSupervisor:
                             self.args,
                             port,
                             "/health",
-                            conn_err_failure_threshold=3 if self._is_ready else 1,
+                            conn_err_failure_threshold=threshold,
+                            conn_err_retry_delay=self.args.dp_supervisor_probe_interval_s,
                         )
                         for port in self.child_ports
                     ),
@@ -386,22 +374,85 @@ class DPSupervisor:
                 all_healthy = all(r is True for r in results)
 
                 if all_healthy:
-                    self._is_ready = True
+                    # If all healthy, we are ready to receive requests.
+                    # This conditional avoids a potential race condition
+                    # where shutdown is set, THEN the probe returns true.
+                    if not self._shutdown_event.is_set():
+                        self._is_ready = True
                 elif self._is_ready:
-                    logger.info("DPSupervisor found unhealthy DP Server.")
+                    # Once ready, any failure in the probe means vLLM is dead.
+                    num_unhealthy = sum(1 for r in results if r is not True)
+                    logger.info(
+                        "DPSupervisor probe found %s unhealthy DP Servers.",
+                        num_unhealthy,
+                    )
                     self._is_ready = False
+                    self._shutdown_event.set()
                     return
 
-                # Sleep for the probe interval or until a shutdown event.
                 with contextlib.suppress(asyncio.TimeoutError):
                     logger.debug(
                         "Waiting for %s seconds before next probe",
-                        self.args.data_parallel_probe_interval_s,
+                        self.args.dp_supervisor_probe_interval_s,
                     )
                     await asyncio.wait_for(
                         self._shutdown_event.wait(),
-                        timeout=self.args.data_parallel_probe_interval_s,
+                        timeout=self.args.dp_supervisor_probe_interval_s,
                     )
+
+    async def _monitor_children(self) -> None:
+        """
+        Main coroutine task that monitors the children vLLM servers.
+
+        Before the vLLM servers are /ready:
+        - if the pid is dead, we will shut down
+        - if the probe fails, we try again after dp_supervisor_probe_interval_s
+
+        After the vLLM servers are /ready:
+        - if the pid is dead, we will shut down
+        - if the probe fails, we will shut down
+        """
+        probe_task = asyncio.create_task(
+            self._probe_all_children(),
+            name="dp-health-probe",
+        )
+
+        try:
+            while not self._shutdown_event.is_set():
+                # 1. Check for dead processes
+                n_failed = len([p for p in self._processes if not p.is_alive()])
+                if n_failed > 0:
+                    logger.error("DPSupervisor found %s exited DP Servers.", n_failed)
+                    break
+
+                # 2. Check if the probe background task crashed or failed.
+                if probe_task.done():
+                    # Extract exception if it crashed, or log failure
+                    exc = (
+                        probe_task.exception()
+                        if probe_task.cancelled() is False
+                        else None
+                    )
+                    logger.error("DPSupervisor probe task stopped. Exception: %s", exc)
+                    break
+
+                # Sleep for probe_interval seconds or until a shutdown.
+                with contextlib.suppress(asyncio.TimeoutError):
+                    logger.debug(
+                        "Waiting for %s seconds before next monitor",
+                        self.args.dp_supervisor_probe_interval_s,
+                    )
+                    await asyncio.wait_for(
+                        self._shutdown_event.wait(),
+                        timeout=self.args.dp_supervisor_probe_interval_s,
+                    )
+
+        finally:
+            # Cleanup probe task if needed.
+            if not probe_task.done():
+                probe_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await probe_task
 
     async def _shutdown_children(self) -> None:
         """Terminate the vLLM DP servers."""
@@ -409,9 +460,8 @@ class DPSupervisor:
 
         try:
             logger.info(
-                "Forwarding signal %s to %d DP Servers.",
+                "DPSupervisor forwarding %s to DP Servers.",
                 self._shutdown_signal.name,
-                len(self._processes),
             )
             for process in self._processes:
                 pid = process.pid
@@ -420,11 +470,13 @@ class DPSupervisor:
                 with contextlib.suppress(ProcessLookupError, OSError):
                     os.kill(pid, self._shutdown_signal)
 
-            await asyncio.to_thread(
-                _join_processes_with_timeout,
-                self._processes,
-                timeout,
-            )
+            try:
+                await asyncio.to_thread(
+                    _join_processes_with_timeout, self._processes, timeout
+                )
+            except asyncio.CancelledError:
+                logger.warning("Shutdown await cancelled")
+                raise
         finally:
             for process in self._processes:
                 pid = process.pid
