@@ -48,10 +48,6 @@ class ServeSubcommand(CLISubcommand):
         if hasattr(args, "model_tag") and args.model_tag is not None:
             args.model = args.model_tag
 
-        if getattr(args, "data_parallel_multi_port_external_lb", False):
-            run_dp_supervisor(args)
-            return
-
         if getattr(args, "grpc", False):
             from vllm.entrypoints.grpc_server import serve_grpc
 
@@ -69,8 +65,10 @@ class ServeSubcommand(CLISubcommand):
             args.api_server_count = 0
 
         # Detect LB mode for defaulting api_server_count.
+        # Multi-port: --data-parallel-multi-port-external-lb
         # External LB: --data-parallel-external-lb or --data-parallel-rank
         # Hybrid LB: --data-parallel-hybrid-lb or --data-parallel-start-rank
+        is_multi_port = getattr(args, "data_parallel_multi_port_external_lb", False)
         is_external_lb = (
             args.data_parallel_external_lb or args.data_parallel_rank is not None
         )
@@ -78,21 +76,21 @@ class ServeSubcommand(CLISubcommand):
             args.data_parallel_hybrid_lb or args.data_parallel_start_rank is not None
         )
 
-        if is_external_lb and is_hybrid_lb:
+        if sum([is_multi_port, is_external_lb, is_hybrid_lb]) > 1:
             raise ValueError(
-                "Cannot use both external and hybrid data parallel load "
-                "balancing modes. External LB is enabled via "
-                "--data-parallel-external-lb or --data-parallel-rank. "
-                "Hybrid LB is enabled via --data-parallel-hybrid-lb or "
-                "--data-parallel-start-rank. Use one mode or the other."
+                "Cannot use more than one data parallel load balancing mode. "
+                "Choose one of: --data-parallel-multi-port-external-lb, "
+                "--data-parallel-external-lb (or --data-parallel-rank), "
+                "--data-parallel-hybrid-lb (or --data-parallel-start-rank)."
             )
 
         # Default api_server_count if not explicitly set.
-        # - External LB: Leave as 1 (external LB handles distribution)
+        # - Multi-port: 1 (supervisor spawns one server per local DP rank)
+        # - External LB: 1 (external LB handles distribution)
         # - Hybrid LB: Use local DP size (internal LB for local ranks only)
         # - Internal LB: Use full DP size
         if args.api_server_count is None:
-            if is_external_lb:
+            if is_multi_port or is_external_lb:
                 args.api_server_count = 1
             elif is_hybrid_lb:
                 args.api_server_count = args.data_parallel_size_local or 1
@@ -119,7 +117,9 @@ class ServeSubcommand(CLISubcommand):
             )
             args.api_server_count = 1
 
-        if args.api_server_count < 1:
+        if is_multi_port:
+            run_dp_supervisor(args)
+        elif args.api_server_count < 1:
             run_headless(args)
         elif args.api_server_count > 1:
             run_multi_api_server(args)
