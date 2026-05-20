@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import itertools
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -12,12 +11,6 @@ from pydantic import ValidationError
 from tqdm.auto import tqdm
 from typing_extensions import TypeVar, overload
 
-from vllm.beam_search import (
-    BeamSearchInstance,
-    BeamSearchOutput,
-    BeamSearchSequence,
-    create_sort_beams_key_function,
-)
 from vllm.config import (
     AttentionConfig,
     CompilationConfig,
@@ -45,13 +38,12 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     load_chat_template,
 )
+from vllm.entrypoints.generate.beam_search.offline import BeamSearchOfflineMixin
 from vllm.entrypoints.pooling.offline import PoolingOfflineMixin
 from vllm.entrypoints.utils import log_non_default_args
 from vllm.inputs import (
     EngineInput,
     PromptType,
-    TextPrompt,
-    TokensPrompt,
 )
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -65,7 +57,7 @@ from vllm.renderers.inputs.preprocess import (
     parse_model_prompt,
     prompt_to_seq,
 )
-from vllm.sampling_params import BeamSearchParams, RequestOutputKind, SamplingParams
+from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.counter import Counter
@@ -89,7 +81,7 @@ _P = TypeVar("_P", bound=SamplingParams | PoolingParams | None)
 _R = TypeVar("_R", default=Any)
 
 
-class LLM(PoolingOfflineMixin):
+class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin):
     """An LLM for generating texts from given prompts and sampling parameters.
 
     This class includes a tokenizer, a language model (possibly distributed
@@ -188,6 +180,10 @@ class LLM(PoolingOfflineMixin):
             dictionary or an AttentionConfig instance. If a dictionary, it will
             be converted to an AttentionConfig. Allows specifying the attention
             backend and other attention-related settings.
+        spec_method: Top-level alias for `speculative_config["method"]`.
+        spec_model: Top-level alias for `speculative_config["model"]`.
+        spec_tokens: Top-level alias for
+            `speculative_config["num_speculative_tokens"]`.
         **kwargs: Arguments for [`EngineArgs`][vllm.EngineArgs].
 
     Note:
@@ -236,6 +232,9 @@ class LLM(PoolingOfflineMixin):
         compilation_config: int | dict[str, Any] | CompilationConfig | None = None,
         quantization_config: dict[str, Any] | QuantizationConfigArgs | None = None,
         logits_processors: list[str | type[LogitsProcessor]] | None = None,
+        spec_method: str | None = None,
+        spec_model: str | None = None,
+        spec_tokens: int | None = None,
         **kwargs: Any,
     ) -> None:
         """LLM constructor."""
@@ -357,6 +356,9 @@ class LLM(PoolingOfflineMixin):
             compilation_config=compilation_config_instance,
             quantization_config=quantization_config,
             logits_processors=logits_processors,
+            spec_method=spec_method,
+            spec_model=spec_model,
+            spec_tokens=spec_tokens,
             **kwargs,
         )
 
@@ -665,163 +667,6 @@ class LLM(PoolingOfflineMixin):
         """
         return self.llm_engine.apply_model(func)
 
-    def beam_search(
-        self,
-        prompts: list[TokensPrompt | TextPrompt],
-        params: BeamSearchParams,
-        lora_request: list[LoRARequest] | LoRARequest | None = None,
-        use_tqdm: bool = False,
-        concurrency_limit: int | None = None,
-    ) -> list[BeamSearchOutput]:
-        """
-        Generate sequences using beam search.
-
-        Args:
-            prompts: A list of prompts. Each prompt can be a string or a list
-                of token IDs.
-            params: The beam search parameters.
-            lora_request: LoRA request to use for generation, if any.
-            use_tqdm: Whether to use tqdm to display the progress bar.
-            concurrency_limit: The maximum number of concurrent requests.
-                If None, the number of concurrent requests is unlimited.
-        """
-        # TODO: how does beam search work together with length penalty,
-        # frequency, penalty, and stopping criteria, etc.?
-        beam_width = params.beam_width
-        max_tokens = params.max_tokens
-        temperature = params.temperature
-        ignore_eos = params.ignore_eos
-        length_penalty = params.length_penalty
-
-        tokenizer = self.renderer.get_tokenizer()
-        eos_token_id = tokenizer.eos_token_id
-        sort_beams_key = create_sort_beams_key_function(eos_token_id, length_penalty)
-
-        engine_inputs = self._preprocess_cmpl(prompts)
-        lora_requests = self._lora_request_to_seq(lora_request, len(engine_inputs))
-
-        if use_tqdm and concurrency_limit is not None:
-            logger.warning(
-                "Progress bar is not supported when using concurrency_limit. "
-                "Disabling progress bar."
-            )
-            use_tqdm = False
-
-        if concurrency_limit is None:
-            concurrency_limit = len(engine_inputs)
-
-        # generate 2 * beam_width candidates at each step
-        # following the huggingface transformers implementation
-        # at https://github.com/huggingface/transformers/blob/e15687fffe5c9d20598a19aeab721ae0a7580f8a/src/transformers/generation/beam_search.py#L534 # noqa
-        sampling_params = SamplingParams(
-            logprobs=2 * beam_width,
-            max_tokens=1,
-            temperature=temperature,
-            skip_clone=True,  # Internal beam search, safe to skip clone
-        )
-        instances: list[BeamSearchInstance] = []
-
-        for lora_req, prompt in zip(lora_requests, engine_inputs):
-            if prompt["type"] == "embeds":
-                raise NotImplementedError(
-                    "Embedding prompt not supported for beam search"
-                )
-
-            instances.append(
-                BeamSearchInstance(
-                    prompt,
-                    lora_request=lora_req,
-                    logprobs=None,
-                ),
-            )
-
-        for prompt_start in range(0, len(instances), concurrency_limit):
-            instances_batch = instances[prompt_start : prompt_start + concurrency_limit]
-
-            token_iter = range(max_tokens)
-            if use_tqdm:
-                token_iter = tqdm(
-                    token_iter, desc="Beam search", unit="token", unit_scale=False
-                )
-                logger.warning(
-                    "The progress bar shows the upper bound on token steps and "
-                    "may finish early due to stopping conditions. It does not "
-                    "reflect instance-level progress."
-                )
-            for _ in token_iter:
-                all_beams: list[BeamSearchSequence] = list(
-                    sum((instance.beams for instance in instances_batch), [])
-                )
-                pos = [0] + list(
-                    itertools.accumulate(
-                        len(instance.beams) for instance in instances_batch
-                    )
-                )
-                instance_start_and_end: list[tuple[int, int]] = list(
-                    zip(pos[:-1], pos[1:])
-                )
-
-                if len(all_beams) == 0:
-                    break
-
-                # only runs for one step
-                # we don't need to use tqdm here
-                output = self._render_and_run_requests(
-                    prompts=(beam.get_prompt() for beam in all_beams),
-                    params=self._params_to_seq(sampling_params, len(all_beams)),
-                    output_type=RequestOutput,
-                    lora_requests=[beam.lora_request for beam in all_beams],
-                    use_tqdm=False,
-                )
-
-                for (start, end), instance in zip(
-                    instance_start_and_end, instances_batch
-                ):
-                    instance_new_beams = []
-                    for i in range(start, end):
-                        current_beam = all_beams[i]
-                        result = output[i]
-
-                        if result.outputs[0].logprobs is not None:
-                            # if `result.outputs[0].logprobs` is None, it means
-                            # the sequence is completed because of the
-                            # max-model-len or abortion. we don't need to add
-                            # it to the new beams.
-                            logprobs = result.outputs[0].logprobs[0]
-                            for token_id, logprob_obj in logprobs.items():
-                                new_beam = BeamSearchSequence(
-                                    current_beam.orig_prompt,
-                                    tokens=current_beam.tokens + [token_id],
-                                    logprobs=current_beam.logprobs + [logprobs],
-                                    lora_request=current_beam.lora_request,
-                                    cum_logprob=current_beam.cum_logprob
-                                    + logprob_obj.logprob,
-                                )
-
-                                if token_id == eos_token_id and not ignore_eos:
-                                    instance.completed.append(new_beam)
-                                else:
-                                    instance_new_beams.append(new_beam)
-                    sorted_beams = sorted(
-                        instance_new_beams, key=sort_beams_key, reverse=True
-                    )
-                    instance.beams = sorted_beams[:beam_width]
-
-        outputs = []
-        for instance in instances:
-            instance.completed.extend(instance.beams)
-            sorted_completed = sorted(
-                instance.completed, key=sort_beams_key, reverse=True
-            )
-            best_beams = sorted_completed[:beam_width]
-
-            for beam in best_beams:
-                beam.text = tokenizer.decode(beam.tokens)
-
-            outputs.append(BeamSearchOutput(sequences=best_beams))
-
-        return outputs
-
     def _preprocess_cmpl(
         self,
         prompts: Sequence[PromptType],
@@ -1049,6 +894,83 @@ class LLM(PoolingOfflineMixin):
             mm_processor_kwargs=mm_processor_kwargs,
         )
 
+    def enqueue_chat(
+        self,
+        messages: list[ChatCompletionMessageParam]
+        | Sequence[list[ChatCompletionMessageParam]],
+        sampling_params: SamplingParams | Sequence[SamplingParams] | None = None,
+        use_tqdm: bool | Callable[..., tqdm] = True,
+        lora_request: Sequence[LoRARequest] | LoRARequest | None = None,
+        priority: list[int] | None = None,
+        chat_template: str | None = None,
+        chat_template_content_format: ChatTemplateContentFormatOption = "auto",
+        add_generation_prompt: bool = True,
+        continue_final_message: bool = False,
+        tools: list[dict[str, Any]] | None = None,
+        chat_template_kwargs: dict[str, Any] | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
+        mm_processor_kwargs: dict[str, Any] | None = None,
+    ) -> list[str]:
+        """Enqueue chat conversations for generation without waiting.
+
+        This method renders chat conversations and adds the resulting requests
+        to the engine queue. Use wait_for_completion() to get results. To
+        guarantee that all requests are queued before scheduling starts, pause
+        scheduling with sleep(level=0) before calling this method and resume it
+        with wake_up(tags=["scheduling"]) afterward.
+
+        Args:
+            messages: A sequence of conversations or a single conversation.
+                Each conversation is represented as a list of messages.
+            sampling_params: The sampling parameters for text generation.
+                If None, we use the default sampling parameters.
+            use_tqdm: If `True`, shows a tqdm progress bar while rendering
+                conversations.
+            lora_request: LoRA request to use for generation, if any.
+            priority: The priority of the requests, if any.
+            chat_template: The template to use for structuring the chat.
+            chat_template_content_format: The format to render message content.
+            add_generation_prompt: If True, adds a generation template
+                to each message.
+            continue_final_message: If True, continues the final message in
+                the conversation instead of starting a new one.
+            tools: Tools to make available to the model, if any.
+            chat_template_kwargs: Additional kwargs to pass to the chat
+                template.
+            tokenization_kwargs: Overrides for `tokenizer.encode`.
+            mm_processor_kwargs: Overrides for `processor.__call__`.
+
+        Returns:
+            A list of request IDs for the enqueued requests.
+        """
+        model_config = self.model_config
+        runner_type = model_config.runner_type
+        if runner_type != "generate":
+            raise ValueError(
+                "LLM.enqueue_chat() is only supported for generative models. "
+                "Try passing `--runner generate` to use the model as a "
+                "generative model."
+            )
+
+        if sampling_params is None:
+            sampling_params = self.get_default_sampling_params()
+
+        return self._add_chat_requests(
+            messages=messages,
+            params=sampling_params,
+            use_tqdm=use_tqdm,
+            lora_request=lora_request,
+            priority=priority,
+            chat_template=chat_template,
+            chat_template_content_format=chat_template_content_format,
+            chat_template_kwargs=chat_template_kwargs,
+            add_generation_prompt=add_generation_prompt,
+            continue_final_message=continue_final_message,
+            tools=tools,
+            tokenization_kwargs=tokenization_kwargs,
+            mm_processor_kwargs=mm_processor_kwargs,
+        )
+
     def start_profile(self, profile_prefix: str | None = None) -> None:
         """Start profiling with optional custom trace prefix.
 
@@ -1250,9 +1172,46 @@ class LLM(PoolingOfflineMixin):
         tokenization_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
     ):
+        self._add_chat_requests(
+            messages=messages,
+            params=params,
+            use_tqdm=use_tqdm,
+            lora_request=lora_request,
+            chat_template=chat_template,
+            chat_template_content_format=chat_template_content_format,
+            chat_template_kwargs=chat_template_kwargs,
+            add_generation_prompt=add_generation_prompt,
+            continue_final_message=continue_final_message,
+            tools=tools,
+            tokenization_kwargs=tokenization_kwargs,
+            mm_processor_kwargs=mm_processor_kwargs,
+        )
+        return self._run_engine(output_type=output_type, use_tqdm=use_tqdm)
+
+    def _add_chat_requests(
+        self,
+        messages: list[ChatCompletionMessageParam]
+        | Sequence[list[ChatCompletionMessageParam]],
+        params: SamplingParams
+        | PoolingParams
+        | Sequence[SamplingParams | PoolingParams],
+        *,
+        use_tqdm: bool | Callable[..., tqdm] = True,
+        lora_request: Sequence[LoRARequest] | LoRARequest | None = None,
+        priority: list[int] | None = None,
+        chat_template: str | None = None,
+        chat_template_content_format: ChatTemplateContentFormatOption = "auto",
+        add_generation_prompt: bool = True,
+        continue_final_message: bool = False,
+        tools: list[dict[str, Any]] | None = None,
+        chat_template_kwargs: dict[str, Any] | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
+        mm_processor_kwargs: dict[str, Any] | None = None,
+    ) -> list[str]:
         seq_convs = conversation_to_seq(messages)
         seq_params = self._params_to_seq(params, len(seq_convs))
         seq_lora_requests = self._lora_request_to_seq(lora_request, len(seq_convs))
+        seq_priority = self._priority_to_seq(priority, len(seq_convs))
 
         # When thinking is enabled or tools are provided, and the model
         # uses special tokens for structured output (e.g. Gemma4's
@@ -1265,7 +1224,7 @@ class LLM(PoolingOfflineMixin):
         if needs_parsing:
             self._adjust_params_for_parsing(seq_params)
 
-        return self._render_and_run_requests(
+        return self._render_and_add_requests(
             prompts=(
                 self._preprocess_chat_one(
                     conversation,
@@ -1285,9 +1244,8 @@ class LLM(PoolingOfflineMixin):
                 )
             ),
             params=seq_params,
-            output_type=output_type,
             lora_requests=seq_lora_requests,
-            use_tqdm=use_tqdm,
+            priorities=seq_priority,
         )
 
     def _adjust_params_for_parsing(
