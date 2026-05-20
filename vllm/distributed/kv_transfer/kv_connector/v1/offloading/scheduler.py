@@ -145,6 +145,8 @@ class RequestOffloadState:
             kv_transfer_params=self.req.kv_transfer_params,
         )
         params = self.req.kv_transfer_params
+
+        # NOTE: This field is experimental and subject to change in the future.
         raw = params.get("max_offload_tokens") if params else None
         if type(raw) is int and raw >= 0:
             self.max_offload_tokens = raw
