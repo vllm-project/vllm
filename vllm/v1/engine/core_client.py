@@ -20,6 +20,9 @@ import zmq
 import zmq.asyncio
 
 from vllm.config import VllmConfig
+from vllm.distributed.elastic_ep.external_elastic_ep import (
+    ExternalElasticEPScaleCoordinator,
+)
 from vllm.envs import VLLM_ENGINE_READY_TIMEOUT_S
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -931,13 +934,16 @@ class AsyncMPClient(MPClient):
         output_handler: (
             Callable[[AsyncMPClient, EngineCoreOutputs], Awaitable[None]] | None
         ) = getattr(self.__class__, "process_engine_outputs", None)
-        _self_ref = weakref.ref(self) if output_handler else None
         output_socket = resources.output_socket
         assert output_socket is not None
 
         notification_callback_handler: (
             Callable[[AsyncMPClient, Sequence[Any]], Any] | None
         ) = getattr(self.__class__, "eep_process_engine_core_notification", None)
+        needs_self_ref = (
+            output_handler is not None or notification_callback_handler is not None
+        )
+        _self_ref = weakref.ref(self) if needs_self_ref else None
 
         async def process_outputs_socket():
             try:
@@ -1148,6 +1154,7 @@ class DPAsyncMPClient(AsyncMPClient):
         client_index: int = 0,
     ):
         self.current_wave = 0
+        self.external_eep_coordinator = ExternalElasticEPScaleCoordinator(self)
 
         super().__init__(
             vllm_config,
@@ -1313,6 +1320,58 @@ class DPAsyncMPClient(AsyncMPClient):
     def get_core_engine_for_request(self, request: EngineCoreRequest):
         return self.core_engine
 
+    def _setup_elastic_ep_reconfig_bootstrap(self) -> tuple[str, int]:
+        from vllm.distributed.utils import create_tcp_store
+        from vllm.utils.network_utils import get_open_ports_list
+
+        parallel_config = self.vllm_config.parallel_config
+        parallel_config._data_parallel_master_port_list = get_open_ports_list(5)
+        parallel_config.data_parallel_master_port = (
+            parallel_config._data_parallel_master_port_list.pop()
+        )
+
+        ip = parallel_config.data_parallel_master_ip
+        store = create_tcp_store(
+            ip,
+            0,
+            is_master=True,
+            world_size=-1,
+            wait_for_workers=False,
+        )
+        parallel_config._coord_store_port = store.port
+        self._coord_store = store
+        return ip, store.port
+
+    @staticmethod
+    async def eep_process_engine_core_notification(
+        self: "DPAsyncMPClient", notification_data: tuple[str, int]
+    ) -> None:
+        await self.external_eep_coordinator.process_engine_core_notification(
+            notification_data
+        )
+
+    async def scale_elastic_ep(self, new_data_parallel_size: int) -> None:
+        cur_data_parallel_size = self.vllm_config.parallel_config.data_parallel_size
+
+        assert new_data_parallel_size != cur_data_parallel_size, (
+            f"new_data_parallel_size {new_data_parallel_size} must be "
+            f"different from cur_data_parallel_size {cur_data_parallel_size}"
+        )
+
+        parallel_config = self.vllm_config.parallel_config
+        if not parallel_config.enable_elastic_ep:
+            raise NotImplementedError(
+                "Elastic EP scaling requires enable_elastic_ep=True."
+            )
+        if not parallel_config.data_parallel_external_lb:
+            raise NotImplementedError(
+                "DPAsyncMPClient only supports Elastic EP scaling in external "
+                "load-balancer mode."
+            )
+        await self.external_eep_coordinator.scale(
+            cur_data_parallel_size, new_data_parallel_size
+        )
+
 
 class DPLBAsyncMPClient(DPAsyncMPClient):
     """Asyncio-compatible client for multi-proc, multi-engine (data parallel)
@@ -1398,8 +1457,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
     @staticmethod
     async def eep_process_engine_core_notification(
-        self: "DPLBAsyncMPClient", notification_data: tuple[str, int]
-    ):
+        self: "DPAsyncMPClient", notification_data: tuple[str, int]
+    ) -> None:
+        assert isinstance(self, DPLBAsyncMPClient)
         cache = self.eep_scaling_cache
         notification_type_str, dp_rank = notification_data
         try:
@@ -1516,28 +1576,6 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         self.utility_results[EEP_NOTIFICATION_CALL_ID] = future
         self._ensure_output_queue_task()
         await future
-
-    def _setup_elastic_ep_reconfig_bootstrap(self) -> tuple[str, int]:
-        from vllm.distributed.utils import create_tcp_store
-        from vllm.utils.network_utils import get_open_ports_list
-
-        parallel_config = self.vllm_config.parallel_config
-        parallel_config._data_parallel_master_port_list = get_open_ports_list(5)
-        parallel_config.data_parallel_master_port = (
-            parallel_config._data_parallel_master_port_list.pop()
-        )
-
-        ip = parallel_config.data_parallel_master_ip
-        store = create_tcp_store(
-            ip,
-            0,
-            is_master=True,
-            world_size=-1,
-            wait_for_workers=False,
-        )
-        parallel_config._coord_store_port = store.port
-        self._coord_store = store
-        return ip, store.port
 
     async def _scale_up_elastic_ep(
         self, cur_data_parallel_size: int, new_data_parallel_size: int

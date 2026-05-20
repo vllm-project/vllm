@@ -128,6 +128,7 @@ class DPCoordinator:
         self.stats_publish_address = front_publish_address
         self.coord_in_address = back_publish_address
         self.coord_out_address = back_output_address
+        self._coord_store: object | None = None
         self._finalizer = weakref.finalize(self, shutdown, [self.proc])
 
     def get_stats_publish_address(self) -> str:
