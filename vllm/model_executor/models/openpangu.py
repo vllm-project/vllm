@@ -56,6 +56,12 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.model_executor.layers.mhc import (
+    HCHeadOp,
+    MHCFusedPostPreOp,
+    MHCPostOp,
+    MHCPreOp,
+)
 from vllm.model_executor.layers.mla import (
     MLAModules,
     MultiHeadLatentAttentionWrapper,
@@ -1589,18 +1595,14 @@ class mHCModule(CustomOp):
 
         if not self.merge_layer_only_pre:
             phi_output_hidden_size = (self.num_stream + 2) * self.num_stream
-            self.branch_alpha = nn.Parameter(torch.empty(3, dtype=torch.bfloat16))
+            self.branch_alpha = nn.Parameter(torch.empty(3, dtype=torch.float32))
             self.branch_beta = nn.Parameter(
-                torch.empty(
-                    self.num_stream * (self.num_stream + 2), dtype=torch.bfloat16
-                )
+                torch.empty(self.num_stream * (self.num_stream + 2), dtype=torch.float32)
             )
         else:
             phi_output_hidden_size = self.num_stream
-            self.branch_alpha_pre = nn.Parameter(torch.empty(1, dtype=torch.bfloat16))
-            self.branch_beta_pre = nn.Parameter(
-                torch.empty(self.num_stream, dtype=torch.bfloat16)
-            )
+            self.branch_alpha_pre = nn.Parameter(torch.empty(1, dtype=torch.float32))
+            self.branch_beta_pre = nn.Parameter(torch.empty(self.num_stream, dtype=torch.float32))
         self.phi = ReplicatedLinear(
             self.hidden_size * self.num_stream,
             phi_output_hidden_size,
@@ -1611,84 +1613,40 @@ class mHCModule(CustomOp):
         self.hc_eps = 1e-6
         self.norm_eps = config.rms_norm_eps
         self.mhc_recur_norm = config.mhc_recur_norm
+        self.hc_post_alpha = 2.0
         if self.mhc_use_gamma:
-            self.norm_gamma = nn.Parameter(
-                torch.empty(self.hidden_size * self.num_stream, dtype=torch.bfloat16)
-            )
-
-    def hc_pre(self, x: torch.Tensor):
-        dtype = x.dtype
-        x = x.float()
-        rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + self.norm_eps)
+            self.norm_gamma = nn.Parameter(torch.empty(self.hidden_size * self.num_stream, dtype=torch.bfloat16))
+        self.mhc_pre = MHCPreOp()
+        self.mhc_post = MHCPostOp()
+    
+    def post_weight_load(self) -> None:
         if self.mhc_use_gamma:
-            weight = self.phi((x * rsqrt * self.norm_gamma.unsqueeze(0)).to(dtype))[0]
-        else:
-            weight = self.phi(x.to(dtype))[0] * rsqrt
-        h_pre, h_post, h_res = self.hc_split_sinkhorn_torch(weight)
-        y = torch.sum(
-            h_pre.unsqueeze(-1) * x.unflatten(dim=-1, sizes=(self.num_stream, -1)),
-            dim=1,
-        ).squeeze(1)
-        return y.to(dtype), h_post, h_res
+            self.phi_weight = (self.phi.weight * self.norm_gamma).contiguous().float()
 
-    def hc_post(
+    def hc_pre(
         self,
         x: torch.Tensor,
-        residual: torch.Tensor,
-        h_post: torch.Tensor,
-        h_res: torch.Tensor,
     ):
-        if self.merge_layer_only_pre:
-            return x
-        else:
-            y = (
-                h_post.unsqueeze(-1) * x.unsqueeze(-2)
-                + torch.sum(
-                    h_res.unsqueeze(-1)
-                    * residual.unflatten(dim=-1, sizes=(self.num_stream, -1)).unsqueeze(
-                        -2
-                    ),
-                    dim=1,
-                )
-            ).view(residual.shape)
-            return y.type_as(x)
+        x = x.view(-1, self.num_stream, self.hidden_size)
+        fn = (self.phi_weight if hasattr(self, 'phi_weight') else self.phi.weight).float()
+        post_mix, res_mix, layer_input = self.mhc_pre(
+            residual=x,
+            fn=fn,
+            hc_scale=self.branch_alpha,
+            hc_base=self.branch_beta,
+            rms_eps=self.norm_eps,
+            hc_pre_eps=self.hc_eps,
+            hc_sinkhorn_eps=self.hc_eps,
+            hc_post_mult_value=self.hc_post_alpha,
+            sinkhorn_repeat=self.mhc_recur_norm,
+        )
+        return layer_input, post_mix, res_mix
 
-    def hc_split_sinkhorn_torch(self, weight):
-        if not self.merge_layer_only_pre:
-            h_pre, h_post, h_res = weight.split(
-                [self.num_stream, self.num_stream, self.num_stream * self.num_stream],
-                dim=-1,
-            )
-            alpha_pre, alpha_post, alpha_res = self.branch_alpha.view(-1).split(
-                [1, 1, 1]
-            )
-            beta_pre, beta_post, beta_res = self.branch_beta.view(-1).split(
-                [self.num_stream, self.num_stream, self.num_stream * self.num_stream]
-            )
-            h_post = 2 * torch.sigmoid(h_post * alpha_post + beta_post)
-            h_res = h_res.unflatten(-1, (self.num_stream, self.num_stream))
-            h_res = h_res * alpha_res + beta_res.view(self.num_stream, self.num_stream)
-            h_res = sinkhorn_knopps(h_res, self.mhc_recur_norm, self.hc_eps)
-        else:
-            h_pre = weight
-            h_post = None
-            h_res = None
-            alpha_pre = self.branch_alpha_pre
-            beta_pre = self.branch_beta_pre
-        h_pre = torch.sigmoid(h_pre * alpha_pre + beta_pre) + self.hc_eps
-        return h_pre, h_post, h_res
-
-
-def sinkhorn_knopps(h_res, sinkhorn_iters, eps):
-    h_res = h_res.softmax(-1) + eps
-    col_sum = h_res.sum(-2, keepdim=True)
-    h_res = h_res / (col_sum + eps)
-    for _ in range(sinkhorn_iters - 1):
-        row_sum = h_res.sum(-1, keepdim=True)
-        h_res = h_res / (row_sum + eps)
-        col_sum = h_res.sum(-2, keepdim=True)
-        h_res = h_res / (col_sum + eps)
-    return h_res
+    def hc_post(self, x: torch.Tensor, residual: torch.Tensor, h_post: torch.Tensor, h_res: torch.Tensor):
+        residual = residual.view(-1, self.num_stream, self.hidden_size)
+        res = self.mhc_post(x, residual, h_post, h_res)
+        res = res.view(-1, self.num_stream * self.hidden_size)
+        return res
 
 
 class OpenPanguDecoderLayer(nn.Module):
@@ -2042,9 +2000,22 @@ class OpenPanguModel(nn.Module):
                 merge_layer_only_pre=True,
                 prefix=f"{prefix}.attn_mhc_module",
             )
+            self.hc_head_op = HCHeadOp()
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
+
+    def hc_head(self, x) -> torch.Tensor:
+        x = x.view(-1, self.num_stream, self.merge_mhc_module.hidden_size)
+        res = self.hc_head_op(
+            x,
+            self.merge_mhc_module.phi_weight if hasattr(self.merge_mhc_module, 'phi_weight') else self.merge_mhc_module.phi.weight.float(),
+            self.merge_mhc_module.branch_alpha_pre,
+            self.merge_mhc_module.branch_beta_pre,
+            self.merge_mhc_module.norm_eps,
+            self.merge_mhc_module.hc_eps
+        )
+        return res
 
     def forward(
         self,
@@ -2060,6 +2031,7 @@ class OpenPanguModel(nn.Module):
                 hidden_states = self.embed_input_ids(input_ids)
                 if self.use_mhc:
                     hidden_states = hidden_states.repeat(1, self.num_stream)
+                    # hidden_states = hidden_states.unsqueeze(-2).repeat(1, self.num_stream, 1)
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -2076,7 +2048,7 @@ class OpenPanguModel(nn.Module):
             )
 
         if self.use_mhc:
-            hidden_states, _, _ = self.merge_mhc_module.hc_pre(hidden_states)
+            hidden_states = self.hc_head(hidden_states)
         else:
             hidden_states = (
                 hidden_states + residual if residual is not None else hidden_states
