@@ -797,7 +797,7 @@ class VllmConfig:
         # pins memory, so we conservatively reject the combination whenever
         # any KV connector is configured.
         #
-        # Sleep mode is exempt: CuMemAllocator.use_memory_pool toggles
+        # CuMem allocator is exempt: CuMemAllocator.use_memory_pool toggles
         # expandable_segments off around its pool (see #40812), so the KV
         # cache allocated within that context lands on stable physical pages
         # even when the env var is set.
@@ -805,17 +805,18 @@ class VllmConfig:
             "PYTORCH_CUDA_ALLOC_CONF", ""
         ):
             return
-        if self.model_config is not None and self.model_config.enable_sleep_mode:
+        if self.model_config is not None and (self.model_config.enable_cumem_allocator):
             return
 
         raise ValueError(
             f"KV connector {self.kv_transfer_config.kv_connector} is "
             "incompatible with PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True "
-            "unless enable_sleep_mode is also enabled. PyTorch's CUDA VMM "
+            "unless enable_cumem_allocator is also enabled. PyTorch's CUDA VMM "
             "allocator can remap KV cache virtual addresses to different "
             "physical pages, invalidating any pinned/registered KV memory "
             "(e.g. IB memory regions registered by NIXL or Mooncake). Either "
-            "unset expandable_segments:True or enable sleep mode (which "
+            "unset expandable_segments:True or enable the cumem allocator "
+            "(sleep mode does this automatically and also "
             "routes KV allocations through CuMemAllocator's pool, where "
             "expandable_segments is automatically disabled)."
         )
