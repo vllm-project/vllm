@@ -135,7 +135,42 @@ def parse_job_metadata(slurm_out: Path | None) -> dict[str, Any]:
     m = re.search(r"Mean TPOT \(ms\):\s+([\d.]+)", text)
     if m:
         meta["mean_tpot_ms"] = float(m.group(1))
+    m = re.search(r"HEAD_NODE=(\S+)", text)
+    if m:
+        meta["head_node"] = m.group(1)
+    m = re.search(r"WORKER_NODES=(\S+)", text)
+    if m:
+        meta["worker_nodes"] = [n for n in m.group(1).split() if n]
+    m = re.search(r"SLURM_JOB_NODELIST=(\S+)", text)
+    if m:
+        meta["slurm_nodelist"] = m.group(1)
     return meta
+
+
+def pp_rank_order(job_meta: dict[str, Any]) -> list[str]:
+    """PP stage order: rank 0 = head node, then workers in listed order."""
+    head = job_meta.get("head_node")
+    workers = job_meta.get("worker_nodes") or []
+    if head:
+        return [head, *workers]
+    return workers
+
+
+def infer_local_rank(
+    trace_path: Path,
+    job_meta: dict[str, Any],
+    *,
+    default: int = 0,
+) -> int:
+    """Map trace path hostname (e.g. htc-g060) to PP rank using Slurm log order."""
+    m = re.search(r"(htc-g\d+)", trace_path.as_posix(), re.I)
+    if not m:
+        return default
+    node = m.group(1).lower()
+    order = [n.lower() for n in pp_rank_order(job_meta)]
+    if node in order:
+        return order.index(node)
+    return default
 
 
 def merge_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:

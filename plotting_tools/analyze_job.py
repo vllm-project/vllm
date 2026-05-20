@@ -7,15 +7,19 @@ import argparse
 import sys
 from pathlib import Path
 
+import numpy as np
+
 # Allow `python plotting_tools/analyze_job.py` without installing the package.
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from plotting_tools.plots import (  # noqa: E402
+    build_gpu_traffic_matrix,
     build_traffic_matrix,
     collect_nccl_ops,
     comm_delta,
+    merge_rank_traffic_matrices,
     nocomm_windows,
     plot_classic_timeline,
     plot_collective_ops_breakdown,
@@ -32,6 +36,7 @@ from plotting_tools.plots import (  # noqa: E402
 )
 from plotting_tools.trace_io import (  # noqa: E402
     duty_by_sub,
+    infer_local_rank,
     load_chrome_trace,
     load_trace,
     parse_duration_events,
@@ -49,8 +54,75 @@ def _find_traces(job_dir: Path) -> list[Path]:
                 continue
             if "summary" in p.name:
                 continue
+            if "api_server" in p.name:
+                continue
             found.append(p)
     return found
+
+
+def _find_worker_traces(job_dir: Path) -> list[Path]:
+    root = job_dir / "ray_worker_nsight"
+    if not root.is_dir():
+        return []
+    out: list[Path] = []
+    for p in sorted(root.rglob("*.jsonl")):
+        if p.stat().st_size == 0:
+            continue
+        out.append(p)
+    return out
+
+
+def plot_job_rank_heatmap(
+    job_dir: Path,
+    out_dir: Path,
+    *,
+    job_meta: dict,
+    n_ranks: int,
+    strict: bool,
+    prefix: str = "job",
+) -> dict | None:
+    """Merge Ray worker traces into one PP/TP rank x rank traffic heatmap."""
+    traces = _find_worker_traces(job_dir)
+    if not traces:
+        return None
+    pp = job_meta.get("pipeline_parallel", 1)
+    tp = job_meta.get("tensor_parallel", 1)
+    n_ranks_use = max(n_ranks, pp * tp, 2)
+    matrices: list[np.ndarray] = []
+    ranks_seen: list[int] = []
+
+    for tp_path in traces:
+        events = load_trace(tp_path, strict=strict)
+        if not any(e["kind"] == "comm" for e in events):
+            continue
+        local_rank = infer_local_rank(tp_path, job_meta)
+        mat = build_traffic_matrix(
+            events,
+            n_ranks_use,
+            local_rank=local_rank,
+            pp_mode=pp > 1,
+        )
+        matrices.append(mat)
+        ranks_seen.append(local_rank)
+
+    if not matrices:
+        return None
+    merged = merge_rank_traffic_matrices(matrices)
+    parallel_label = f"TP={tp} PP={pp}"
+    plot_traffic_heatmap(
+        merged,
+        out_dir / "rank_traffic_heatmap.png",
+        title=f"{prefix}: rank-to-rank comm traffic ({parallel_label})",
+        xlabel="Destination PP/TP rank",
+        ylabel="Source PP/TP rank",
+        colorbar_label="Bytes or µs proxy (summed across workers)",
+    )
+    return {
+        "n_ranks": n_ranks_use,
+        "worker_traces": [str(p) for p in traces],
+        "ranks_seen": ranks_seen,
+        "matrix_sum": float(merged.sum()),
+    }
 
 
 def analyze_trace(
@@ -106,11 +178,32 @@ def analyze_trace(
     )
 
     n_ranks_use = max(n_ranks, pp * tp, 2)
-    mat = build_traffic_matrix(events, n_ranks_use)
+    local_rank = infer_local_rank(trace_path, job_meta)
+    mat = build_traffic_matrix(
+        events,
+        n_ranks_use,
+        local_rank=local_rank,
+        pp_mode=pp > 1,
+    )
+    plot_traffic_heatmap(
+        mat,
+        trace_out / "rank_traffic_heatmap.png",
+        title=f"{prefix}: rank-to-rank comm (local rank {local_rank}, {parallel_label})",
+        xlabel="Destination rank",
+        ylabel="Source rank",
+    )
     plot_traffic_heatmap(
         mat,
         trace_out / "all2all_traffic_heatmap.png",
         title=f"{prefix}: comm traffic matrix (rank x rank)",
+    )
+    gpu_mat = build_gpu_traffic_matrix(events, n_gpus=tp if tp > 1 else None)
+    plot_traffic_heatmap(
+        gpu_mat,
+        trace_out / "gpu_traffic_heatmap.png",
+        title=f"{prefix}: GPU-to-GPU comm on node (TP={tp})",
+        xlabel="Destination GPU",
+        ylabel="Source GPU",
     )
 
     msg_stats = plot_message_stats(
@@ -266,6 +359,18 @@ def main() -> None:
             strict=args.strict_classify,
             max_plot_ms=args.max_plot_ms,
         )
+
+    job_rank = plot_job_rank_heatmap(
+        job_dir,
+        out_dir,
+        job_meta=job_meta,
+        n_ranks=args.n_ranks,
+        strict=args.strict_classify,
+        prefix=job_dir.name,
+    )
+    if job_rank:
+        print(f"  merged rank heatmap: {out_dir / 'rank_traffic_heatmap.png'}")
+        all_summaries["job_rank_traffic"] = job_rank
 
     write_summary_json(out_dir / "job_summary.json", all_summaries)
     print(f"Wrote plots under {out_dir}")

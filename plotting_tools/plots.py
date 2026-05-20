@@ -470,26 +470,139 @@ def _peer_from_nccl_name(name: str) -> int | None:
     m = re.search(r"peer\s*[=:]?\s*(\d+)", name.lower())
     if m:
         return int(m.group(1))
+    m = re.search(r"root\s*[=:]?\s*(\d+)", name.lower())
+    if m:
+        return int(m.group(1))
     return None
+
+
+def _peer_device_from_name(name: str) -> int | None:
+    m = re.search(r"device\s*[=:]?\s*(\d+)", name.lower())
+    if m:
+        return int(m.group(1))
+    m = re.search(r"gpu\s*[=:]?\s*(\d+)", name.lower())
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def _comm_volume(event: dict[str, Any]) -> float:
+    b = _extract_comm_bytes(event)
+    if b is not None and b > 0:
+        return float(b)
+    return float(event["dur"])
+
+
+def _pp_neighbor_ranks(local_rank: int, n_ranks: int) -> list[int]:
+    out: list[int] = []
+    if local_rank > 0:
+        out.append(local_rank - 1)
+    if local_rank < n_ranks - 1:
+        out.append(local_rank + 1)
+    return out
+
+
+def _infer_pp_peer(local_rank: int, n_ranks: int, name: str) -> int | None:
+    """Pipeline-parallel fallback when NCCL name has no peer rank."""
+    peer = _peer_from_nccl_name(name)
+    if peer is not None and 0 <= peer < n_ranks:
+        return peer
+    lower = name.lower()
+    if n_ranks == 2:
+        return 1 - local_rank
+    neighbors = _pp_neighbor_ranks(local_rank, n_ranks)
+    if not neighbors:
+        return None
+    if "sendrecv" in lower or "send" in lower or "recv" in lower:
+        if "send" in lower and "recv" not in lower and local_rank < n_ranks - 1:
+            return local_rank + 1
+        if "recv" in lower and "send" not in lower and local_rank > 0:
+            return local_rank - 1
+    if len(neighbors) == 1:
+        return neighbors[0]
+    return neighbors[0]
 
 
 def build_traffic_matrix(
     events: list[dict[str, Any]],
     n_ranks: int,
+    *,
+    local_rank: int = 0,
+    pp_mode: bool = True,
 ) -> np.ndarray:
-    """Approximate all-to-all bytes matrix from NCCL / comm event names."""
+    """Rank-to-rank comm volume (bytes, else µs) from this trace's perspective."""
     mat = np.zeros((n_ranks, n_ranks), dtype=np.float64)
-    local_rank = 0
     for e in events:
         if e["kind"] != "comm":
             continue
-        b = _extract_comm_bytes(e) or 0
-        peer = _peer_from_nccl_name(e.get("name", ""))
-        if peer is None or peer >= n_ranks:
+        vol = _comm_volume(e)
+        name = e.get("name", "")
+        peer = _peer_from_nccl_name(name)
+        if peer is None and pp_mode:
+            peer = _infer_pp_peer(local_rank, n_ranks, name)
+        if peer is None or peer < 0 or peer >= n_ranks:
             continue
-        mat[local_rank, peer] += b
-        if b == 0:
-            mat[local_rank, peer] += e["dur"]  # fallback: time proxy
+        if peer == local_rank:
+            continue
+        mat[local_rank, peer] += vol
+    return mat
+
+
+def merge_rank_traffic_matrices(
+    matrices: list[np.ndarray],
+) -> np.ndarray:
+    """Sum per-rank trace matrices into one job-level rank x rank view."""
+    if not matrices:
+        return np.zeros((1, 1), dtype=np.float64)
+    n = max(m.shape[0] for m in matrices)
+    out = np.zeros((n, n), dtype=np.float64)
+    for m in matrices:
+        out[: m.shape[0], : m.shape[1]] += m
+    return out
+
+
+def build_gpu_traffic_matrix(
+    events: list[dict[str, Any]],
+    *,
+    n_gpus: int | None = None,
+) -> np.ndarray:
+    """
+    GPU-to-GPU comm on this process: diagonal = local collectives;
+    off-diagonal = P2P when peer GPU is known, else split across other GPUs.
+    """
+    devices: set[int] = set()
+    for e in events:
+        args = e.get("args") or {}
+        if "device_id" in args:
+            devices.add(int(args["device_id"]))
+    if n_gpus is None:
+        n_gpus = (max(devices) + 1) if devices else 1
+    n_gpus = max(n_gpus, 1)
+    mat = np.zeros((n_gpus, n_gpus), dtype=np.float64)
+
+    for e in events:
+        if e["kind"] != "comm":
+            continue
+        args = e.get("args") or {}
+        src = int(args.get("device_id", 0))
+        if src >= n_gpus:
+            continue
+        vol = _comm_volume(e)
+        name = e.get("name", "")
+        peer_dev = _peer_device_from_name(name)
+        lower = name.lower()
+        if peer_dev is not None and 0 <= peer_dev < n_gpus and peer_dev != src:
+            mat[src, peer_dev] += vol
+        elif any(k in lower for k in ("allreduce", "allgather", "reducescatter", "broadcast")):
+            for dst in range(n_gpus):
+                if dst != src:
+                    mat[src, dst] += vol / max(n_gpus - 1, 1)
+        elif "sendrecv" in lower or "send" in lower or "recv" in lower:
+            for dst in range(n_gpus):
+                if dst != src:
+                    mat[src, dst] += vol / max(n_gpus - 1, 1)
+        else:
+            mat[src, src] += vol
     return mat
 
 
@@ -500,24 +613,31 @@ def plot_traffic_heatmap(
     title: str,
     xlabel: str = "Destination rank",
     ylabel: str = "Source rank",
+    colorbar_label: str = "Volume (bytes or µs proxy)",
+    annotate: bool = True,
 ) -> None:
-    fig, ax = plt.subplots(figsize=(7, 6))
-    vmax = matrix.max() if matrix.size else 1.0
+    fig, ax = plt.subplots(figsize=(max(6, matrix.shape[1] * 0.9), max(5, matrix.shape[0] * 0.8)))
+    vmax = float(matrix.max()) if matrix.size else 1.0
     if vmax <= 0:
         vmax = 1.0
     im = ax.imshow(matrix, cmap=TRAFFIC_CMAP, vmin=0, vmax=vmax, aspect="auto")
     ax.set_title(title)
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
-    n = matrix.shape[0]
-    ax.set_xticks(range(n))
-    ax.set_yticks(range(n))
-    for i in range(n):
-        for j in range(n):
-            val = matrix[i, j]
-            if val > 0:
-                ax.text(j, i, f"{val:.2e}", ha="center", va="center", fontsize=8)
-    plt.colorbar(im, ax=ax, label="Volume (bytes or µs proxy)")
+    n0, n1 = matrix.shape
+    ax.set_xticks(range(n1))
+    ax.set_yticks(range(n0))
+    ax.set_xticklabels([str(i) for i in range(n1)])
+    ax.set_yticklabels([str(i) for i in range(n0)])
+    if annotate:
+        for i in range(n0):
+            for j in range(n1):
+                val = matrix[i, j]
+                if val > 0:
+                    txt = f"{val:.2e}" if val >= 1e4 else f"{val:.1f}"
+                    color = "white" if val > 0.6 * vmax else "black"
+                    ax.text(j, i, txt, ha="center", va="center", fontsize=8, color=color)
+    plt.colorbar(im, ax=ax, label=colorbar_label)
     plt.tight_layout()
     fig.savefig(out_path, dpi=200)
     plt.close(fig)

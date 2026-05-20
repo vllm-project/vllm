@@ -33,7 +33,9 @@ Outputs: `results/7651157/plots/<trace_stem>/`
 | Category time share (%) | `traffic_volume_pct.png` |
 | Classic compute / comm / control | `compute_comm_control_timeline.png` |
 | Expert traffic heuristic (GB) | `expert_traffic_gb.png` |
-| All-to-all heatmap (white → green → dark blue) | `all2all_traffic_heatmap.png` |
+| Rank-to-rank comm heatmap (PP/TP; per trace + merged job) | `rank_traffic_heatmap.png`, `job-level rank_traffic_heatmap.png` |
+| GPU-to-GPU comm heatmap (on-node TP) | `gpu_traffic_heatmap.png` |
+| All-to-all heatmap (alias, white → green → dark blue) | `all2all_traffic_heatmap.png` |
 | Prefill / decode / all comm counts & avg size | `message_stats_prefill_decode.png` |
 | NCCL ops (timestamp, name, bytes, shape) | `collective_ops.json` |
 | No-comm window CDF | `nocomm_windows_cdf.png` |

@@ -80,6 +80,10 @@ def load_nsys_jsonl(path: Path, *, strict: bool = False) -> list[dict[str, Any]]
             dur = dur_ns // 1000
 
             extra: dict[str, Any] = {}
+            if row.get("deviceId") is not None:
+                extra["device_id"] = int(row["deviceId"])
+            if row.get("streamId") is not None:
+                extra["stream_id"] = int(row["streamId"])
             if table == "CUPTI_ACTIVITY_KIND_KERNEL":
                 name = _resolve_name(row, strings)
                 cat = "kernel"
@@ -87,6 +91,7 @@ def load_nsys_jsonl(path: Path, *, strict: bool = False) -> list[dict[str, Any]]
                 kind = int(row.get("copyKind", 0))
                 name = _MEMCPY_KIND.get(kind, "memcpy")
                 cat = "memcpy"
+                extra["copy_kind"] = kind
                 if row.get("bytes") is not None:
                     extra["bytes"] = row["bytes"]
             elif table == "CUPTI_ACTIVITY_KIND_RUNTIME":
