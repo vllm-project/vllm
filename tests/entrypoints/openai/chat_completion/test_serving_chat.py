@@ -1993,6 +1993,59 @@ async def test_streaming_n_gt1_independent_tool_parsers():
             f"Choice {choice_idx}: expected {{'city': 'Tokyo'}}, got {parsed_args}"
         )
 
+@pytest.mark.asyncio
+async def test_serving_chat_truncation_side_controls_prompt_truncation():
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig(skip_tokenizer_init=True)
+    mock_engine.input_processor = MagicMock()
+    mock_renderer = MistralRenderer(
+        MockVllmConfig(mock_engine.model_config, parallel_config=MockParallelConfig()),
+        tokenizer=None,
+    )
+    mock_renderer.render_messages_async = AsyncMock(
+        side_effect=lambda *_args, **_kwargs: (
+            [],
+            TokensPrompt(prompt_token_ids=list(range(8))),
+        )
+    )
+    mock_engine.renderer = mock_renderer
+
+    serving_chat = _build_serving_chat(mock_engine)
+    messages = [{"role": "user", "content": "what is 1+1?"}]
+
+    full_result = await serving_chat.render_chat_request(
+        ChatCompletionRequest(model=MODEL_NAME, messages=messages)
+    )
+    assert not isinstance(full_result, ErrorResponse)
+    _, full_engine_inputs = full_result
+    full_token_ids = full_engine_inputs[0]["prompt_token_ids"]
+
+    right_result = await serving_chat.render_chat_request(
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=messages,
+            truncate_prompt_tokens=4,
+            truncation_side="right",
+        )
+    )
+    assert not isinstance(right_result, ErrorResponse)
+    _, right_engine_inputs = right_result
+    assert right_engine_inputs[0]["prompt_token_ids"] == full_token_ids[:4]
+
+    left_result = await serving_chat.render_chat_request(
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=messages,
+            truncate_prompt_tokens=4,
+            truncation_side="left",
+        )
+    )
+    assert not isinstance(left_result, ErrorResponse)
+    _, left_engine_inputs = left_result
+    assert left_engine_inputs[0]["prompt_token_ids"] == full_token_ids[-4:]
+
+
 
 class TestCreateRemainingArgsDelta:
     """Tests for _create_remaining_args_delta helper function.
