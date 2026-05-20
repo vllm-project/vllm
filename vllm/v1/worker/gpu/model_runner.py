@@ -1088,6 +1088,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.lora_config:
                 # program a no-LoRA mapping here so kernels early-exit instead of
                 # reading uninitialized metadata during dummy runs.
+                # FIXME: Replace this with LoRA warmup: https://github.com/vllm-project/vllm/pull/35536
                 assert hasattr(self, "lora_manager")
                 self.lora_manager._adapter_manager.set_adapter_mapping(
                     LoRAMapping(
