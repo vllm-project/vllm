@@ -11,12 +11,10 @@ No GPU, no distributed setup — these run in the regular pytest suite."""
 
 from pathlib import Path
 
-import pytest
 import torch
 from safetensors import safe_open
 from safetensors.torch import load_file
 
-from vllm.config.parallel import EPLBConfig
 from vllm.distributed.eplb.eplb_state import EplbState
 
 
