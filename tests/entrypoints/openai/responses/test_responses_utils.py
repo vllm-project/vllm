@@ -935,6 +935,63 @@ class TestConstructInputMessagesPrevResponseToolCalls:
         assert roles == ["user", "assistant", "user"]
         assert msgs[1]["content"] == "The answer is 42."
 
+    def test_prev_response_output_message_empty_content(self):
+        """ResponseOutputMessage with empty content should not crash."""
+        empty_msg = ResponseOutputMessage(
+            id="msg_empty",
+            content=[],
+            role="assistant",
+            status="in_progress",
+            type="message",
+        )
+        prev_output = [empty_msg]
+        msgs = construct_input_messages(
+            request_instructions=None,
+            request_input="Hello",
+            prev_msg=[{"role": "user", "content": "Hi"}],
+            prev_response_output=prev_output,
+        )
+        roles = [m["role"] for m in msgs]
+        assert "user" in roles
+        # Empty content message should be skipped
+        assistant_msgs = [m for m in msgs if m.get("role") == "assistant"]
+        assert len(assistant_msgs) == 0
+
+    def test_prev_response_output_message_multi_content(self):
+        """ResponseOutputMessage with multiple content parts should
+        preserve all text."""
+        multi_msg = ResponseOutputMessage(
+            id="msg_multi",
+            content=[
+                ResponseOutputText(
+                    annotations=[],
+                    text="Step 1: Analyze",
+                    type="output_text",
+                    logprobs=None,
+                ),
+                ResponseOutputText(
+                    annotations=[],
+                    text="Step 2: Execute",
+                    type="output_text",
+                    logprobs=None,
+                ),
+            ],
+            role="assistant",
+            status="completed",
+            type="message",
+        )
+        prev_output = [multi_msg]
+        msgs = construct_input_messages(
+            request_instructions=None,
+            request_input="What next?",
+            prev_msg=[{"role": "user", "content": "Plan this"}],
+            prev_response_output=prev_output,
+        )
+        assistant_msgs = [m for m in msgs if m.get("role") == "assistant"]
+        assert len(assistant_msgs) == 1
+        assert "Step 1: Analyze" in assistant_msgs[0]["content"]
+        assert "Step 2: Execute" in assistant_msgs[0]["content"]
+
 
 class TestConstructInputMessagesInstructionsLeak:
     """Regression tests for #37697: instructions from a prior response

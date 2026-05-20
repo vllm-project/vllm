@@ -201,7 +201,11 @@ def _construct_message_from_response_item(
             "reasoning": reasoning,
         }
     elif isinstance(item, ResponseOutputMessage):
-        output_text = item.content[0].text
+        if not item.content:
+            return None
+        output_text = "\n".join(part.text for part in item.content if part.text)
+        if not output_text:
+            return None
         if prev_assistant_msg:
             previous_content = prev_assistant_msg.get("content")
             if previous_content is None:
