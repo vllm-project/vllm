@@ -21,6 +21,10 @@ import torch.nn as nn
 from tqdm import tqdm
 
 import vllm.envs as envs
+from vllm.compilation.breakable_cudagraph import (
+    BreakableCUDAGraphWrapper,
+    is_breakable_cudagraph_enabled,
+)
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
@@ -884,6 +888,11 @@ class GPUModelRunner(
         self.kv_connector_output: KVConnectorOutput | None = None
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_copy_bufs: mamba_utils.MambaCopyBuffers | None = None
+        self.mamba_prev_last_scheduled_idx: CpuGpuBuffer | None = None
+        if self.cache_config.mamba_cache_mode == "all" and self.num_spec_tokens > 0:
+            self.mamba_prev_last_scheduled_idx = self._make_buffer(
+                self.max_num_reqs, dtype=torch.int32
+            )
         self.layerwise_nvtx_hooks_registered = False
 
     def update_max_model_len(self, max_model_len: int) -> None:
@@ -1489,27 +1498,36 @@ class GPUModelRunner(
         num_reqs = output_token_ids.size(0)
         self.num_accepted_tokens.gpu[:num_reqs] = (output_token_ids != -1).sum(dim=1)
 
-        if self.cache_config.mamba_cache_mode == "align":
+        is_align = self.cache_config.mamba_cache_mode == "align"
+        if is_align:
             for i, num_tokens in enumerate(
                 self.num_accepted_tokens.gpu[:num_reqs].cpu().numpy()
             ):
                 self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
-            mamba_utils.postprocess_mamba(
-                scheduler_output,
-                self.kv_cache_config,
-                self.input_batch,
-                self.requests,
-                self.mamba_state_idx,
-                self.compilation_config.static_forward_context,
-                self.model.get_mamba_state_copy_func(),
-                self._get_mamba_copy_bufs(),
-            )
         else:
             self.input_batch.num_accepted_tokens_cpu_tensor[:num_reqs].copy_(
                 self.num_accepted_tokens.gpu[:num_reqs], non_blocking=True
             )
             assert self.num_accepted_tokens_event is not None
             self.num_accepted_tokens_event.record()
+
+        mamba_utils.postprocess_mamba(
+            scheduler_output,
+            self.kv_cache_config,
+            self.cache_config,
+            self.input_batch,
+            self.requests,
+            self.mamba_state_idx,
+            self.num_spec_tokens,
+            num_reqs,
+            forward_context=(
+                self.compilation_config.static_forward_context if is_align else None
+            ),
+            mamba_state_copy_funcs=(
+                self.model.get_mamba_state_copy_func() if is_align else None
+            ),
+            copy_bufs=self._get_mamba_copy_bufs() if is_align else None,
+        )
 
     def _update_streaming_request(
         self, req_id: str, new_req_data: NewRequestData
@@ -1747,8 +1765,6 @@ class GPUModelRunner(
                 self.input_batch.prev_sampled_token_ids[:num_common_tokens, 0],
                 non_blocking=True,
             )
-            if self.enable_prompt_embeds:
-                self.is_token_ids.gpu[:num_common_tokens] = True
             return
         # Upload the index tensors asynchronously so the scatter can be non-blocking.
         sampled_tokens_index_tensor = torch.tensor(
@@ -2007,6 +2023,15 @@ class GPUModelRunner(
         else:
             self.num_accepted_tokens.np.fill(1)
             self.num_accepted_tokens.gpu.fill_(1)
+
+        if self.mamba_prev_last_scheduled_idx is not None:
+            mamba_utils.preprocess_mamba_all_specdec(
+                scheduler_output,
+                self.input_batch,
+                self.mamba_state_idx,
+                num_reqs,
+                self.mamba_prev_last_scheduled_idx,
+            )
 
         # Update num_computed_tokens on GPU. In async spec decode,
         # CPU values are optimistic (all drafts accepted). The kernel
@@ -2315,6 +2340,13 @@ class GPUModelRunner(
                         :num_reqs_padded
                     ],
                 )
+                if (
+                    isinstance(builder, Mamba2AttentionMetadataBuilder)
+                    and self.mamba_prev_last_scheduled_idx is not None
+                ):
+                    extra_attn_metadata_args["prev_last_scheduled_idx"] = (
+                        self.mamba_prev_last_scheduled_idx.gpu[:num_reqs_padded]
+                    )
 
             if for_cudagraph_capture:
                 attn_metadata_i = builder.build_for_cudagraph_capture(
@@ -3127,7 +3159,9 @@ class GPUModelRunner(
     def get_model(self) -> nn.Module:
         if not hasattr(self, "model"):
             raise ValueError("Cannot get model before model has been initialized")
-        if isinstance(self.model, (CUDAGraphWrapper, UBatchWrapper)):
+        if isinstance(
+            self.model, (CUDAGraphWrapper, UBatchWrapper, BreakableCUDAGraphWrapper)
+        ):
             # get raw model out of the cudagraph wrapper.
             return self.model.unwrap()
         return self.model
@@ -3372,13 +3406,12 @@ class GPUModelRunner(
             # If a batch only has token ids, then including the embedding layer
             # in the CUDA graph will be more performant (like in the else case
             # below).
-            token_ids_idx = (
-                self.is_token_ids.gpu[:num_scheduled_tokens]
-                .nonzero(as_tuple=False)
-                .squeeze(1)
-            )
+            is_token_ids = self.is_token_ids.np[:num_scheduled_tokens]
+            token_ids_idx_np = np.nonzero(is_token_ids)[0]
             # Some tokens ids may need to become embeds
-            if token_ids_idx.numel() > 0:
+            if token_ids_idx_np.size > 0:
+                token_ids_idx = torch.from_numpy(token_ids_idx_np)
+                token_ids_idx = token_ids_idx.to(self.device, non_blocking=True)
                 token_ids = self.input_ids.gpu[token_ids_idx]
                 tokens_to_embeds = self.model.embed_input_ids(input_ids=token_ids)
                 self.inputs_embeds.gpu[token_ids_idx] = tokens_to_embeds
@@ -4565,6 +4598,9 @@ class GPUModelRunner(
             # appending a placeholder (-1) token id.
             if (req_state := self.requests.get(req_id)) is not None:
                 req_state.output_token_ids.append(-1)
+            pos = self.input_batch.num_tokens_no_spec[i]
+            self.input_batch.is_token_ids[i, pos] = True
+            self.input_batch.num_tokens_no_spec[i] = pos + 1
         self.input_batch.prev_req_id_to_index = prev_req_id_to_index
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
@@ -5019,27 +5055,7 @@ class GPUModelRunner(
                         )
                         eplb_models += 1
 
-                if self.use_aux_hidden_state_outputs:
-                    if not supports_eagle3(self.get_model()):
-                        raise RuntimeError(
-                            "Model does not support EAGLE3 interface but "
-                            "aux_hidden_state_outputs was requested"
-                        )
-
-                    # Try to get auxiliary layers from speculative config,
-                    # otherwise use model's default layers
-                    aux_layers = self._get_eagle3_aux_layers_from_config()
-                    if aux_layers:
-                        logger.info(
-                            "Using auxiliary layers from speculative config: %s",
-                            aux_layers,
-                        )
-                    else:
-                        aux_layers = (
-                            self.model.get_eagle3_default_aux_hidden_state_layers()
-                        )
-
-                    self.model.set_aux_hidden_state_layers(aux_layers)
+                self._setup_eagle3_aux_hidden_state_outputs()
 
                 # Resolve the MoE model, unwrapping VLM wrappers if needed.
                 # VLM models (e.g. KimiK25ForConditionalGeneration) wrap the
@@ -5130,6 +5146,12 @@ class GPUModelRunner(
         cudagraph_mode = self.compilation_config.cudagraph_mode
         assert cudagraph_mode is not None
         if (
+            is_breakable_cudagraph_enabled()
+            and cudagraph_mode != CUDAGraphMode.NONE
+            and not self.parallel_config.use_ubatching
+        ):
+            self.model = BreakableCUDAGraphWrapper(self.model, self.vllm_config)
+        elif (
             cudagraph_mode.has_full_cudagraphs()
             and not self.parallel_config.use_ubatching
         ):
@@ -5147,6 +5169,27 @@ class GPUModelRunner(
                 )
 
         get_offloader().post_init()
+
+    def _setup_eagle3_aux_hidden_state_outputs(self) -> None:
+        if not self.use_aux_hidden_state_outputs:
+            return
+
+        if not supports_eagle3(self.get_model()):
+            raise RuntimeError(
+                "Model does not support EAGLE3 interface but "
+                "aux_hidden_state_outputs was requested"
+            )
+        # Try to get auxiliary layers from speculative config,
+        # otherwise use model's default layers
+        aux_layers = self._get_eagle3_aux_layers_from_config()
+        if aux_layers:
+            logger.info(
+                "Using auxiliary layers from speculative config: %s", aux_layers
+            )
+        else:
+            aux_layers = self.model.get_eagle3_default_aux_hidden_state_layers()
+
+        self.model.set_aux_hidden_state_layers(aux_layers)
 
     def _get_eagle3_aux_layers_from_config(self) -> tuple[int, ...] | None:
         """Extract Eagle3 auxiliary layer indices from speculative config.
@@ -5167,8 +5210,16 @@ class GPUModelRunner(
         layer_ids = getattr(hf_config, "eagle_aux_hidden_state_layer_ids", None)
         if not layer_ids:
             dflash_config = getattr(hf_config, "dflash_config", None)
+            eagle_config = getattr(hf_config, "eagle_config", None)
+
             if dflash_config and isinstance(dflash_config, dict):
-                layer_ids = dflash_config.get("target_layer_ids")
+                # Add 1 to convert DFlash's aux layer id semantics
+                layer_ids = [
+                    i + 1 for i in (dflash_config.get("target_layer_ids") or [])
+                ]
+
+            if eagle_config and isinstance(eagle_config, dict):
+                layer_ids = eagle_config.get("eagle_aux_hidden_state_layer_ids")
 
         if layer_ids and isinstance(layer_ids, (list, tuple)):
             return tuple(layer_ids)
@@ -6206,7 +6257,10 @@ class GPUModelRunner(
         # Use a temporary pool for profiling to avoid fragmentation in the main pool.
         profiling_pool = current_platform.graph_pool_handle()
         original_pools: dict[int, Any] = {}
-        for instance in list(CUDAGraphWrapper._all_instances):
+        all_wrappers = list(CUDAGraphWrapper._all_instances) + list(
+            BreakableCUDAGraphWrapper._all_instances
+        )
+        for instance in all_wrappers:
             original_pools[id(instance)] = instance.graph_pool
             instance.graph_pool = profiling_pool
 
@@ -6257,7 +6311,11 @@ class GPUModelRunner(
 
         set_cudagraph_capturing_enabled(False)
         CUDAGraphWrapper.clear_all_graphs()
-        for instance in list(CUDAGraphWrapper._all_instances):
+        BreakableCUDAGraphWrapper.clear_all_graphs()
+        all_wrappers = list(CUDAGraphWrapper._all_instances) + list(
+            BreakableCUDAGraphWrapper._all_instances
+        )
+        for instance in all_wrappers:
             if id(instance) in original_pools:
                 instance.graph_pool = original_pools[id(instance)]
         for key_set in self.cudagraph_dispatcher.cudagraph_keys.values():
