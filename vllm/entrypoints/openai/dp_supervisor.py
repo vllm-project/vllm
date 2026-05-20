@@ -17,6 +17,7 @@ from http import HTTPStatus
 from multiprocessing.process import BaseProcess
 
 import aiohttp
+import prctl
 import psutil
 import uvicorn
 import uvloop
@@ -232,6 +233,7 @@ def _run_vllm_dp_server(
     # Create a fresh process group for the vLLM DP Server,
     # so that CTRL-C is propagated cleanly.
     os.setpgrp()
+    prctl.set_pdeathsig(signal.SIGTERM)
 
     name = f"APIServer_DP{child_args.data_parallel_rank}"
     update_environment_variables(env_updates)

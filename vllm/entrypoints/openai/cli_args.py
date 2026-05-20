@@ -238,9 +238,6 @@ class FrontendArgs(BaseFrontendArgs):
     dp_supervisor_probe_interval_s: float = 5.0
     """Seconds between aggregated health probes in multi-port external LB mode."""
     dp_supervisor_probe_timeout_s: float = 5.0
-    """Timeout in seconds for each aggregated child health probe in
-    multi-port external LB mode."""
-    dp_supervisor_probe_period_s: float = 5.0
     """Seconds to wait between retries when a child health probe fails with a
     connection error in multi-port external LB mode."""
     dp_supervisor_probe_failure_threshold: int = 3
