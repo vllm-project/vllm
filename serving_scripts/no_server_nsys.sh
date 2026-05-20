@@ -17,7 +17,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="arc-ray-qwen3-30b-workers-nsys-no-api-wrapper-live-copy-v1"
+SCRIPT_VERSION="arc-ray-qwen3-30b-workers-nsys-no-api-wrapper-live-copy-v2-finalize-wait"
 
 # This variant intentionally DOES NOT wrap the vLLM API server in:
 #   nsys profile python -m vllm.entrypoints.openai.api_server
@@ -25,9 +25,13 @@ SCRIPT_VERSION="arc-ray-qwen3-30b-workers-nsys-no-api-wrapper-live-copy-v1"
 # It still enables vLLM's worker-side Nsight path via:
 #   --ray-workers-use-nsight
 #
-# Goal:
-#   remove API-server Nsight shutdown/finalization as a confounder, while
-#   preserving Ray worker CUDA/NVTX traces.
+# Key fixes in v2:
+#   1. Do not copy empty.nsys-rep or zero-byte Nsight placeholder files.
+#   2. Keep Ray alive after the workload/server stops while worker Nsight
+#      has time to finalize real worker_process_*.nsys-rep files.
+#   3. The live sidecar keeps copying while Ray is alive, which matches the
+#      manual rescue that worked: SSH in, find the current session, copy before
+#      Slurm tmp cleanup.
 
 DEBUG_SLURM_SCRIPT="${DEBUG_SLURM_SCRIPT:-0}"
 NSYS_COPY_DEBUG="${NSYS_COPY_DEBUG:-0}"
@@ -40,6 +44,14 @@ SERVER_SHUTDOWN_TIMEOUT_S="${SERVER_SHUTDOWN_TIMEOUT_S:-420}"
 
 # Live sidecar copy interval inside each Ray srun step.
 WORKER_NSYS_LIVE_COPY_INTERVAL="${WORKER_NSYS_LIVE_COPY_INTERVAL:-2}"
+
+# After stopping the vLLM API server, keep Ray alive this long while waiting
+# for real worker_process_*.nsys-rep files to appear and be copied.
+WORKER_NSYS_FINALIZE_WAIT_S="${WORKER_NSYS_FINALIZE_WAIT_S:-180}"
+WORKER_NSYS_FINALIZE_POLL_S="${WORKER_NSYS_FINALIZE_POLL_S:-5}"
+
+# Treat files smaller than this as placeholders, not useful reports.
+MIN_WORKER_NSYS_REP_BYTES="${MIN_WORKER_NSYS_REP_BYTES:-1024}"
 
 slurm_debug() {
   if [ "${DEBUG_SLURM_SCRIPT}" = "1" ]; then
@@ -111,6 +123,65 @@ nsight_summarize_dest() {
   fi
 }
 
+# Return success only if every expected node has at least one real non-empty
+# worker_process_*.nsys-rep copied into TRACE_RUN_DIR/ray_worker_nsight/<node>.
+wait_for_real_worker_nsys_reports() {
+  local timeout_s="${1:-180}"
+  local poll_s="${2:-5}"
+  local elapsed=0
+
+  if [ "${NSYS_ENABLE:-1}" != "1" ] || [ "${NSYS_PROFILE_WORKERS:-1}" != "1" ]; then
+    echo "[nsight-copy] worker Nsight disabled; skipping wait for worker reports."
+    return 0
+  fi
+
+  echo "[nsight-copy] waiting up to ${timeout_s}s for real non-empty worker_process_*.nsys-rep files..."
+  echo "[nsight-copy] minimum accepted .nsys-rep size: ${MIN_WORKER_NSYS_REP_BYTES} bytes"
+  echo "[nsight-copy] expected nodes: ${HEAD_NODE} ${WORKER_NODES}"
+
+  while [ "${elapsed}" -lt "${timeout_s}" ]; do
+    local all_ok=1
+    local missing_nodes=""
+
+    for node in ${HEAD_NODE} ${WORKER_NODES}; do
+      local dest="${TRACE_RUN_DIR}/ray_worker_nsight/${node}"
+
+      if ! find "${dest}" -maxdepth 1 -type f \
+        -name '*worker_process*.nsys-rep' \
+        ! -name '*empty*' \
+        -size +"${MIN_WORKER_NSYS_REP_BYTES}"c \
+        -print -quit 2>/dev/null | grep -q .; then
+        all_ok=0
+        missing_nodes="${missing_nodes} ${node}"
+      fi
+    done
+
+    if [ "${all_ok}" = "1" ]; then
+      echo "[nsight-copy] found real non-empty worker_process_*.nsys-rep on every node."
+      find "${TRACE_RUN_DIR}/ray_worker_nsight" -type f \
+        \( -name '*.nsys-rep' -o -name '*.qdstrm' \) \
+        -printf '[nsight-copy]   %p %s bytes\n' 2>/dev/null | sort || true
+      return 0
+    fi
+
+    echo "[nsight-copy] worker reports not ready yet (${elapsed}/${timeout_s}s); missing:${missing_nodes}"
+    find "${TRACE_RUN_DIR}/ray_worker_nsight" -type f \
+      \( -name '*.nsys-rep' -o -name '*.qdstrm' \) \
+      -printf '[nsight-copy]   seen %p %s bytes\n' 2>/dev/null | sort || true
+
+    sleep "${poll_s}"
+    elapsed=$((elapsed + poll_s))
+  done
+
+  echo "[nsight-copy] WARNING: timed out waiting for real non-empty worker_process_*.nsys-rep files."
+  echo "[nsight-copy] Current worker Nsight destination contents:"
+  find "${TRACE_RUN_DIR}/ray_worker_nsight" -type f \
+    \( -name '*.nsys-rep' -o -name '*.qdstrm' \) \
+    -printf '[nsight-copy]   %p %s bytes\n' 2>/dev/null | sort || true
+
+  return 1
+}
+
 # Copy worker Nsight files from inside a live Ray srun step.
 #
 # This is deliberately more restrictive than "find every /tmp/ray/session_*":
@@ -124,6 +195,10 @@ nsight_summarize_dest() {
 #
 # This matches what worked manually: ssh into the node while the allocation is
 # alive, find the real current session path, and copy before tmp cleanup.
+#
+# IMPORTANT:
+#   We intentionally ignore empty.nsys-rep and *_empty.nsys-rep. Those are
+#   zero-byte placeholders and not usable Nsight reports.
 copy_ray_nsight_locally_once() {
   set +e
 
@@ -189,7 +264,13 @@ ${d}"
     while IFS= read -r d; do
       [ -d "${d}" ] || continue
 
-      find "${d}" -maxdepth 1 -type f \( -name '*.nsys-rep' -o -name '*.qdstrm' \) -print0 2>/dev/null |
+      find "${d}" -maxdepth 1 -type f \
+        \( \
+          \( -name '*.nsys-rep' ! -name 'empty.nsys-rep' ! -name '*_empty.nsys-rep' ! -name '*empty*' -size +"${MIN_WORKER_NSYS_REP_BYTES}"c \) \
+          -o \
+          \( -name '*.qdstrm' ! -name '*empty*' -size +0c \) \
+        \) \
+        -print0 2>/dev/null |
         while IFS= read -r -d '' f; do
           local base session out tmpout
           base="$(basename "${f}")"
@@ -269,6 +350,8 @@ start_ray_nsight_live_copier() {
 #   May 14/19 reports in earlier debugging. This fallback searches:
 #     1. current-job /tmp/slurm-${SLURM_JOB_ID}/tmp/ray/session_*/logs/nsight
 #     2. /tmp/ray/<session names recorded while Ray was live>/logs/nsight
+#
+# Also intentionally skip empty.nsys-rep and zero-byte reports.
 copy_ray_nsight_from_node() {
   local NODE="$1"
   local dest="${TRACE_RUN_DIR}/ray_worker_nsight/${NODE}"
@@ -329,10 +412,22 @@ copy_ray_nsight_from_node() {
           while read -r d; do
             [ -d \"\$d\" ] || continue
 
-            find \"\$d\" -maxdepth 1 -type f \( -name '*.nsys-rep' -o -name '*.qdstrm' \) \
+            echo '[nsight-copy] candidate report files in '\$d':'
+            find \"\$d\" -maxdepth 1 -type f \
+              \( \
+                \( -name '*.nsys-rep' ! -name 'empty.nsys-rep' ! -name '*_empty.nsys-rep' ! -name '*empty*' -size +${MIN_WORKER_NSYS_REP_BYTES}c \) \
+                -o \
+                \( -name '*.qdstrm' ! -name '*empty*' -size +0c \) \
+              \) \
               -printf '[nsight-copy] candidate %p %s bytes\n' 2>/dev/null | sort || true
 
-            find \"\$d\" -maxdepth 1 -type f \( -name '*.nsys-rep' -o -name '*.qdstrm' \) -print0 2>/dev/null |
+            find \"\$d\" -maxdepth 1 -type f \
+              \( \
+                \( -name '*.nsys-rep' ! -name 'empty.nsys-rep' ! -name '*_empty.nsys-rep' ! -name '*empty*' -size +${MIN_WORKER_NSYS_REP_BYTES}c \) \
+                -o \
+                \( -name '*.qdstrm' ! -name '*empty*' -size +0c \) \
+              \) \
+              -print0 2>/dev/null |
               while IFS= read -r -d '' f; do
                 base=\$(basename \"\$f\")
                 session=\$(echo \"\$f\" | sed -n 's#^.*/\(session_[^/]*\)/logs/nsight/.*#\1#p')
@@ -546,6 +641,9 @@ echo "NSYS_COPY_DEBUG=${NSYS_COPY_DEBUG}"
 echo "SRUN_COPY_TIMEOUT=${SRUN_COPY_TIMEOUT}"
 echo "SERVER_SHUTDOWN_TIMEOUT_S=${SERVER_SHUTDOWN_TIMEOUT_S}"
 echo "WORKER_NSYS_LIVE_COPY_INTERVAL=${WORKER_NSYS_LIVE_COPY_INTERVAL}"
+echo "WORKER_NSYS_FINALIZE_WAIT_S=${WORKER_NSYS_FINALIZE_WAIT_S}"
+echo "WORKER_NSYS_FINALIZE_POLL_S=${WORKER_NSYS_FINALIZE_POLL_S}"
+echo "MIN_WORKER_NSYS_REP_BYTES=${MIN_WORKER_NSYS_REP_BYTES}"
 echo "nsys path: $(command -v nsys || echo '<not found>')"
 nsys --version || true
 
@@ -681,6 +779,7 @@ export SLURM_JOB_ID='${SLURM_JOB_ID:-unknown}'
 export NSYS_COPY_DEBUG='${NSYS_COPY_DEBUG}'
 export DEBUG_SLURM_SCRIPT='${DEBUG_SLURM_SCRIPT}'
 export WORKER_NSYS_LIVE_COPY_INTERVAL='${WORKER_NSYS_LIVE_COPY_INTERVAL}'
+export MIN_WORKER_NSYS_REP_BYTES='${MIN_WORKER_NSYS_REP_BYTES}'
 
 start_ray_nsight_live_copier
 
@@ -753,6 +852,7 @@ export SLURM_JOB_ID='${SLURM_JOB_ID:-unknown}'
 export NSYS_COPY_DEBUG='${NSYS_COPY_DEBUG}'
 export DEBUG_SLURM_SCRIPT='${DEBUG_SLURM_SCRIPT}'
 export WORKER_NSYS_LIVE_COPY_INTERVAL='${WORKER_NSYS_LIVE_COPY_INTERVAL}'
+export MIN_WORKER_NSYS_REP_BYTES='${MIN_WORKER_NSYS_REP_BYTES}'
 
 start_ray_nsight_live_copier
 
@@ -831,6 +931,7 @@ echo "API_SERVER_OUTER_NSYS_WRAPPER=0"
 if [ "${NSYS_ENABLE}" = "1" ] && [ "${NSYS_PROFILE_WORKERS}" = "1" ]; then
   nsight_copy_msg "worker Nsight enabled via --ray-workers-use-nsight"
   nsight_copy_msg "live sidecar copies current-job Slurm tmp plus live /tmp/ray sessions"
+  nsight_copy_msg "empty.nsys-rep and zero-byte reports are ignored"
 fi
 
 python -m vllm.entrypoints.openai.api_server \
@@ -882,11 +983,18 @@ HOST="${HEAD_NODE_IP}" PORT="${PORT}" MODEL_ID="${MODEL_ID}" \
 # Important ordering:
 #   1. Stop vLLM API server.
 #      There is no outer API-server nsys wrapper in this script.
-#   2. Stop Ray head/worker srun --block steps.
-#      The live sidecar in each srun step copies worker Nsight files while Ray
-#      is still alive and once more during in-step cleanup.
-#   3. Wait briefly for files to flush.
-#   4. Launch plain, non-overlapped fallback copy srun steps.
+#
+#   2. Keep Ray alive while worker Nsight finalizes.
+#      The live sidecar in each Ray srun step keeps copying from:
+#        /tmp/slurm-${SLURM_JOB_ID}/tmp/ray/session_*/logs/nsight
+#        /tmp/ray/<live-session>/logs/nsight
+#
+#      This is the key fix. Previously we killed Ray too soon, so the only file
+#      copied was empty.nsys-rep.
+#
+#   3. Only after the wait, stop Ray head/worker srun --block steps.
+#
+#   4. Run a plain, non-overlapped fallback copy.
 #
 # Do not call extra diagnostic srun steps before Ray exits.
 # Do not use --overlap in the copy path.
@@ -904,7 +1012,10 @@ fi
 echo "NSYS_DIR after server shutdown:"
 ls -la "${NSYS_DIR}/" 2>/dev/null || true
 
-echo "Stopping Ray background srun steps before fallback copy..."
+echo "Keeping Ray alive so worker Nsight can finalize real reports..."
+wait_for_real_worker_nsys_reports "${WORKER_NSYS_FINALIZE_WAIT_S}" "${WORKER_NSYS_FINALIZE_POLL_S}" || true
+
+echo "Stopping Ray background srun steps after worker Nsight finalize wait..."
 
 if [ -n "${HEAD_RAY_PID}" ] && kill -0 "${HEAD_RAY_PID}" 2>/dev/null; then
   kill -TERM "${HEAD_RAY_PID}" 2>/dev/null || true
