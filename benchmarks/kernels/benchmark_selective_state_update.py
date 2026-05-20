@@ -399,8 +399,13 @@ def validate_configs(
 ) -> dict[int, bool]:
     """
     For every effective_batch in *tuned*, run the kernel with the tuned config
-    and compare against the CPU reference. Returns {effective_batch: passed}.
+    and compare against the reference. Returns {effective_batch: passed}.
     """
+    # Disable TF32 in the reference's matmul: at larger effective_batch the
+    # worst output value grows, so TF32 rounding shows up as a bf16-quantum
+    # mismatch (e.g. 1.0–4.0) versus the Triton kernel's true fp32 accumulation.
+    torch.set_float32_matmul_precision("highest")
+
     print(f"\n{'=' * 74}")
     effective_state_dtype = state_dtype if state_dtype is not None else dtype
     print(
@@ -452,9 +457,23 @@ def validate_configs(
         gpu_out = out.detach().cpu()
 
         # Reference uses the original (unmodified) state
-        ref_out = selective_state_update_ref(
-            state_ref, x, dt, A, B, C, D=D, dt_bias=dt_bias, dt_softplus=True
-        ).cpu()
+        # Upcast to fp32 so the reference sums in fp32 (matches the Triton
+        # kernel); summing in bf16 over `dstate` blows up the error.
+        ref_out = (
+            selective_state_update_ref(
+                state_ref.float(),
+                x.float(),
+                dt.float(),
+                A.float(),
+                B.float(),
+                C.float(),
+                D=D.float(),
+                dt_bias=dt_bias.float(),
+                dt_softplus=True,
+            )
+            .to(out.dtype)
+            .cpu()
+        )
 
         passed = torch.allclose(gpu_out.float(), ref_out.float(), atol=atol, rtol=rtol)
         max_err = (gpu_out.float() - ref_out.float()).abs().max().item()
