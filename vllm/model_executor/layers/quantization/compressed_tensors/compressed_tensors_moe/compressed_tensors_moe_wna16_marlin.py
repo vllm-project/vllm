@@ -417,6 +417,8 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             w2_scale=layer.w2_weight_scale,
             group_size=self.group_size,
             num_bits=self.num_bits,
+            a1_gscale=getattr(layer, "w13_input_global_scale", None),
+            a2_gscale=getattr(layer, "w2_input_global_scale", None),
         )
 
     def apply_monolithic(
