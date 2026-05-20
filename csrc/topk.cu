@@ -9,6 +9,7 @@
 #ifndef USE_ROCM
   #include "persistent_topk.cuh"
   #include "cluster_topk.cuh"
+  #include "filtered_topk.cuh"
 #endif
 
 namespace {
@@ -235,8 +236,7 @@ void launch_persistent_topk(const torch::Tensor& logits,
 template <uint32_t CS>
 void launch_cluster_impl(cluster_topk::Params& params, uint32_t num_sms, size_t smem,
                           cudaStream_t stream) {
-  const uint32_t mc = num_sms / CS;
-  const uint32_t nc = std::min(mc, params.num_rows);
+  const uint32_t nc = params.num_rows;
   auto kernel = &cluster_topk::cluster_persistent_topk_impl<CS>;
   static bool s = false;
   if (!s) { cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem); s = true; }
@@ -269,7 +269,6 @@ void launch_cluster_topk_1024(const torch::Tensor& logits,
                                int64_t max_seq_len) {
 
   const int64_t num_rows = logits.size(0);
-  const int64_t stride = logits.stride(0);
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   static int num_sms = 0;
@@ -279,30 +278,39 @@ void launch_cluster_topk_1024(const torch::Tensor& logits,
     cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, device);
   }
 
-  const uint32_t mc = std::max(num_sms / 8, num_sms / 4);
-  TORCH_CHECK(workspace.size(0) >= (int64_t)(mc * sizeof(cluster_topk::ClusterState)),
-              "workspace too small for cluster_topk");
+  namespace ct = cluster_topk;
 
-  cluster_topk::Params params;
-  params.input = logits.data_ptr<float>();
-  params.output = output.data_ptr<int32_t>();
-  params.lengths = lengths.data_ptr<int32_t>();
-  params.states = reinterpret_cast<cluster_topk::ClusterState*>(workspace.data_ptr<uint8_t>());
-  params.num_rows = static_cast<uint32_t>(num_rows);
-  params.stride = static_cast<uint32_t>(stride);
-
-  // Non-cluster register path for small seq_lens
-  if (max_seq_len > 0 && max_seq_len <= cluster_topk::kRegMaxLen) {
-    constexpr size_t reg_smem = 16384 + 4096 + 1024 + 128;
-    launch_register_topk(params, reg_smem, stream);
+  // Large batch: FilteredTopK (single CTA per row, CG-safe)
+  // Includes register_topk<12,8> fast path for sl <= 32K
+  if (num_rows > 48) {
+    constexpr int TopK = 1024;
+    cudaError_t status = vllm::FilteredTopKRaggedTransform<float, int32_t, TopK>(
+        logits.data_ptr<float>(), output.data_ptr<int32_t>(),
+        lengths.data_ptr<int32_t>(), static_cast<uint32_t>(num_rows),
+        static_cast<uint32_t>(TopK), static_cast<uint32_t>(logits.size(1)), stream);
+    TORCH_CHECK(status == cudaSuccess,
+                "FilteredTopK failed: ", cudaGetErrorString(status));
     return;
   }
 
-  // Cluster path: CS=8 for small batch, CS=4 for large batch
+  // Small/medium batch: cluster cooperative
+  const size_t tie_ws_offset = ((num_rows * sizeof(ct::ClusterState)) + 7) & ~size_t(7);
+  TORCH_CHECK(workspace.size(0) >= (int64_t)(tie_ws_offset + num_rows * ct::kMaxTies * sizeof(ct::Tie)),
+              "workspace too small for cluster_topk");
+
+  ct::Params params;
+  params.input = logits.data_ptr<float>();
+  params.output = output.data_ptr<int32_t>();
+  params.lengths = lengths.data_ptr<int32_t>();
+  params.states = reinterpret_cast<ct::ClusterState*>(workspace.data_ptr<uint8_t>());
+  params.tie_ws = reinterpret_cast<ct::Tie*>(workspace.data_ptr<uint8_t>() + tie_ws_offset);
+  params.num_rows = static_cast<uint32_t>(num_rows);
+  params.stride = static_cast<uint32_t>(logits.size(1));
+
   if (num_rows <= 8)
-    launch_cluster_impl<8>(params, num_sms, cluster_topk::kSmemSize8, stream);
+    launch_cluster_impl<8>(params, num_sms, ct::kSmemSize8, stream);
   else
-    launch_cluster_impl<4>(params, num_sms, cluster_topk::kSmemSize4, stream);
+    launch_cluster_impl<4>(params, num_sms, ct::kSmemSize4, stream);
 }
 
 }  // anonymous namespace
