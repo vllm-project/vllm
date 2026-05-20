@@ -5,7 +5,14 @@
 import pytest
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
+from vllm.entrypoints.openai.chat_completion.serving import (
+    _merge_reasoning_into_content,
+)
+from vllm.entrypoints.openai.engine.protocol import (
+    DeltaFunctionCall,
+    DeltaMessage,
+    DeltaToolCall,
+)
 
 
 class TestSeparateReasoningParameter:
@@ -32,49 +39,68 @@ class TestSeparateReasoningParameter:
         assert request.separate_reasoning is True
 
 
-class TestDeltaMessageReasoningMerge:
-    """Tests for merging reasoning into content in DeltaMessage."""
+class TestMergeReasoningIntoContent:
+    """Tests for the _merge_reasoning_into_content helper."""
 
     def test_merge_reasoning_into_content(self):
-        """When separate_reasoning=False, reasoning should merge into content."""
-        delta = DeltaMessage(reasoning="Let me think...", content="The answer is 42.")
-        merged = DeltaMessage(
-            content=(delta.reasoning or "") + (delta.content or ""),
-            reasoning=None,
-            tool_calls=delta.tool_calls,
+        reasoning, content = _merge_reasoning_into_content(
+            "Let me think...", "The answer is 42."
         )
-        assert merged.reasoning is None
-        assert merged.content == "Let me think...The answer is 42."
+        assert reasoning is None
+        assert content == "Let me think...The answer is 42."
 
     def test_merge_reasoning_only(self):
-        """When there is reasoning but no content, reasoning becomes content."""
-        delta = DeltaMessage(reasoning="Thinking...", content=None)
-        merged = DeltaMessage(
-            content=(delta.reasoning or "") + (delta.content or ""),
-            reasoning=None,
-            tool_calls=delta.tool_calls,
-        )
-        assert merged.reasoning is None
-        assert merged.content == "Thinking..."
+        reasoning, content = _merge_reasoning_into_content("Thinking...", None)
+        assert reasoning is None
+        assert content == "Thinking..."
 
     def test_no_merge_when_no_reasoning(self):
-        """When there is no reasoning, content stays unchanged."""
-        delta = DeltaMessage(reasoning=None, content="Hello!")
-        merged = DeltaMessage(
-            content=(delta.reasoning or "") + (delta.content or ""),
-            reasoning=None,
+        reasoning, content = _merge_reasoning_into_content(None, "Hello!")
+        assert reasoning is None
+        assert content == "Hello!"
+
+    def test_both_none(self):
+        reasoning, content = _merge_reasoning_into_content(None, None)
+        assert reasoning is None
+        assert content is None
+
+    @pytest.mark.parametrize(
+        "reasoning,content,expected_reasoning,expected_content",
+        [
+            ("thinking", "answer", None, "thinkinganswer"),
+            ("thinking", None, None, "thinking"),
+            (None, "answer", None, "answer"),
+            (None, None, None, None),
+        ],
+    )
+    def test_merge_matrix(
+        self, reasoning, content, expected_reasoning, expected_content
+    ):
+        result_reasoning, result_content = _merge_reasoning_into_content(
+            reasoning, content
+        )
+        assert result_reasoning == expected_reasoning
+        assert result_content == expected_content
+
+
+class TestDeltaMessageReasoningMerge:
+    """Tests for merging reasoning into content in streaming DeltaMessage."""
+
+    def test_streaming_merge_with_reasoning(self):
+        """Simulate the streaming merge path from serving.py."""
+        delta = DeltaMessage(reasoning="Let me think...", content="The answer is 42.")
+        merged_reasoning, merged_content = _merge_reasoning_into_content(
+            delta.reasoning, delta.content
+        )
+        delta = DeltaMessage(
+            content=merged_content,
+            reasoning=merged_reasoning,
             tool_calls=delta.tool_calls,
         )
-        assert merged.reasoning is None
-        assert merged.content == "Hello!"
+        assert delta.reasoning is None
+        assert delta.content == "Let me think...The answer is 42."
 
-    def test_merge_preserves_tool_calls(self):
-        """Tool calls should be preserved during merge."""
-        from vllm.entrypoints.openai.engine.protocol import (
-            DeltaFunctionCall,
-            DeltaToolCall,
-        )
-
+    def test_streaming_merge_preserves_tool_calls(self):
         delta = DeltaMessage(
             reasoning="Thinking...",
             content="",
@@ -85,34 +111,14 @@ class TestDeltaMessageReasoningMerge:
                 )
             ],
         )
-        merged = DeltaMessage(
-            content=(delta.reasoning or "") + (delta.content or ""),
-            reasoning=None,
+        merged_reasoning, merged_content = _merge_reasoning_into_content(
+            delta.reasoning, delta.content
+        )
+        delta = DeltaMessage(
+            content=merged_content,
+            reasoning=merged_reasoning,
             tool_calls=delta.tool_calls,
         )
-        assert merged.reasoning is None
-        assert len(merged.tool_calls) == 1
-        assert merged.tool_calls[0].function.name == "test"
-
-    @pytest.mark.parametrize(
-        "separate_reasoning,has_reasoning,expected_content,expected_reasoning",
-        [
-            (True, True, "answer", "thinking"),
-            (False, True, "thinkinganswer", None),
-            (True, False, "answer", None),
-            (False, False, "answer", None),
-        ],
-    )
-    def test_merge_matrix(
-        self, separate_reasoning, has_reasoning, expected_content, expected_reasoning
-    ):
-        """Test all combinations of separate_reasoning and reasoning presence."""
-        reasoning = "thinking" if has_reasoning else None
-        content = "answer"
-
-        if not separate_reasoning and reasoning:
-            content = reasoning + content
-            reasoning = None
-
-        assert content == expected_content
-        assert reasoning == expected_reasoning
+        assert delta.reasoning is None
+        assert len(delta.tool_calls) == 1
+        assert delta.tool_calls[0].function.name == "test"
