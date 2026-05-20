@@ -1,12 +1,12 @@
-#include <ATen/cuda/CUDAContext.h>
-#include <torch/all.h>
-#include <c10/cuda/CUDAGuard.h>
+#include <cuda.h>
+#include <torch/csrc/stable/tensor.h>
 
 #include <cmath>
 
-#include "cuda_compat.h"
-#include "cuda_vec_utils.cuh"
+#include "../cuda_compat.h"
+#include "../cuda_vec_utils.cuh"
 #include "dispatch_utils.h"
+#include "torch_utils.h"
 
 namespace vllm {
 
@@ -210,64 +210,68 @@ packed_gelu_tanh_kernel(const packed_t& val) {
     return;                                                                    \
   }                                                                            \
   dim3 grid(num_tokens);                                                       \
-  int cc_major = at::cuda::getCurrentDeviceProperties()->major;                \
+  int cc_major = get_device_prop()->major;                                     \
   int support_vec =                                                            \
       (CUDA_VERSION >= 12090 && cc_major >= 10 && num_tokens > 128)            \
           ? vllm::VecTraits<true>::ARCH_MAX_VEC_SIZE                           \
           : vllm::VecTraits<false>::ARCH_MAX_VEC_SIZE;                         \
-  int vec_size = support_vec / at::elementSize(dtype);                         \
+  int vec_size = support_vec / input.element_size();                           \
   const bool use_vec = (d % vec_size == 0);                                    \
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));            \
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();                \
+  const torch::stable::accelerator::DeviceGuard device_guard(                  \
+      input.get_device_index());                                               \
+  const cudaStream_t stream = get_current_cuda_stream();                       \
   if (use_vec) {                                                               \
     dim3 block(std::min(d / vec_size, 1024));                                  \
     if (CUDA_VERSION >= 12090 && cc_major >= 10 && num_tokens > 128) {         \
-      VLLM_DISPATCH_FLOATING_TYPES(dtype, "act_and_mul_kernel", [&] {          \
+      VLLM_STABLE_DISPATCH_FLOATING_TYPES(dtype, "act_and_mul_kernel", [&] {   \
         vllm::act_and_mul_kernel<                                              \
             scalar_t, typename vllm::PackedTypeConverter<scalar_t>::Type,      \
             KERNEL<scalar_t>,                                                  \
             PACKED_KERNEL<typename vllm::PackedTypeConverter<scalar_t>::Type>, \
             ACT_FIRST, true, HAS_CLAMP, true><<<grid, block, 0, stream>>>(     \
-            out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(), d, LIMIT);   \
+            out.mutable_data_ptr<scalar_t>(),                                  \
+            input.const_data_ptr<scalar_t>(), d, LIMIT);                       \
       });                                                                      \
     } else {                                                                   \
-      VLLM_DISPATCH_FLOATING_TYPES(dtype, "act_and_mul_kernel", [&] {          \
+      VLLM_STABLE_DISPATCH_FLOATING_TYPES(dtype, "act_and_mul_kernel", [&] {   \
         vllm::act_and_mul_kernel<                                              \
             scalar_t, typename vllm::PackedTypeConverter<scalar_t>::Type,      \
             KERNEL<scalar_t>,                                                  \
             PACKED_KERNEL<typename vllm::PackedTypeConverter<scalar_t>::Type>, \
             ACT_FIRST, true, HAS_CLAMP, false><<<grid, block, 0, stream>>>(    \
-            out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(), d, LIMIT);   \
+            out.mutable_data_ptr<scalar_t>(),                                  \
+            input.const_data_ptr<scalar_t>(), d, LIMIT);                       \
       });                                                                      \
     }                                                                          \
   } else {                                                                     \
     dim3 block(std::min(d, 1024));                                             \
-    VLLM_DISPATCH_FLOATING_TYPES(dtype, "act_and_mul_kernel", [&] {            \
+    VLLM_STABLE_DISPATCH_FLOATING_TYPES(dtype, "act_and_mul_kernel", [&] {     \
       vllm::act_and_mul_kernel<                                                \
           scalar_t, typename vllm::PackedTypeConverter<scalar_t>::Type,        \
           KERNEL<scalar_t>,                                                    \
           PACKED_KERNEL<typename vllm::PackedTypeConverter<scalar_t>::Type>,   \
           ACT_FIRST, false, HAS_CLAMP><<<grid, block, 0, stream>>>(            \
-          out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(), d, LIMIT);     \
+          out.mutable_data_ptr<scalar_t>(), input.const_data_ptr<scalar_t>(),  \
+          d, LIMIT);                                                           \
     });                                                                        \
   }
 
-void silu_and_mul(torch::Tensor& out,    // [..., d]
-                  torch::Tensor& input)  // [..., 2 * d]
+void silu_and_mul(torch::stable::Tensor& out,    // [..., d]
+                  torch::stable::Tensor& input)  // [..., 2 * d]
 {
   LAUNCH_ACTIVATION_GATE_KERNEL(vllm::silu_kernel, vllm::packed_silu_kernel,
                                 true, false, 0.0f);
 }
 
-void silu_and_mul_clamp(torch::Tensor& out,    // [..., d]
-                        torch::Tensor& input,  // [..., 2 * d]
+void silu_and_mul_clamp(torch::stable::Tensor& out,    // [..., d]
+                        torch::stable::Tensor& input,  // [..., 2 * d]
                         double limit) {
   LAUNCH_ACTIVATION_GATE_KERNEL(vllm::silu_kernel, vllm::packed_silu_kernel,
                                 true, true, (float)limit);
 }
 
-void mul_and_silu(torch::Tensor& out,    // [..., d]
-                  torch::Tensor& input)  // [..., 2 * d]
+void mul_and_silu(torch::stable::Tensor& out,    // [..., d]
+                  torch::stable::Tensor& input)  // [..., 2 * d]
 {
   // The difference between mul_and_silu and silu_and_mul is that mul_and_silu
   // applies the silu to the latter half of the input.
@@ -275,15 +279,15 @@ void mul_and_silu(torch::Tensor& out,    // [..., d]
                                 false, false, 0.0f);
 }
 
-void gelu_and_mul(torch::Tensor& out,    // [..., d]
-                  torch::Tensor& input)  // [..., 2 * d]
+void gelu_and_mul(torch::stable::Tensor& out,    // [..., d]
+                  torch::stable::Tensor& input)  // [..., 2 * d]
 {
   LAUNCH_ACTIVATION_GATE_KERNEL(vllm::gelu_kernel, vllm::packed_gelu_kernel,
                                 true, false, 0.0f);
 }
 
-void gelu_tanh_and_mul(torch::Tensor& out,    // [..., d]
-                       torch::Tensor& input)  // [..., 2 * d]
+void gelu_tanh_and_mul(torch::stable::Tensor& out,    // [..., d]
+                       torch::stable::Tensor& input)  // [..., 2 * d]
 {
   LAUNCH_ACTIVATION_GATE_KERNEL(
       vllm::gelu_tanh_kernel, vllm::packed_gelu_tanh_kernel, true, false, 0.0f);
@@ -434,19 +438,20 @@ __global__ void swigluoai_and_mul_kernel(
     return;                                                                    \
   }                                                                            \
   dim3 grid(num_tokens);                                                       \
-  int cc_major = at::cuda::getCurrentDeviceProperties()->major;                \
+  int cc_major = get_device_prop()->major;                                     \
   int support_vec =                                                            \
       (CUDA_VERSION >= 12090 && cc_major >= 10 && num_tokens > 128)            \
           ? vllm::VecTraits<true>::ARCH_MAX_VEC_SIZE                           \
           : vllm::VecTraits<false>::ARCH_MAX_VEC_SIZE;                         \
-  int vec_size = support_vec / at::elementSize(dtype);                         \
+  int vec_size = support_vec / input.element_size();                           \
   const bool use_vec = (d % vec_size == 0);                                    \
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));            \
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();                \
+  const torch::stable::accelerator::DeviceGuard device_guard(                  \
+      input.get_device_index());                                               \
+  const cudaStream_t stream = get_current_cuda_stream();                       \
   if (use_vec) {                                                               \
     dim3 block(std::min(d / vec_size, 1024));                                  \
     if (CUDA_VERSION >= 12090 && cc_major >= 10 && num_tokens > 128) {         \
-      VLLM_DISPATCH_FLOATING_TYPES(                                            \
+      VLLM_STABLE_DISPATCH_FLOATING_TYPES(                                     \
           dtype, "act_and_mul_kernel_with_param", [&] {                        \
             vllm::act_and_mul_kernel_with_param<                               \
                 scalar_t, typename vllm::PackedTypeConverter<scalar_t>::Type,  \
@@ -454,11 +459,11 @@ __global__ void swigluoai_and_mul_kernel(
                 PACKED_KERNEL<                                                 \
                     typename vllm::PackedTypeConverter<scalar_t>::Type>,       \
                 true, true><<<grid, block, 0, stream>>>(                       \
-                out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(), d,       \
-                PARAM);                                                        \
+                out.mutable_data_ptr<scalar_t>(),                              \
+                input.const_data_ptr<scalar_t>(), d, PARAM);                   \
           });                                                                  \
     } else {                                                                   \
-      VLLM_DISPATCH_FLOATING_TYPES(                                            \
+      VLLM_STABLE_DISPATCH_FLOATING_TYPES(                                     \
           dtype, "act_and_mul_kernel_with_param", [&] {                        \
             vllm::act_and_mul_kernel_with_param<                               \
                 scalar_t, typename vllm::PackedTypeConverter<scalar_t>::Type,  \
@@ -466,45 +471,49 @@ __global__ void swigluoai_and_mul_kernel(
                 PACKED_KERNEL<                                                 \
                     typename vllm::PackedTypeConverter<scalar_t>::Type>,       \
                 true, false><<<grid, block, 0, stream>>>(                      \
-                out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(), d,       \
-                PARAM);                                                        \
+                out.mutable_data_ptr<scalar_t>(),                              \
+                input.const_data_ptr<scalar_t>(), d, PARAM);                   \
           });                                                                  \
     }                                                                          \
   } else {                                                                     \
     dim3 block(std::min(d, 1024));                                             \
-    VLLM_DISPATCH_FLOATING_TYPES(dtype, "act_and_mul_kernel_with_param", [&] { \
-      vllm::act_and_mul_kernel_with_param<                                     \
-          scalar_t, typename vllm::PackedTypeConverter<scalar_t>::Type,        \
-          KERNEL<scalar_t>,                                                    \
-          PACKED_KERNEL<typename vllm::PackedTypeConverter<scalar_t>::Type>,   \
-          false><<<grid, block, 0, stream>>>(                                  \
-          out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(), d, PARAM);     \
-    });                                                                        \
+    VLLM_STABLE_DISPATCH_FLOATING_TYPES(                                       \
+        dtype, "act_and_mul_kernel_with_param", [&] {                          \
+          vllm::act_and_mul_kernel_with_param<                                 \
+              scalar_t, typename vllm::PackedTypeConverter<scalar_t>::Type,    \
+              KERNEL<scalar_t>,                                                \
+              PACKED_KERNEL<                                                   \
+                  typename vllm::PackedTypeConverter<scalar_t>::Type>,         \
+              false><<<grid, block, 0, stream>>>(                              \
+              out.mutable_data_ptr<scalar_t>(),                                \
+              input.const_data_ptr<scalar_t>(), d, PARAM);                     \
+        });                                                                    \
   }
 
-#define LAUNCH_SIGLUOAI_AND_MUL(KERNEL, ALPHA, LIMIT)                          \
-  int d = input.size(-1) / 2;                                                  \
-  int64_t num_tokens = input.numel() / input.size(-1);                         \
-  dim3 grid(num_tokens);                                                       \
-  dim3 block(std::min(d, 1024));                                               \
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));            \
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();                \
-  VLLM_DISPATCH_FLOATING_TYPES(                                                \
-      input.scalar_type(), "clamp_swiglu_kernel_with_params", [&] {            \
-        vllm::swigluoai_and_mul_kernel<scalar_t, KERNEL<scalar_t>>             \
-            <<<grid, block, 0, stream>>>(out.data_ptr<scalar_t>(),             \
-                                         input.data_ptr<scalar_t>(), d, ALPHA, \
-                                         LIMIT);                               \
+#define LAUNCH_SIGLUOAI_AND_MUL(KERNEL, ALPHA, LIMIT)                         \
+  int d = input.size(-1) / 2;                                                 \
+  int64_t num_tokens = input.numel() / input.size(-1);                        \
+  dim3 grid(num_tokens);                                                      \
+  dim3 block(std::min(d, 1024));                                              \
+  const torch::stable::accelerator::DeviceGuard device_guard(                 \
+      input.get_device_index());                                              \
+  const cudaStream_t stream = get_current_cuda_stream();                      \
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(                                        \
+      input.scalar_type(), "clamp_swiglu_kernel_with_params", [&] {           \
+        vllm::swigluoai_and_mul_kernel<scalar_t, KERNEL<scalar_t>>            \
+            <<<grid, block, 0, stream>>>(out.mutable_data_ptr<scalar_t>(),    \
+                                         input.const_data_ptr<scalar_t>(), d, \
+                                         ALPHA, LIMIT);                       \
       });
 
-void fatrelu_and_mul(torch::Tensor& out,    // [..., d],
-                     torch::Tensor& input,  // [..., 2 * d]
+void fatrelu_and_mul(torch::stable::Tensor& out,    // [..., d],
+                     torch::stable::Tensor& input,  // [..., 2 * d]
                      double threshold) {
   LAUNCH_ACTIVATION_GATE_KERNEL_WITH_PARAM(
       vllm::fatrelu_kernel, vllm::packed_fatrelu_kernel, threshold);
 }
-void swigluoai_and_mul(torch::Tensor& out,    // [..., d]
-                       torch::Tensor& input,  // [..., 2 * d]
+void swigluoai_and_mul(torch::stable::Tensor& out,    // [..., d]
+                       torch::stable::Tensor& input,  // [..., 2 * d]
                        double alpha, double limit) {
   LAUNCH_SIGLUOAI_AND_MUL(vllm::swigluoai_and_mul, alpha, limit);
 }
@@ -559,45 +568,46 @@ __global__ void activation_kernel(
 }  // namespace vllm
 
 // Launch element-wise activation kernel.
-#define LAUNCH_ACTIVATION_KERNEL(KERNEL)                                 \
-  auto dtype = input.scalar_type();                                      \
-  int d = input.size(-1);                                                \
-  int64_t num_tokens = input.numel() / input.size(-1);                   \
-  if (num_tokens == 0) {                                                 \
-    return;                                                              \
-  }                                                                      \
-  dim3 grid(num_tokens);                                                 \
-  int cc_major = at::cuda::getCurrentDeviceProperties()->major;          \
-  int support_vec =                                                      \
-      (CUDA_VERSION >= 12090 && cc_major >= 10 && num_tokens > 128)      \
-          ? vllm::VecTraits<true>::ARCH_MAX_VEC_SIZE                     \
-          : vllm::VecTraits<false>::ARCH_MAX_VEC_SIZE;                   \
-  int vec_size = support_vec / at::elementSize(dtype);                   \
-  const bool use_vec = (d % vec_size == 0);                              \
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));      \
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();          \
-  if (use_vec) {                                                         \
-    dim3 block(std::min(d / vec_size, 1024));                            \
-    if (CUDA_VERSION >= 12090 && cc_major >= 10 && num_tokens > 128) {   \
-      VLLM_DISPATCH_FLOATING_TYPES(dtype, "activation_kernel", [&] {     \
-        vllm::activation_kernel<scalar_t, KERNEL<scalar_t>, true, true>  \
-            <<<grid, block, 0, stream>>>(out.data_ptr<scalar_t>(),       \
-                                         input.data_ptr<scalar_t>(), d); \
-      });                                                                \
-    } else {                                                             \
-      VLLM_DISPATCH_FLOATING_TYPES(dtype, "activation_kernel", [&] {     \
-        vllm::activation_kernel<scalar_t, KERNEL<scalar_t>, true, false> \
-            <<<grid, block, 0, stream>>>(out.data_ptr<scalar_t>(),       \
-                                         input.data_ptr<scalar_t>(), d); \
-      });                                                                \
-    }                                                                    \
-  } else {                                                               \
-    dim3 block(std::min(d, 1024));                                       \
-    VLLM_DISPATCH_FLOATING_TYPES(dtype, "activation_kernel", [&] {       \
-      vllm::activation_kernel<scalar_t, KERNEL<scalar_t>, false>         \
-          <<<grid, block, 0, stream>>>(out.data_ptr<scalar_t>(),         \
-                                       input.data_ptr<scalar_t>(), d);   \
-    });                                                                  \
+#define LAUNCH_ACTIVATION_KERNEL(KERNEL)                                       \
+  auto dtype = input.scalar_type();                                            \
+  int d = input.size(-1);                                                      \
+  int64_t num_tokens = input.numel() / input.size(-1);                         \
+  if (num_tokens == 0) {                                                       \
+    return;                                                                    \
+  }                                                                            \
+  dim3 grid(num_tokens);                                                       \
+  int cc_major = get_device_prop()->major;                                     \
+  int support_vec =                                                            \
+      (CUDA_VERSION >= 12090 && cc_major >= 10 && num_tokens > 128)            \
+          ? vllm::VecTraits<true>::ARCH_MAX_VEC_SIZE                           \
+          : vllm::VecTraits<false>::ARCH_MAX_VEC_SIZE;                         \
+  int vec_size = support_vec / input.element_size();                           \
+  const bool use_vec = (d % vec_size == 0);                                    \
+  const torch::stable::accelerator::DeviceGuard device_guard(                  \
+      input.get_device_index());                                               \
+  const cudaStream_t stream = get_current_cuda_stream();                       \
+  if (use_vec) {                                                               \
+    dim3 block(std::min(d / vec_size, 1024));                                  \
+    if (CUDA_VERSION >= 12090 && cc_major >= 10 && num_tokens > 128) {         \
+      VLLM_STABLE_DISPATCH_FLOATING_TYPES(dtype, "activation_kernel", [&] {    \
+        vllm::activation_kernel<scalar_t, KERNEL<scalar_t>, true, true>        \
+            <<<grid, block, 0, stream>>>(out.mutable_data_ptr<scalar_t>(),     \
+                                         input.const_data_ptr<scalar_t>(), d); \
+      });                                                                      \
+    } else {                                                                   \
+      VLLM_STABLE_DISPATCH_FLOATING_TYPES(dtype, "activation_kernel", [&] {    \
+        vllm::activation_kernel<scalar_t, KERNEL<scalar_t>, true, false>       \
+            <<<grid, block, 0, stream>>>(out.mutable_data_ptr<scalar_t>(),     \
+                                         input.const_data_ptr<scalar_t>(), d); \
+      });                                                                      \
+    }                                                                          \
+  } else {                                                                     \
+    dim3 block(std::min(d, 1024));                                             \
+    VLLM_STABLE_DISPATCH_FLOATING_TYPES(dtype, "activation_kernel", [&] {      \
+      vllm::activation_kernel<scalar_t, KERNEL<scalar_t>, false>               \
+          <<<grid, block, 0, stream>>>(out.mutable_data_ptr<scalar_t>(),       \
+                                       input.const_data_ptr<scalar_t>(), d);   \
+    });                                                                        \
   }
 
 namespace vllm {
@@ -625,20 +635,20 @@ __device__ __forceinline__ T gelu_quick_kernel(const T& x) {
 
 }  // namespace vllm
 
-void gelu_new(torch::Tensor& out,    // [..., d]
-              torch::Tensor& input)  // [..., d]
+void gelu_new(torch::stable::Tensor& out,    // [..., d]
+              torch::stable::Tensor& input)  // [..., d]
 {
   LAUNCH_ACTIVATION_KERNEL(vllm::gelu_new_kernel);
 }
 
-void gelu_fast(torch::Tensor& out,    // [..., d]
-               torch::Tensor& input)  // [..., d]
+void gelu_fast(torch::stable::Tensor& out,    // [..., d]
+               torch::stable::Tensor& input)  // [..., d]
 {
   LAUNCH_ACTIVATION_KERNEL(vllm::gelu_fast_kernel);
 }
 
-void gelu_quick(torch::Tensor& out,    // [..., d]
-                torch::Tensor& input)  // [..., d]
+void gelu_quick(torch::stable::Tensor& out,    // [..., d]
+                torch::stable::Tensor& input)  // [..., d]
 {
   LAUNCH_ACTIVATION_KERNEL(vllm::gelu_quick_kernel);
 }
