@@ -148,34 +148,66 @@ def FusedMoE(
     routed_experts_cls: type[RoutedExperts] | None = None,
     routed_experts_args: dict[str, Any] | None = None,
 ) -> MoERunner:
-    # TODO update comment
-    """FusedMoE layer builder for MoE models.
+    """Factory function for creating MoE execution pipeline.
 
-    This layer contains both MergedColumnParallel weights (gate_up_proj /
-    w13) and RowParallelLinear weights (down_proj/ w2).
+    Creates and configures a complete MoE execution pipeline including:
+    - Router (for token-to-expert assignment)
+    - RoutedExperts (containing expert weight parameters)
+    - MoERunner (orchestrates the complete forward pass)
+
+    The experts contain both MergedColumnParallel weights (gate_up_proj/w13)
+    and RowParallelLinear weights (down_proj/w2).
 
     Note: Mixtral uses w1, w2, and w3 for gate, up, and down_proj. We
     copy that naming convention here and handle any remapping in the
     load_weights function in each model implementation.
 
     Args:
-        num_experts: Number of experts in the model
+        num_experts: Number of experts in the model (global count)
         top_k: Number of experts selected for each token
         hidden_size: Input hidden state size of the transformer
         intermediate_size: Intermediate size of the experts
-        params_dtype: Data type for the parameters.
-        renormalize: Whether to renormalize the logits in the fused_moe kernel
-        quant_config: Quantization configure.
-        enable_eplb: Whether to enable expert parallelism load balancer.
-        router_logits_dtype: Data type for router logits buffers.
-        routed_scaling_factor: A scaling factor that is applied to the topk_weights
-                               by the router or the output of the layer depending
-                               on the value of `apply_routed_scale_to_output`
-        apply_routed_scale_to_output: Determine whether or not `routed_scaling_factor`
-                                      is applied to the topk_weights or to the experts
-                                      output. It is applied to the experts output
-                                      instead of the topk_weights when this feature is
-                                      not supported by the router (or the experts).
+        params_dtype: Data type for the parameters
+        renormalize: Whether to renormalize the logits in the router
+        use_grouped_topk: Whether to use grouped top-k routing
+        num_expert_group: Number of expert groups for grouped top-k
+        topk_group: Top-k value per group for grouped top-k
+        quant_config: Quantization configuration
+        tp_size: Tensor parallelism size (None = use global default)
+        dp_size: Data parallelism size (None = use global default)
+        pcp_size: Pipeline context parallelism size (None = use global default)
+        prefix: Layer name prefix for weight loading
+        custom_routing_function: Custom routing function override
+        router: Pre-configured router instance (None = create default)
+        scoring_func: Scoring function for routing ("softmax" or others)
+        routed_scaling_factor: Scaling factor applied to topk_weights or output
+        swiglu_limit: SwiGLU activation limit
+        e_score_correction_bias: Expert score correction bias tensor
+        apply_router_weight_on_input: Whether to apply router weights on input
+        activation: Activation function name ("silu", "gelu", etc.)
+        enable_eplb: Whether to enable expert parallelism load balancer
+        num_redundant_experts: Number of redundant experts for EPLB
+        has_bias: Whether expert layers have bias terms
+        is_sequence_parallel: Whether sequence parallelism is enabled
+        expert_mapping: Expert parameter mapping for weight loading
+        n_shared_experts: Number of shared experts (ROCm aiter only)
+        router_logits_dtype: Data type for router logits buffers
+        gate: Pre-configured gate module
+        shared_experts: Pre-configured shared experts module
+        shared_expert_gate: Pre-configured shared expert gate module
+        routed_input_transform: Input transformation module
+        routed_output_transform: Output transformation module
+        apply_routed_scale_to_output: Whether to apply routed_scaling_factor to
+                                      output instead of topk_weights
+        zero_expert_type: Type of zero expert handling
+        hash_indices_table: Hash table for expert indices
+        runner_cls: Custom MoERunner class (None = use default MoERunner)
+        runner_args: Additional arguments for runner constructor
+        routed_experts_cls: Custom RoutedExperts class (None = use default)
+        routed_experts_args: Additional arguments for routed_experts constructor
+
+    Returns:
+        MoERunner: Configured MoE execution pipeline ready for forward passes
     """
     vllm_config = get_current_vllm_config()
 
