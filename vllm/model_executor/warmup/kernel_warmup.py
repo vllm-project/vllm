@@ -412,18 +412,9 @@ def _deepseek_v4_sparse_mla_attention_warmup(worker: "Worker") -> None:
             create_single_prefill=True,
             profile_seq_lens=prefill_tokens * 2,
         )
-        # NOTE: The multi-request prefill warmup that previously sat here
-        # (max_num_seqs prefills sharing the batched-token budget) hit a
-        # CUDA illegal memory access inside the CUTeDSL
-        # ``DequantGatherKCacheKernel`` on SM12x. The dummy_run shape it
-        # generated violates an implicit ``offset + gather_len <= M``
-        # invariant of the kv-gather output buffer (M is sized for the
-        # single-prefill warmup case). Removing the warmup gives back the
-        # one-time JIT cost on the first real multi-prefill request, but
-        # unblocks serve startup at production ``--max-num-seqs`` values
-        # (e.g. 128). Re-enable once the gather-buffer sizing for
-        # multi-request prefill warmup is reconciled with the kernel's
-        # bounds.
+        # Do not synthesize multi-request prefill here: that dummy shape
+        # overflows the CUTeDSL KV-gather workspace on SM12x. Revisit only
+        # with a real buffer-sizing fix for that warmup path.
     query_len = getattr(runner, "uniform_decode_query_len", 0)
     for num_reqs in uniform_decode_reqs:
         runner._dummy_run(
