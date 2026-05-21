@@ -131,7 +131,13 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        return (weight_key, activation_key) == (kNvfp4Static, kNvfp4Dynamic)
+        # b12x performs in-kernel BF16->FP4 activation quant, so W4A16
+        # NVFP4 checkpoints (activation_key=None, e.g. mixed-precision
+        # compressed-tensors layouts) are runtime-compatible.
+        return (weight_key, activation_key) in (
+            (kNvfp4Static, kNvfp4Dynamic),
+            (kNvfp4Static, None),
+        )
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
