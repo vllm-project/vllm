@@ -4,4 +4,4 @@ from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLConfig
 
 
 class Cosmos3Config(Qwen3VLConfig):
-    model_type = "cosmos3"
+    model_type = "cosmos3_omni"
