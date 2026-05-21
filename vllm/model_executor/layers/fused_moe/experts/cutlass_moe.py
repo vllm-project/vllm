@@ -1318,7 +1318,7 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        return not moe_parallel_config.use_batched_activation_format
+        return True
 
     def supports_expert_map(self) -> bool:
         return True

@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Callable
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -81,7 +80,6 @@ def select_w4a8_moe_backend(
 
 
 def convert_to_w4a8_moe_kernel_format(
-    quant_fp8: Callable[..., Any],
     w13_weight_packed: torch.Tensor,
     w2_weight_packed: torch.Tensor,
     w13_weight_scale: torch.Tensor,
@@ -97,10 +95,14 @@ def convert_to_w4a8_moe_kernel_format(
     torch.Tensor,
 ]:
     from vllm import _custom_ops as ops
+    from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
     from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        GroupShape,
         convert_bf16_scales_to_fp8,
         convert_packed_uint4b8_to_signed_int4_inplace,
     )
+
+    quant_fp8 = QuantFP8(static=False, group_shape=GroupShape.PER_TOKEN)
 
     convert_packed_uint4b8_to_signed_int4_inplace(w13_weight_packed)
     # Mirror the sync in CutlassW4A8LinearKernel; required for TP>1 correctness.

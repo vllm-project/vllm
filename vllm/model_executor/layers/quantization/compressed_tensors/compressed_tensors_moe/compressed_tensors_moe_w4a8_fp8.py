@@ -50,12 +50,6 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         assert self.weight_quant.actorder != "group"
         assert self.group_size == 128, "Only group size 128 supported for W4A8 MoE"
 
-        from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
-        from vllm.model_executor.layers.quantization.utils.quant_utils import (
-            GroupShape,
-        )
-
-        self.quant_fp8 = QuantFP8(static=False, group_shape=GroupShape.PER_TOKEN)
         self.w4a8_backend, self.experts_cls = select_w4a8_moe_backend(
             config=self.moe,
         )
@@ -181,7 +175,6 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             b_strides1,
             b_strides2,
         ) = convert_to_w4a8_moe_kernel_format(
-            quant_fp8=self.quant_fp8,
             w13_weight_packed=layer.w13_weight_packed,
             w2_weight_packed=layer.w2_weight_packed,
             w13_weight_scale=layer.w13_weight_scale,
