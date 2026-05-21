@@ -202,7 +202,15 @@ def backend_to_kernel_cls(
 
 
 def map_fp8_backend(runner_backend: MoEBackend) -> Fp8MoeBackend:
-    """Map user's MoEBackend to Fp8MoeBackend."""
+    """Map user's MoEBackend to Fp8MoeBackend.
+
+    ``--moe-backend`` is consumed by both the NVFP4 and FP8 dispatchers.
+    For FP4-only kernels (e.g. ``flashinfer_b12x``), the FP8 dispatcher
+    has no equivalent and the mapping below would otherwise raise. Set
+    ``VLLM_FP8_MOE_BACKEND`` to override only the FP8-side routing while
+    keeping the user's ``--moe-backend`` value for the NVFP4 path.
+    """
+    effective = envs.VLLM_FP8_MOE_BACKEND or runner_backend
     mapping = {
         "triton": Fp8MoeBackend.TRITON,
         "deep_gemm": Fp8MoeBackend.DEEPGEMM,
@@ -212,10 +220,12 @@ def map_fp8_backend(runner_backend: MoEBackend) -> Fp8MoeBackend:
         "marlin": Fp8MoeBackend.MARLIN,
         "aiter": Fp8MoeBackend.AITER,
     }
-    if backend := mapping.get(runner_backend):
+    if backend := mapping.get(effective):
         return backend
+    src = ("VLLM_FP8_MOE_BACKEND env var"
+           if envs.VLLM_FP8_MOE_BACKEND else "--moe-backend")
     raise ValueError(
-        f"moe_backend='{runner_backend}' is not supported for FP8 MoE. "
+        f"FP8 MoE backend='{effective}' (from {src}) is not supported. "
         f"Expected one of {list(mapping.keys())}."
     )
 

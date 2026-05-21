@@ -187,6 +187,10 @@ if TYPE_CHECKING:
     VLLM_FLASHINFER_MOE_BACKEND: Literal["throughput", "latency", "masked_gemm"] = (
         "latency"
     )
+    VLLM_FP8_MOE_BACKEND: (
+        Literal["triton", "deep_gemm", "cutlass", "flashinfer_trtllm",
+                "flashinfer_cutlass", "marlin", "aiter"] | None
+    ) = None
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
@@ -1550,6 +1554,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
             "latency",
             ["throughput", "latency", "masked_gemm"],
         ),
+    ),
+    # FP8 MoE backend override. `--moe-backend` is consumed by both the
+    # NVFP4 and FP8 dispatchers; FP4-only kernels (e.g. flashinfer_b12x)
+    # have no FP8 equivalent. Set this to route FP8 experts in mixed-
+    # precision checkpoints to a different backend.
+    "VLLM_FP8_MOE_BACKEND": env_with_choices(
+        "VLLM_FP8_MOE_BACKEND",
+        None,
+        ["triton", "deep_gemm", "cutlass", "flashinfer_trtllm",
+         "flashinfer_cutlass", "marlin", "aiter"],
     ),
     # Override the directory for the FlashInfer autotune config cache.
     "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR": lambda: os.getenv(
