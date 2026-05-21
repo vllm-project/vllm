@@ -317,11 +317,25 @@ def _get_enginecore_numa_nodes(
 def _get_numactl_enginecore_args(
     parallel_config, local_rank: int, dp_local_rank: int | None
 ) -> str:
-    """Compute the numactl args for an EngineCore subprocess."""
+    """Compute the numactl args for an EngineCore subprocess.
+
+    ``--numa-bind-cpus`` is deliberately ignored here: the user provides a
+    per-worker CPU list, and binding EngineCore to any of those entries
+    would shrink its ``cpus_allowed`` below the strict-superset that the
+    workers' ``--physcpubind`` spawns require. We fall back to
+    ``--cpunodebind=<shard nodes>`` instead, which is always a safe
+    superset. PCT auto-detection still applies when the user did not pass
+    ``--numa-bind-cpus`` (its priority-core union across the shard nodes
+    is also a safe superset by construction).
+    """
     shard_nodes = _get_enginecore_numa_nodes(parallel_config, dp_local_rank)
-    gpu_index = _get_gpu_index(parallel_config, local_rank, dp_local_rank)
-    cpu_binding = _get_cpu_binding(parallel_config, gpu_index, shard_nodes)
     membind_arg = ",".join(str(n) for n in shard_nodes)
+
+    cpu_binding = (
+        None
+        if parallel_config.numa_bind_cpus is not None
+        else _maybe_get_pct_cpu_binding(shard_nodes)
+    )
 
     if cpu_binding is not None:
         logger.info(

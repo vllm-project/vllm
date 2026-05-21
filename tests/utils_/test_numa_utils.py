@@ -297,9 +297,15 @@ def test_get_numactl_args_engine_core_baseline_multi_node_within_dp_spans_locals
     )
 
 
-def test_get_numactl_args_engine_core_user_cpus_override(monkeypatch):
-    """User-provided --numa-bind-cpus still wins for the EngineCore branch.
-    The membind still spans the whole shard's NUMA nodes."""
+def test_get_numactl_args_engine_core_skips_user_cpu_list(monkeypatch):
+    """EngineCore ignores ``--numa-bind-cpus``.
+
+    Those are per-worker lists; binding EngineCore to any of them would
+    shrink its ``cpus_allowed`` below the strict-superset workers'
+    ``--physcpubind`` spawns need. We fall back to ``--cpunodebind`` over
+    the shard's NUMA nodes instead. PCT auto-detect is also bypassed when
+    the user is explicit (its priority-core union may not be a superset
+    of the user's per-worker cores)."""
     _patch_pct_gates(monkeypatch, model_match=True, highest_perf=46)
     vllm_config = _make_config(
         numa_bind=True,
@@ -311,7 +317,7 @@ def test_get_numactl_args_engine_core_user_cpus_override(monkeypatch):
         numa_utils._get_numactl_args(
             vllm_config, local_rank=0, process_kind="EngineCore"
         )
-        == "--physcpubind=0-3 --membind=0,1"
+        == "--cpunodebind=0,1 --membind=0,1"
     )
 
 
