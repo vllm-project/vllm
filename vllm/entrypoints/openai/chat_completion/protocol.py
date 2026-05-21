@@ -749,24 +749,26 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
         # if "tool_choice" is not specified but tools are provided,
         # default to "auto" tool_choice
-        if "tool_choice" not in data and data.get("tools"):
+        if ("tool_choice" not in data or data["tool_choice"] is None) and data.get(
+            "tools"
+        ):
             data["tool_choice"] = "auto"
-
-        # if "tool_choice" is "none" -- no validation is needed for tools
-        if "tool_choice" in data and data["tool_choice"] == "none":
-            return data
 
         # if "tool_choice" is specified -- validation
         if "tool_choice" in data and data["tool_choice"] is not None:
             # ensure that if "tool choice" is specified, tools are present
             if "tools" not in data or data["tools"] is None:
-                raise ValueError("When using `tool_choice`, `tools` must be set.")
+                raise ValueError(
+                    "`tool_choice` is only allowed when 'tools' are specified."
+                )
 
             # make sure that tool choice is either a named tool
             # OR that it's set to "auto" or "required"
-            if data["tool_choice"] not in ["auto", "required"] and not isinstance(
-                data["tool_choice"], dict
-            ):
+            if data["tool_choice"] not in [
+                "none",
+                "auto",
+                "required",
+            ] and not isinstance(data["tool_choice"], dict):
                 raise ValueError(
                     f"Invalid value for `tool_choice`: {data['tool_choice']}! "
                     'Only named tools, "none", "auto" or "required" '
@@ -804,8 +806,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
                         break
                 if not valid_tool:
                     raise ValueError(
-                        "The tool specified in `tool_choice` does not match any"
-                        " of the specified `tools`"
+                        "The tool specified in `tool_choice` does not match"
+                        " any of the specified `tools`"
                     )
         return data
 

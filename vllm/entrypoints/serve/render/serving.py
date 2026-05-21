@@ -587,14 +587,15 @@ class OpenAIServingRender:
         # adjust_request — even for tool_choice="none" — so that the grammar
         # factory can prevent special-token leakage.
         if tool_parser is not None:
-            tool_choice = getattr(request, "tool_choice", "none")
+            tool_choice = getattr(request, "tool_choice", None)
+            tools = getattr(request, "tools", None)
             tokenizer = renderer.get_tokenizer()
             is_mistral_grammar_eligible = (
                 is_mistral_tool_parser(tool_parser)
                 and is_mistral_tokenizer(tokenizer)
                 and tokenizer.supports_grammar
             )
-            if tool_choice != "none" or is_mistral_grammar_eligible:
+            if (tool_choice != "none" and tools) or is_mistral_grammar_eligible:
                 if not isinstance(request, ChatCompletionRequest | ResponsesRequest):
                     msg = (
                         "Tool usage is only supported "
@@ -602,8 +603,6 @@ class OpenAIServingRender:
                         f"but got {type(request).__name__}"
                     )
                     raise NotImplementedError(msg)
-                request = tool_parser(tokenizer, request.tools).adjust_request(
-                    request=request
-                )
+                request = tool_parser(tokenizer, tools).adjust_request(request=request)
 
         return conversation, [engine_input]

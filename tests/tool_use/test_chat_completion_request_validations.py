@@ -37,11 +37,9 @@ def test_chat_completion_request_with_no_tools():
         )
 
 
-@pytest.mark.parametrize("tool_choice", ["auto", "required"])
+@pytest.mark.parametrize("tool_choice", ["none", "auto", "required"])
 def test_chat_completion_request_with_tool_choice_but_no_tools(tool_choice):
-    with pytest.raises(
-        ValueError, match="When using `tool_choice`, `tools` must be set."
-    ):
+    with pytest.raises(ValueError, match="`tool_choice` is only allowed when"):
         ChatCompletionRequest.model_validate(
             {
                 "messages": [{"role": "user", "content": "Hello"}],
@@ -50,14 +48,26 @@ def test_chat_completion_request_with_tool_choice_but_no_tools(tool_choice):
             }
         )
 
-    with pytest.raises(
-        ValueError, match="When using `tool_choice`, `tools` must be set."
-    ):
+    with pytest.raises(ValueError, match="`tool_choice` is only allowed when"):
         ChatCompletionRequest.model_validate(
             {
                 "messages": [{"role": "user", "content": "Hello"}],
                 "model": "facebook/opt-125m",
                 "tool_choice": tool_choice,
                 "tools": None,
+            }
+        )
+
+
+def test_chat_completion_request_named_tool_choice_without_tools():
+    with pytest.raises(ValueError, match="`tool_choice` is only allowed when"):
+        ChatCompletionRequest.model_validate(
+            {
+                "messages": [{"role": "user", "content": "Hello"}],
+                "model": "facebook/opt-125m",
+                "tool_choice": {
+                    "type": "function",
+                    "function": {"name": "foo"},
+                },
             }
         )
