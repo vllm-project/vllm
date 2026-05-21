@@ -241,8 +241,7 @@ class QKNormRoPEFusionPass(VllmPatternMatcherPass):
         self.matched_count = self.patterns.apply(graph)
         if self.matched_count > 0:
             logger.info_once(
-                "QK-Norm+RoPE fusion: Fused %d attention layer(s) "
-                "(RMSNorm+RoPE operations combined into single kernel)",
+                "QK-Norm+RoPE fusion: Fused %d attention layer(s)",
                 self.matched_count,
                 scope="global",
             )
