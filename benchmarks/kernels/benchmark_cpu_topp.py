@@ -78,37 +78,38 @@ def _ops_ns():
     raise RuntimeError("No CPU sampling ops namespace found")
 
 
+def _run_bench(title, sep_width, configs, col_fmt, make_fns, warmup, iters):
+    header_cols = f"  {'before_ms':>10}  {'after_ms':>9}  {'speedup':>7}"
+    print(f"\n--- {title} ---")
+    print(col_fmt + header_cols)
+    print("-" * sep_width)
+    for cfg in configs:
+        B, V = cfg[0], cfg[1]
+        logits = torch.randn(B, V, dtype=torch.float32)
+        before_fn, after_fn, row_prefix = make_fns(cfg, logits)
+        ms_before = _time_fn(before_fn, warmup, iters)
+        ms_after = _time_fn(after_fn, warmup, iters)
+        speedup = ms_before / ms_after
+        print(f"{row_prefix}  {ms_before:>10.3f}  {ms_after:>9.3f}  {speedup:>7.2f}x")
+
+
 def run_bench_topp(warmup: int = 5, iters: int = 20) -> None:
     ns = _ops_ns()
     cpu_topp_sampling = ns.cpu_topp_sampling
     from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p_pytorch
 
-    header = (
-        f"{'B':>4}  {'V':>7}  {'top_p':>6}"
-        f"  {'before_ms':>10}  {'after_ms':>9}  {'speedup':>7}"
-    )
-    print("\n--- top-p only ---")
-    print(header)
-    print("-" * 55)
-    for B, V, top_p in CONFIGS_TOPP:
-        logits = torch.randn(B, V, dtype=torch.float32)
-        p_f32 = torch.full((B,), top_p, dtype=torch.float32)
-        p_one = torch.full((B,), top_p, dtype=torch.float32)
+    col_fmt = f"{'B':>4}  {'V':>7}  {'top_p':>6}"
 
-        before_fn = lambda lg=logits, po=p_one: apply_top_k_top_p_pytorch(  # noqa: E731
-            lg.clone(), None, po, allow_cpu_sync=True
+    def make_fns(cfg, logits):
+        B, V, top_p = cfg
+        p = torch.full((B,), top_p, dtype=torch.float32)
+        before = lambda lg=logits, pp=p: apply_top_k_top_p_pytorch(  # noqa: E731
+            lg.clone(), None, pp, allow_cpu_sync=True
         )
-        after_fn = lambda lg=logits, pf=p_f32: cpu_topp_sampling(  # noqa: E731
-            lg.clone(), pf
-        )
+        after = lambda lg=logits, pp=p: cpu_topp_sampling(lg.clone(), pp)  # noqa: E731
+        return before, after, f"{B:>4}  {V:>7}  {top_p:>6.2f}"
 
-        ms_before = _time_fn(before_fn, warmup, iters)
-        ms_after = _time_fn(after_fn, warmup, iters)
-        speedup = ms_before / ms_after
-        print(
-            f"{B:>4}  {V:>7}  {top_p:>6.2f}"
-            f"  {ms_before:>10.3f}  {ms_after:>9.3f}  {speedup:>7.2f}x"
-        )
+    _run_bench("top-p only", 55, CONFIGS_TOPP, col_fmt, make_fns, warmup, iters)
 
 
 def run_bench_topk(warmup: int = 5, iters: int = 20) -> None:
@@ -116,31 +117,16 @@ def run_bench_topk(warmup: int = 5, iters: int = 20) -> None:
     cpu_topk_sampling = ns.cpu_topk_sampling
     from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_only
 
-    header = (
-        f"{'B':>4}  {'V':>7}  {'top_k':>6}"
-        f"  {'before_ms':>10}  {'after_ms':>9}  {'speedup':>7}"
-    )
-    print("\n--- top-k only ---")
-    print(header)
-    print("-" * 55)
-    for B, V, top_k in CONFIGS_TOPK:
-        logits = torch.randn(B, V, dtype=torch.float32)
-        k_i32 = torch.full((B,), top_k, dtype=torch.int32)
+    col_fmt = f"{'B':>4}  {'V':>7}  {'top_k':>6}"
 
-        before_fn = lambda lg=logits, ki=k_i32: apply_top_k_only(  # noqa: E731
-            lg.clone(), ki.long()
-        )
-        after_fn = lambda lg=logits, ki=k_i32: cpu_topk_sampling(  # noqa: E731
-            lg.clone(), ki
-        )
+    def make_fns(cfg, logits):
+        B, V, top_k = cfg
+        k = torch.full((B,), top_k, dtype=torch.int32)
+        before = lambda lg=logits, ki=k: apply_top_k_only(lg.clone(), ki.long())  # noqa: E731
+        after = lambda lg=logits, ki=k: cpu_topk_sampling(lg.clone(), ki)  # noqa: E731
+        return before, after, f"{B:>4}  {V:>7}  {top_k:>6}"
 
-        ms_before = _time_fn(before_fn, warmup, iters)
-        ms_after = _time_fn(after_fn, warmup, iters)
-        speedup = ms_before / ms_after
-        print(
-            f"{B:>4}  {V:>7}  {top_k:>6}"
-            f"  {ms_before:>10.3f}  {ms_after:>9.3f}  {speedup:>7.2f}x"
-        )
+    _run_bench("top-k only", 55, CONFIGS_TOPK, col_fmt, make_fns, warmup, iters)
 
 
 def run_bench_joint(warmup: int = 5, iters: int = 20) -> None:
@@ -149,35 +135,25 @@ def run_bench_joint(warmup: int = 5, iters: int = 20) -> None:
     cpu_topk_topp_sampling = ns.cpu_topk_topp_sampling
     from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_only
 
-    header = (
-        f"{'B':>4}  {'V':>7}  {'k':>5}  {'p':>4}"
-        f"  {'before_ms':>10}  {'after_ms':>9}  {'speedup':>7}"
-    )
-    print("\n--- top-k + top-p (joint) ---")
-    print(header)
-    print("-" * 62)
-    for B, V, top_k, top_p in CONFIGS_JOINT:
-        logits = torch.randn(B, V, dtype=torch.float32)
-        k_i32 = torch.full((B,), top_k, dtype=torch.int32)
-        p_f32 = torch.full((B,), top_p, dtype=torch.float32)
+    col_fmt = f"{'B':>4}  {'V':>7}  {'k':>5}  {'p':>4}"
 
-        def before_fn(  # noqa: E731
-            lg=logits, ki=k_i32, pf=p_f32
-        ):
+    def make_fns(cfg, logits):
+        B, V, top_k, top_p = cfg
+        k = torch.full((B,), top_k, dtype=torch.int32)
+        p = torch.full((B,), top_p, dtype=torch.float32)
+
+        def before(lg=logits, ki=k, pp=p):
             tmp = apply_top_k_only(lg.clone(), ki.long())
-            cpu_topp_sampling(tmp.contiguous().clone(), pf)
+            cpu_topp_sampling(tmp.contiguous().clone(), pp)
 
-        after_fn = lambda lg=logits, ki=k_i32, pf=p_f32: (  # noqa: E731
-            cpu_topk_topp_sampling(lg.clone(), ki, pf)
+        after = lambda lg=logits, ki=k, pp=p: cpu_topk_topp_sampling(  # noqa: E731
+            lg.clone(), ki, pp
         )
+        return before, after, f"{B:>4}  {V:>7}  {top_k:>5}  {top_p:>4.2f}"
 
-        ms_before = _time_fn(before_fn, warmup, iters)
-        ms_after = _time_fn(after_fn, warmup, iters)
-        speedup = ms_before / ms_after
-        print(
-            f"{B:>4}  {V:>7}  {top_k:>5}  {top_p:>4.2f}"
-            f"  {ms_before:>10.3f}  {ms_after:>9.3f}  {speedup:>7.2f}x"
-        )
+    _run_bench(
+        "top-k + top-p (joint)", 62, CONFIGS_JOINT, col_fmt, make_fns, warmup, iters
+    )
 
 
 def spawn_for_isa(isa: str, extra_args: list) -> None:

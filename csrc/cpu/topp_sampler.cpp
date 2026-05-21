@@ -311,6 +311,44 @@ __attribute__((always_inline)) static inline int gather_outliers(
   return m;
 }
 
+static inline void compute_mean_std(const float* row, int V, float* avg_out,
+                                    float* std_out) {
+  float sum_s = 0.f, sum_sq = 0.f;
+  int nf = 0;
+  for (int i = 0; i < V && nf < kMeanStdSampleN; ++i) {
+    float v = row[i];
+    if (v > kPadSentinel) {
+      sum_s += v;
+      sum_sq += v * v;
+      ++nf;
+    }
+  }
+  float avg = nf > 0 ? sum_s / nf : 0.f;
+  float var = nf > 0 ? sum_sq / nf - avg * avg : 1.f;
+  *avg_out = avg;
+  *std_out = sqrtf(var > 0.f ? var : 0.f);
+}
+
+// Apply boundary-tie resolution in row order. Keeps all v > pivot, plus up to
+// n_keep_at_boundary values within tol of dup_value. Rare path: called only
+// when binary/ternary search lands exactly on a duplicate boundary value.
+static inline void apply_boundary_tie_loop(float* row, int V, float pivot,
+                                           float dup_value, float tol,
+                                           int n_keep_at_boundary) {
+  const float neg_inf = -std::numeric_limits<float>::infinity();
+  int kept_boundary = 0;
+  for (int i = 0; i < V; ++i) {
+    float v = row[i];
+    bool keep = v > pivot;
+    if (!keep && fabsf(v - dup_value) < tol &&
+        kept_boundary < n_keep_at_boundary) {
+      keep = true;
+      ++kept_boundary;
+    }
+    if (!keep) row[i] = neg_inf;
+  }
+}
+
 }  // namespace
 
 static float binary_search_buffer(const float* buf, int n, float p_val,
@@ -430,20 +468,8 @@ static float ternary_search_topk(const float* buf, int n, int k, float lo,
 
 static void top_k_row(float* __restrict__ row, int V, int k_val,
                       float* __restrict__ outlier_buf) {
-  // Pass 0: mean/std estimate on up to kMeanStdSampleN finite logits.
-  float sum_s = 0.f, sum_sq = 0.f;
-  int nf = 0;
-  for (int i = 0; i < V && nf < kMeanStdSampleN; ++i) {
-    float v = row[i];
-    if (v > kPadSentinel) {
-      sum_s += v;
-      sum_sq += v * v;
-      ++nf;
-    }
-  }
-  float avg = nf > 0 ? sum_s / nf : 0.f;
-  float var = nf > 0 ? sum_sq / nf - avg * avg : 1.f;
-  float std_v = sqrtf(var > 0.f ? var : 0.f);
+  float avg, std_v;
+  compute_mean_std(row, V, &avg, &std_v);
 
   int tidx = (int)((double)k_val / V * 200);
   if (tidx < 0) tidx = 0;
@@ -503,17 +529,8 @@ static void top_k_row(float* __restrict__ row, int V, int k_val,
   if (n_keep_at_boundary == 0) {
     mask_write_below(row, V, final_pivot, neg_inf);
   } else {
-    int kept_boundary = 0;
-    for (int i = 0; i < V; ++i) {
-      float v = row[i];
-      bool keep = v > final_pivot;
-      if (!keep && fabsf(v - dup_value) < kKDuplicateTol &&
-          kept_boundary < n_keep_at_boundary) {
-        keep = true;
-        ++kept_boundary;
-      }
-      if (!keep) row[i] = neg_inf;
-    }
+    apply_boundary_tie_loop(row, V, final_pivot, dup_value, kKDuplicateTol,
+                            n_keep_at_boundary);
   }
 }
 
@@ -522,19 +539,8 @@ static void top_p_row(float* __restrict__ row, int V, float p_val,
                       float* __restrict__ outlier_buf) {
   if (p_val >= 1.0f) return;
 
-  float sum_s = 0.f, sum_sq = 0.f;
-  int nf = 0;
-  for (int i = 0; i < V && nf < kMeanStdSampleN; ++i) {
-    float v = row[i];
-    if (v > kPadSentinel) {
-      sum_s += v;
-      sum_sq += v * v;
-      ++nf;
-    }
-  }
-  float avg = nf > 0 ? sum_s / nf : 0.f;
-  float var = nf > 0 ? sum_sq / nf - avg * avg : 1.f;
-  float std_v = sqrtf(var > 0.f ? var : 0.f);
+  float avg, std_v;
+  compute_mean_std(row, V, &avg, &std_v);
 
   int tidx = (int)(p_val * 200);
   if (tidx < 0) tidx = 0;
@@ -544,8 +550,8 @@ static void top_p_row(float* __restrict__ row, int V, float p_val,
   float outlier_logit = avg + std_v * sigma;
 
   float max_l, min_l;
-  int n_finite_p1, tail_i;
-  vec_max_min_with_pad_blend(row, V, kPadSentinel, &max_l, &min_l, &n_finite_p1,
+  int n_finite, tail_i;
+  vec_max_min_with_pad_blend(row, V, kPadSentinel, &max_l, &min_l, &n_finite,
                              &tail_i);
   for (int i = tail_i; i < V; ++i) {
     float v = row[i];
@@ -632,18 +638,8 @@ static void top_p_row(float* __restrict__ row, int V, float p_val,
   if (n_keep_at_boundary == 0) {
     mask_write_below(row, V, dup_logit, neg_inf);
   } else {
-    // Boundary ties must be resolved in row order; scalar loop is intentional.
-    int kept_boundary = 0;
-    for (int i = 0; i < V; ++i) {
-      float v = row[i];
-      bool keep = v > dup_logit;
-      if (!keep && fabsf(v - dup_logit) < kBoundaryTol &&
-          kept_boundary < n_keep_at_boundary) {
-        keep = true;
-        ++kept_boundary;
-      }
-      if (!keep) row[i] = neg_inf;
-    }
+    apply_boundary_tie_loop(row, V, dup_logit, dup_logit, kBoundaryTol,
+                            n_keep_at_boundary);
   }
 }
 
@@ -652,19 +648,8 @@ static void top_p_row(float* __restrict__ row, int V, float p_val,
 static void top_k_p_row(float* __restrict__ row, int V, int k_val, float p_val,
                         float* __restrict__ scratch,
                         float* __restrict__ outlier_buf) {
-  float sum_s = 0.f, sum_sq = 0.f;
-  int nf = 0;
-  for (int i = 0; i < V && nf < kMeanStdSampleN; ++i) {
-    float v = row[i];
-    if (v > kPadSentinel) {
-      sum_s += v;
-      sum_sq += v * v;
-      ++nf;
-    }
-  }
-  float avg = nf > 0 ? sum_s / nf : 0.f;
-  float var = nf > 0 ? sum_sq / nf - avg * avg : 1.f;
-  float std_v = sqrtf(var > 0.f ? var : 0.f);
+  float avg, std_v;
+  compute_mean_std(row, V, &avg, &std_v);
 
   int k_tidx = (int)((double)k_val / V * 200);
   if (k_tidx < 0) k_tidx = 0;
@@ -729,17 +714,8 @@ static void top_k_p_row(float* __restrict__ row, int V, int k_val, float p_val,
       if (tk_keep_at_boundary == 0) {
         mask_write_below(row, V, final_pivot, neg_inf);
       } else {
-        int kept_boundary = 0;
-        for (int i = 0; i < V; ++i) {
-          float v = row[i];
-          bool keep = v > final_pivot;
-          if (!keep && fabsf(v - dup_value) < kKDuplicateTol &&
-              kept_boundary < tk_keep_at_boundary) {
-            keep = true;
-            ++kept_boundary;
-          }
-          if (!keep) row[i] = neg_inf;
-        }
+        apply_boundary_tie_loop(row, V, final_pivot, dup_value, kKDuplicateTol,
+                                tk_keep_at_boundary);
       }
     }
   }
@@ -818,18 +794,8 @@ static void top_k_p_row(float* __restrict__ row, int V, int k_val, float p_val,
   if (n_keep_at_boundary == 0) {
     mask_write_below(row, V, dup_logit, neg_inf);
   } else {
-    // Boundary ties must be resolved in row order; scalar loop is intentional.
-    int kept_boundary = 0;
-    for (int i = 0; i < V; ++i) {
-      float v = row[i];
-      bool keep = v > dup_logit;
-      if (!keep && fabsf(v - dup_logit) < kBoundaryTol &&
-          kept_boundary < n_keep_at_boundary) {
-        keep = true;
-        ++kept_boundary;
-      }
-      if (!keep) row[i] = neg_inf;
-    }
+    apply_boundary_tie_loop(row, V, dup_logit, dup_logit, kBoundaryTol,
+                            n_keep_at_boundary);
   }
 }
 

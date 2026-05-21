@@ -18,6 +18,27 @@ BATCH_SIZE = 1024
 VOCAB_SIZE = 128 * 1024
 
 
+def _chi2_check(empirical, expected, chisquare_fn, *, label, alpha):
+    import numpy as np
+
+    outside = (expected == 0) & (empirical > 0)
+    assert not outside.any(), (
+        f"{label}: sampled out-of-support tokens "
+        f"(zero expected prob): indices={outside.nonzero()[0].tolist()}"
+    )
+    in_support = expected > 0
+    if int(in_support.sum()) <= 1:
+        return
+    emp = empirical[in_support].astype(np.float64)
+    exp = expected[in_support].astype(np.float64)
+    exp = exp * (emp.sum() / exp.sum())
+    chi2, p_value = chisquare_fn(emp, exp)
+    assert p_value > alpha, (
+        f"{label}: distribution differs from theoretical: "
+        f"chi2={chi2:.2f} p_value={p_value:.2e} alpha={alpha}"
+    )
+
+
 def _flashinfer_topk_topp_supported() -> bool:
     """True iff the FlashInfer top-k/top-p sampler is usable on this host.
 
@@ -847,33 +868,7 @@ class TestFlashInferDistributionMatch:
         )
 
     def _chi2_check(self, empirical, expected, chisquare_fn, *, label):
-        import numpy as np
-
-        # Hard check: the sampler must never produce a token outside the
-        # expected support (zero theoretical probability).
-        outside = (expected == 0) & (empirical > 0)
-        assert not outside.any(), (
-            f"{label}: sampled out-of-support tokens "
-            f"(zero expected prob): indices={outside.nonzero()[0].tolist()}"
-        )
-        # Skip chi-square in the degenerate case where the support
-        # collapses to a single token (e.g. very restrictive joint
-        # top-k + top-p): all samples must land there and the hard
-        # check above already verified they do.
-        in_support = expected > 0
-        if int(in_support.sum()) <= 1:
-            return
-        # Soft check: chi-square goodness-of-fit on in-support tokens.
-        # Cast to float64 so the rescaling step below stays within
-        # scipy.chisquare's strict 1.5e-8 sum-equality tolerance.
-        emp = empirical[in_support].astype(np.float64)
-        exp = expected[in_support].astype(np.float64)
-        exp = exp * (emp.sum() / exp.sum())
-        chi2, p_value = chisquare_fn(emp, exp)
-        assert p_value > self.ALPHA, (
-            f"{label}: distribution differs from theoretical: "
-            f"chi2={chi2:.2f} p_value={p_value:.2e} alpha={self.ALPHA}"
-        )
+        _chi2_check(empirical, expected, chisquare_fn, label=label, alpha=self.ALPHA)
 
 
 # =============================================================================
@@ -1540,21 +1535,4 @@ class TestCpuDistributionMatch:
         )
 
     def _chi2_check(self, empirical, expected, chisquare_fn, *, label):
-        import numpy as np
-
-        outside = (expected == 0) & (empirical > 0)
-        assert not outside.any(), (
-            f"{label}: sampled out-of-support tokens "
-            f"(zero expected prob): indices={outside.nonzero()[0].tolist()}"
-        )
-        in_support = expected > 0
-        if int(in_support.sum()) <= 1:
-            return
-        emp = empirical[in_support].astype(np.float64)
-        exp = expected[in_support].astype(np.float64)
-        exp = exp * (emp.sum() / exp.sum())
-        chi2, p_value = chisquare_fn(emp, exp)
-        assert p_value > self.ALPHA, (
-            f"{label}: distribution differs from theoretical: "
-            f"chi2={chi2:.2f} p_value={p_value:.2e} alpha={self.ALPHA}"
-        )
+        _chi2_check(empirical, expected, chisquare_fn, label=label, alpha=self.ALPHA)
