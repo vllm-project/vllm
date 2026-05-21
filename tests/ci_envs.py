@@ -8,7 +8,7 @@ import os
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from vllm.envs import maybe_convert_bool
+from vllm.envs_impl import maybe_convert_bool
 
 if TYPE_CHECKING:
     VLLM_CI_NO_SKIP: bool = False

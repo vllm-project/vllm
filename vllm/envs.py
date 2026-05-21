@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""vLLM environment variables.
 
 import functools
 import json
@@ -451,17 +452,19 @@ def env_set_with_choices(
     returns choices as a set.
     """
 
-    def _get_validated_env_set() -> set[str]:
-        return set(env_list_with_choices(env_name, default, choices, case_sensitive)())
+    import vllm.envs as envs
 
-    return _get_validated_env_set
+    print(envs.VLLM_PORT)
+    print(envs.VLLM_HOST_IP)
 
+All attribute access is lazy: the corresponding ``os.environ`` lookup is
+performed on each access (or once if caching is enabled via
+``envs.enable_envs_cache()``).
 
-def get_vllm_port() -> int | None:
-    """Get the port from VLLM_PORT environment variable.
+Helper utilities are importable from :mod:`vllm.envs_impl`:
 
-    Returns:
-        The port number as an integer if VLLM_PORT is set, None otherwise.
+    from vllm.envs_impl import env_with_choices, environment_variables
+"""
 
     Raises:
         ValueError: If VLLM_PORT is a URI, suggest k8s service discovery issue.
@@ -2033,4 +2036,17 @@ def compile_factors() -> dict[str, object]:
     for var in ray_noset_env_vars:
         factors[var] = normalize_value(os.getenv(var))
 
-    return factors
+from vllm.envs_impl import (  # noqa: F401 - re-exported for backward compatibility
+    Envs,
+    env_list_with_choices,
+    env_set_with_choices,
+    env_with_choices,
+    environment_variables,
+    envs,
+)
+
+# Replace this module in sys.modules with the Envs singleton so that
+#   import vllm.envs as envs
+# binds ``envs`` directly to the Envs() instance, giving IDEs full type
+# information and hover docs from the class annotations.
+sys.modules[__name__] = envs  # type: ignore[assignment]

@@ -37,6 +37,10 @@ EXCLUDE = [
     "vllm/model_executor/layers/fla/ops",
     # TODO: Remove these entries after fixing mypy errors.
     "vllm/benchmarks",
+    # vllm/envs.py replaces itself in sys.modules at runtime; envs.pyi is the
+    # authoritative stub.  Exclude the .py source to avoid a "Duplicate module"
+    # error when both files are discovered together.
+    "vllm/envs.py",
 ]
 
 
@@ -93,6 +97,10 @@ def mypy(
         args += ["--python-version", python_version]
     if follow_imports is not None:
         args += ["--follow-imports", follow_imports]
+    # vllm/envs.py replaces itself via sys.modules; envs.pyi is the
+    # authoritative stub.  Exclude envs.py so mypy doesn't register it as a
+    # duplicate module when it discovers the vllm package during stub checking.
+    args += ["--exclude", "vllm/envs\\.py"]
     print(f"$ {' '.join(args)} {file_group}")
     return subprocess.run(args + targets, check=False).returncode
 
