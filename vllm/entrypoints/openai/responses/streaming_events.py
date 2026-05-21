@@ -627,9 +627,12 @@ def emit_previous_item_done_events(
         # Preambles (commentary with no recipient) and final messages
         # are both user-visible text. The conversation text is purposefully
         # omitted when it immediately precedes a tool call.
-        include_content = not is_function_recipient(
-            next_recipient,
-            function_tool_names,
+        include_content = not (
+            next_recipient is not None
+            and is_function_recipient(
+                next_recipient,
+                function_tool_names,
+            )
         )
         return emit_text_output_done_events(
             text,

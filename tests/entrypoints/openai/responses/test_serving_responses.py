@@ -259,10 +259,7 @@ def test_simple_streaming_omits_preamble_message_before_tool_call() -> None:
     message_done = next(
         event
         for event in tool_events
-        if (
-            event.type == "response.output_item.done"
-            and event.item.type == "message"
-        )
+        if (event.type == "response.output_item.done" and event.item.type == "message")
     )
     function_added = next(
         event
@@ -279,9 +276,7 @@ def test_simple_streaming_omits_preamble_message_before_tool_call() -> None:
         if event.type == "response.output_text.delta"
     ] == [preamble]
     assert [
-        event.text
-        for event in tool_events
-        if event.type == "response.output_text.done"
+        event.text for event in tool_events if event.type == "response.output_text.done"
     ] == [""]
     assert message_done.item.content == []
     assert function_added.item.name == "exec_command"
