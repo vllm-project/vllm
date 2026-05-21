@@ -694,6 +694,10 @@ def unified_attention(
                 else:
                     BLOCK_M = 128
                     waves_per_eu = 4
+                # Gemma-2B
+                if head_size == 256 and num_kv_heads == 1:
+                    num_stages = 1
+                    waves_per_eu = 4
             else:
                 BLOCK_M = 128
                 num_stages = 1
