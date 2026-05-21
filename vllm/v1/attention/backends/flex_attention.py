@@ -128,6 +128,14 @@ class FlexAttentionBackend(AttentionBackend):
         return (num_blocks, 2, block_size, num_kv_heads, head_size)
 
     @staticmethod
+    def get_kv_cache_stride_order(
+        include_num_layers_dimension: bool = False,
+    ) -> tuple[int, ...]:
+        if include_num_layers_dimension:
+            return (1, 0, 3, 2, 4, 5)
+        return (0, 2, 1, 3, 4)
+
+    @staticmethod
     def get_builder_cls() -> type["FlexAttentionMetadataBuilder"]:
         return FlexAttentionMetadataBuilder
 
@@ -1163,8 +1171,8 @@ class FlexAttentionImpl(AttentionImpl):
             key_cache, value_cache = kv_cache.unbind(1)
 
             # Flatten (num_blocks, block_size) into a single token dim
-            key_cache = key_cache.reshape(-1, self.num_kv_heads, self.head_size)
-            value_cache = value_cache.reshape(-1, self.num_kv_heads, self.head_size)
+            key_cache = key_cache.view(-1, self.num_kv_heads, self.head_size)
+            value_cache = value_cache.view(-1, self.num_kv_heads, self.head_size)
             query, key_tensor, value_tensor = map(
                 lambda x: self.view_as_4d(x).permute(0, 2, 1, 3),
                 (query, key_cache, value_cache),
