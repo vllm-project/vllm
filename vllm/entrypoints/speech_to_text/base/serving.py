@@ -123,6 +123,13 @@ class OpenAISpeechToText(OpenAIServing):
                     tokenizer_mode=self.model_config.tokenizer_mode,
                 ),
             )
+            # Cache the timestamp anchor token id used by ``_get_verbose_segments``.
+            # It is invariant for the loaded tokenizer, so encoding it once at
+            # init avoids re-encoding ``"<|0.00|>"`` on every verbose-segment
+            # build (one per audio chunk per verbose-format request).
+            self._segment_init_token_id = self.tokenizer.encode(
+                "<|0.00|>", add_special_tokens=False
+            )[0]
 
         if self.default_sampling_params:
             logger.info(
@@ -327,7 +334,7 @@ class OpenAISpeechToText(OpenAIServing):
         in this implementation and will be None. See docs for details.
         """
         BASE_OFFSET = 0.02
-        init_token = self.tokenizer.encode("<|0.00|>", add_special_tokens=False)[0]
+        init_token = self._segment_init_token_id
         if tokens[-1] == self.tokenizer.eos_token_id:
             tokens = tokens[:-1]
 
