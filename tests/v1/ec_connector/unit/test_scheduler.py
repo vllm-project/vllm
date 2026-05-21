@@ -18,13 +18,25 @@ it with an integration test using real inproc:// sockets.
 """
 
 import contextlib
+import logging
 import uuid
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import msgspec
-import pybase64
 import pytest
 import zmq
+from utils import (  # noqa: E402  (test-local helper module)
+    _BLOCK_SIZE,
+    _ELEMENT_SIZE,
+    _HIDDEN_DIM,
+    _NUM_BLOCKS,
+    _feature,
+    _info,
+    _make_layout,
+    _make_nixl_mock,
+    _make_vllm_config,
+    _request_for,
+)
 
 from vllm.distributed.ec_transfer.ec_connector.cpu.metadata import (
     EC_CONNECTOR_VERSION,
@@ -34,7 +46,6 @@ from vllm.distributed.ec_transfer.ec_connector.cpu.metadata import (
 from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler import ECCPUScheduler
 from vllm.distributed.ec_transfer.ec_connector.cpu.utils import (
     ConsumerPeer,
-    ECRegionLayout,
     ProducerPeer,
     serialize_mem_descriptor,
 )
@@ -42,55 +53,9 @@ from vllm.distributed.ec_transfer.ec_connector.ec_shared_region import (
     AllocationError,
     ECSharedRegion,
 )
+from vllm.v1.core.sched.output import SchedulerOutput
 
-# ── helpers ───────────────────────────────────────────────────────────────────
-
-# block_size_bytes=64, element_size=2 (float16) → hidden_dim=32
-_NUM_BLOCKS = 8
-_BLOCK_SIZE = 64
-_HIDDEN_DIM = _BLOCK_SIZE // 2
-_ELEMENT_SIZE = 2
-
-
-def _make_layout() -> ECRegionLayout:
-    import torch
-
-    region = ECSharedRegion(
-        instance_id=str(uuid.uuid4()),
-        num_blocks=_NUM_BLOCKS,
-        block_size_bytes=_BLOCK_SIZE,
-    )
-    return ECRegionLayout(
-        region=region,
-        dtype=torch.float16,
-        hidden_dim=_HIDDEN_DIM,
-        element_size=_ELEMENT_SIZE,
-        block_size_bytes=_BLOCK_SIZE,
-        num_blocks=_NUM_BLOCKS,
-    )
-
-
-def _make_nixl_mock() -> MagicMock:
-    nixl = MagicMock()
-    nixl.get_agent_metadata.return_value = b"agent-meta"
-    nixl.get_reg_descs.return_value = MagicMock()
-    nixl.get_xfer_descs.return_value = MagicMock()
-    nixl.prep_xfer_dlist.return_value = 42
-    nixl.check_xfer_state.return_value = "PROC"
-    nixl.add_remote_agent.return_value = "remote-agent-1"
-    return nixl
-
-
-def _make_vllm_config(is_producer: bool, is_consumer: bool) -> MagicMock:
-    ec_cfg = MagicMock()
-    ec_cfg.is_ec_producer = is_producer
-    ec_cfg.is_ec_consumer = is_consumer
-    ec_cfg.engine_id = str(uuid.uuid4())
-
-    cfg = MagicMock()
-    cfg.ec_transfer_config = ec_cfg
-    cfg.model_config.model = "test-model"
-    return cfg
+# ── scheduler-specific helpers ────────────────────────────────────────────────
 
 
 def _inject_in_flight(
@@ -115,38 +80,6 @@ def _dealer_returning(frames: list) -> MagicMock:
 
 def _ack_frames(mm_hash: str, ok: bool) -> list[bytes]:
     return [b"", _ack_encoder.encode(XferAck(mm_hash=mm_hash, ok=ok))]
-
-
-def _info(
-    *,
-    peer_host: str = "host",
-    peer_port: int = 1234,
-    size_bytes: int = _BLOCK_SIZE,  # exactly one block
-    metadata: bytes = b"meta",
-) -> dict:
-    """Build the announcement-info dict the consumer expects."""
-    return {
-        "peer_host": peer_host,
-        "peer_port": peer_port,
-        "size_bytes": size_bytes,
-        "nixl_agent_metadata_b64": pybase64.b64encode(metadata).decode("ascii"),
-    }
-
-
-def _feature(mm_hash: str, length: int = 1, offset: int = 0) -> MagicMock:
-    f = MagicMock()
-    f.mm_hash = mm_hash
-    f.identifier = mm_hash
-    f.mm_position.length = length
-    f.mm_position.offset = offset
-    return f
-
-
-def _request_for(*features: MagicMock, params: dict | None = None) -> MagicMock:
-    req = MagicMock()
-    req.mm_features = list(features)
-    req.ec_transfer_params = params
-    return req
 
 
 # ── fixtures ──────────────────────────────────────────────────────────────────
@@ -349,7 +282,7 @@ def test_update_state_dedups_against_local_encodings(producer):
 def test_build_meta_promotes_pending_save(producer):
     producer._pending_save["h1"] = [0, 1]
 
-    producer.build_connector_meta(MagicMock())
+    producer.build_connector_meta(Mock(spec=SchedulerOutput))
 
     assert producer._local_encodings["h1"] == [0, 1]
     assert producer._pending_save == {}
@@ -358,7 +291,7 @@ def test_build_meta_promotes_pending_save(producer):
 def test_build_meta_allocates_for_pending_new_encodings(producer):
     producer._pending_new_encodings["h2"] = _BLOCK_SIZE  # exactly 1 block
 
-    meta = producer.build_connector_meta(MagicMock())
+    meta = producer.build_connector_meta(Mock(spec=SchedulerOutput))
 
     assert "h2" in meta.saves
     assert len(meta.saves["h2"]) == 1
@@ -368,7 +301,7 @@ def test_build_meta_allocates_for_pending_new_encodings(producer):
 
 def test_build_meta_rounds_up_partial_block(producer):
     producer._pending_new_encodings["h"] = _BLOCK_SIZE + 1
-    meta = producer.build_connector_meta(MagicMock())
+    meta = producer.build_connector_meta(Mock(spec=SchedulerOutput))
     assert len(meta.saves["h"]) == 2
 
 
@@ -916,7 +849,7 @@ def test_consumer_build_meta_promotes_ready_to_loads_and_loaded(consumer):
     consumer._remote_encodings["h"] = indices
     consumer._ready.add("h")
 
-    meta = consumer.build_connector_meta(MagicMock())
+    meta = consumer.build_connector_meta(Mock(spec=SchedulerOutput))
 
     assert meta.loads["h"] == indices
     assert consumer._loaded["h"] == indices  # cached for future re-serve
@@ -932,7 +865,7 @@ def test_consumer_build_meta_re_emits_pending_reload(consumer):
     consumer._pending_reload.add("h")
     free_before = len(consumer._region._free)
 
-    meta = consumer.build_connector_meta(MagicMock())
+    meta = consumer.build_connector_meta(Mock(spec=SchedulerOutput))
 
     assert meta.loads["h"] is indices  # identity: same list object from _loaded
     assert consumer._pending_reload == set()  # cleared after build
@@ -949,7 +882,7 @@ def test_consumer_build_meta_drops_stale_ready(consumer):
     consumer._ready.add("h")
     # _remote_encodings does NOT have "h"
 
-    meta = consumer.build_connector_meta(MagicMock())
+    meta = consumer.build_connector_meta(Mock(spec=SchedulerOutput))
 
     assert "h" not in meta.loads
     assert "h" not in consumer._ready
@@ -1039,7 +972,7 @@ def test_ensure_starts_xfer_for_uncached_announced_feature(consumer):
     fake_dealer.send_multipart.assert_called_once()
 
 
-def test_ensure_alloc_failure_falls_through_to_local_encode(consumer):
+def test_ensure_alloc_failure_falls_through_to_local_encode(consumer, caplog_vllm):
     """If allocation fails (region exhausted by protected entries), log and
     fall through; do not propagate AllocationError."""
     consumer._loaded["protected"] = consumer._region.alloc(_NUM_BLOCKS)
@@ -1055,8 +988,13 @@ def test_ensure_alloc_failure_falls_through_to_local_encode(consumer):
     req = _request_for(_feature("new"), params=params)
 
     # Must NOT raise — falls through to local encode for "new".
-    result = consumer.ensure_cache_available(req, num_computed_tokens=0)
+    with caplog_vllm.at_level(logging.ERROR):
+        result = consumer.ensure_cache_available(req, num_computed_tokens=0)
 
+    # Operator-visible diagnostic must have fired.
+    assert any(
+        "new" in r.message for r in caplog_vllm.records if r.levelno == logging.ERROR
+    )
     # "new" was not transferred; "protected" still safe.
     assert "new" not in consumer._remote_encodings
     assert "protected" in consumer._loaded
