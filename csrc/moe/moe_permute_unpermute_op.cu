@@ -68,11 +68,10 @@ void moe_permute_impl(
   auto expanded_rows = n_token * topk;
   auto stream = at::cuda::getCurrentCUDAStream().stream();
 
-  size_t sorter_size =
-      CubKeyValueSorter::getWorkspaceSize(expanded_rows, n_expert);
-  auto sort_workspace = maybe_allocate_tensor(
-      maybe_sort_workspace, {static_cast<int64_t>(sorter_size)}, torch::kInt8,
-      device, "sort_workspace");
+  auto sorter_size = moe_permute_sort_workspace_size(expanded_rows, n_expert);
+  auto sort_workspace =
+      maybe_allocate_tensor(maybe_sort_workspace, {sorter_size}, torch::kInt8,
+                            device, "sort_workspace");
   auto permuted_experts_id =
       maybe_allocate_tensor(maybe_permuted_experts_id, topk_ids.sizes(),
                             at::ScalarType::Int, device, "permuted_experts_id");
