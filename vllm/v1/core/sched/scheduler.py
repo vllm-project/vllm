@@ -56,7 +56,7 @@ from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
-from vllm.v1.utils import record_function_or_nullcontext
+from vllm.v1.utils import compute_iteration_details, record_function_or_nullcontext
 
 logger = init_logger(__name__)
 
@@ -106,6 +106,8 @@ class Scheduler(SchedulerInterface):
             if self.scheduler_config.max_num_scheduled_tokens
             else self.scheduler_config.max_num_batched_tokens
         )
+        self.num_prefill_steps = 0
+        self.num_decode_steps = 0
         self.max_model_len = vllm_config.model_config.max_model_len
         self.enable_kv_cache_events = (
             self.kv_events_config is not None
@@ -901,6 +903,13 @@ class Scheduler(SchedulerInterface):
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=new_block_ids_to_zero,
         )
+
+        if self.log_stats and scheduler_output.total_num_scheduled_tokens > 0:
+            iteration_details = compute_iteration_details(scheduler_output)
+            if iteration_details.num_ctx_requests > 0:
+                self.num_prefill_steps += 1
+            if iteration_details.num_generation_requests > 0:
+                self.num_decode_steps += 1
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store
@@ -1986,6 +1995,8 @@ class Scheduler(SchedulerInterface):
             kv_cache_eviction_events=eviction_events,
             spec_decoding_stats=spec_stats,
             kv_connector_stats=connector_stats_payload,
+            num_prefill_steps=self.num_prefill_steps,
+            num_decode_steps=self.num_decode_steps,
             cudagraph_stats=cudagraph_stats,
             perf_stats=perf_stats,
         )

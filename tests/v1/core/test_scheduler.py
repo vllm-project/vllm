@@ -128,6 +128,42 @@ def test_schedule_multimodal_requests():
         assert len(encoder_input) == 1
 
 
+def test_scheduler_stats_prefill_and_decode_step_counters():
+    scheduler = create_scheduler(max_num_batched_tokens=1024, max_num_seqs=2)
+    requests = create_requests(num_requests=2, num_tokens=8)
+
+    scheduler.add_request(requests[0])
+    scheduler_output0 = scheduler.schedule()
+    stats = scheduler.make_stats()
+    assert stats is not None
+    assert stats.num_prefill_steps == 1
+    assert stats.num_decode_steps == 0
+
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[requests[0].request_id],
+        req_id_to_index={requests[0].request_id: 0},
+        sampled_token_ids=[[0]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(scheduler_output0, model_runner_output)
+
+    scheduler_output1 = scheduler.schedule()
+    stats = scheduler.make_stats()
+    assert stats is not None
+    assert stats.num_prefill_steps == 1
+    assert stats.num_decode_steps == 1
+    scheduler.update_from_output(scheduler_output1, model_runner_output)
+
+    scheduler.add_request(requests[1])
+    scheduler.schedule()
+    stats = scheduler.make_stats()
+    assert stats is not None
+    assert stats.num_prefill_steps == 2
+    assert stats.num_decode_steps == 2
+
+
 def test_async_scheduling_pp_allows_rescheduling_with_output_placeholders():
     """Async scheduling + PP: allow multi-step in-flight scheduling per request"""
     scheduler = create_scheduler(async_scheduling=True, pipeline_parallel_size=2)

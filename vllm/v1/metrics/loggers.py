@@ -668,6 +668,27 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             counter_generation_tokens, per_engine_labelvalues
         )
 
+        counter_prefill_steps = self._counter_cls(
+            name="vllm:prefill_steps",
+            documentation="Number of scheduler steps containing prefill work.",
+            labelnames=labelnames,
+        )
+        self.counter_prefill_steps = create_metric_per_engine(
+            counter_prefill_steps, per_engine_labelvalues
+        )
+
+        counter_decode_steps = self._counter_cls(
+            name="vllm:decode_steps",
+            documentation="Number of scheduler steps containing decode work.",
+            labelnames=labelnames,
+        )
+        self.counter_decode_steps = create_metric_per_engine(
+            counter_decode_steps, per_engine_labelvalues
+        )
+
+        self.last_num_prefill_steps = {idx: 0 for idx in engine_indexes}
+        self.last_num_decode_steps = {idx: 0 for idx in engine_indexes}
+
         self.counter_request_success: dict[FinishReason, dict[int, Counter]] = {}
         counter_request_success_base = self._counter_cls(
             name="vllm:request_success",
@@ -1079,6 +1100,34 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 scheduler_stats.num_skipped_waiting_reqs
             )
             self.gauge_kv_cache_usage[engine_idx].set(scheduler_stats.kv_cache_usage)
+
+            num_prefill_steps_delta = (
+                scheduler_stats.num_prefill_steps
+                - self.last_num_prefill_steps[engine_idx]
+            )
+            if num_prefill_steps_delta < 0:
+                self.last_num_prefill_steps[engine_idx] = (
+                    scheduler_stats.num_prefill_steps
+                )
+            elif num_prefill_steps_delta > 0:
+                self.counter_prefill_steps[engine_idx].inc(num_prefill_steps_delta)
+                self.last_num_prefill_steps[engine_idx] = (
+                    scheduler_stats.num_prefill_steps
+                )
+
+            num_decode_steps_delta = (
+                scheduler_stats.num_decode_steps
+                - self.last_num_decode_steps[engine_idx]
+            )
+            if num_decode_steps_delta < 0:
+                self.last_num_decode_steps[engine_idx] = (
+                    scheduler_stats.num_decode_steps
+                )
+            elif num_decode_steps_delta > 0:
+                self.counter_decode_steps[engine_idx].inc(num_decode_steps_delta)
+                self.last_num_decode_steps[engine_idx] = (
+                    scheduler_stats.num_decode_steps
+                )
 
             self.counter_prefix_cache_queries[engine_idx].inc(
                 scheduler_stats.prefix_cache_stats.queries

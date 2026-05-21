@@ -190,6 +190,9 @@ class SchedulerStats:
     spec_decoding_stats: SpecDecodingStats | None = None
     kv_connector_stats: dict[str, Any] | None = None
 
+    num_prefill_steps: int = 0
+    num_decode_steps: int = 0
+
     waiting_lora_adapters: dict[str, int] = field(default_factory=dict)
     running_lora_adapters: dict[str, int] = field(default_factory=dict)
 
