@@ -15,6 +15,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kInt4Static32,
 )
+from vllm.platforms import current_platform
 
 
 class TrtLlmMxint4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
@@ -45,7 +46,12 @@ class TrtLlmMxint4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             is_flashinfer_mxint4_moe_available,
         )
 
-        return is_flashinfer_mxint4_moe_available()
+        p = current_platform
+        return (
+            p.is_cuda()
+            and p.is_device_capability_family(100)
+            and is_flashinfer_mxint4_moe_available()
+        )
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:

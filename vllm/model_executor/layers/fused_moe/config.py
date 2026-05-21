@@ -927,7 +927,7 @@ def int8_w8a16_moe_quant_config(
         _a1=FusedMoEQuantDesc(shape=group_shape, alpha_or_gscale=a1_gscale),
         _a2=FusedMoEQuantDesc(shape=group_shape, alpha_or_gscale=a2_gscale),
         _w1=FusedMoEQuantDesc(torch.int8, group_shape, w1_scale, None, w1_zp, w1_bias),
-        _w2=FusedMoEQuantDesc(torch.int8, group_shape, w2_scale, None, w2_zp, w1_bias),
+        _w2=FusedMoEQuantDesc(torch.int8, group_shape, w2_scale, None, w2_zp, w2_bias),
     )
 
 

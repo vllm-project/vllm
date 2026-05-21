@@ -42,7 +42,7 @@ logger = init_logger(__name__)
 class WNA16MoEBackend(Enum):
     MARLIN = "MARLIN"
     BATCHED_MARLIN = "BATCHED_MARLIN"
-    FLASHINFER = "FLASHINFER"
+    FLASHINFER_TRTLLM = "FLASHINFER_TRTLLM"
 
 
 def backend_to_kernel_cls(
@@ -53,7 +53,7 @@ def backend_to_kernel_cls(
         return [MarlinExperts]
     elif backend == WNA16MoEBackend.BATCHED_MARLIN:
         return [BatchedMarlinExperts]
-    elif backend == WNA16MoEBackend.FLASHINFER:
+    elif backend == WNA16MoEBackend.FLASHINFER_TRTLLM:
         return [TrtLlmMxint4ExpertsMonolithic]
     else:
         raise ValueError(f"Unknown WNA16 MoE backend: {backend.value}")
@@ -64,7 +64,7 @@ def _get_priority_backends() -> list[WNA16MoEBackend]:
     Get available backends in priority order based on platform and config.
     """
     _AVAILABLE_BACKENDS = [
-        WNA16MoEBackend.FLASHINFER,
+        WNA16MoEBackend.FLASHINFER_TRTLLM,
         WNA16MoEBackend.MARLIN,
         WNA16MoEBackend.BATCHED_MARLIN,
     ]
@@ -748,7 +748,7 @@ def convert_to_wna16_moe_kernel_format(
             w13_bias,
             w2_bias,
         )
-    elif backend == WNA16MoEBackend.FLASHINFER:
+    elif backend == WNA16MoEBackend.FLASHINFER_TRTLLM:
         return _process_weights_flashinfer(
             w13,
             w2,

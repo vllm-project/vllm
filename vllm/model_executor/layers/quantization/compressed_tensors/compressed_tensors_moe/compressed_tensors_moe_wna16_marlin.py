@@ -114,7 +114,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
                 "num_groups_w2 must be provided for weight scales"
             )
         w13_num_shards = 2 if self.moe.is_act_and_mul else 1
-        is_flashinfer = self.wna16_backend == WNA16MoEBackend.FLASHINFER
+        is_flashinfer = self.wna16_backend == WNA16MoEBackend.FLASHINFER_TRTLLM
         shape_map = {
             "w13_weight": {
                 "Flashinfer": (
@@ -174,7 +174,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         # Will transpose the loaded weight along the
         # intermediate and hidden dim sizes. Will
         # shard for TP along the transposed dims
-        is_transposed = self.wna16_backend != WNA16MoEBackend.FLASHINFER
+        is_transposed = self.wna16_backend != WNA16MoEBackend.FLASHINFER_TRTLLM
         extra_weight_attrs.update(
             {"is_transposed": is_transposed, "quant_method": self.strategy}
         )
@@ -324,7 +324,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Process weights using the shared oracle infrastructure
-        is_flashinfer = self.wna16_backend == WNA16MoEBackend.FLASHINFER
+        is_flashinfer = self.wna16_backend == WNA16MoEBackend.FLASHINFER_TRTLLM
         (
             w13_qweight,
             w2_qweight,
@@ -417,8 +417,6 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             w2_scale=layer.w2_weight_scale,
             group_size=self.group_size,
             num_bits=self.num_bits,
-            a1_gscale=getattr(layer, "w13_input_global_scale", None),
-            a2_gscale=getattr(layer, "w2_input_global_scale", None),
         )
 
     def apply_monolithic(
