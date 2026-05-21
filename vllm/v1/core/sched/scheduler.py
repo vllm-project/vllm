@@ -349,7 +349,16 @@ class Scheduler(SchedulerInterface):
         if remaining_prefill <= self.max_num_scheduled_tokens:
             return num_new_tokens
 
-        mixed_prefill_budget = max(1, (self.max_num_scheduled_tokens * 3) // 4)
+        # Very long prefills span many scheduling steps; a smaller chunk keeps
+        # already-active decoders from seeing long inter-token gaps.
+        very_long_prefill_steps = 16
+        very_long_prefill_threshold = (
+            self.max_num_scheduled_tokens * very_long_prefill_steps
+        )
+        if remaining_prefill > very_long_prefill_threshold:
+            mixed_prefill_budget = max(1, self.max_num_scheduled_tokens // 2)
+        else:
+            mixed_prefill_budget = max(1, (self.max_num_scheduled_tokens * 3) // 4)
         return min(num_new_tokens, mixed_prefill_budget)
 
     def schedule(self) -> SchedulerOutput:

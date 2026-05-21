@@ -758,6 +758,43 @@ def test_mixed_decode_prefill_caps_long_prefill_chunk():
     assert mixed_output.num_scheduled_tokens[long_prefill_req.request_id] == 75
 
 
+def test_mixed_decode_prefill_caps_very_long_prefill_more_tightly():
+    scheduler = create_scheduler(
+        max_num_batched_tokens=100,
+        max_model_len=4096,
+        max_num_seqs=2,
+        enable_chunked_prefill=True,
+    )
+    decode_req = create_requests(num_requests=1, num_tokens=100, req_ids=["decode"])[0]
+    very_long_prefill_req = create_requests(
+        num_requests=1,
+        num_tokens=2000,
+        req_ids=["very_long_prefill"],
+    )[0]
+
+    scheduler.add_request(decode_req)
+    prefill_output = scheduler.schedule()
+    assert prefill_output.num_scheduled_tokens[decode_req.request_id] == 100
+
+    scheduler.update_from_output(
+        prefill_output,
+        ModelRunnerOutput(
+            req_ids=[decode_req.request_id],
+            req_id_to_index={decode_req.request_id: 0},
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    scheduler.add_request(very_long_prefill_req)
+    mixed_output = scheduler.schedule()
+
+    assert mixed_output.num_scheduled_tokens[decode_req.request_id] == 1
+    assert mixed_output.num_scheduled_tokens[very_long_prefill_req.request_id] == 50
+
+
 def test_preempt_during_execution():
     # NOTE(woosuk): The actual number of available blocks is 10 instead of 11
     # because block 0 is reserved as the null block.
