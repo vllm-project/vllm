@@ -26,8 +26,7 @@
 namespace vllm {
 namespace prefill_attn_cdna_v2_int4 {
 
-#if defined(__HIPCC__) && \
-    (defined(__gfx90a__) || defined(__gfx942__) || defined(__gfx950__))
+#if defined(USE_ROCM)
 
 using vllm::prefill_attn_cdna::bf16_t;
 using vllm::prefill_attn_cdna::cvt_T_from_int8;
@@ -320,8 +319,8 @@ __device__ __forceinline__ void attn_step_wave_int4(
   floatx4 s_acc = {0.f, 0.f, 0.f, 0.f};
   #pragma unroll
   for (int dh = 0; dh < FRAGS; ++dh) {
-    int n  = lane / 4;
-    int k0 = (lane % 4) * 4;
+    int n  = lane % 16;
+    int k0 = (lane / 16) * 4;
     V4 b_frag;
     T* bdst = (T*)&b_frag;
     #pragma unroll
@@ -335,7 +334,7 @@ __device__ __forceinline__ void attn_step_wave_int4(
   bool k_in_seg = n_col < valid_k_count;
   #pragma unroll
   for (int i = 0; i < 4; ++i) {
-    int m_row = (lane / 16) + i * 4;
+    int m_row = (lane / 16) * 4 + i;
     bool m_in_q = m_row < valid_q_count;
     bool keep = m_in_q && k_in_seg;
     if constexpr (CAUSAL_MASK) {
@@ -368,15 +367,15 @@ __device__ __forceinline__ void attn_step_wave_int4(
 
   #pragma unroll
   for (int i = 0; i < 4; ++i) {
-    int m_row = (lane / 16) + i * 4;
+    int m_row = (lane / 16) * 4 + i;
     P_lds_wave[m_row * 16 + n_col] = from_float_rn<T>(p_ij[i]);
   }
   __syncthreads();
 
   V4 p_frag;
   {
-    int m = lane / 4;
-    int k0 = (lane % 4) * 4;
+    int m = lane % 16;
+    int k0 = (lane / 16) * 4;
     T* dst = (T*)&p_frag;
     #pragma unroll
     for (int i = 0; i < 4; ++i) dst[i] = P_lds_wave[m * 16 + k0 + i];
@@ -384,8 +383,8 @@ __device__ __forceinline__ void attn_step_wave_int4(
   #pragma unroll
   for (int dh = 0; dh < FRAGS; ++dh) {
     V4 v_frag;
-    int n  = lane / 4;
-    int k0 = (lane % 4) * 4;
+    int n  = lane % 16;
+    int k0 = (lane / 16) * 4;
     T* dst = (T*)&v_frag;
     #pragma unroll
     for (int i = 0; i < 4; ++i)
@@ -474,8 +473,8 @@ void paged_prefill_attn_kernel_v2_int4(
   V4 q_frags[FRAGS];
   #pragma unroll
   for (int dh = 0; dh < FRAGS; ++dh) {
-    int m = lane / 4;
-    int k0 = (lane % 4) * 4;
+    int m = lane % 16;
+    int k0 = (lane / 16) * 4;
     T* dst = (T*)&q_frags[dh];
     #pragma unroll
     for (int i = 0; i < 4; ++i)
@@ -545,7 +544,7 @@ void paged_prefill_attn_kernel_v2_int4(
   int col_offset = lane % 16;
   #pragma unroll
   for (int i = 0; i < 4; ++i) {
-    int m_row = (lane / 16) + i * 4;
+    int m_row = (lane / 16) * 4 + i;
     int abs_m_row = wave_q_offset + m_row;
     int abs_q_pos = q_tile_start + abs_m_row;
     if (abs_q_pos >= query_len) continue;
@@ -613,8 +612,7 @@ void paged_prefill_attn_cdna_int4(
     torch::Tensor block_table, torch::Tensor cu_seqlens_q,
     torch::Tensor seq_lens, int64_t max_query_len, double sm_scale,
     bool causal) {
-#if defined(__HIPCC__) && \
-    (defined(__gfx90a__) || defined(__gfx942__) || defined(__gfx950__))
+#if defined(USE_ROCM)
   using namespace vllm::prefill_attn_cdna_v2_int4;
   using vllm::prefill_attn_cdna::bf16_t;
 

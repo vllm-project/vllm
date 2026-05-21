@@ -97,9 +97,11 @@ __device__ __forceinline__ typename WmmaNative<T>::v4 from_b16x4(_B16x4 v) {
 
 // ---------------------------------------------------------------------------
 // MFMA wrappers (16x16x16, fp16/bf16 inputs, fp32 accumulator)
+//
+// Declarations are unconditional; the underlying `__builtin_amdgcn_mfma_*`
+// calls only get lowered during the device-side compile pass, where the
+// gfx9 arch macros are defined. The host pass compiles a stub.
 // ---------------------------------------------------------------------------
-
-#if defined(__HIP__CDNA__)
 
 template <typename T>
 __device__ __forceinline__ floatx4 mfma_16x16x16(typename WmmaNative<T>::v4 a,
@@ -112,12 +114,12 @@ __device__ __forceinline__ floatx4 mfma_16x16x16(typename WmmaNative<T>::v4 a,
   }
 }
 
-// Signed-signed int8 -> int32 16x16x16.
-// `a` and `b` are 4 int8s per lane packed into one int32.
-__device__ __forceinline__ int32x4 mfma_i32_16x16x16_i8(int32_t a, int32_t b,
-                                                        int32x4 c) {
-  return __builtin_amdgcn_mfma_i32_16x16x16i8(a, b, c, 0, 0, 0);
-}
+// NOTE: i8 MFMA wrappers intentionally omitted. The INT4 path dequantizes
+// to fp16/bf16 in LDS before the matmul (cheaper than the i8 fast path on
+// CDNA3 because each int8 → fp16 conversion is a single VALU and the
+// matmul tile size matches between the two paths). If a future iteration
+// wants i32 MFMA, on gfx942/gfx950 the K-dimension is 32 (not 16); use
+// __builtin_amdgcn_mfma_i32_16x16x32i8 there.
 
 // ---------------------------------------------------------------------------
 // Scalar conversions
@@ -194,8 +196,6 @@ __device__ __forceinline__ float wave_group16_sum(float v) {
   v += __shfl_xor(v, 8);
   return v;
 }
-
-#endif  // __HIP__CDNA__
 
 }  // namespace prefill_attn_cdna
 }  // namespace vllm

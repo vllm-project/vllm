@@ -21,8 +21,7 @@
 namespace vllm {
 namespace pth_decode_int8_cdna {
 
-#if defined(__HIPCC__) && \
-    (defined(__gfx90a__) || defined(__gfx942__) || defined(__gfx950__))
+#if defined(USE_ROCM)
 
 using vllm::prefill_attn_cdna::bf16_t;
 using vllm::prefill_attn_cdna::from_float_rn;
@@ -94,8 +93,13 @@ void pth_decode_int8_kernel(
   #pragma unroll
   for (int i = 0; i < OWN_D; ++i) o_local[i] = 0.f;
 
-  // ----- Each thread owns the K-row at positions {tid, tid+64, tid+128, ...}
-  for (int k = tid; k < seq_len; k += THREADS) {
+  // Each thread iterates ALL k positions (computing the full Q·K dot for
+  // each) and accumulates into its OWN_D output slice. This duplicates the
+  // Q·K work across threads (64× redundant for HS=128) but is the simplest
+  // correct partitioning given that each thread owns disjoint output dims
+  // (a cross-thread reduction over the output axis would otherwise need to
+  // span the full HEAD_SIZE, which doesn't fit in registers).
+  for (int k = 0; k < seq_len; ++k) {
     int log_blk = k / block_size;
     int slot = k - log_blk * block_size;
     int p_blk = block_table[seq_idx * max_blocks_per_seq + log_blk];
@@ -141,19 +145,17 @@ void pth_decode_int8_kernel(
     }
   }
 
-  // ----- Wave-wide merge into a single (m*, l*)  -----------------------
-  float m_star = wave64_max(m_local);
-  float align = (m_local == -INFINITY) ? 0.f : __expf(m_local - m_star);
-  l_local *= align;
-  float total_l = wave64_sum(l_local);
-  float inv_l = 1.f / (total_l + 1e-10f);
+  // Every thread saw all k positions, so m_local and l_local are already
+  // the global online-softmax state. No cross-thread merge needed for the
+  // output: each thread owns disjoint dims of o_local.
+  float inv_l = 1.f / (l_local + 1e-10f);
 
   T* out_row = out + (int64_t)seq_idx * stride_o_seq +
                head_idx * stride_o_head;
   #pragma unroll
   for (int i = 0; i < OWN_D; ++i) {
     int d = tid * OWN_D + i;
-    out_row[d] = from_float_rn<T>(o_local[i] * align * inv_l);
+    out_row[d] = from_float_rn<T>(o_local[i] * inv_l);
   }
 }
 
@@ -198,8 +200,7 @@ void pth_decode_int8_cdna(
     torch::Tensor v_cache, torch::Tensor k_scale_cache,
     torch::Tensor v_scale_cache, torch::Tensor block_table,
     torch::Tensor seq_lens, double sm_scale) {
-#if defined(__HIPCC__) && \
-    (defined(__gfx90a__) || defined(__gfx942__) || defined(__gfx950__))
+#if defined(USE_ROCM)
   using namespace vllm::pth_decode_int8_cdna;
   using vllm::prefill_attn_cdna::bf16_t;
 

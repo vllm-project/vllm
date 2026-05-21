@@ -27,8 +27,7 @@
 namespace vllm {
 namespace reshape_cache_int4_cdna {
 
-#if defined(__HIPCC__) && \
-    (defined(__gfx90a__) || defined(__gfx942__) || defined(__gfx950__))
+#if defined(USE_ROCM)
 
 using vllm::prefill_attn_cdna::bf16_t;
 using vllm::prefill_attn_cdna::to_float;
@@ -205,8 +204,7 @@ void reshape_and_cache_int4_cdna(
     torch::Tensor key, torch::Tensor value, torch::Tensor key_cache,
     torch::Tensor value_cache, torch::Tensor k_scale_cache,
     torch::Tensor v_scale_cache, torch::Tensor slot_mapping) {
-#if defined(__HIPCC__) && \
-    (defined(__gfx90a__) || defined(__gfx942__) || defined(__gfx950__))
+#if defined(USE_ROCM)
   using namespace vllm::reshape_cache_int4_cdna;
   using vllm::prefill_attn_cdna::bf16_t;
 

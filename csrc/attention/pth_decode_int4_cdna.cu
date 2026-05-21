@@ -16,8 +16,7 @@
 namespace vllm {
 namespace pth_decode_int4_cdna {
 
-#if defined(__HIPCC__) && \
-    (defined(__gfx90a__) || defined(__gfx942__) || defined(__gfx950__))
+#if defined(USE_ROCM)
 
 using vllm::prefill_attn_cdna::bf16_t;
 using vllm::prefill_attn_cdna::from_float_rn;
@@ -72,6 +71,8 @@ void pth_decode_int4_kernel(
     int64_t stride_o_seq, int64_t stride_o_head) {
   constexpr int BYTES_PER_ROW = HEAD_SIZE / 2;
   constexpr int OWN_BYTES = BYTES_PER_ROW / THREADS;  // bytes (= 2*OWN_D nibbles) per thread
+  static_assert(BYTES_PER_ROW >= THREADS,
+                "INT4 decode requires HEAD_SIZE >= 128 (so >=64 bytes/row)");
   static_assert(BYTES_PER_ROW % THREADS == 0,
                 "HEAD_SIZE/2 must be a multiple of 64");
   int seq_idx = blockIdx.x;
@@ -94,7 +95,9 @@ void pth_decode_int4_kernel(
   #pragma unroll
   for (int i = 0; i < OWN_BYTES * 2; ++i) o_local[i] = 0.f;
 
-  for (int k = tid; k < seq_len; k += THREADS) {
+  // Each thread iterates ALL k positions (see comment in
+  // pth_decode_int8_cdna.cu); only the V slice it owns is updated per k.
+  for (int k = 0; k < seq_len; ++k) {
     int log_blk = k / block_size;
     int slot = k - log_blk * block_size;
     int p_blk = block_table[seq_idx * max_blocks_per_seq + log_blk];
@@ -152,19 +155,17 @@ void pth_decode_int4_kernel(
     }
   }
 
-  float m_star = wave64_max(m_local);
-  float align = (m_local == -INFINITY) ? 0.f : __expf(m_local - m_star);
-  l_local *= align;
-  float total_l = wave64_sum(l_local);
-  float inv_l = 1.f / (total_l + 1e-10f);
+  // Every thread saw all k positions, so m_local and l_local are globally
+  // correct. No cross-thread merge needed for the output.
+  float inv_l = 1.f / (l_local + 1e-10f);
 
   T* out_row = out + (int64_t)seq_idx * stride_o_seq +
                head_idx * stride_o_head;
   #pragma unroll
   for (int i = 0; i < OWN_BYTES; ++i) {
     int d_base = (tid * OWN_BYTES + i) * 2;
-    out_row[d_base + 0] = from_float_rn<T>(o_local[2 * i + 0] * align * inv_l);
-    out_row[d_base + 1] = from_float_rn<T>(o_local[2 * i + 1] * align * inv_l);
+    out_row[d_base + 0] = from_float_rn<T>(o_local[2 * i + 0] * inv_l);
+    out_row[d_base + 1] = from_float_rn<T>(o_local[2 * i + 1] * inv_l);
   }
 }
 
@@ -209,8 +210,7 @@ void pth_decode_int4_cdna(
     torch::Tensor v_cache, torch::Tensor k_scale_cache,
     torch::Tensor v_scale_cache, torch::Tensor block_table,
     torch::Tensor seq_lens, double sm_scale) {
-#if defined(__HIPCC__) && \
-    (defined(__gfx90a__) || defined(__gfx942__) || defined(__gfx950__))
+#if defined(USE_ROCM)
   using namespace vllm::pth_decode_int4_cdna;
   using vllm::prefill_attn_cdna::bf16_t;
 
@@ -247,16 +247,18 @@ void pth_decode_int4_cdna(
   if (q.dtype() == at::kHalf) {
     using T = _Float16;
     switch (head_size) {
-      case 64:  LAUNCH(T, 64);  break;
       case 128: LAUNCH(T, 128); break;
-      default: TORCH_CHECK(false, "unsupported head_size=", head_size);
+      default: TORCH_CHECK(false,
+                "pth_decode_int4_cdna: unsupported head_size=", head_size,
+                " (only 128 supported; INT4 decode needs >=64 bytes/row)");
     }
   } else {
     using T = vllm::prefill_attn_cdna::bf16_t;
     switch (head_size) {
-      case 64:  LAUNCH(T, 64);  break;
       case 128: LAUNCH(T, 128); break;
-      default: TORCH_CHECK(false, "unsupported head_size=", head_size);
+      default: TORCH_CHECK(false,
+                "pth_decode_int4_cdna: unsupported head_size=", head_size,
+                " (only 128 supported; INT4 decode needs >=64 bytes/row)");
     }
   }
   #undef LAUNCH

@@ -33,8 +33,7 @@
 namespace vllm {
 namespace prefill_attn_cdna_v2_int8 {
 
-#if defined(__HIPCC__) && \
-    (defined(__gfx90a__) || defined(__gfx942__) || defined(__gfx950__))
+#if defined(USE_ROCM)
 
 using vllm::prefill_attn_cdna::bf16_t;
 using vllm::prefill_attn_cdna::cvt_T_from_int8;
@@ -291,8 +290,8 @@ __device__ __forceinline__ typename WmmaNative<T>::v4 load_mfma_a_frag(
     const T* row_base, int lane) {
   // Q is laid out as [M=16, K=16] contiguous on K. Each lane wants 4 K
   // values from row m = lane / 4, at k = (lane % 4) * 4 + [0..3].
-  int m = lane / 4;
-  int k0 = (lane % 4) * 4;
+  int m = lane % 16;
+  int k0 = (lane / 16) * 4;
   typename WmmaNative<T>::v4 frag;
   T* dst = (T*)&frag;
   #pragma unroll
@@ -300,31 +299,8 @@ __device__ __forceinline__ typename WmmaNative<T>::v4 load_mfma_a_frag(
   return frag;
 }
 
-template <typename T>
-__device__ __forceinline__ typename WmmaNative<T>::v4 load_mfma_b_frag_K(
-    const T* K_lds, int lane, int dh_offset) {
-  // K_lds is [K_TILE=16, HEAD_SIZE]. For one MFMA computing Q[16,K] @
-  // K[K,16]^T effectively (S = Q @ K_T), we treat K as B and load each
-  // lane's 4 elements as: column n = lane / 4 (one of 16 KV tokens), K
-  // index = (lane % 4) * 4 + i (one of 16 head dims within dh_offset
-  // .. dh_offset+16).
-  int n  = lane / 4;
-  int k0 = (lane % 4) * 4;
-  typename WmmaNative<T>::v4 frag;
-  T* dst = (T*)&frag;
-  #pragma unroll
-  for (int i = 0; i < 4; ++i) dst[i] = K_lds[n * /*HEAD_SIZE row stride placeholder*/16 + 0];
-  // ... See note below.
-  return frag;
-}
-
-// NOTE on the B fragment for QK:
-// The line above is a placeholder for the read of the per-(n,k) element.
-// The actual K layout in this kernel is K_lds[k_idx][d] = K[KV_token=k_idx, head_dim=d].
-// For the QK matmul we have S[m,n] = sum_k Q[m,k] * K[n,k]  (K is transposed),
-// so the B-operand element at MFMA (n, k_inner) is K_lds[n, dh_offset + k_inner].
-// The full template below uses inline loads at the call site so that the
-// HEAD_SIZE template parameter can be applied to the row stride.
+// Fragment loaders are inlined at the call site in attn_step_wave_int8 below
+// so that the HEAD_SIZE template parameter feeds into the row stride.
 
 // ---------------------------------------------------------------------------
 // attn_step (INT8 / shared with chunk path)
@@ -350,8 +326,8 @@ __device__ __forceinline__ void attn_step_wave_int8(
   floatx4 s_acc = {0.f, 0.f, 0.f, 0.f};
   #pragma unroll
   for (int dh = 0; dh < FRAGS; ++dh) {
-    int n  = lane / 4;
-    int k0 = (lane % 4) * 4;
+    int n  = lane % 16;
+    int k0 = (lane / 16) * 4;
     V4 b_frag;
     T* bdst = (T*)&b_frag;
     #pragma unroll
@@ -372,7 +348,7 @@ __device__ __forceinline__ void attn_step_wave_int8(
   bool k_in_seg = n_col < valid_k_count;
   #pragma unroll
   for (int i = 0; i < 4; ++i) {
-    int m_row = (lane / 16) + i * 4;
+    int m_row = (lane / 16) * 4 + i;
     bool m_in_q = m_row < valid_q_count;
     bool keep = m_in_q && k_in_seg;
     if constexpr (CAUSAL_MASK) {
@@ -411,7 +387,7 @@ __device__ __forceinline__ void attn_step_wave_int8(
   // P_lds_wave is [M=16, K=16], owned by this wave.
   #pragma unroll
   for (int i = 0; i < 4; ++i) {
-    int m_row = (lane / 16) + i * 4;
+    int m_row = (lane / 16) * 4 + i;
     P_lds_wave[m_row * 16 + n_col] = from_float_rn<T>(p_ij[i]);
   }
   __syncthreads();
@@ -419,8 +395,8 @@ __device__ __forceinline__ void attn_step_wave_int8(
   // P as A fragment, same load pattern as Q.
   V4 p_frag;
   {
-    int m = lane / 4;
-    int k0 = (lane % 4) * 4;
+    int m = lane % 16;
+    int k0 = (lane / 16) * 4;
     T* dst = (T*)&p_frag;
     #pragma unroll
     for (int i = 0; i < 4; ++i) dst[i] = P_lds_wave[m * 16 + k0 + i];
@@ -433,8 +409,8 @@ __device__ __forceinline__ void attn_step_wave_int8(
   #pragma unroll
   for (int dh = 0; dh < FRAGS; ++dh) {
     V4 v_frag;
-    int n  = lane / 4;
-    int k0 = (lane % 4) * 4;
+    int n  = lane % 16;
+    int k0 = (lane / 16) * 4;
     T* dst = (T*)&v_frag;
     #pragma unroll
     for (int i = 0; i < 4; ++i) {
@@ -529,8 +505,8 @@ void paged_prefill_attn_kernel_v2_int8(
   V4 q_frags[FRAGS];
   #pragma unroll
   for (int dh = 0; dh < FRAGS; ++dh) {
-    int m  = lane / 4;
-    int k0 = (lane % 4) * 4;
+    int m  = lane % 16;
+    int k0 = (lane / 16) * 4;
     T* dst = (T*)&q_frags[dh];
     #pragma unroll
     for (int i = 0; i < 4; ++i) dst[i] = Q_lds[m * HEAD_SIZE + dh * 16 + k0 + i];
@@ -617,7 +593,7 @@ void paged_prefill_attn_kernel_v2_int8(
   int col_offset = lane % 16;
   #pragma unroll
   for (int i = 0; i < 4; ++i) {
-    int m_row = (lane / 16) + i * 4;
+    int m_row = (lane / 16) * 4 + i;
     int abs_m_row = wave_q_offset + m_row;
     int abs_q_pos = q_tile_start + abs_m_row;
     if (abs_q_pos >= query_len) continue;
@@ -690,8 +666,7 @@ void paged_prefill_attn_cdna_int8(
     torch::Tensor block_table, torch::Tensor cu_seqlens_q,
     torch::Tensor seq_lens, int64_t max_query_len, double sm_scale,
     bool causal) {
-#if defined(__HIPCC__) && \
-    (defined(__gfx90a__) || defined(__gfx942__) || defined(__gfx950__))
+#if defined(USE_ROCM)
   using namespace vllm::prefill_attn_cdna_v2_int8;
   using vllm::prefill_attn_cdna::bf16_t;
 

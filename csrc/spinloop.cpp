@@ -7,7 +7,9 @@ extern "C" {
 
 #if defined(__i386__) || defined(__x86_64__)
   #include <cpuid.h>
-  #include <mwaitxintrin.h>
+  // amdclang-22 / ROCm 7.2 toolchain: the standalone <mwaitxintrin.h>
+  // errors unless reached via <x86intrin.h>.
+  #include <x86intrin.h>
 #endif
 
 #if defined(CLOCK_MONOTONIC_RAW)
