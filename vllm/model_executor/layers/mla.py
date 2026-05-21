@@ -245,7 +245,6 @@ class StaticSinkMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper)
         self.is_sparse = mla_modules.is_sparse
 
         self.mome_attn = mome_attn
-        self.prefix = prefix
 
         if self.indexer is not None:
             assert hasattr(self.indexer, "topk_tokens")
@@ -323,6 +322,7 @@ class StaticSinkMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper)
         kv_c_normed = self.kv_a_layernorm(kv_c)
 
         q = q.view(-1, self.num_heads, self.qk_head_dim)
+        # Add head dim of 1 to k_pe
         k_pe = k_pe.unsqueeze(1)
 
         if self.rotary_emb is not None:

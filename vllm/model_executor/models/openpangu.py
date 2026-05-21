@@ -377,7 +377,7 @@ def mome_attention(
         output.fill_(0)
         return
     mome_metadata = forward_context.attn_metadata[layer_name]
-    self_kv_cache = layer.kv_cache[forward_context.virtual_engine]
+    self_kv_cache = layer.kv_cache
 
     def _get_request_state_indices(state_indices: torch.Tensor) -> torch.Tensor:
         # MOME only needs one persistent state slot per request.
@@ -410,7 +410,7 @@ def mome_attention(
             (num_decode_tokens, hidden_size))
         decode_hidden_states = hidden_states[:num_decodes]
         decode_state_indices = _get_request_state_indices(
-            mome_metadata.state_indices_tensor[:num_decodes])
+            mome_metadata.state_indices_tensor_d[:num_decodes])
         if num_decodes > 0:
             prev_cache = cache[decode_state_indices, :kernel_size - 1].to(
                 hidden_states.dtype)
@@ -433,8 +433,7 @@ def mome_attention(
         prefill_hidden_states = hidden_states[num_decode_tokens:num_decode_tokens +
                                                 mome_metadata.num_prefill_tokens]
         prefill_state_indices = _get_request_state_indices(
-            mome_metadata.state_indices_tensor[
-                num_decode_tokens:num_decode_tokens + mome_metadata.num_prefills])
+            mome_metadata.state_indices_tensor_p[:mome_metadata.num_prefills])
         conv_output_list = []
         for i in range(mome_metadata.num_prefills):
             s = query_start_loc[i]
@@ -772,7 +771,7 @@ def pangu_sparse_attn_indexer(
 
     forward_context = get_forward_context()
     attn_layer = forward_context.no_compile_layers[attn_layer_name]
-    kv_cache = attn_layer.indexer.kv_cache[forward_context.virtual_engine]
+    kv_cache = attn_layer.indexer.kv_cache
     # if "model.layers.0" in attn_layer_name:
     #     print(f"[DEBUG] before first layer PanguIndexer forward, kv_cache.shape: {kv_cache.shape}, kv_cache.float().sum(): {kv_cache.float().sum()}")
 
