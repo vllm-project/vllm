@@ -183,7 +183,7 @@ class LLFp8BlockGemm:
         ).launch(
             grid=[cute.size(grid_m), cute.size(grid_n), 1],
             block=[self.num_threads, 1, 1],
-            stream=stream, use_pdl=False,
+            stream=stream, use_pdl=True,
         )
 
     @cute.kernel
@@ -284,7 +284,22 @@ class LLFp8BlockGemm:
             producer_state = pipeline.make_pipeline_state(
                 pipeline.PipelineUserType.Producer, num_stages)
 
-            for k_tile in range(k_tile_count):
+            # Peeled first iteration: preload B (weights) before
+            # waiting for quant to finish producing A (activations).
+            mainloop_pipeline.producer_acquire(producer_state)
+            cute.copy(tiled_copy_B,
+                      tBgB[None, None, None, 0],
+                      tBsB[None, None, None, producer_state.index],
+                      pred=tBpB)
+            cute.arch.griddepcontrol_wait()
+            cute.copy(tiled_copy_A,
+                      tAgA[None, None, None, 0],
+                      tAsA[None, None, None, producer_state.index],
+                      pred=tApA)
+            mainloop_pipeline.producer_commit(producer_state)
+            producer_state.advance()
+
+            for k_tile in range(1, k_tile_count):
                 mainloop_pipeline.producer_acquire(producer_state)
                 cute.copy(tiled_copy_A,
                           tAgA[None, None, None, k_tile],
@@ -431,6 +446,11 @@ class LLFp8BlockGemm:
 
                 mainloop_pipeline.consumer_release(consumer_state)
                 consumer_state.advance()
+
+            # Signal dependent kernels after GEMM is done
+            if mma_tidx == 0:
+                cute.arch.griddepcontrol_launch_dependents()
+            cute.arch.sync_threads()
 
             # Epilogue: warp reduction + global store
             smem_red_ptr = cute.arch.alloc_smem(

@@ -392,6 +392,7 @@ __global__ void per_token_group_quant_8bit_packed_register_kernel(
       static_cast<int64_t>(mn_idx) * groups_per_row * GROUP_SIZE +
       sf_k_idx * GROUP_SIZE + lane_id * VEC_SIZE;
   *reinterpret_cast<uint4*>(group_output) = packed_out;
+  asm volatile("griddepcontrol.launch_dependents;");
 }
 
 // Public entry point: register-resident packed quant kernel.
