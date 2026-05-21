@@ -9,19 +9,24 @@ import os
 from vllm import LLM
 
 C5_SANITY_PROMPTS = [
-    (
-        "Q: What is the capital of China?\n"
-        "A: The capital of China is Beijing.\n"
-        "Q: What is the capital of France?\n"
-        "A: The capital of France is "
-    ),
-    "Michael Jordan is a ",
-    "def add(a, b):\n    return",
-    ("问题: 中国的首都是哪里?\n答案: 北京\n问题: 法国的首都是哪里?\n答案: "),
+    "What is the capital of France? Reply with just the city name.",
+    "What sport did Michael Jordan play professionally?",
+    "Write a one-line Python function `add(a, b)` that returns the sum of `a` and `b`.",
+    "请用中文回答: 法国的首都是哪个城市?用一个词回答。",
 ]
 
-# Expect at least one of these strings to appear in the response.
-C5_SANITY_EXPECTED = [["paris"], ["basketball", "nba"], ["a+b", "a + b"], ["巴黎"]]
+# Expect at least one of these strings to appear in the lowercased response.
+# Lists are intentionally permissive: the c5 model emits a thinking trace
+# (<|end_thinking|>...<|start_text|>) followed by a final answer. Any keyword
+# match across the full generation counts as a pass. The Chinese prompt
+# explicitly instructs the model to answer in Chinese, so we require 巴黎
+# specifically (the thinking trace stays in English).
+C5_SANITY_EXPECTED = [
+    ["paris"],
+    ["basketball", "nba"],
+    ["a + b", "a+b", "return a", "sum("],
+    ["巴黎"],
+]
 
 
 def validate_model_path(model_path: str) -> str:

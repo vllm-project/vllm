@@ -99,7 +99,7 @@ def run_c5_lora_sanity_check_test(
     print(f"Using LoRA adapter from: {lora_path}")
     print(f"Using tensor_parallel_size: {tensor_parallel_size}")
 
-    sampling_params = SamplingParams(temperature=0.0, max_tokens=32)
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=256)
     lora_request = LoRARequest(
         lora_name="c5-adapter",
         lora_int_id=1,
