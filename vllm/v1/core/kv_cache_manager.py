@@ -220,9 +220,18 @@ class KVCacheManager:
         # num_computed_tokens to be block-size aligned. Removing this limitation
         # could slightly improve performance in the future.
         max_cache_hit_length = request.num_tokens - 1
+        # PD-pull requests do not transfer Mamba state via the KV connector,
+        # so Mamba groups must be excluded from the hybrid hit min-reduction
+        # to preserve the FullAttention prefix-cache hit on the D side.
+        skip_mamba_align = bool(
+            request.kv_transfer_params
+            and request.kv_transfer_params.get("do_remote_prefill")
+        )
         computed_blocks, num_new_computed_tokens = (
             self.coordinator.find_longest_cache_hit(
-                request.block_hashes, max_cache_hit_length
+                request.block_hashes,
+                max_cache_hit_length,
+                skip_mamba_align=skip_mamba_align,
             )
         )
 
