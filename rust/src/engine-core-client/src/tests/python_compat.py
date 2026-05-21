@@ -10,8 +10,8 @@
 
 from enum import Enum, IntEnum
 
-import msgspec
 import msgpack
+import msgspec
 import numpy as np
 
 
@@ -183,7 +183,12 @@ outputs = EngineCoreOutputs(
 )
 
 
-def encode_ndarray(array: np.ndarray, buffers: list[bytes], *, size_threshold: int = 256):
+def encode_ndarray(
+    array: np.ndarray,
+    buffers: list[bytes],
+    *,
+    size_threshold: int = 256,
+):
     arr_data = array.data if array.flags.c_contiguous else array.tobytes()
     if not array.shape or array.nbytes < size_threshold:
         data = msgpack.ExtType(3, bytes(arr_data))
@@ -193,7 +198,14 @@ def encode_ndarray(array: np.ndarray, buffers: list[bytes], *, size_threshold: i
     return [array.dtype.str, list(array.shape), data]
 
 
-def encode_tensor_like(dtype: str, shape: list[int], payload: bytes, buffers: list[bytes], *, size_threshold: int = 256):
+def encode_tensor_like(
+    dtype: str,
+    shape: list[int],
+    payload: bytes,
+    buffers: list[bytes],
+    *,
+    size_threshold: int = 256,
+):
     if len(payload) < size_threshold:
         data = msgpack.ExtType(3, payload)
     else:
@@ -208,9 +220,19 @@ def encode_output_frames(obj, *, size_threshold: int = 256) -> list[bytes]:
     def transform(value):
         if isinstance(value, np.ndarray):
             return encode_ndarray(value, buffers, size_threshold=size_threshold)
-        if isinstance(value, tuple) and len(value) == 3 and value[0] in ("int32", "int64", "float32"):
+        if (
+            isinstance(value, tuple)
+            and len(value) == 3
+            and value[0] in ("int32", "int64", "float32")
+        ):
             dtype, shape, payload = value
-            return encode_tensor_like(dtype, shape, payload, buffers, size_threshold=size_threshold)
+            return encode_tensor_like(
+                dtype,
+                shape,
+                payload,
+                buffers,
+                size_threshold=size_threshold,
+            )
         if type(value) is list:
             return [transform(v) for v in value]
         if type(value) is tuple:
@@ -223,7 +245,12 @@ def encode_output_frames(obj, *, size_threshold: int = 256) -> list[bytes]:
     return buffers
 
 
-def engine_output_wire(request_id: str, *, new_logprobs=None, new_prompt_logprobs_tensors=None):
+def engine_output_wire(
+    request_id: str,
+    *,
+    new_logprobs=None,
+    new_prompt_logprobs_tensors=None,
+):
     return [
         request_id,
         [7, 8],
@@ -266,8 +293,19 @@ inline_prompt_logprobs = engine_outputs_wire(
     engine_output_wire(
         "req-1",
         new_prompt_logprobs_tensors=(
-            ("int64", [2, 3], np.array([[10, 11, 12], [13, 14, 15]], dtype=np.int64).tobytes()),
-            ("float32", [2, 3], np.array([[10, 11, 12], [13, 14, 15]], dtype=np.float32).tobytes()),
+            (
+                "int64",
+                [2, 3],
+                np.array([[10, 11, 12], [13, 14, 15]], dtype=np.int64).tobytes(),
+            ),
+            (
+                "float32",
+                [2, 3],
+                np.array(
+                    [[10, 11, 12], [13, 14, 15]],
+                    dtype=np.float32,
+                ).tobytes(),
+            ),
             ("int64", [2], np.array([3, 4], dtype=np.int64).tobytes()),
             None,
         ),
@@ -278,8 +316,19 @@ multipart_prompt_logprobs = engine_outputs_wire(
     engine_output_wire(
         "req-1",
         new_prompt_logprobs_tensors=(
-            ("int64", [2, 3], np.array([[10, 11, 12], [13, 14, 15]], dtype=np.int64).tobytes()),
-            ("float32", [2, 3], np.array([[10, 11, 12], [13, 14, 15]], dtype=np.float32).tobytes()),
+            (
+                "int64",
+                [2, 3],
+                np.array([[10, 11, 12], [13, 14, 15]], dtype=np.int64).tobytes(),
+            ),
+            (
+                "float32",
+                [2, 3],
+                np.array(
+                    [[10, 11, 12], [13, 14, 15]],
+                    dtype=np.float32,
+                ).tobytes(),
+            ),
             ("int64", [2], np.array([3, 4], dtype=np.int64).tobytes()),
             None,
         ),
