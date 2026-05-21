@@ -333,7 +333,6 @@ jobs:
           }
 
           log_ascend_visibility before-sanitize
-          resolved_visible_devices="$(normalize_visible_devices "${ASCEND_VISIBLE_DEVICES:-}" 2>/dev/null || true)"
           resolved_rt_visible_devices="$(normalize_visible_devices "${ASCEND_RT_VISIBLE_DEVICES:-}" 2>/dev/null || true)"
           if [[ -z "${resolved_rt_visible_devices}" && -n "${ASCEND_RT_VISIBLE_DEVICES+x}" ]]; then
             unset ASCEND_RT_VISIBLE_DEVICES
