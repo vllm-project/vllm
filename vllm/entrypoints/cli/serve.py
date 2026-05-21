@@ -10,7 +10,8 @@ import uvloop
 import vllm
 import vllm.envs as envs
 from vllm.entrypoints.cli.types import CLISubcommand
-from vllm.entrypoints.openai.api_server import run_server, setup_server
+from vllm.entrypoints.openai.api_server import run_server, run_server_worker, setup_server
+from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
 from vllm.entrypoints.utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
@@ -320,3 +321,21 @@ def run_multi_api_server(args: argparse.Namespace):
             local_engine_manager.shutdown(timeout=to_timeout(shutdown_by))
         if coordinator:
             coordinator.shutdown(timeout=to_timeout(shutdown_by))
+
+
+
+def run_api_server_worker_proc(
+    listen_address, sock, args, client_config=None, **uvicorn_kwargs
+) -> None:
+    """Entrypoint for individual API server worker processes."""
+    client_config = client_config or {}
+    server_index = client_config.get("client_index", 0)
+
+    # Set process title and add process-specific prefix to stdout and stderr.
+    set_process_title("APIServer", str(server_index))
+    if getattr(args, "enable_log_prefix", True):
+        decorate_logs()
+
+    uvloop.run(
+        run_server_worker(listen_address, sock, args, client_config, **uvicorn_kwargs)
+    )
