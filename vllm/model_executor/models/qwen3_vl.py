@@ -101,6 +101,7 @@ from vllm.utils.collection_utils import is_list_of
 from vllm.utils.math_utils import round_up
 from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
 
+from ...utils.torch_utils import async_tensor_h2d
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsEagle,
@@ -1768,14 +1769,12 @@ class Qwen3VLForConditionalGeneration(
             EncoderCudaGraphConfig,
         )
 
-        modalities = ["image"]
-        # NOTE: When EVS (Efficient Video Sampling) pruning is enabled, the number
-        # of tokens becomes data-dependent (i.e., the retained tokens are
-        # dynamically selected based on inter-frame differences) and therefore
-        # cannot be captured by CUDA Graphs. As a result, video CUDA Graphs are
-        # only enabled when EVS is disabled.
-        if not self.is_multimodal_pruning_enabled:
-            modalities.append("video")
+        # When EVS pruning is enabled, embed_multimodal post-processes both
+        # image and video embeddings (mrope positions are appended for image,
+        # prune+append for video). The encoder CUDA graph path bypasses that
+        # post-process, producing inconsistent embedding formats vs eager. So
+        # disable CUDA graph for all modalities when pruning is on.
+        modalities = [] if self.is_multimodal_pruning_enabled else ["image", "video"]
 
         return EncoderCudaGraphConfig(
             modalities=modalities,
@@ -1923,7 +1922,10 @@ class Qwen3VLForConditionalGeneration(
         )
 
         spatial_merge_size = self.visual.spatial_merge_size
-        per_mm_item_output = token_budget // max_batch_size
+        # Ceil so the buffer fits the worst case of one item using the full
+        # budget. Floor under-allocates when budget is not a multiple of
+        # max_batch_size.
+        per_mm_item_output = (token_budget + max_batch_size - 1) // max_batch_size
 
         frames_per_item = max_frames_per_batch // max_batch_size
         if frames_per_item > 1:
@@ -2156,7 +2158,9 @@ class Qwen3VLForConditionalGeneration(
             grid_thw_list = grid_thw.tolist()
             image_embeds_out = []
             for emb, size in zip(image_embeds_split, grid_thw_list):
-                positions = compute_mrope_for_media(size, merge_size).to(emb.device)
+                positions = compute_mrope_for_media(size, merge_size).to(
+                    emb.device, non_blocking=True
+                )
                 positions = torch.cat(
                     [
                         positions,
@@ -2387,7 +2391,7 @@ class Qwen3VLForConditionalGeneration(
                 input_tokens=unpruned_token_ids,
                 mm_features=[mm_feature],
             )[0]
-            .to(device)
+            .to(device, non_blocking=True)
             .permute(1, 0)
         )
         full_is_video_embed = unpruned_token_ids_tensor == embed_token_id
@@ -2635,7 +2639,7 @@ class Qwen3VLForConditionalGeneration(
         )
 
         # Tensors
-        input_ids_t = torch.as_tensor(input_ids, device=device, dtype=torch.long)
+        input_ids_t = async_tensor_h2d(input_ids, device=device, dtype=torch.long)
 
         mm_embeddings_out = []
         mm_embeddings_pos = []

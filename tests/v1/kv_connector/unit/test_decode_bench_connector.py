@@ -11,7 +11,6 @@ import pytest
 import torch
 
 from vllm import SamplingParams
-from vllm.config import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 
 # ruff: noqa: E501
@@ -44,11 +43,9 @@ class DecodeBenchTestRunner:
 
         # Create vllm config with DecodeBenchConnector
         vllm_config = create_vllm_config(
-            block_size=block_size, max_num_batched_tokens=1000
-        )
-        vllm_config.kv_transfer_config = KVTransferConfig(
+            block_size=block_size,
+            max_num_batched_tokens=1000,
             kv_connector="DecodeBenchConnector",
-            kv_role="kv_both",
         )
 
         self.vllm_config = vllm_config

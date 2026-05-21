@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import Enum
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, Literal, Union
 
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
+from vllm.config import get_current_vllm_config
 from vllm.config.kernel import MoEBackend
+from vllm.config.quantization import QuantizationConfigArgs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
@@ -29,6 +31,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
     kFp8StaticTensorSym,
+    kMxfp4Dynamic,
     kMxfp4Static,
     kMxfp8Dynamic,
 )
@@ -72,11 +75,14 @@ class Mxfp4MoeBackend(Enum):
     # Keep the legacy name as an alias while the ROCm split backend rename settles.
     AITER = "AITER_MXFP4_BF16"
     AITER_MXFP4_FP8 = "AITER_MXFP4_FP8"  # W4A8: triton kernel
+    AITER_MXFP4_MXFP4 = "AITER_MXFP4_MXFP4"  # W4A4: CK kernel
     # Triton
     TRITON = "TRITON"
     TRITON_UNFUSED = "TRITON_UNFUSED"
     # XPU
     XPU = "XPU"
+    # CPU
+    CPU = "CPU"
     # Emulation
     EMULATION = "EMULATION"
     # Humming
@@ -87,6 +93,7 @@ class Mxfp4MoeBackend(Enum):
 AITER_BACKENDS = (
     Mxfp4MoeBackend.AITER_MXFP4_BF16,
     Mxfp4MoeBackend.AITER_MXFP4_FP8,
+    Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
 )
 
 
@@ -191,10 +198,22 @@ def backend_to_kernel_cls(
 
         return [AiterW4A8ExpertsMonolithic]
 
+    elif backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
+        from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+            AiterExperts,
+        )
+
+        return [AiterExperts]
+
     elif backend == Mxfp4MoeBackend.XPU:
         from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExpertsMXFp4
 
         return [XPUExpertsMXFp4]
+
+    elif backend == Mxfp4MoeBackend.CPU:
+        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import CPUExpertsMxfp4
+
+        return [CPUExpertsMxfp4]
 
     elif backend == Mxfp4MoeBackend.EMULATION:
         from vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe import (
@@ -207,25 +226,41 @@ def backend_to_kernel_cls(
         raise ValueError(f"Unknown MXFP4 MoE backend: {backend.value}")
 
 
-def map_mxfp4_backend(runner_backend: MoEBackend) -> Mxfp4MoeBackend:
-    """Map user's moe_backend string to Mxfp4MoeBackend."""
-    mapping: dict[str, Mxfp4MoeBackend] = {
-        "deep_gemm": Mxfp4MoeBackend.DEEPGEMM_MXFP4,
-        "flashinfer_trtllm": Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
-        "flashinfer_trtllm_afp8": Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
-        "flashinfer_cutlass": Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
-        "flashinfer_cutlass_afp8": Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
-        "triton": Mxfp4MoeBackend.TRITON,
-        "triton_unfused": Mxfp4MoeBackend.TRITON_UNFUSED,
-        "humming": Mxfp4MoeBackend.HUMMING,
-        "marlin": Mxfp4MoeBackend.MARLIN,
-        "aiter": Mxfp4MoeBackend.AITER_MXFP4_BF16,
-        "aiter_mxfp4_fp8": Mxfp4MoeBackend.AITER_MXFP4_FP8,
-        "xpu": Mxfp4MoeBackend.XPU,
-        "emulation": Mxfp4MoeBackend.EMULATION,
+def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
+    """Map a moe_backend string to its candidate Mxfp4MoeBackends.
+
+    Vendor families return all activation variants; the caller picks one
+    via ``activation_key`` and ``is_supported_config``.
+    """
+    mapping: dict[str, list[Mxfp4MoeBackend]] = {
+        "deep_gemm": [Mxfp4MoeBackend.DEEPGEMM_MXFP4],
+        "flashinfer_trtllm": [
+            Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
+            Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
+        ],
+        "flashinfer_trtllm_afp8": [Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8],
+        "flashinfer_cutlass": [
+            Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
+            Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
+        ],
+        "flashinfer_cutlass_afp8": [Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8],
+        "triton": [Mxfp4MoeBackend.TRITON],
+        "triton_unfused": [Mxfp4MoeBackend.TRITON_UNFUSED],
+        "humming": [Mxfp4MoeBackend.HUMMING],
+        "marlin": [Mxfp4MoeBackend.MARLIN],
+        "aiter": [
+            Mxfp4MoeBackend.AITER_MXFP4_BF16,
+            Mxfp4MoeBackend.AITER_MXFP4_FP8,
+            Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
+        ],
+        "aiter_mxfp4_fp8": [Mxfp4MoeBackend.AITER_MXFP4_FP8],
+        "aiter_mxfp4_mxfp4": [Mxfp4MoeBackend.AITER_MXFP4_MXFP4],
+        "xpu": [Mxfp4MoeBackend.XPU],
+        "cpu": [Mxfp4MoeBackend.CPU],
+        "emulation": [Mxfp4MoeBackend.EMULATION],
     }
-    if backend := mapping.get(runner_backend):
-        return backend
+    if backends := mapping.get(runner_backend):
+        return backends
     raise ValueError(
         f"moe_backend='{runner_backend}' is not supported for MXFP4 MoE. "
         f"Expected one of {list(mapping.keys())}."
@@ -233,23 +268,23 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> Mxfp4MoeBackend:
 
 
 def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
-    """
-    Get available backends in priority order based on platform and config.
-    Only includes BF16 backends. MXFP8 backends are selected via env vars.
-    """
+    """Available backends in priority order, BF16-act variant before
+    activation-quantized variant within each vendor family."""
     _AVAILABLE_BACKENDS = [
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
+        Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
         Mxfp4MoeBackend.AITER_MXFP4_BF16,
         Mxfp4MoeBackend.AITER_MXFP4_FP8,
+        Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
         Mxfp4MoeBackend.TRITON,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
+        Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
         # TRITON_UNFUSED has bug with MTP support
         # TODO re-enable after kernel is fixed
         # TRITON_UNFUSED
         Mxfp4MoeBackend.MARLIN,
         Mxfp4MoeBackend.BATCHED_MARLIN,
         Mxfp4MoeBackend.XPU,
-        Mxfp4MoeBackend.EMULATION,
     ]
     return _AVAILABLE_BACKENDS
 
@@ -285,7 +320,83 @@ def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
         return kMxfp8Dynamic
     if backend == Mxfp4MoeBackend.AITER_MXFP4_FP8:
         return kFp8StaticTensorSym
+    if backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
+        return kMxfp4Dynamic
     return None  # BF16 activation
+
+
+def _user_moe_activation_override() -> QuantKey | None:
+    """User's MoE activation override from quantization_config, or None."""
+    args = get_current_vllm_config().model_config.quantization_config
+    if not isinstance(args, QuantizationConfigArgs) or args.moe is None:
+        return None
+    return args.moe.activation
+
+
+def _resolve_activation_key(
+    model_activation_key: QuantKey | None,
+) -> QuantKey | None:
+    """Combine the model-supplied activation key with the user override.
+    Raises on conflict (both set and disagreeing)."""
+    user_override = _user_moe_activation_override()
+    if user_override is None:
+        return model_activation_key
+    if model_activation_key is None or model_activation_key == user_override:
+        return user_override
+    raise ValueError(
+        f"checkpoint declares MoE activation={model_activation_key} but "
+        f"quantization_config.moe.activation={user_override}; remove the "
+        f"override or align it with the checkpoint."
+    )
+
+
+def _make_log_backend(backend: Mxfp4MoeBackend) -> str:
+    return f"Using '{backend.value}' Mxfp4 MoE backend."
+
+
+def _make_log_unsupported(backend: Mxfp4MoeBackend, reason: str | None) -> str:
+    base = (
+        f"Mxfp4 MoE backend '{backend.value}' does not support the "
+        f"deployment configuration"
+    )
+    return f"{base} since {reason}." if reason else f"{base}."
+
+
+def _return_or_raise(
+    backend: Mxfp4MoeBackend,
+    config: FusedMoEConfig,
+    weight_key: QuantKey | None,
+    activation_key: QuantKey | None,
+    activation_format: mk.FusedMoEActivationFormat,
+    scope: Literal["process", "global", "local"] = "local",
+) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts]]:
+    reason: str | None = None
+    for k_cls in backend_to_kernel_cls(backend):
+        supported, reason = k_cls.is_supported_config(
+            k_cls, config, weight_key, activation_key, activation_format
+        )
+        if supported:
+            logger.info_once(_make_log_backend(backend), scope=scope)
+            return backend, k_cls
+    raise ValueError(_make_log_unsupported(backend, reason))
+
+
+def _filter_by_activation(
+    backends: list[Mxfp4MoeBackend],
+    requested_activation_key: QuantKey | None,
+) -> list[Mxfp4MoeBackend]:
+    """Pick variants matching ``requested_activation_key``; without one,
+    prefer BF16 if the list has any, else keep the list as-is so explicit
+    non-BF16 picks (e.g. the ``_afp8`` aliases) still land."""
+    if requested_activation_key is not None:
+        return [
+            b
+            for b in backends
+            if _backend_activation_key(b) == requested_activation_key
+            or b == Mxfp4MoeBackend.EMULATION
+        ]
+    bf16 = [b for b in backends if _backend_activation_key(b) is None]
+    return bf16 if bf16 else backends
 
 
 def select_mxfp4_moe_backend(
@@ -303,8 +414,7 @@ def select_mxfp4_moe_backend(
 
     Note: Shape-specific fallbacks may still occur at runtime.
     """
-    # If activation_key is explicitly provided (e.g., W4A8), use it
-    requested_activation_key = activation_key
+    requested_activation_key = _resolve_activation_key(activation_key)
 
     activation_format = (
         mk.FusedMoEActivationFormat.BatchedExperts
@@ -312,67 +422,55 @@ def select_mxfp4_moe_backend(
         else mk.FusedMoEActivationFormat.Standard
     )
 
-    def _make_log_backend(backend: Mxfp4MoeBackend):
-        return f"Using '{backend.value}' Mxfp4 MoE backend."
-
-    def _make_log_unsupported(backend: Mxfp4MoeBackend, reason: str | None) -> str:
-        if reason:
-            return (
-                f"Mxfp4 MoE backend '{backend.value}' does not support the "
-                f"deployment configuration since {reason}."
-            )
-        return (
-            f"Mxfp4 MoE backend '{backend.value}' does not support the "
-            "deployment configuration."
-        )
-
-    def _return_or_raise(
-        backend: Mxfp4MoeBackend,
-        config: FusedMoEConfig,
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-        activation_format: mk.FusedMoEActivationFormat,
-    ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts]]:
-        reason: str | None = None
-        for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
-                k_cls, config, weight_key, activation_key, activation_format
-            )
-            if supported:
-                logger.info_once(_make_log_backend(backend))
-                return backend, k_cls
-        raise ValueError(_make_log_unsupported(backend, reason))
-
     runner_backend = config.moe_backend
     if runner_backend != "auto":
-        requested_backend = map_mxfp4_backend(runner_backend)
-        if (
-            activation_format == mk.FusedMoEActivationFormat.BatchedExperts
-            and requested_backend == Mxfp4MoeBackend.MARLIN
-        ):
-            requested_backend = Mxfp4MoeBackend.BATCHED_MARLIN
-        # Use requested_activation_key if provided, otherwise use backend default
-        act_key = (
-            requested_activation_key
-            if requested_activation_key is not None
-            else _backend_activation_key(requested_backend)
-        )
-        return _return_or_raise(
-            requested_backend,
-            config,
-            kMxfp4Static,
-            act_key,
-            activation_format,
-        )
+        requested_backends = map_mxfp4_backend(runner_backend)
+        if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+            requested_backends = [
+                Mxfp4MoeBackend.BATCHED_MARLIN if b == Mxfp4MoeBackend.MARLIN else b
+                for b in requested_backends
+            ]
+        candidates = _filter_by_activation(requested_backends, requested_activation_key)
+        if not candidates:
+            raise ValueError(
+                f"moe_backend={runner_backend!r} does not support "
+                f"activation={requested_activation_key}; supported variants: "
+                f"{[b.name for b in requested_backends]}"
+            )
+        last_error: Exception | None = None
+        for requested_backend in candidates:
+            act_key = (
+                requested_activation_key
+                if requested_activation_key is not None
+                else _backend_activation_key(requested_backend)
+            )
+            try:
+                return _return_or_raise(
+                    requested_backend,
+                    config,
+                    kMxfp4Static,
+                    act_key,
+                    activation_format,
+                )
+            except ValueError as e:
+                last_error = e
+        assert last_error is not None
+        raise last_error
 
     # Select kernels in order of backend.
-    AVAILABLE_BACKENDS = _get_priority_backends_for_gpt_oss()
+    AVAILABLE_BACKENDS = _filter_by_activation(
+        _get_priority_backends_for_gpt_oss(), requested_activation_key
+    )
 
     # Handle explicit FlashInfer MXFP4 BF16 configuration.
     if envs.is_set("VLLM_USE_FLASHINFER_MOE_MXFP4_BF16"):
         if not envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16:
-            AVAILABLE_BACKENDS.remove(Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16)
-            AVAILABLE_BACKENDS.remove(Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16)
+            for _b in (
+                Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
+                Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
+            ):
+                if _b in AVAILABLE_BACKENDS:
+                    AVAILABLE_BACKENDS.remove(_b)
         else:
             if current_platform.is_device_capability(90):
                 return _return_or_raise(
@@ -460,9 +558,25 @@ def select_mxfp4_moe_backend(
             activation_format,
         )
 
+    if current_platform.is_cpu():
+        backend = Mxfp4MoeBackend.CPU
+        logger.info_once(_make_log_backend(backend))
+        return _return_or_raise(
+            Mxfp4MoeBackend.CPU,
+            config,
+            kMxfp4Static,
+            None,
+            activation_format,
+        )
+
     if current_platform.is_cuda() or current_platform.is_rocm():
         raise NotImplementedError(
-            "No MXFP4 MoE backend supports the deployment configuration."
+            "No MXFP4 MoE backend supports the deployment configuration. "
+            f"weight_key=kMxfp4Static, activation_key={activation_key}. "
+            "Native backends require specific hardware. "
+            "Set `VLLM_LOGGING_LEVEL=DEBUG` to see detailed unsupported reasons. "
+            "To use the emulation backend for research/debugging, pass "
+            "--moe-backend emulation."
         )
 
     return Mxfp4MoeBackend.NONE, None
@@ -481,54 +595,30 @@ def select_deepseek_v4_mxfp4_moe_backend(
         else mk.FusedMoEActivationFormat.Standard
     )
 
-    def _make_log_backend(backend: Mxfp4MoeBackend):
-        return f"Using '{backend.value}' Mxfp4 MoE backend."
-
-    def _make_log_unsupported(backend: Mxfp4MoeBackend, reason: str | None) -> str:
-        if reason:
-            return (
-                f"Mxfp4 MoE backend '{backend.value}' does not support the "
-                f"deployment configuration since {reason}."
-            )
-        return (
-            f"Mxfp4 MoE backend '{backend.value}' does not support the "
-            "deployment configuration."
-        )
-
-    def _return_or_raise(
-        backend: Mxfp4MoeBackend,
-        config: FusedMoEConfig,
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-        activation_format: mk.FusedMoEActivationFormat,
-    ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts]]:
-        reason: str | None = None
-        for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
-                k_cls, config, weight_key, activation_key, activation_format
-            )
-            if supported:
-                logger.info_once(_make_log_backend(backend), scope="local")
-                return backend, k_cls
-        raise ValueError(_make_log_unsupported(backend, reason))
-
     # Honor explicit moe_backend (e.g. "marlin", "triton_unfused") before
     # falling back to the auto priority list.
     runner_backend = config.moe_backend
     if runner_backend != "auto":
-        requested_backend = map_mxfp4_backend(runner_backend)
-        if (
-            activation_format == mk.FusedMoEActivationFormat.BatchedExperts
-            and requested_backend == Mxfp4MoeBackend.MARLIN
-        ):
-            requested_backend = Mxfp4MoeBackend.BATCHED_MARLIN
-        return _return_or_raise(
-            requested_backend,
-            config,
-            kMxfp4Static,
-            _backend_activation_key(requested_backend),
-            activation_format,
-        )
+        requested_backends = map_mxfp4_backend(runner_backend)
+        if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+            requested_backends = [
+                Mxfp4MoeBackend.BATCHED_MARLIN if b == Mxfp4MoeBackend.MARLIN else b
+                for b in requested_backends
+            ]
+        last_error: Exception | None = None
+        for requested_backend in requested_backends:
+            try:
+                return _return_or_raise(
+                    requested_backend,
+                    config,
+                    kMxfp4Static,
+                    _backend_activation_key(requested_backend),
+                    activation_format,
+                )
+            except ValueError as e:
+                last_error = e
+        assert last_error is not None
+        raise last_error
 
     # DeepSeek-V4 on ROCm is more accurate with the unfused Triton MXFP4 path
     # than the default AITER path. Prefer Triton-unfused for this routing mode,
@@ -588,6 +678,10 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
     elif current_platform.is_rocm():
         intermediate_size = round_up(intermediate_size, 256)
         hidden_size = round_up(hidden_size, 256)
+    elif backend == Mxfp4MoeBackend.CPU:
+        # CPU AMX kernel uses BLOCK_N=32, align to 32
+        intermediate_size = round_up(intermediate_size, 32)
+        hidden_size = round_up(hidden_size, 32)
     else:
         intermediate_size = round_up(intermediate_size, 64)
     return hidden_size, intermediate_size
@@ -856,29 +950,75 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         else:
             assert mxfp4_backend == Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16
 
-            def _interleave_mxfp4_cutlass_sm90(w):
-                w_shape = w.shape
-                w_interleaved = w.reshape(w_shape[0], w_shape[1], (w_shape[2] // 4), 4)
-                w_interleaved = w_interleaved.permute(0, 2, 1, 3)
-                w_interleaved = w_interleaved.reshape(
-                    w_shape[0], w_shape[2] // 4, w_shape[1] * 4
-                )
-                return w_interleaved
+            from flashinfer.fused_moe import (
+                interleave_moe_scales_for_sm90_mixed_gemm,
+                interleave_moe_weights_for_sm90_mixed_gemm,
+            )
 
-            w31_scales = w13_scale_swapped.to(torch.uint8)
-            w31_scales_interleaved = _interleave_mxfp4_cutlass_sm90(w31_scales)
-
-            w2_scale = w2_weight_scale.data.to(torch.uint8)
-            w2_scale_interleaved = _interleave_mxfp4_cutlass_sm90(w2_scale)
+            w13_weight_interleaved = interleave_moe_weights_for_sm90_mixed_gemm(
+                w13_weight_swapped.contiguous(), "fp4"
+            )
+            w2_weight_interleaved = interleave_moe_weights_for_sm90_mixed_gemm(
+                w2_weight.contiguous(), "fp4"
+            )
+            w31_scales_interleaved = interleave_moe_scales_for_sm90_mixed_gemm(
+                w13_scale_swapped.to(torch.uint8)
+            )
+            w2_scale_interleaved = interleave_moe_scales_for_sm90_mixed_gemm(
+                w2_weight_scale.data.to(torch.uint8)
+            )
 
             return (
-                w13_weight_swapped,
-                w2_weight,
+                w13_weight_interleaved,
+                w2_weight_interleaved,
                 w31_scales_interleaved,
                 w2_scale_interleaved,
                 w13_bias_swapped,
                 w2_bias,
             )
+
+    elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        if w13_bias is not None:
+            w13_bias = w13_bias.data.to(torch.float32)
+        if w2_bias is not None:
+            w2_bias = w2_bias.data.to(torch.float32)
+
+        # e8m0_shuffle on weight scales (GFX950 swizzle layout)
+        from aiter.utility.fp4_utils import e8m0_shuffle
+
+        s0, s1, _ = w13_weight_scale.shape
+        w13_weight_scale.data = e8m0_shuffle(w13_weight_scale.view(s0 * s1, -1)).view(
+            s0, s1, -1
+        )
+
+        s0, s1, _ = w2_weight_scale.shape
+        w2_weight_scale.data = e8m0_shuffle(w2_weight_scale.view(s0 * s1, -1)).view(
+            s0, s1, -1
+        )
+
+        # View as native FP4 dtype
+        fp4_dtype = getattr(torch, "float4_e2m1fn_x2", None)
+        if fp4_dtype is not None:
+            w13_weight.data = w13_weight.data.view(fp4_dtype)
+            w2_weight.data = w2_weight.data.view(fp4_dtype)
+
+        # Shuffle weights for AITER CK kernel
+        shuffled_w13, shuffled_w2 = rocm_aiter_ops.shuffle_weights(
+            w13_weight, w2_weight
+        )
+        shuffled_w13.is_shuffled = True
+        shuffled_w2.is_shuffled = True
+
+        return (
+            shuffled_w13,
+            shuffled_w2,
+            w13_weight_scale,
+            w2_weight_scale,
+            w13_bias,
+            w2_bias,
+        )
 
     elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16:
         from vllm._aiter_ops import rocm_aiter_ops
@@ -1041,6 +1181,31 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             w2_weight,
             w13_weight_scale,
             w2_weight_scale,
+            w13_bias,
+            w2_bias,
+        )
+    elif mxfp4_backend == Mxfp4MoeBackend.CPU:
+        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+            prepare_mxfp4_moe_layer_for_cpu,
+        )
+
+        packed_w13, packed_w2, packed_w13_scale, packed_w2_scale = (
+            prepare_mxfp4_moe_layer_for_cpu(
+                w13_weight.data,
+                w2_weight.data,
+                w13_weight_scale.data,
+                w2_weight_scale.data,
+            )
+        )
+        if w13_bias is not None:
+            w13_bias = w13_bias.data.to(torch.float32)
+        if w2_bias is not None:
+            w2_bias = w2_bias.data.to(torch.float32)
+        return (
+            packed_w13,
+            packed_w2,
+            packed_w13_scale,
+            packed_w2_scale,
             w13_bias,
             w2_bias,
         )
@@ -1437,6 +1602,18 @@ def make_mxfp4_moe_quant_config(
             w1_bias=w1_bias,
             w2_bias=w2_bias,
             block_shape=None,
+            gemm1_clamp_limit=swiglu_limit,
+        )
+    elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
+        return ocp_mx_moe_quant_config(
+            quant_dtype="mxfp4",
+            w1_bias=w1_bias,
+            w2_bias=w2_bias,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            gemm1_alpha=gemm1_alpha,
+            gemm1_beta=gemm1_beta,
+            gemm1_clamp_limit=swiglu_limit,
         )
     elif mxfp4_backend in (
         Mxfp4MoeBackend.MARLIN,
@@ -1446,6 +1623,7 @@ def make_mxfp4_moe_quant_config(
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
         Mxfp4MoeBackend.AITER_MXFP4_BF16,
+        Mxfp4MoeBackend.CPU,
     ):
         return mxfp4_w4a16_moe_quant_config(
             w1_bias=w1_bias,
@@ -1463,7 +1641,12 @@ def make_mxfp4_moe_quant_config(
         )
 
         assert isinstance(layer, FusedMoE)
-        return get_humming_moe_quant_config(layer)
+        return get_humming_moe_quant_config(
+            layer,
+            gemm1_alpha=gemm1_alpha,
+            gemm1_beta=gemm1_beta,
+            gemm1_clamp_limit=swiglu_limit,
+        )
     else:
         return ocp_mx_moe_quant_config(
             quant_dtype="mxfp4",
