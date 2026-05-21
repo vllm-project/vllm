@@ -94,6 +94,47 @@ RUN cat torch_build_versions.txt
 
 #################### BASE BUILD IMAGE ####################
 
+#################### RUST BUILD IMAGE ####################
+# Build the Rust frontend (`vllm-rs`) in a dedicated stage so the wheel build
+# stage doesn't need the rust toolchain or protoc.
+FROM ubuntu:22.04 AS rust-build
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update -y \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates curl git build-essential \
+        protobuf-compiler libprotobuf-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install rustup; the toolchain itself is pinned by rust/rust-toolchain.toml.
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --profile minimal --default-toolchain none
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+WORKDIR /workspace
+
+COPY rust rust
+
+# Fail loudly if the rust submodule was not initialized on the host before
+# `docker build`.
+RUN if [ ! -f rust/Cargo.toml ]; then \
+        echo "ERROR: rust/ submodule is not initialized."; \
+        echo "Run 'git submodule update --init --recursive' on the host before building."; \
+        exit 1; \
+    fi
+
+# Cap cargo parallelism to avoid exhausting the CI host's open-file limit
+# (rustc spawns enough concurrent processes to hit RLIMIT_NOFILE otherwise).
+ENV CARGO_BUILD_JOBS=4
+
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    --mount=type=cache,target=/workspace/rust/target \
+    cd rust \
+    && cargo build --release --bin vllm-rs --features native-tls-vendored \
+    && cp target/release/vllm-rs /workspace/vllm-rs
+#################### RUST BUILD IMAGE ####################
+
 #################### WHEEL BUILD IMAGE ####################
 FROM base AS build
 ARG TARGETPLATFORM
@@ -103,6 +144,10 @@ ARG TARGETPLATFORM
 ENV UV_HTTP_TIMEOUT=500
 
 COPY . .
+
+# Drop the pre-built rust frontend binary into the source tree. setup.py
+# detects it and ships it as-is, skipping the local cargo build.
+COPY --from=rust-build /workspace/vllm-rs vllm/vllm-rs
 
 RUN python3 use_existing_torch.py
 
