@@ -1306,6 +1306,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 w2_bias=getattr(layer, "w2_bias", None),
                 a1_scale=getattr(layer, "w13_input_scale", None),
                 a2_scale=getattr(layer, "w2_input_scale", None),
+                layer=layer,
             )
 
         # Emulation and other schemes

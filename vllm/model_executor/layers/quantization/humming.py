@@ -19,9 +19,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.oracle.humming import (
+    get_humming_moe_quant_config,
     make_humming_moe_kernel,
     # convert_to_humming_moe_kernel_format,
-    make_humming_moe_quant_config,
     select_humming_moe_backend,
 )
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
@@ -764,10 +764,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
         layer.register_buffer("locks", locks)
 
     def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
-        return make_humming_moe_quant_config(
-            self.backend,
-            layer,
-        )
+        return get_humming_moe_quant_config(layer)
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         if getattr(self, "processed", False):

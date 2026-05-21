@@ -14,8 +14,12 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import (
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantDesc,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    QuantKey,
+)
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_humming
 
@@ -24,7 +28,6 @@ if has_humming() and current_platform.is_cuda():
         BatchedHummingGroupedExperts,
         HummingGroupedExperts,
         HummingIndexedExperts,
-        get_humming_moe_gemm_type,
     )
 
 
@@ -36,9 +39,7 @@ logger = init_logger(__name__)
 
 class HummingBackend(Enum):
     NONE = "NONE"
-    BATCHED_HUMMING = "BATCHED_HUMMING"
-    HUMMING_GROUPED = "HUMMING_GROUPED"
-    HUMMING_INDEXED = "HUMMING_INDEXED"
+    HUMMING = "HUMMING"
 
 
 def _get_priority_backends(
@@ -51,38 +52,29 @@ def _get_priority_backends(
 
     This function can be extended to become more complex as needed.
     """
-
-    _AVAILABLE_BACKENDS = []
-
     if has_humming():
-        _AVAILABLE_BACKENDS.append(HummingBackend.BATCHED_HUMMING)
-
-        if get_humming_moe_gemm_type() == "indexed":
-            _AVAILABLE_BACKENDS.append(HummingBackend.HUMMING_INDEXED)
-        else:
-            _AVAILABLE_BACKENDS.append(HummingBackend.HUMMING_GROUPED)
-
-    return _AVAILABLE_BACKENDS
+        return [HummingBackend.HUMMING]
+    else:
+        return []
 
 
 def backend_to_kernel_cls(
     backend: HummingBackend,
 ) -> list[type[mk.FusedMoEExperts]]:
-    backend_map: dict[HummingBackend, type[mk.FusedMoEExperts]] = {
-        HummingBackend.BATCHED_HUMMING: BatchedHummingGroupedExperts,
-        HummingBackend.HUMMING_GROUPED: HummingGroupedExperts,
-        HummingBackend.HUMMING_INDEXED: HummingIndexedExperts,
+    backend_map: dict[HummingBackend, list[type[mk.FusedMoEExperts]]] = {
+        HummingBackend.HUMMING: [
+            BatchedHummingGroupedExperts,
+            HummingGroupedExperts,
+            HummingIndexedExperts,
+        ],
     }
-    return [backend_map[backend]]
+    return backend_map[backend]
 
 
 def map_humming_backend(runner_backend: MoEBackend) -> HummingBackend:
     """Map user's MoEBackend to HummingBackend."""
     mapping = {
-        "batched_humming": HummingBackend.BATCHED_HUMMING,
-        "humming_grouped": HummingBackend.HUMMING_GROUPED,
-        "humming_grouped_contiguous": HummingBackend.HUMMING_GROUPED,
-        "humming_indexed": HummingBackend.HUMMING_INDEXED,
+        "humming": HummingBackend.HUMMING,
     }
     if backend := mapping.get(runner_backend):
         return backend
@@ -153,13 +145,6 @@ def select_humming_moe_backend(
     runner_backend = config.moe_backend
     if runner_backend != "auto":
         requested_backend = map_humming_backend(runner_backend)
-        # For batched activation format, use batched variants if available.
-        if (
-            activation_format == mk.FusedMoEActivationFormat.BatchedExperts
-            and requested_backend == HummingBackend.HUMMING_GROUPED
-        ):
-            requested_backend = HummingBackend.BATCHED_HUMMING
-
         return _return_or_raise(
             requested_backend, config, weight_key, activation_key, activation_format
         )
@@ -197,14 +182,96 @@ def convert_to_humming_moe_kernel_format(
 
 
 def make_humming_moe_quant_config(
-    backend: HummingBackend,
-    layer: "RoutedExperts",
+    quant_dtype: torch.dtype | str | None,
+    weight_dtype: torch.dtype | str | None,
+    weight_group_shape: GroupShape | None = None,
+    w1_scale: torch.Tensor | None = None,
+    w2_scale: torch.Tensor | None = None,
+    w1_zp: torch.Tensor | None = None,
+    w2_zp: torch.Tensor | None = None,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
+    w1_gscale: torch.Tensor | None = None,
+    w2_gscale: torch.Tensor | None = None,
+    gemm1_alpha: float | None = None,
+    gemm1_beta: float | None = None,
+    gemm1_clamp_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
-    from vllm.model_executor.layers.quantization.utils.humming_utils import (
-        get_humming_moe_quant_config,
+    if quant_dtype is None:
+        a_quant_desc = FusedMoEQuantDesc(dtype=None)
+    else:
+        shape = GroupShape(row=1, col=-1)
+        a_quant_desc = FusedMoEQuantDesc(dtype=quant_dtype, shape=shape)
+
+    w1_quant_desc = FusedMoEQuantDesc(
+        dtype=weight_dtype,
+        shape=weight_group_shape,
+        scale=w1_scale,
+        alpha_or_gscale=w1_gscale,
+        zp=w1_zp,
+        bias=w1_bias,
     )
 
-    return get_humming_moe_quant_config(layer)
+    w2_quant_desc = FusedMoEQuantDesc(
+        dtype=weight_dtype,
+        shape=weight_group_shape,
+        scale=w2_scale,
+        alpha_or_gscale=w2_gscale,
+        zp=w2_zp,
+        bias=w2_bias,
+    )
+
+    return FusedMoEQuantConfig(
+        _a1=a_quant_desc,
+        _a2=a_quant_desc,
+        _w1=w1_quant_desc,
+        _w2=w2_quant_desc,
+        gemm1_alpha=gemm1_alpha,
+        gemm1_beta=gemm1_beta,
+        gemm1_clamp_limit=gemm1_clamp_limit,
+    )
+
+
+def get_humming_moe_quant_config(
+    layer: "RoutedExperts",
+    gemm1_alpha: float | None = None,
+    gemm1_beta: float | None = None,
+    gemm1_clamp_limit: float | None = None,
+):
+    input_schema = layer.input_schemas["w13"]
+    weight_schema = layer.weight_schemas["w13"]
+
+    if input_schema.a_dtype is None or input_schema.a_dtype.num_bits == 16:
+        q_dtype = None
+    else:
+        q_dtype = str(input_schema.a_dtype)
+
+    weight_scale_group_size = weight_schema.weight_scale_group_size
+    weight_scale_group_size_n = weight_schema.weight_scale_group_size_n
+    weight_group_shape: tuple[int, ...] = ()
+    if weight_scale_group_size_n > 1:
+        weight_group_shape = GroupShape(
+            row=weight_scale_group_size,
+            col=weight_scale_group_size_n,
+        )
+    elif weight_scale_group_size == 0:
+        weight_group_shape = GroupShape(row=-1, col=1)
+    else:
+        weight_group_shape = GroupShape(row=weight_scale_group_size, col=1)
+
+    return make_humming_moe_quant_config(
+        quant_dtype=q_dtype,
+        weight_dtype=str(weight_schema.b_dtype),
+        weight_group_shape=weight_group_shape,
+        w1_scale=getattr(layer, "w13_weight_scale", None),
+        w1_gscale=getattr(layer, "w13_global_scale", None),
+        w1_zp=getattr(layer, "w13_zero_point", None),
+        w1_bias=getattr(layer, "w13_bias", None),
+        w2_scale=getattr(layer, "w2_weight_scale", None),
+        w2_gscale=getattr(layer, "w2_global_scale", None),
+        w2_zp=getattr(layer, "w2_zero_point", None),
+        w2_bias=getattr(layer, "w2_bias", None),
+    )
 
 
 def make_humming_moe_kernel(

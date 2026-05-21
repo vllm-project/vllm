@@ -8,13 +8,8 @@ from humming.layer import HummingInputSchema, HummingMethod
 from humming.schema import BaseWeightSchema
 
 from vllm import envs
-from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEQuantConfig,
-    FusedMoEQuantDesc,
-)
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.linear import LinearBase
-from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 
 
 def humming_is_layer_skipped(config: dict[str, Any], prefix: str):
@@ -162,61 +157,3 @@ def prepare_humming_moe_layer(layer: RoutedExperts, quant_config: dict):
         device = layer.w13_weight.device
         locks = torch.zeros(1024, dtype=torch.int32, device=device)
         layer.register_buffer("locks", locks)
-
-
-def get_humming_moe_quant_config(
-    layer: RoutedExperts,
-    gemm1_alpha: float | None = None,
-    gemm1_beta: float | None = None,
-    gemm1_clamp_limit: float | None = None,
-):
-    input_schema = layer.input_schemas["w13"]
-    weight_schema = layer.weight_schemas["w13"]
-
-    a_dtype = input_schema.a_dtype
-    if a_dtype is None or a_dtype.num_bits == 16:
-        a_quant_desc = FusedMoEQuantDesc(dtype=None)
-    else:
-        shape = GroupShape(row=1, col=-1)
-        a_quant_desc = FusedMoEQuantDesc(dtype=str(a_dtype), shape=shape)
-
-    weight_scale_group_size = weight_schema.weight_scale_group_size
-    weight_scale_group_size_n = weight_schema.weight_scale_group_size_n
-    weight_group_shape: tuple[int, ...] = ()
-    if weight_scale_group_size_n > 1:
-        weight_group_shape = GroupShape(
-            row=weight_scale_group_size,
-            col=weight_scale_group_size_n,
-        )
-    elif weight_scale_group_size == 0:
-        weight_group_shape = GroupShape(row=-1, col=1)
-    else:
-        weight_group_shape = GroupShape(row=weight_scale_group_size, col=1)
-
-    w1_quant_desc = FusedMoEQuantDesc(
-        dtype=str(weight_schema.b_dtype),
-        shape=weight_group_shape,
-        scale=getattr(layer, "w13_weight_scale", None),
-        alpha_or_gscale=getattr(layer, "w13_global_scale", None),
-        zp=getattr(layer, "w13_zero_point", None),
-        bias=getattr(layer, "w13_bias", None),
-    )
-
-    w2_quant_desc = FusedMoEQuantDesc(
-        dtype=str(weight_schema.b_dtype),
-        shape=weight_group_shape,
-        scale=getattr(layer, "w2_weight_scale", None),
-        alpha_or_gscale=getattr(layer, "w2_global_scale", None),
-        zp=getattr(layer, "w2_zero_point", None),
-        bias=getattr(layer, "w2_bias", None),
-    )
-
-    return FusedMoEQuantConfig(
-        _a1=a_quant_desc,
-        _a2=a_quant_desc,
-        _w1=w1_quant_desc,
-        _w2=w2_quant_desc,
-        gemm1_alpha=gemm1_alpha,
-        gemm1_beta=gemm1_beta,
-        gemm1_clamp_limit=gemm1_clamp_limit,
-    )
