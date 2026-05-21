@@ -87,6 +87,7 @@ if TYPE_CHECKING:
     MAX_JOBS: str | None = None
     NVCC_THREADS: str | None = None
     VLLM_USE_PRECOMPILED: bool = False
+    VLLM_USE_PRECOMPILED_RUST: bool = False
     VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX: bool = False
     VLLM_DOCKER_BUILD_CONTEXT: bool = False
     VLLM_KEEP_ALIVE_ON_ENGINE_DEATH: bool = False
@@ -135,6 +136,8 @@ if TYPE_CHECKING:
     Q_SCALE_CONSTANT: int = 200
     K_SCALE_CONSTANT: int = 200
     V_SCALE_CONSTANT: int = 100
+    VLLM_USE_RUST_FRONTEND: bool = False
+    VLLM_RUST_FRONTEND_PATH: str | None = "auto"
     VLLM_SERVER_DEV_MODE: bool = False
     VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
     VLLM_MLA_DISABLE: bool = False
@@ -210,6 +213,8 @@ if TYPE_CHECKING:
     ] = "NONE"
     VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16: bool = True
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: int | None = None
+    VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_MB: int | None = None
+    VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB: int | None = None
     VLLM_MORIIO_CONNECTOR_READ_MODE: bool = False
     VLLM_MORIIO_QP_PER_TRANSFER: int = 1
     VLLM_MORIIO_POST_BATCH_SIZE: int = -1
@@ -534,6 +539,40 @@ def get_env_or_set_default(
 
 logger = logging.getLogger(__name__)
 
+
+def _resolve_rust_frontend_path() -> str | None:
+    """Resolve the Rust frontend binary path.
+
+    Returns None if VLLM_USE_RUST_FRONTEND is not enabled.
+    When enabled, resolves VLLM_RUST_FRONTEND_PATH ("auto" by default)
+    to the actual binary path.
+    """
+    use_rust = bool(int(os.environ.get("VLLM_USE_RUST_FRONTEND", "0")))
+    raw = os.environ.get("VLLM_RUST_FRONTEND_PATH", "auto")
+
+    if not use_rust:
+        if os.environ.get("VLLM_RUST_FRONTEND_PATH") is not None:
+            logger.warning(
+                "VLLM_RUST_FRONTEND_PATH is set but VLLM_USE_RUST_FRONTEND "
+                "is not enabled. The Rust frontend will not be used. "
+                "Set VLLM_USE_RUST_FRONTEND=1 to enable it."
+            )
+        return None
+
+    if raw.lower() in ("auto", "1", "true"):
+        pkg_dir = os.path.dirname(os.path.abspath(__file__))
+        candidate = os.path.join(pkg_dir, "vllm-rs")
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+
+        raise FileNotFoundError(
+            "VLLM_RUST_FRONTEND_PATH=auto but the vllm-rs binary was "
+            f"not found at {candidate}. "
+            "Build with setuptools-rust or set the path explicitly."
+        )
+    return raw
+
+
 environment_variables: dict[str, Callable[[], Any]] = {
     # ================== Installation Time Env Vars ==================
     # Target device of vLLM, supporting [cuda (by default),
@@ -571,10 +610,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default this is 1.
     # If set, `MAX_JOBS` will be reduced to avoid oversubscribing the CPU.
     "NVCC_THREADS": lambda: os.getenv("NVCC_THREADS", None),
-    # If set, vllm will use precompiled binaries (*.so)
+    # If set, vllm will use precompiled native binaries (*.so and vllm-rs).
     "VLLM_USE_PRECOMPILED": lambda: (
         os.environ.get("VLLM_USE_PRECOMPILED", "").strip().lower() in ("1", "true")
         or bool(os.environ.get("VLLM_PRECOMPILED_WHEEL_LOCATION"))
+    ),
+    # If set, vllm will use the precompiled Rust frontend binary (vllm-rs).
+    "VLLM_USE_PRECOMPILED_RUST": lambda: (
+        os.environ.get("VLLM_USE_PRECOMPILED_RUST", "").strip().lower() in ("1", "true")
     ),
     # If set, skip adding +precompiled suffix to version string
     "VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX": lambda: bool(
@@ -1144,6 +1187,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB": lambda: maybe_convert_int(
         os.environ.get("VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB", None)
     ),
+    # Custom quick allreduce kernel for MI3* cards.
+    # Controls the minimum allowed number of data bytes(MB) required to use
+    # custom quick allreduce communication.
+    # If unset, use the built-in threshold table.
+    "VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_MB": lambda: maybe_convert_int(
+        os.environ.get("VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_MB", None)
+    ),
+    # Controls the minimum tensor size (KB, where 1 KB = 1024 bytes) required
+    # to use the configured QuickReduce codec. Smaller tensors use FP
+    # QuickReduce. This does not affect QuickReduce eligibility.
+    "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB": lambda: maybe_convert_int(
+        os.environ.get("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB", None)
+    ),
     # Divisor for dynamic query scale factor calculation for FP8 KV Cache
     "Q_SCALE_CONSTANT": lambda: int(os.getenv("Q_SCALE_CONSTANT", "200")),
     # Divisor for dynamic key scale factor calculation for FP8 KV Cache
@@ -1161,6 +1217,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set to "0", disable LayerName opaque type for layer_name
     # parameters in custom ops.  Defaults to enabled on torch >= 2.11.
     "VLLM_USE_LAYERNAME": lambda: bool(int(os.getenv("VLLM_USE_LAYERNAME", "1"))),
+    # If set, use the Rust frontend binary instead of the Python API server
+    # process(es).
+    "VLLM_USE_RUST_FRONTEND": lambda: bool(
+        int(os.getenv("VLLM_USE_RUST_FRONTEND", "0"))
+    ),
+    # Path to the Rust frontend binary. Defaults to "auto" which discovers
+    # the binary installed with the vllm package. Only used when
+    # VLLM_USE_RUST_FRONTEND=1.
+    "VLLM_RUST_FRONTEND_PATH": lambda: _resolve_rust_frontend_path(),
     # If set, vllm will run in development mode, which will enable
     # some additional endpoints for developing and debugging,
     # e.g. `/reset_prefix_cache`
@@ -1612,6 +1677,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
             "VLLM_NVFP4_GEMM_BACKEND",
             None,
             [
+                "flashinfer-b12x",
                 "flashinfer-cudnn",
                 "flashinfer-trtllm",
                 "flashinfer-cutlass",

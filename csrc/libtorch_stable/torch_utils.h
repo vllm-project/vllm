@@ -6,8 +6,12 @@
 #include <torch/csrc/stable/tensor.h>
 #include <torch/headeronly/util/shim_utils.h>
 
+#ifndef USE_ROCM
+  #include <cuda_runtime.h>
+#else
+  #include <hip/hip_runtime.h>
+#endif
 #include <cublas_v2.h>
-#include <cuda_runtime.h>
 
 #include <deque>
 #include <mutex>
