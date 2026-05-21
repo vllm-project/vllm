@@ -273,11 +273,17 @@ class MooncakeStoreScheduler:
                         if self._discard_partial_chunks
                         else len(prefill_tokens)
                     )
+                    # When a load is also issued in this step, skip the save
+                    # to avoid co-queuing recv+send for the same req_id (see
+                    # comment in the load-only branch below).
+                    skip_save_this_step = force_skip_save or (
+                        load_spec is not None and load_spec.can_load
+                    )
                     req_meta = ReqMeta.from_request_tracker(
                         request_tracker,
                         self._block_size,
                         load_spec=load_spec,
-                        skip_save=force_skip_save,
+                        skip_save=skip_save_this_step,
                         block_hashes=request_real.block_hashes,
                         is_last_chunk=(
                             request_tracker.token_len >= last_chunk_tokens_num
@@ -352,11 +358,16 @@ class MooncakeStoreScheduler:
                     num_saved_tokens=0,
                 )
                 self._request_trackers[request_id] = request_tracker
+                # skip_save=True: co-queuing a save with a load makes the
+                # worker produce both finished_recving and finished_sending
+                # for the same req_id, which double-frees in
+                # _update_from_kv_xfer_finished. Saves resume normally on
+                # later cached_reqs steps as new tokens are computed.
                 req_meta = ReqMeta.from_request_tracker(
                     request_tracker,
                     self._block_size,
                     load_spec=load_spec,
-                    skip_save=None,
+                    skip_save=True,
                     block_hashes=unfinished_req.block_hashes,
                     discard_partial_chunks=self._discard_partial_chunks,
                 )
