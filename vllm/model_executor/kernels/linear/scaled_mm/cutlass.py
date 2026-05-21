@@ -17,6 +17,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     convert_to_channelwise,
 )
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from .BlockScaledMMLinearKernel import Fp8BlockScaledMMLinearKernel
@@ -155,7 +156,11 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     def __init__(
         self, c: FP8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
     ) -> None:
-        self.logical_output_size: int | None = None
+        # Padded buffers cached at load time. Held here rather than swapped
+        # into layer.weight so weight reload (which expects the original
+        # shape) keeps working.
+        self._padded_weight: torch.Tensor | None = None
+        self._padded_weight_scale: torch.Tensor | None = None
         super().__init__(c, layer_param_names)
 
     @classmethod
@@ -185,31 +190,32 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return torch.nn.functional.pad(x, pad_spec, value=value)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # Reset caches first so a reload that lands on an aligned shape (or a
+        # smaller one) clears any stale buffers from a prior load.
+        self._padded_weight = None
+        self._padded_weight_scale = None
+
         weight_name, weight_scale_name, _, _ = self.layer_param_names
         weight = getattr(layer, weight_name)
 
-        # keep the logical output width so runtime can slice away static padding.
-        self.logical_output_size = weight.shape[1]
-
-        pad_k = (16 - weight.shape[0] % 16) % 16
-        pad_n = (16 - weight.shape[1] % 16) % 16
+        pad_k = round_up(weight.shape[0], 16) - weight.shape[0]
+        pad_n = round_up(weight.shape[1], 16) - weight.shape[1]
         if pad_k == 0 and pad_n == 0:
             return
 
-        # B is column-major [K, N]
-        padded_weight = torch.nn.functional.pad(
+        # B is column-major [K, N]; pad once here so apply_scaled_mm only
+        # pads activations.
+        self._padded_weight = torch.nn.functional.pad(
             weight.t().contiguous(),
             (0, pad_k, 0, pad_n),
         ).t()
-        replace_parameter(layer, weight_name, padded_weight.data)
 
         weight_scale = getattr(layer, weight_scale_name, None)
         if weight_scale is not None and pad_n > 0 and weight_scale.numel() > 1:
             flat_scale = weight_scale.reshape(-1)
-            padded_scale = self._pad_to_alignment(
+            self._padded_weight_scale = self._pad_to_alignment(
                 flat_scale, dim=0, alignment=16, value=1.0
             ).view(-1, *weight_scale.shape[1:])
-            replace_parameter(layer, weight_scale_name, padded_scale.data)
 
     def apply_scaled_mm(
         self,
@@ -222,11 +228,12 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         bias: torch.Tensor | None,
         output_shape: list,
     ) -> torch.Tensor:
-        padded_k, padded_n = B.shape
-        output_size = self.logical_output_size
-        assert output_size is not None
-        pad_k = padded_k - A.shape[1]
-        pad_n = padded_n - output_size
+        B = self._padded_weight if self._padded_weight is not None else B
+        Bs = self._padded_weight_scale if self._padded_weight_scale is not None else Bs
+
+        output_size = output_shape[-1]
+        pad_k = B.shape[0] - A.shape[1]
+        pad_n = B.shape[1] - output_size
 
         if pad_k > 0:
             A = self._pad_to_alignment(A, dim=1, alignment=16)
@@ -240,7 +247,7 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         if pad_n > 0:
             output = output[..., :output_size].contiguous()
 
-        return output.view(*output_shape[:-1], output_size)
+        return output.view(*output_shape)
 
 
 class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
