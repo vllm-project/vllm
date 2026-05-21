@@ -419,7 +419,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
             replace_parameter(layer, "w2_qzeros", w2_qzeros)
 
         # Marlin-specific parameters (not needed for Flashinfer)
-        if self.wna16_backend != WNA16MoEBackend.FLASHINFER:
+        if self.wna16_backend != WNA16MoEBackend.FLASHINFER_TRTLLM:
             replace_parameter(layer, "w13_g_idx", w13_g_idx_processed)
             replace_parameter(layer, "w2_g_idx", w2_g_idx_processed)
             replace_parameter(layer, "w13_g_idx_sort_indices", w13_g_idx_sort_indices)

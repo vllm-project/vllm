@@ -46,7 +46,7 @@ logger = init_logger(__name__)
 class WNA16MoEBackend(Enum):
     MARLIN = "MARLIN"
     BATCHED_MARLIN = "BATCHED_MARLIN"
-    FLASHINFER = "FLASHINFER_TRTLLM"
+    FLASHINFER_TRTLLM = "FLASHINFER_TRTLLM"
     TRITON = "TRITON"
 
 
@@ -79,7 +79,7 @@ def _get_priority_backends(
         _AVAILABLE_BACKENDS.append(WNA16MoEBackend.TRITON)
 
     if not may_have_zp and not may_have_bias:
-        _AVAILABLE_BACKENDS.append(WNA16MoEBackend.FLASHINFER)
+        _AVAILABLE_BACKENDS.append(WNA16MoEBackend.FLASHINFER_TRTLLM)
 
     # Marlin supports ZP and bias
     _AVAILABLE_BACKENDS += [
