@@ -4,7 +4,6 @@
 import os
 import types
 from importlib.util import find_spec
-
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 
@@ -103,3 +102,4 @@ class TritonLanguagePlaceholder(types.ModuleType):
         self.exp = None
         self.log = None
         self.log2 = None
+        self.exp2 = None
