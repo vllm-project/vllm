@@ -329,9 +329,15 @@ class ModelConfig:
     io_processor_plugin: str | None = None
     """IOProcessor plugin name to load at model startup"""
     renderer_num_workers: int = 1
-    """Number of worker threads in the renderer thread pool. This pool
-    handles async tokenization, chat template rendering, and multimodal
-    preprocessing."""
+    """Number of worker threads in the renderer thread pool. The pool is
+    consumed by the async renderer path (e.g. the OpenAI-compatible API
+    server started by `vllm serve`) to parallelize tokenization, chat
+    template rendering, and multimodal preprocessing across concurrent
+    requests.
+
+    The offline `LLM` entrypoint uses the synchronous renderer path and
+    processes prompts (including multimodal preprocessing) serially, so
+    this setting has no effect there."""
 
     # Pooler config
     pooler_config: PoolerConfig | None = None
