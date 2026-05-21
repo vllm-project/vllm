@@ -53,6 +53,8 @@ def make_dummy_moe_config(
     hidden_dim: int = 1,
     intermediate_size_per_partition: int = 1,
     in_dtype: torch.dtype = torch.bfloat16,
+    activation: MoEActivation = MoEActivation.SILU,
+    is_act_and_mul: bool = True,
 ) -> FusedMoEConfig:
     """
     This is a dummy config for the mk constructor interface
@@ -69,7 +71,8 @@ def make_dummy_moe_config(
         num_local_experts=num_experts,
         num_logical_experts=num_experts,
         moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
-        activation=MoEActivation.SILU,
+        activation=activation,
+        is_act_and_mul=is_act_and_mul,
         in_dtype=in_dtype,
         device="cuda",
         routing_method=RoutingMethodType.TopK,
