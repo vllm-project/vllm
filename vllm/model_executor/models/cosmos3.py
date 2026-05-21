@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import re
+import regex
 
 from vllm.config import VllmConfig
 from vllm.model_executor.models.qwen3_vl import Qwen3VLForConditionalGeneration
@@ -15,14 +15,14 @@ class Cosmos3ForConditionalGeneration(Qwen3VLForConditionalGeneration):
     # into the nested form expected by Qwen3VLForConditionalGeneration.
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_regex={
-            re.compile(
+            regex.compile(
                 r"^model\.(?!language_model\.)(.+)$"
             ): r"model.language_model.\1",
-            re.compile(
+            regex.compile(
                 r"^(blocks\.|merger\.|patch_embed\.|pos_embed\.|deepstack_merger_list\.)"
             ): r"model.visual.\1",
-            re.compile(r"^sound_modality_embed$"): None,
-            re.compile(r"^action_modality_embed$"): None,
+            regex.compile(r"^sound_modality_embed$"): None,
+            regex.compile(r"^action_modality_embed$"): None,
         },
         orig_to_new_substr={
             "_moe_gen": None,
