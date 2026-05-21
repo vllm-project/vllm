@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING,Optional
+from typing import TYPE_CHECKING
 
 import torch
 from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
@@ -89,6 +89,7 @@ def _xpu_ops_deepseek_scaling_rope_impl(
         positions, query, key, offsets, cos_sin_cache, rotary_dim, is_neox_style
     )
 
+
 def _xpu_ops_deepseek_scaling_rope_fake(
     positions: torch.Tensor,
     query: torch.Tensor,
@@ -100,6 +101,7 @@ def _xpu_ops_deepseek_scaling_rope_fake(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return query, key
 
+
 def _xpu_ops_fused_grouped_topk_impl(
     hidden_states: torch.Tensor,
     gating_output: torch.Tensor,
@@ -109,20 +111,27 @@ def _xpu_ops_fused_grouped_topk_impl(
     topk_group: int,
     scoring_func: str,
     routed_scaling_factor: float,
-    e_score_correction_bias: Optional[torch.Tensor] = None,       
+    e_score_correction_bias: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    assert hidden_states.size(0) == gating_output.size(0), (
-        "Number of tokens mismatch")
+    assert hidden_states.size(0) == gating_output.size(0), "Number of tokens mismatch"
     if scoring_func == "softmax":
         scores = torch.softmax(gating_output, dim=-1)
     elif scoring_func == "sigmoid":
         scores = gating_output
-    else:   
+    else:
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
-    return torch.ops._moe_C.fused_grouped_topk(hidden_states, scores, topk,
-                                  renormalize, num_expert_group, topk_group,
-                                  scoring_func, routed_scaling_factor,
-                                  e_score_correction_bias)
+    return torch.ops._moe_C.fused_grouped_topk(
+        hidden_states,
+        scores,
+        topk,
+        renormalize,
+        num_expert_group,
+        topk_group,
+        scoring_func,
+        routed_scaling_factor,
+        e_score_correction_bias,
+    )
+
 
 def _xpu_ops_fused_grouped_topk_fake(
     hidden_states: torch.Tensor,
@@ -133,7 +142,7 @@ def _xpu_ops_fused_grouped_topk_fake(
     topk_group: int,
     scoring_func: str,
     routed_scaling_factor: float,
-    e_score_correction_bias: Optional[torch.Tensor] = None,       
+    e_score_correction_bias: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_tokens = hidden_states.shape[0]
     topk_weights = torch.empty(
@@ -147,6 +156,7 @@ def _xpu_ops_fused_grouped_topk_fake(
         dtype=torch.int32,
     )
     return topk_weights, topk_ids
+
 
 def _xpu_mxfp8_quantize_impl(
     x: torch.Tensor, dtype: torch.dtype | None = None

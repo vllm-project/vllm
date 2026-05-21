@@ -23,7 +23,7 @@ from vllm.platforms import current_platform
 if current_platform.is_xpu():
     from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
 
-from typing import Optional, Tuple
+
 class XPUExperts(mk.FusedMoEExpertsModular):
     def __init__(
         self,
