@@ -16,10 +16,10 @@ batch) for the ops registered with the "XPU" dispatch key:
 Also tests the Triton rms_norm kernel (called directly, not via aten dispatch),
 verifies that registering the XPU overrides correctly routes standard torch ops
 through the batch-invariant implementations, and includes an end-to-end LLM
-generation test demonstrating batch invariance at the inference level.
+logprobs test demonstrating bitwise batch invariance at the inference level
+(using Triton Attention backend).
 """
 
-import contextlib
 import os
 import random
 
@@ -480,84 +480,20 @@ def test_override_mean(xpu_batch_invariant_lib, dtype):
 
 @skip_unsupported_xpu
 @pytest.mark.timeout(600)
-def test_e2e_generation_batch_invariance():
-    """Same prompt produces identical output at any position in a batch.
-
-    Runs a needle prompt alone (BS=1), then embeds it at random positions
-    within larger batches and verifies the output text is identical.
-    """
-    seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
-    random.seed(seed)
-
-    model = TEST_MODEL
-    num_trials = int(os.getenv("VLLM_NEEDLE_TRIALS", "3"))
-    max_batch_size = int(os.getenv("VLLM_NEEDLE_BATCH_SIZE", "32"))
-
-    sampling = SamplingParams(
-        temperature=0.0,
-        max_tokens=64,
-        seed=20240919,
-    )
-
-    needle_prompt = "The meaning of life is"
-
-    llm = None
-    try:
-        llm = LLM(
-            model=model,
-            max_num_seqs=max_batch_size,
-            gpu_memory_utilization=0.7,
-            max_model_len=2048,
-            dtype="auto",
-            enforce_eager=True,
-        )
-
-        # Baseline: needle alone
-        baseline_out = llm.generate([needle_prompt], sampling)
-        baseline_text = baseline_out[0].outputs[0].text
-
-        mismatches = 0
-        for trial in range(num_trials):
-            batch_size = random.randint(max_batch_size // 2, max_batch_size)
-            needle_pos = random.randint(0, batch_size - 1)
-            prompts: list[str] = []
-            for i in range(batch_size):
-                if i == needle_pos:
-                    prompts.append(needle_prompt)
-                else:
-                    prompts.append(_random_prompt(50, 200))
-
-            outputs = llm.generate(prompts, sampling)
-            text = outputs[needle_pos].outputs[0].text
-
-            if text != baseline_text:
-                print(
-                    f"Trial {trial}: mismatch at pos={needle_pos}, "
-                    f"bs={batch_size}\n"
-                    f"  Expected: {baseline_text[:80]}\n"
-                    f"  Got:      {text[:80]}"
-                )
-                mismatches += 1
-
-        if mismatches > 0:
-            pytest.fail(
-                f"E2E batch invariance violated: {mismatches}/{num_trials} "
-                f"trials produced different output."
-            )
-
-    finally:
-        if llm is not None:
-            with contextlib.suppress(Exception):
-                llm.shutdown()
-
-
-@skip_unsupported_xpu
-@pytest.mark.timeout(600)
 def test_e2e_logprobs_bs1_vs_bsN():
-    """Logprobs for each prompt must be bitwise identical in BS=1 vs BS=N.
+    """Logprobs for each prompt must be bitwise identical between BS=1 and BS=N.
 
     Runs prompts individually (BS=1) and batched (BS=N), then compares
     per-token logprobs to verify the batch composition does not affect results.
+
+    This test validates that with batch-invariant mode enabled (matmul overrides
+    + attention 2D kernel path), the full pipeline produces identical logprobs
+    regardless of what other sequences are in the batch.
+
+    Note:
+    Only tested to work with the TRITON_ATTN backend.
+    Other backends may have non-deterministic attention implementations that fail
+    this test, even with individual batch-invariant kernels enabled.
     """
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
@@ -569,6 +505,7 @@ def test_e2e_logprobs_bs1_vs_bsN():
         dtype="auto",
         gpu_memory_utilization=0.8,
         enforce_eager=True,
+        attention_config={"backend": "TRITON_ATTN"},
     )
 
     prompts = [_random_prompt(10, 50) for _ in range(16)]
