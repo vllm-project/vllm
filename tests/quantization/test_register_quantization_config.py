@@ -109,7 +109,7 @@ def test_register_quantization_config(caplog_vllm):
 
     # The quantization method `custom_quant` is already exists,
     # should raise a debug message when re-registering it.
-    with caplog_vllm.at_level(logging.DEBUG):
+    with caplog_vllm.at_level(logging.DEBUG, logger="vllm"):
         register_quantization_config("custom_quant")(CustomQuantConfig)
 
     assert any(
