@@ -1017,7 +1017,7 @@ class SpeculativeConfig:
 
     def verify_equal_vocab_size_if_draft_model(self):
         if (
-            self.method in ("draft_model", "eagle", "eagle3")
+            (self.method == "draft_model" or self.use_eagle())
             and self.target_model_config is not None
             and self.draft_model_config is not None
         ):

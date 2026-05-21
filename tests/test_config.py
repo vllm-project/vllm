@@ -1469,7 +1469,7 @@ def test_ir_op_priority_ctx():
         assert ir.ops.fused_add_rms_norm.get_priority() == ["native"]
 
 
-@pytest.mark.parametrize("method", ["eagle", "eagle3"])
+@pytest.mark.parametrize("method", ["eagle", "eagle3", "dflash", "mtp"])
 def test_verify_vocab_size_raises_for_eagle_mismatch(method):
     """eagle and eagle3 must enforce vocab-size parity like draft_model does."""
     spec_cfg = SpeculativeConfig.__new__(SpeculativeConfig)
