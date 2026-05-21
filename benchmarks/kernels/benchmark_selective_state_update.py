@@ -200,6 +200,11 @@ def benchmark_config(
 # CUDA grid Y/Z dim limit — both `batch` and `nheads` must fit individually.
 _CUDA_MAX_GRID_DIM = 65535
 
+# Above this, kernel state-offset arithmetic (batch * nheads * headdim * dstate)
+# overflows int32 and the launch raises cudaErrorIllegalAddress.
+# 262144 covers Nemotron Super TP1 BS=2048.
+_MAX_EFFECTIVE_BATCH = 262144
+
 
 def expand_batch_x_nheads(
     batch_sizes: list[int],
@@ -208,12 +213,13 @@ def expand_batch_x_nheads(
 ) -> list[tuple[int, int, int]]:
     """Cross-product batch_sizes × nheads_list → sorted [(effective_batch,
     batch, nheads)], deduped by effective_batch. Filters pairs that exceed
-    the CUDA grid dim limit or where nheads is not a positive multiple of
-    ngroups.
+    the CUDA grid dim limit, the effective_batch ceiling, or where nheads is
+    not a positive multiple of ngroups.
     """
     seen: dict[int, tuple[int, int]] = {}
     skipped_grid: list[tuple[int, int]] = []
     skipped_ngroups: list[tuple[int, int]] = []
+    skipped_eb: list[tuple[int, int]] = []
     for b, n in product(batch_sizes, nheads_list):
         if b <= 0 or n <= 0:
             continue
@@ -222,6 +228,9 @@ def expand_batch_x_nheads(
             continue
         if n % ngroups != 0:
             skipped_ngroups.append((b, n))
+            continue
+        if b * n > _MAX_EFFECTIVE_BATCH:
+            skipped_eb.append((b, n))
             continue
         seen.setdefault(b * n, (b, n))
     if skipped_grid:
@@ -233,6 +242,11 @@ def expand_batch_x_nheads(
         print(
             f"  Note: skipping (batch, nheads) pairs where nheads % ngroups != 0 "
             f"for ngroups={ngroups}: {skipped_ngroups}"
+        )
+    if skipped_eb:
+        print(
+            f"  Note: skipping (batch, nheads) pairs whose effective_batch "
+            f"exceeds {_MAX_EFFECTIVE_BATCH}: {skipped_eb}"
         )
     return sorted((eb, b, n) for eb, (b, n) in seen.items())
 
