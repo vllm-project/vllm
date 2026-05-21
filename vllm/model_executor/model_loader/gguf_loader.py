@@ -57,7 +57,12 @@ class GGUFModelLoader(BaseModelLoader):
         # repo id/filename.gguf
         if "/" in model_name_or_path and model_name_or_path.endswith(".gguf"):
             repo_id, filename = model_name_or_path.rsplit("/", 1)
-            return hf_hub_download(repo_id=repo_id, filename=filename)
+            return hf_hub_download(
+                repo_id=repo_id,
+                filename=filename,
+                revision=model_config.revision,
+                cache_dir=self.load_config.download_dir,
+            )
         # repo_id:quant_type
         elif "/" in model_name_or_path and ":" in model_name_or_path:
             repo_id, quant_type = model_name_or_path.rsplit(":", 1)
@@ -265,12 +270,24 @@ class GGUFModelLoader(BaseModelLoader):
                 GGUF tensor name with suffix (e.g., 'mm.soft_emb_norm.weight')
                 or None if no mapping found
             """
+            # In transformers v5, multimodal models (e.g. Gemma3) wrap
+            # all sub-models under an outer 'model.' attribute, producing
+            # state_dict keys like 'model.language_model.layers.0...' and
+            # 'model.vision_tower.vision_model...'.  Strip this outer
+            # prefix so the keys match what gguf-py expects.
+            if is_multimodal and hf_name.startswith("model."):
+                hf_name = hf_name[6:]  # Remove outer 'model.'
+
             # Strip 'language_model.' prefix for multimodal models - gguf-py
             # tensor mappings expect parameter names without this prefix.
             # Note: 'model.' prefix should be KEPT for text-only models as
             # gguf-py expects it.
             if hf_name.startswith("language_model."):
                 hf_name = hf_name[15:]  # Remove 'language_model.'
+                # Re-add 'model.' prefix because gguf-py text tensor maps
+                # expect 'model.layers...' format.
+                if is_multimodal:
+                    hf_name = "model." + hf_name
 
             # Parse parameter name and suffix
             if hf_name.endswith((".weight", ".bias")):

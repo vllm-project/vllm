@@ -100,6 +100,8 @@ class DeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 else params.weight_scale,
                 quant_block_shape=tuple(layer.weight_block_size),
                 use_e8m0=self.use_deep_gemm_e8m0,
+                is_bmm=getattr(layer, "is_bmm", False),
+                bmm_batch_size=getattr(layer, "bmm_batch_size", 0),
             )
             replace_parameter(layer, params.WEIGHT, dg_weight)
             replace_parameter(layer, scale_attr, dg_weight_scale)

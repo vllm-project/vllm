@@ -11,7 +11,7 @@ REPO=$2
 BUILDKITE_COMMIT=$3
 
 # authenticate with AWS ECR
-aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin "$REGISTRY"
+aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin "$REGISTRY" || true
 
 # skip build if image already exists
 if [[ -z $(docker manifest inspect "$REGISTRY"/"$REPO":"$BUILDKITE_COMMIT"-cpu) ]]; then
@@ -20,6 +20,12 @@ else
   echo "Image found"
   exit 0
 fi
+
+# The rust frontend lives in a git submodule under rust/. Buildkite's default
+# checkout does not recurse submodules, and the Dockerfile only sees what's in
+# the build context, so initialize the submodule here before building.
+git submodule sync --recursive
+git submodule update --init --recursive
 
 # build
 docker build --file docker/Dockerfile.cpu \

@@ -92,8 +92,8 @@ check_and_skip_if_image_exists() {
 }
 
 ecr_login() {
-    aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin "$REGISTRY"
-    aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-east-1.amazonaws.com
+    aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin "$REGISTRY" || true
+    aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-east-1.amazonaws.com || true
 }
 
 prepare_cache_tags() {
@@ -192,6 +192,7 @@ export BUILDKITE_COMMIT
 export PARENT_COMMIT
 export IMAGE_TAG
 export IMAGE_TAG_LATEST
+export COMMIT="${COMMIT:-${BUILDKITE_COMMIT}}"
 export CACHE_FROM
 export CACHE_FROM_BASE_BRANCH
 export CACHE_FROM_MAIN
@@ -221,6 +222,13 @@ echo "CACHE_FROM_BASE_BRANCH: ${CACHE_FROM_BASE_BRANCH}"
 echo "CACHE_FROM_MAIN: ${CACHE_FROM_MAIN}"
 
 check_and_skip_if_image_exists
+
+# The rust frontend lives in a git submodule under rust/. Buildkite's default
+# checkout does not recurse submodules, and the Dockerfile only sees what's in
+# the build context, so initialize the submodule here before invoking bake.
+echo "--- :git: Initializing git submodules"
+git submodule sync --recursive
+git submodule update --init --recursive
 
 echo "--- :docker: Setting up Docker buildx bake"
 echo "Target: ${TARGET}"

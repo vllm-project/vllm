@@ -2,6 +2,7 @@ name: pre-commit
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
   push:
     branches: [main]
 

@@ -881,7 +881,7 @@ def test_apc_common_prefix_same_batch(
         "hello what is one plus one what is one plus one what is one plus one the answer is",  # noqa: E501
         "hello what is one plus one what is one plus one what is one plus one the answer is",  # noqa: E501
     ]
-    sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=20)
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=20)
     outputs = llm.generate(prompts, sampling_params)
     for output in outputs:
         assert "two" in output.outputs[0].text

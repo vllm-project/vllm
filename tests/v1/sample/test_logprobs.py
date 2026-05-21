@@ -33,11 +33,10 @@ PROMPT = BatchLogprobsComposition.PROMPT
 SAMPLE_PROMPT = BatchLogprobsComposition.SAMPLE_PROMPT
 
 # On ROCm, floating-point reductions in attention and GEMM kernels are
-# non-associative and sensitive to batch geometry. The ref LLM (no spec
-# decode, default scheduling) and the spec-decode LLM (chunked prefill,
-# different effective batch sizes) follow different reduction orders,
-# producing numerically divergent logprobs that get misattributed to
-# spec-decode incorrectness.
+# non-associative and sensitive to batch geometry. If the ref LLM and
+# spec-decode LLM use different scheduling or batch geometry, they can
+# follow different reduction orders and produce numerically divergent
+# logprobs that get misattributed to spec-decode incorrectness.
 #
 # Force LLM instances into an identical, deterministic execution
 # mode so the test isolates spec-decode correctness only:
@@ -1086,17 +1085,24 @@ def test_spec_decode_logprobs(
     )
 
     max_model_len = 256
-
-    # Run base LLM.
-    ref_llm = LLM(
-        model=model_name,
+    llm_kwargs = dict(
         max_logprobs=5,
         max_model_len=max_model_len,
         seed=42,
         logprobs_mode=logprobs_mode,
         gpu_memory_utilization=0.4,
+        # Force the same prefill chunking for both the base model and
+        # spec decode model so the comparison isolates spec decode.
+        enable_chunked_prefill=True,
+        max_num_batched_tokens=32,
         enable_prefix_caching=False,
         **ROCM_DETERMINISM_KWARGS,
+    )
+
+    # Run base LLM.
+    ref_llm = LLM(
+        model=model_name,
+        **llm_kwargs,
     )
     ref_results = ref_llm.generate(
         [prompt, prompt], [sampling_params, penalty_sampling_params]
@@ -1117,16 +1123,7 @@ def test_spec_decode_logprobs(
     spec_llm = LLM(
         model_name,
         speculative_config=spec_config_with_len,
-        max_logprobs=5,
-        max_model_len=max_model_len,
-        seed=42,
-        logprobs_mode=logprobs_mode,
-        gpu_memory_utilization=0.4,
-        # Force prefill chunking
-        enable_chunked_prefill=True,
-        max_num_batched_tokens=32,
-        enable_prefix_caching=False,
-        **ROCM_DETERMINISM_KWARGS,
+        **llm_kwargs,
     )
     spec_results = spec_llm.generate(
         [prompt, prompt], [sampling_params, penalty_sampling_params]

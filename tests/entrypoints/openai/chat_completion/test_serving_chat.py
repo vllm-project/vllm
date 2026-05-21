@@ -538,6 +538,7 @@ class MockModelConfig:
     is_encoder_decoder: bool = False
     is_multimodal_model: bool = False
     renderer_num_workers: int = 1
+    enable_prompt_embeds: bool = False
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}
@@ -567,7 +568,6 @@ def _build_serving_render(
     return OpenAIServingRender(
         model_config=engine.model_config,
         renderer=engine.renderer,
-        io_processor=engine.io_processor,
         model_registry=model_registry,
         request_logger=None,
         chat_template=CHAT_TEMPLATE,
@@ -599,7 +599,6 @@ def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
 class MockEngine:
     model_config: MockModelConfig = field(default_factory=MockModelConfig)
     input_processor: MagicMock = field(default_factory=MagicMock)
-    io_processor: MagicMock = field(default_factory=MagicMock)
     renderer: MagicMock = field(default_factory=MagicMock)
 
 
@@ -632,7 +631,6 @@ async def test_serving_chat_returns_correct_model_name():
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
-    mock_engine.io_processor = MagicMock()
     mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     serving_chat = _build_serving_chat(mock_engine)
@@ -662,7 +660,6 @@ async def test_serving_chat_should_set_correct_max_tokens():
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
-    mock_engine.io_processor = MagicMock()
     mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     serving_chat = _build_serving_chat(mock_engine)
@@ -693,7 +690,6 @@ async def test_serving_chat_should_set_correct_max_tokens():
     mock_engine.errored = False
     mock_engine.model_config = mock_model_config
     mock_engine.input_processor = MagicMock()
-    mock_engine.io_processor = MagicMock()
     mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     # Initialize the serving chat
@@ -737,7 +733,6 @@ async def test_serving_chat_should_set_correct_max_tokens():
     mock_engine.errored = False
     mock_engine.model_config = mock_model_config
     mock_engine.input_processor = MagicMock()
-    mock_engine.io_processor = MagicMock()
     mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     serving_chat = _build_serving_chat(mock_engine)
@@ -779,7 +774,6 @@ async def test_serving_chat_should_set_correct_max_tokens():
     mock_engine.errored = False
     mock_engine.model_config = mock_model_config
     mock_engine.input_processor = MagicMock()
-    mock_engine.io_processor = MagicMock()
     mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     # Initialize the serving chat
@@ -814,6 +808,57 @@ async def test_serving_chat_should_set_correct_max_tokens():
 
 
 @pytest.mark.asyncio
+async def test_serving_chat_truncate_prompt_tokens_max_token_accounting():
+    """When truncate_prompt_tokens is set, max_tokens must be calculated using
+    the truncated prompt length, not the original prompt length.
+
+    Regression: without the fix, get_max_tokens received the untruncated prompt
+    length, causing the output budget to be underestimated.
+    """
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    serving_chat = _build_serving_chat(mock_engine)
+
+    # "what is 1+1?" tokenizes to 7 tokens with the test chat template
+    # (max_model_len=100 -> max_tokens = 93 without truncation, confirmed by
+    # test_serving_chat_should_set_correct_max_tokens above).
+    messages = [{"role": "user", "content": "what is 1+1?"}]
+
+    # Baseline: no truncation -> max_tokens = 100 - 7 = 93.
+    req = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+    assert mock_engine.generate.call_args.args[1].max_tokens == 93
+
+    # With truncate_prompt_tokens=5 (less than 7): the effective prompt length
+    # is 5, so max_tokens should be 100 - 5 = 95, not 93.
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=messages,
+        truncate_prompt_tokens=5,
+    )
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+    assert mock_engine.generate.call_args.args[1].max_tokens == 95
+
+    # With truncate_prompt_tokens=-1 (meaning use full max_model_len as the
+    # truncation limit, i.e., no practical truncation vs the window): effective
+    # length = min(7, 100) = 7 -> max_tokens = 93 again.
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=messages,
+        truncate_prompt_tokens=-1,
+    )
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+    assert mock_engine.generate.call_args.args[1].max_tokens == 93
+
+
+@pytest.mark.asyncio
 async def test_serving_chat_mistral_token_ids_prompt_is_validated():
     """Regression test: when the Mistral tokenizer path returns token IDs
     directly, we must still apply input length + max_tokens validation.
@@ -823,7 +868,6 @@ async def test_serving_chat_mistral_token_ids_prompt_is_validated():
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig(skip_tokenizer_init=True)
     mock_engine.input_processor = MagicMock()
-    mock_engine.io_processor = MagicMock()
 
     mock_tokenizer = MagicMock(spec=MistralTokenizer)
     mock_renderer = MistralRenderer(
@@ -863,7 +907,6 @@ async def test_serving_chat_mistral_token_ids_prompt_too_long_is_rejected():
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig(skip_tokenizer_init=True)
     mock_engine.input_processor = MagicMock()
-    mock_engine.io_processor = MagicMock()
 
     mock_tokenizer = MagicMock(spec=MistralTokenizer)
     mock_renderer = MistralRenderer(
@@ -906,7 +949,6 @@ async def test_serving_chat_could_load_correct_generation_config():
     mock_engine.errored = False
     mock_engine.model_config = mock_model_config
     mock_engine.input_processor = MagicMock()
-    mock_engine.io_processor = MagicMock()
     mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     # Initialize the serving chat
@@ -952,7 +994,6 @@ async def test_serving_chat_did_set_correct_cache_salt(model_type):
     mock_engine.errored = False
     mock_engine.model_config = mock_model_config
     mock_engine.input_processor = MagicMock()
-    mock_engine.io_processor = MagicMock()
     mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     serving_chat = _build_serving_chat(mock_engine)
@@ -1003,7 +1044,6 @@ async def test_serving_chat_data_parallel_rank_extraction():
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
-    mock_engine.io_processor = MagicMock()
     mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     # Mock the generate method to return an async generator
@@ -1095,7 +1135,6 @@ class TestServingChatWithHarmony:
         mock_engine.errored = False
         mock_engine.model_config = MockModelConfig()
         mock_engine.input_processor = MagicMock()
-        mock_engine.io_processor = MagicMock()
         mock_engine.renderer = _build_renderer(mock_engine.model_config)
         return mock_engine
 
@@ -1732,7 +1771,6 @@ async def test_tool_choice_validation_without_parser():
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
-    mock_engine.io_processor = MagicMock()
     mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     models = OpenAIServingModels(
@@ -1802,7 +1840,6 @@ async def test_streaming_n_gt1_independent_tool_parsers():
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
-    mock_engine.io_processor = MagicMock()
     mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     models = OpenAIServingModels(
