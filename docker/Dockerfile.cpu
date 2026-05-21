@@ -112,6 +112,10 @@ RUN if [ ! -f rust/Cargo.toml ]; then \
         exit 1; \
     fi
 
+# Cap cargo parallelism to avoid exhausting the CI host's open-file limit
+# (rustc spawns enough concurrent processes to hit RLIMIT_NOFILE otherwise).
+ENV CARGO_BUILD_JOBS=4
+
 # Build the release binary. Cache cargo registry/git and target/, but copy the
 # binary out of the target/ cache mount so it persists into the image layer
 # for later COPY --from=rust-build.
