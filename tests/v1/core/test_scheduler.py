@@ -684,6 +684,80 @@ def test_schedule_order(enable_chunked_prefill: bool):
         assert len(scheduler_output1.scheduled_new_reqs) == 1
 
 
+def test_mixed_decode_prefill_does_not_cap_short_prefill():
+    scheduler = create_scheduler(
+        max_num_batched_tokens=100,
+        max_model_len=512,
+        max_num_seqs=2,
+        enable_chunked_prefill=True,
+    )
+    decode_req = create_requests(num_requests=1, num_tokens=100, req_ids=["decode"])[0]
+    short_prefill_req = create_requests(
+        num_requests=1,
+        num_tokens=40,
+        req_ids=["short_prefill"],
+    )[0]
+
+    scheduler.add_request(decode_req)
+    prefill_output = scheduler.schedule()
+    assert prefill_output.num_scheduled_tokens[decode_req.request_id] == 100
+
+    scheduler.update_from_output(
+        prefill_output,
+        ModelRunnerOutput(
+            req_ids=[decode_req.request_id],
+            req_id_to_index={decode_req.request_id: 0},
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    scheduler.add_request(short_prefill_req)
+    mixed_output = scheduler.schedule()
+
+    assert mixed_output.num_scheduled_tokens[decode_req.request_id] == 1
+    assert mixed_output.num_scheduled_tokens[short_prefill_req.request_id] == 40
+
+
+def test_mixed_decode_prefill_caps_long_prefill_chunk():
+    scheduler = create_scheduler(
+        max_num_batched_tokens=100,
+        max_model_len=512,
+        max_num_seqs=2,
+        enable_chunked_prefill=True,
+    )
+    decode_req = create_requests(num_requests=1, num_tokens=100, req_ids=["decode"])[0]
+    long_prefill_req = create_requests(
+        num_requests=1,
+        num_tokens=300,
+        req_ids=["long_prefill"],
+    )[0]
+
+    scheduler.add_request(decode_req)
+    prefill_output = scheduler.schedule()
+    assert prefill_output.num_scheduled_tokens[decode_req.request_id] == 100
+
+    scheduler.update_from_output(
+        prefill_output,
+        ModelRunnerOutput(
+            req_ids=[decode_req.request_id],
+            req_id_to_index={decode_req.request_id: 0},
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    scheduler.add_request(long_prefill_req)
+    mixed_output = scheduler.schedule()
+
+    assert mixed_output.num_scheduled_tokens[decode_req.request_id] == 1
+    assert mixed_output.num_scheduled_tokens[long_prefill_req.request_id] == 75
+
+
 def test_preempt_during_execution():
     # NOTE(woosuk): The actual number of available blocks is 10 instead of 11
     # because block 0 is reserved as the null block.
