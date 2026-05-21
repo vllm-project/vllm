@@ -992,6 +992,7 @@ class Gemma4ForConditionalGeneration(
         self.config = config
         self.quant_config = quant_config
         self.multimodal_config = multimodal_config
+        self.model_dtype = vllm_config.model_config.dtype
 
         # ---- Vision tower (shared by image and video) ----
         with self._mark_tower_model(vllm_config, {"image", "video"}):
@@ -1232,9 +1233,9 @@ class Gemma4ForConditionalGeneration(
         # Project each image's features into LM embedding space.
         # Per-image loop is required because images have variable
         # token counts after padding removal.
-        # Cast to match the projection layer's dtype (model may be
-        # bf16 while the vision tower outputs fp32).
-        target_dtype = self.embed_vision.embedding_projection.weight.dtype
+        # Cast to the model dtype. The projection weight may be a packed uint8
+        # tensor under BNB, which is not a valid activation dtype.
+        target_dtype = self.model_dtype
         return [
             self.embed_vision(inputs_embeds=img.unsqueeze(0).to(target_dtype)).squeeze(
                 0
@@ -1267,7 +1268,7 @@ class Gemma4ForConditionalGeneration(
 
         vt = self.vision_tower
         pooling_k2 = self.config.vision_config.pooling_kernel_size**2
-        target_dtype = self.embed_vision.embedding_projection.weight.dtype
+        target_dtype = self.model_dtype
 
         # Split flat tensors into per-video chunks
         if isinstance(frame_counts, torch.Tensor):
