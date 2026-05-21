@@ -26,7 +26,11 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
-from vllm.tool_parsers.utils import find_tool_properties
+from vllm.tool_parsers.utils import (
+    coerce_to_schema_type,
+    extract_types_from_schema,
+    find_tool_properties,
+)
 
 logger = init_logger(__name__)
 
@@ -528,20 +532,17 @@ class StreamingXMLToolCallParser:
                 # If not needed, exit accumulation mode
                 # and pass through directly
                 if self._pre_param_buffer == "":
-                    # Get current parameter type
-                    param_type = (
-                        self._get_param_type(self._pre_current_param_name)
+                    # Get current parameter types
+                    param_types = (
+                        self._get_param_types(self._pre_current_param_name)
                         if self._pre_current_param_name
-                        else "string"
+                        else ["string"]
                     )
                     # Only these types need deferred parsing to
                     # handle Python literals containing single quotes
-                    is_object_type = param_type in ["object"]
-                    is_complex_type = (
-                        param_type in ["array", "arr", "sequence"]
-                        or param_type.startswith("dict")
-                        or param_type.startswith("list")
-                    )
+                    type_set = set(param_types)
+                    is_array = "array" in type_set
+                    is_object = "object" in type_set
 
                     # Only delay when contains container symbols
                     # and has single quotes and is complex type
@@ -553,16 +554,9 @@ class StreamingXMLToolCallParser:
 
                     # Determine if deferred parsing is needed
                     need_defer = False
-                    if is_complex_type:
-                        # Complex type, always need deferred parsing
-                        need_defer = True
-                    elif (
-                        is_object_type
-                        and has_container_hint
-                        and ("'" in original_chunk)
+                    if is_array or (
+                        is_object and has_container_hint and ("'" in original_chunk)
                     ):
-                        # Object type with container symbols
-                        # and single quotes, need deferred parsing
                         need_defer = True
 
                     if not need_defer:
@@ -724,7 +718,8 @@ class StreamingXMLToolCallParser:
                 self.current_param_value += original_data
                 return
 
-            param_type = self._get_param_type(self.current_param_name)
+            param_types = self._get_param_types(self.current_param_name)
+            is_string = self._is_string_type(param_types)
 
             # Check if this is the first time receiving data for this parameter
             # If this is the first packet of data and starts with \n, remove \n
@@ -732,10 +727,7 @@ class StreamingXMLToolCallParser:
                 data = data[1:]
 
             # Output start quote for string type (if not already output)
-            if (
-                param_type in ["string", "str", "text", "varchar", "char", "enum"]
-                and not self.start_quote_emitted
-            ):
+            if is_string and not self.start_quote_emitted:
                 quote_delta = DeltaMessage(
                     tool_calls=[
                         DeltaToolCall(
@@ -762,11 +754,16 @@ class StreamingXMLToolCallParser:
                 original_data = original_data[:-1]
             self.current_param_value += original_data
 
-            # convert parameter value by param_type
-            converted_value = self._convert_param_value(
-                self.current_param_value, param_type
+            # During streaming, exclude object/array from coercion because
+            # the value is incomplete — parsing partial JSON would break
+            # delta calculations. Final coercion happens in _end_element.
+            streaming_types = [
+                t for t in param_types if t not in ("object", "array")
+            ] or ["string"]
+            converted_value = coerce_to_schema_type(
+                self.current_param_value, streaming_types
             )
-            output_data = self._convert_for_json_streaming(converted_value, param_type)
+            output_data = self._convert_for_json_streaming(converted_value, is_string)
 
             delta_data = output_data[len(self.current_param_value_converted) :]
             self.current_param_value_converted = output_data
@@ -853,13 +850,14 @@ class StreamingXMLToolCallParser:
                 self.deferred_param_raw_value = ""
                 return
 
-            param_type = self._get_param_type(param_name)
+            param_types = self._get_param_types(param_name)
+            is_string = self._is_string_type(param_types)
 
-            # convert complete parameter value by param_type
-            converted_value = self._convert_param_value(param_value, param_type)
+            # convert complete parameter value by param_types
+            converted_value = coerce_to_schema_type(param_value, param_types)
 
             # Decide whether to add end quote based on parameter type
-            if param_type in ["string", "str", "text", "varchar", "char", "enum"]:
+            if is_string:
                 # For empty string parameters, need special handling
                 if not param_value and not self.start_quote_emitted:
                     # No start quote output,
@@ -990,123 +988,34 @@ class StreamingXMLToolCallParser:
 
         return None
 
-    def _get_param_type(self, param_name: str) -> str:
-        """Get parameter type based on tool configuration, defaults to string
-        Args:
-            param_name: Parameter name
-
-        Returns:
-            Parameter type
-        """
+    def _get_param_types(self, param_name: str) -> list[str]:
+        """Get parameter types from tool schema, defaults to ["string"]."""
         if not self.tools or not self.current_function_name:
-            return "string"
+            return ["string"]
 
         properties = find_tool_properties(self.tools, self.current_function_name)
         if param_name in properties and isinstance(properties[param_name], dict):
-            return self.repair_param_type(
-                str(properties[param_name].get("type", "string"))
-            )
-        return "string"
+            return extract_types_from_schema(properties[param_name])
+        return ["string"]
 
-    def repair_param_type(self, param_type: str) -> str:
-        """Repair unknown parameter types by treating them as string
+    def _is_string_type(self, types: list[str]) -> bool:
+        """True when "string" is the sole non-null type."""
+        non_null = {t for t in types if t != "null"}
+        return non_null == {"string"} or non_null == set()
+
+    def _convert_for_json_streaming(self, converted_value: Any, is_string: bool) -> str:
+        """Convert value for streaming JSON output.
+
         Args:
-            param_type: Parameter type
-
-        Returns:
-            Repaired parameter type
+            converted_value: Already-converted value.
+            is_string: Whether the parameter is a string type.
         """
-        if (
-            param_type in ["string", "str", "text", "varchar", "char", "enum"]
-            or param_type.startswith("int")
-            or param_type.startswith("uint")
-            or param_type.startswith("long")
-            or param_type.startswith("short")
-            or param_type.startswith("unsigned")
-            or param_type.startswith("num")
-            or param_type.startswith("float")
-            or param_type in ["boolean", "bool", "binary"]
-            or (
-                param_type in ["object", "array", "arr", "sequence"]
-                or param_type.startswith("dict")
-                or param_type.startswith("list")
-            )
-        ):
-            return param_type
-        else:
-            return "string"
-
-    def _convert_param_value(self, param_value: str, param_type: str) -> Any:
-        """Convert value based on parameter type
-        Args:
-            param_value: Parameter value
-            param_type: Parameter type
-
-        Returns:
-            Converted value
-        """
-        if param_value.lower() == "null":
-            return None
-
-        param_type = param_type.strip().lower()
-        if param_type in ["string", "str", "text", "varchar", "char", "enum"]:
-            return param_value
-        elif (
-            param_type.startswith("int")
-            or param_type.startswith("uint")
-            or param_type.startswith("long")
-            or param_type.startswith("short")
-            or param_type.startswith("unsigned")
-        ):
-            try:
-                return int(param_value)
-            except (ValueError, TypeError):
-                logger.warning(
-                    "Parsed value '%s' of parameter '%s' is not an integer "
-                    "in tool '%s', degenerating to string.",
-                    param_value,
-                )
-            return param_value
-        elif param_type.startswith("num") or param_type.startswith("float"):
-            try:
-                float_param_value: float = float(param_value)
-                return (
-                    float_param_value
-                    if float_param_value - int(float_param_value) != 0
-                    else int(float_param_value)
-                )
-            except (ValueError, TypeError):
-                logger.warning(
-                    "Parsed value '%s' of parameter '%s' is not a float "
-                    "in tool '%s', degenerating to string.",
-                    param_value,
-                )
-            return param_value
-        elif param_type in ["boolean", "bool", "binary"]:
-            param_value = param_value.lower()
-            return param_value == "true"
-        else:
-            return param_value
-
-    def _convert_for_json_streaming(self, converted_value: Any, param_type: str) -> str:
-        """Convert converted_value based on
-        whether it's empty and if type is string
-        Args:
-            converted_value: Converted value
-            param_type: Parameter type
-
-        Returns:
-            Converted string for streaming output
-        """
-        # Check if value is empty, but exclude numeric 0
         if converted_value is None or converted_value == "":
             return ""
 
-        if param_type in ["string", "str", "text", "varchar", "char", "enum"]:
-            # String type, remove double quotes
+        if is_string:
             return json.dumps(converted_value, ensure_ascii=False)[1:-1]
         else:
-            # Non-string type, return complete JSON string
             if not isinstance(converted_value, str):
                 return json.dumps(converted_value, ensure_ascii=False)
             else:

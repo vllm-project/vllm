@@ -658,6 +658,166 @@ true
     assert isinstance(args["verbose"], bool)
 
 
+def test_xml_parser_anyof_type_conversion(qwen3_tokenizer):
+    """Test anyOf type conversion for the XML tool parser."""
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "test_anyof",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "anyof_int": {
+                            "anyOf": [
+                                {"type": "integer"},
+                                {"type": "null"},
+                            ],
+                            "default": 5,
+                        },
+                        "anyof_str": {
+                            "anyOf": [
+                                {"type": "string"},
+                                {"type": "null"},
+                            ],
+                        },
+                        "anyof_array": {
+                            "anyOf": [
+                                {"type": "array", "items": {"type": "string"}},
+                                {"type": "null"},
+                            ],
+                        },
+                        "anyof_obj": {
+                            "anyOf": [
+                                {"type": "object"},
+                                {"type": "null"},
+                            ],
+                        },
+                        "type_as_array": {
+                            "type": ["integer", "null"],
+                        },
+                    },
+                },
+            },
+        )
+    ]
+
+    model_output = """<tool_call>
+<function=test_anyof>
+<parameter=anyof_int>
+5
+</parameter>
+<parameter=anyof_str>
+hello
+</parameter>
+<parameter=anyof_array>
+["a", "b", "c"]
+</parameter>
+<parameter=anyof_obj>
+{"key": "value"}
+</parameter>
+<parameter=type_as_array>
+42
+</parameter>
+</function>
+</tool_call>"""
+
+    parser = Qwen3XMLToolParser(qwen3_tokenizer, tools=tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+    extracted = parser.extract_tool_calls(model_output, request=request)
+
+    args = json.loads(extracted.tool_calls[0].function.arguments)
+    assert args["anyof_int"] == 5
+    assert isinstance(args["anyof_int"], int)
+    assert args["anyof_str"] == "hello"
+    assert isinstance(args["anyof_str"], str)
+    assert args["anyof_array"] == ["a", "b", "c"]
+    assert isinstance(args["anyof_array"], list)
+    assert args["anyof_obj"] == {"key": "value"}
+    assert isinstance(args["anyof_obj"], dict)
+    assert args["type_as_array"] == 42
+    assert isinstance(args["type_as_array"], int)
+
+
+def test_xml_parser_anyof_type_conversion_streaming(qwen3_tokenizer):
+    """Test streaming anyOf type conversion for the XML tool parser."""
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "search_web",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "anyOf": [
+                                {"type": "string"},
+                                {"type": "null"},
+                            ],
+                        },
+                        "count": {
+                            "anyOf": [
+                                {"type": "integer"},
+                                {"type": "null"},
+                            ],
+                            "default": 5,
+                        },
+                        "verbose": {
+                            "anyOf": [
+                                {"type": "boolean"},
+                                {"type": "null"},
+                            ],
+                        },
+                    },
+                },
+            },
+        )
+    ]
+
+    model_output = """<tool_call>
+<function=search_web>
+<parameter=query>
+vllm tool parser
+</parameter>
+<parameter=count>
+10
+</parameter>
+<parameter=verbose>
+true
+</parameter>
+</function>
+</tool_call>"""
+
+    parser = Qwen3XMLToolParser(qwen3_tokenizer, tools=tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+
+    tool_states = {}
+    for delta_message in stream_delta_message_generator(
+        parser, qwen3_tokenizer, model_output, request
+    ):
+        if delta_message.tool_calls:
+            for tool_call in delta_message.tool_calls:
+                idx = tool_call.index
+                if idx not in tool_states:
+                    tool_states[idx] = {"name": None, "arguments": ""}
+                if tool_call.function:
+                    if tool_call.function.name:
+                        tool_states[idx]["name"] = tool_call.function.name
+                    if tool_call.function.arguments is not None:
+                        tool_states[idx]["arguments"] += tool_call.function.arguments
+
+    assert len(tool_states) == 1
+    assert tool_states[0]["name"] == "search_web"
+    assert tool_states[0]["arguments"] is not None
+    args = json.loads(tool_states[0]["arguments"])
+    assert args["query"] == "vllm tool parser"
+    assert isinstance(args["query"], str)
+    assert args["count"] == 10
+    assert isinstance(args["count"], int)
+    assert args["verbose"] is True
+    assert isinstance(args["verbose"], bool)
+
+
 @pytest.mark.parametrize(
     ids=[
         "no_tools",
