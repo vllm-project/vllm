@@ -15,37 +15,36 @@
 #SBATCH --account=engs-glass
 #SBATCH --qos=priority
 
-
 set -euo pipefail
 
-SCRIPT_VERSION="arc-ray-qwen3-30b-tp2-pp2-workers-nsys-no-api-wrapper-live-copy-v1"
+SCRIPT_VERSION="arc-ray-qwen3-30b-tp2-pp2-workers-nsys-no-api-wrapper-live-copy-v2-finalize-wait"
 
-# Configuration:
-#   2 nodes x 2 H100s/node = 4 total GPUs
-#   TP=2 within each node
-#   PP=2 across the two nodes
+# -----------------------------------------------------------------------------
+# TP=2, PP=2 configuration
+# -----------------------------------------------------------------------------
 #
-# Layout:
+# 2 nodes x 2 H100s/node = 4 total GPUs
+#
+#   TP=2 within each node
+#   PP=2 across nodes
+#
+# Expected layout:
 #   htc-g059: 2-GPU TP group for PP stage 0
 #   htc-g060: 2-GPU TP group for PP stage 1
 #
-# This variant intentionally DOES NOT wrap the vLLM API server in:
-#   nsys profile python -m vllm.entrypoints.openai.api_server
+# This script uses the tracing framework that worked for the PP-only run:
 #
-# It still enables vLLM worker-side Nsight via:
-#   --ray-workers-use-nsight
-#
-# Important Nsight copy behavior:
-#   - Ignore empty.nsys-rep and zero-byte placeholder reports.
-#   - Keep Ray alive after the workload/server stops while worker Nsight
-#     has time to finalize real worker_process_*.nsys-rep files.
-#   - Run a live sidecar copier inside each Ray srun step. This matches the
-#     manual rescue that worked: SSH into the node, find the current Ray session,
-#     and copy before Slurm tmp cleanup.
-#   - For ARC/Slurm, worker reports may appear under either:
+#   - Do NOT wrap the vLLM API server in outer nsys.
+#   - Enable vLLM worker-side Nsight with --ray-workers-use-nsight.
+#   - Start a live sidecar copier inside each Ray srun step.
+#   - Keep Ray alive after workload/server shutdown while worker Nsight finalizes.
+#   - Ignore empty.nsys-rep / zero-byte placeholder files.
+#   - Search both ARC tmp roots:
 #       /tmp/ray/session_*/logs/nsight/*
 #       /tmp/slurm-${SLURM_JOB_ID}/tmp/ray/session_*/logs/nsight/*
-#     Do not trust /tmp/ray/session_latest; it can be stale.
+#
+# Do not trust /tmp/ray/session_latest; it can point to an old/stale job.
+# -----------------------------------------------------------------------------
 
 DEBUG_SLURM_SCRIPT="${DEBUG_SLURM_SCRIPT:-0}"
 NSYS_COPY_DEBUG="${NSYS_COPY_DEBUG:-0}"
@@ -271,8 +270,6 @@ ${d}"
           out="${dest}/${node}_${session}_${base}"
           tmpout="${out}.tmp"
 
-          # Copy via tmp + rename so the destination is not left half-written
-          # if the source is still growing.
           cp -f "${f}" "${tmpout}" 2>/dev/null &&
             mv -f "${tmpout}" "${out}" 2>/dev/null ||
             rm -f "${tmpout}" 2>/dev/null || true
@@ -436,14 +433,14 @@ copy_ray_nsight_from_node() {
   nsight_summarize_dest "${NODE}"
 }
 
-# SP = prompt / prefill token bucket
-# SD = decode / output tokens per request
+# -----------------------------------------------------------------------------
+# Runtime setup
+# -----------------------------------------------------------------------------
+
 SP="${SP:-128}"
 SD="${SD:-128}"
 
 export NSYS_ENABLE="${NSYS_ENABLE:-1}"
-
-# Worker Nsight is the target. API-server outer wrapper is intentionally removed.
 export NSYS_PROFILE_WORKERS="${NSYS_PROFILE_WORKERS:-1}"
 export NSYS_PROFILE_RAY="${NSYS_PROFILE_RAY:-0}"
 
@@ -561,6 +558,7 @@ configure_socket_ifnames() {
 
 export HEAD_NODE_IP
 HEAD_NODE_IP="$(resolve_host_ip "${HEAD_NODE}")"
+
 if [ -z "${HEAD_NODE_IP}" ]; then
   echo "Error: could not resolve an IPv4 address for head node ${HEAD_NODE}." >&2
   exit 1
@@ -619,17 +617,18 @@ MODEL_ID="${MODEL_ID:-Qwen/Qwen3-30B-A3B-Instruct-2507}"
 HOST="${HOST:-${HEAD_NODE_IP}}"
 PORT="${PORT:-8000}"
 
-# Recommended TP/PP layout for 2 nodes x 2 GPUs/node.
+# TP/PP layout for this job.
 GPUS_PER_NODE="${GPUS_PER_NODE:-2}"
 NUM_NODES="${SLURM_JOB_NUM_NODES:-${SLURM_NNODES:-2}}"
 TP="${TP:-${GPUS_PER_NODE}}"
 PP="${PP:-${NUM_NODES}}"
-
 EP="${EP:-1}"
+
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 CPUS_PER_TASK="${CPUS_PER_TASK:-${SLURM_CPUS_PER_TASK:-1}}"
 SERVE_SCRIPT="${REPO_ROOT}/serving_scripts/serve_ShareGPT_multi_node.sh"
 
+# For TP=2 on each node, expect two vLLM Ray worker reports per node.
 EXPECTED_WORKER_REPORTS_PER_NODE="${EXPECTED_WORKER_REPORTS_PER_NODE:-${GPUS_PER_NODE}}"
 
 echo "TRACE_RUN_DIR=${TRACE_RUN_DIR}"
@@ -649,11 +648,10 @@ echo "WORKER_NSYS_FINALIZE_WAIT_S=${WORKER_NSYS_FINALIZE_WAIT_S}"
 echo "WORKER_NSYS_FINALIZE_POLL_S=${WORKER_NSYS_FINALIZE_POLL_S}"
 echo "MIN_WORKER_NSYS_REP_BYTES=${MIN_WORKER_NSYS_REP_BYTES}"
 echo "EXPECTED_WORKER_REPORTS_PER_NODE=${EXPECTED_WORKER_REPORTS_PER_NODE}"
-echo "nsys path: $(command -v nsys || echo '<not found>')"
-nsys --version || true
-
 echo "REPO_ROOT=${REPO_ROOT}"
 echo "VENV_DIR=${VENV_DIR}"
+echo "nsys path: $(command -v nsys || echo '<not found>')"
+nsys --version || true
 
 if [ ! -d "${VENV_DIR}" ]; then
   python3 -m venv "${VENV_DIR}"
@@ -964,26 +962,14 @@ HOST="${HEAD_NODE_IP}" PORT="${PORT}" MODEL_ID="${MODEL_ID}" \
   RAY_PORT="${RAY_PORT}" bash "${SERVE_SCRIPT}" "${SLURM_JOB_ID}" "${HEAD_NODE}"
 
 # -----------------------------------------------------------------------------
-# Clean shutdown and trace collection.
+# Clean shutdown and trace collection
+# -----------------------------------------------------------------------------
 #
 # Important ordering:
-#   1. Stop vLLM API server.
-#      There is no outer API-server nsys wrapper in this script.
-#
+#   1. Stop vLLM API server. There is no outer API-server nsys wrapper.
 #   2. Keep Ray alive while worker Nsight finalizes.
-#      The live sidecar in each Ray srun step keeps copying from:
-#        /tmp/slurm-${SLURM_JOB_ID}/tmp/ray/session_*/logs/nsight
-#        /tmp/ray/<live-session>/logs/nsight
-#
-#      This is the key fix. Previously Ray was killed too soon, so only
-#      empty.nsys-rep placeholders were copied.
-#
 #   3. Only after the wait, stop Ray head/worker srun --block steps.
-#
-#   4. Run a plain, non-overlapped fallback copy.
-#
-# Do not call extra diagnostic srun steps before Ray exits.
-# Do not use --overlap in the copy path.
+#   4. Run plain, non-overlapped fallback copy.
 # -----------------------------------------------------------------------------
 
 echo "Workload finished. Stopping vLLM server process cleanly..."
