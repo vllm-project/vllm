@@ -100,7 +100,7 @@ class PoolingServingObservabilityMixin(ABC):
     ):
         raw_trace_headers = await self._get_trace_headers(raw_request)
 
-        if not self.is_tracing_request or self.scope_request not in self.traced_scopes:
+        if not self.is_tracing_request:
             ctx.trace_headers = raw_trace_headers
             yield
             return
