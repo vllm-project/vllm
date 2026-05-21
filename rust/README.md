@@ -1,10 +1,14 @@
 # vllm-frontend-rs
 
-`vllm-frontend-rs` is an early-stage Rust drop-in alternative frontend for the [vLLM](https://github.com/vllm-project/vllm) inference engine. The current goal is to rebuild the northbound serving layer in Rust while still talking to the core Python vLLM engine process(es) via ZMQ over the existing engine boundary.
+This is a Rust drop-in alternative frontend for vLLM. The current goal is to rebuild the northbound serving layer in Rust while still talking to the core Python vLLM engine process(es) via ZMQ over the existing engine boundary.
+
+It should still be considered experimental, and is not feature-complete. We are working to add more functionality from the python front-end.
+
+See <https://github.com/Inferact/vllm-frontend-rs> for the original commit history before it was moved into the main vllm repo.
 
 ## Architecture
 
-The project is organized as a Cargo workspace with several crates, layered bottom-up:
+The component is organized as a Cargo workspace with several crates, layered bottom-up:
 
 ```text
 ┌─────────────────────────────────┐
@@ -28,21 +32,7 @@ The project is organized as a Cargo workspace with several crates, layered botto
 └─────────────────────────────────┘
 ```
 
-## Quick Start
-
-Install the CLI from the repo root first:
-
-```bash
-# from the local checkout
-cargo install --path src/cmd --bin vllm-rs
-
-# or directly from the git repo
-cargo install --git https://github.com/inferact/vllm-frontend-rs --bin vllm-rs
-```
-
-### Python Integration
-
-`vllm-rs` integrates into Python `vllm` as a Rust frontend subprocess. In that setup,
+`vllm-rs` integrates into Python `vllm` as a Rust frontend subprocess.
 Python owns process startup and launches the Rust API server as a Python-supervised worker, while
 passing the inherited listening socket and transport addresses into `vllm-rs`.
 
@@ -51,10 +41,6 @@ For example:
 ```bash
 VLLM_USE_RUST_FRONTEND=1 vllm serve Qwen/Qwen3-0.6B
 ```
-
-As a tightly-coupled sub-component of vLLM, it is expected that the code in this repo will be relocated
-to live in a `rust` subdirectory of the vLLM repo. For staging purposes however, we're currently including
-it as a submodule.
 
 ### External Engine
 
@@ -79,6 +65,13 @@ vllm-rs serve Qwen/Qwen3-0.6B \
   --data-parallel-rpc-port 62100 \
   --data-parallel-size 1 \
   --data-parallel-size-local 0
+```
+
+To build the `vllm-rs` in isolation:
+
+```bash
+# from the local checkout
+cargo install --path src/cmd --bin vllm-rs
 ```
 
 ### Example Request
