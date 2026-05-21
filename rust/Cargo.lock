@@ -5741,6 +5741,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "vllm-mock-engine"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "asynk-strim-attr",
+ "clap",
+ "futures",
+ "rand 0.9.2",
+ "rmpv",
+ "serde",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "vllm-engine-core-client",
+ "zeromq",
+]
+
+[[package]]
 name = "vllm-reasoning-parser"
 version = "0.1.0"
 dependencies = [

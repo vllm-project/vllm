@@ -65,6 +65,24 @@ pub enum EngineCoreRequestType {
 }
 
 impl EngineCoreRequestType {
+    /// Decode the single-byte request type frame used on the engine input
+    /// socket. Returns `None` for unrecognized values.
+    pub fn from_frame(frame: &[u8]) -> Option<Self> {
+        let [value] = frame else {
+            return None;
+        };
+
+        match value {
+            0 => Some(Self::Add),
+            1 => Some(Self::Abort),
+            2 => Some(Self::StartDpWave),
+            3 => Some(Self::Utility),
+            _ => None,
+        }
+    }
+
+    /// Encode the request type as the single-byte frame used on the engine
+    /// input socket.
     pub fn to_frame(self) -> Bytes {
         Bytes::from_static(match self {
             Self::Add => b"\x00",

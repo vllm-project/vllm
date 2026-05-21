@@ -30,7 +30,7 @@ use crate::protocol::{
     EngineCoreRequestType, EngineCoreSamplingParams, decode_engine_core_outputs,
 };
 use crate::test_utils::{
-    IpcNamespace, setup_bootstrapped_mock_engine, setup_mock_engine_connections,
+    IpcNamespace, setup_bootstrapped_mock_engine, setup_mock_engine_sockets,
     setup_mock_engine_with_init, spawn_mock_engine_task,
 };
 use crate::{
@@ -477,8 +477,8 @@ async fn coordinator_handshake_includes_engine_control_addresses() {
     let (init_tx, init_rx) = oneshot::channel();
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let engine_task = tokio::spawn(async move {
-        let connections = setup_mock_engine_connections(handshake_address, &engine_id).await;
-        let _ = init_tx.send(connections.init.clone());
+        let sockets = setup_mock_engine_sockets(handshake_address, &engine_id).await;
+        let _ = init_tx.send(sockets.init.clone());
         let _ = shutdown_rx.await;
     });
 
@@ -515,7 +515,7 @@ async fn coordinator_wave_control_tracks_pause_running_and_rebroadcasts() {
     let engine0_task = tokio::spawn({
         let handshake_address = handshake_address.clone();
         async move {
-            let mut engine = setup_mock_engine_connections(handshake_address, &[0x00, 0x00]).await;
+            let mut engine = setup_mock_engine_sockets(handshake_address, &[0x00, 0x00]).await;
             let mut coordinator =
                 engine.coordinator.take().expect("coordinator sockets should be present");
 
@@ -594,7 +594,7 @@ async fn coordinator_wave_control_tracks_pause_running_and_rebroadcasts() {
     let engine1_task = tokio::spawn({
         let handshake_address = handshake_address.clone();
         async move {
-            let mut engine = setup_mock_engine_connections(handshake_address, &[0x01, 0x00]).await;
+            let mut engine = setup_mock_engine_sockets(handshake_address, &[0x01, 0x00]).await;
             let mut coordinator =
                 engine.coordinator.take().expect("coordinator sockets should be present");
 
@@ -712,7 +712,7 @@ async fn coordinator_rebroadcasts_engine_start_wave_control() {
     let engine0_task = tokio::spawn({
         let handshake_address = handshake_address.clone();
         async move {
-            let mut engine = setup_mock_engine_connections(handshake_address, &[0x00, 0x00]).await;
+            let mut engine = setup_mock_engine_sockets(handshake_address, &[0x00, 0x00]).await;
             let mut coordinator =
                 engine.coordinator.take().expect("coordinator sockets should be present");
 
@@ -727,7 +727,7 @@ async fn coordinator_rebroadcasts_engine_start_wave_control() {
     let engine1_task = tokio::spawn({
         let handshake_address = handshake_address.clone();
         async move {
-            let mut engine = setup_mock_engine_connections(handshake_address, &[0x01, 0x00]).await;
+            let mut engine = setup_mock_engine_sockets(handshake_address, &[0x01, 0x00]).await;
             let mut coordinator =
                 engine.coordinator.take().expect("coordinator sockets should be present");
 
@@ -778,7 +778,7 @@ async fn coordinator_accepts_stats_only_outputs() {
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let engine_task = tokio::spawn(async move {
-        let mut engine = setup_mock_engine_connections(handshake_address, &[0x00, 0x00]).await;
+        let mut engine = setup_mock_engine_sockets(handshake_address, &[0x00, 0x00]).await;
         let mut coordinator =
             engine.coordinator.take().expect("coordinator sockets should be present");
 
