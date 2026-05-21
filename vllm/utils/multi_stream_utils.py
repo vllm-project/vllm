@@ -8,6 +8,16 @@ from typing import Any
 import torch
 
 
+def record_tensors_on_stream(
+    tensors: tuple[torch.Tensor | None, ...],
+    stream: torch.cuda.Stream,
+) -> None:
+    """Mark tensors as used on ``stream`` so their storage stays alive."""
+    for tensor in tensors:
+        if tensor is not None and tensor.numel() > 0:
+            tensor.record_stream(stream)
+
+
 class AuxStreamType(Enum):
     Attention = 1
 
@@ -46,11 +56,11 @@ def maybe_execute_in_parallel(
     """
     if aux_stream is not None:
         event0.record()
-        result0 = fn0()
         with torch.cuda.stream(aux_stream):
             event0.wait()
             result1 = fn1()
             event1.record()
+        result0 = fn0()
         event1.wait()
     else:
         result0 = fn0()

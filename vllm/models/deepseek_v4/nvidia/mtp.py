@@ -37,6 +37,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.deepseek_mtp import SharedHead
 from vllm.model_executor.models.deepseek_v2 import get_spec_layer_idx_from_weight_name
 from vllm.model_executor.models.utils import maybe_prefix
+from vllm.models.deepseek_v4.multi_stream import create_dsv4_aux_stream_list
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
@@ -174,12 +175,8 @@ class DeepSeekV4MultiTokenPredictor(nn.Module):
         )
 
         # Three aux streams shared across all MTP layers, mirroring
-        # DeepseekV4Model. ROCm runs the same work serially for now.
-        aux_stream_list = (
-            None
-            if current_platform.is_rocm()
-            else [torch.cuda.Stream() for _ in range(3)]
-        )
+        # DeepseekV4Model. ROCm uses the same opt-in multi-stream path.
+        aux_stream_list = create_dsv4_aux_stream_list()
 
         # to map the exact layer index from weights
         self.layers = torch.nn.ModuleDict(

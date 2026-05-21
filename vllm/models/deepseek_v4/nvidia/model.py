@@ -61,6 +61,7 @@ from vllm.models.deepseek_v4.attention import (
     DeepseekV4MLAModules,
     DeepseekV4MultiHeadLatentAttentionWrapper,
 )
+from vllm.models.deepseek_v4.multi_stream import create_dsv4_aux_stream_list
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import tl, triton
@@ -1227,13 +1228,9 @@ class DeepseekV4Model(nn.Module):
         # Three aux streams: one per non-default input GEMM in
         # DeepseekV4MultiHeadLatentAttentionWrapper.attn_gemm_parallel_execute
         # (compressor kv_score, indexer.weights_proj, indexer.compressor
-        # kv_score). fused_wqa_wkv stays on the default stream.
-        # Disable them on ROCm because of hang issues.
-        aux_stream_list = (
-            None
-            if current_platform.is_rocm()
-            else [torch.cuda.Stream() for _ in range(3)]
-        )
+        # kv_score). fused_wqa_wkv stays on the default stream. On ROCm,
+        # streams are opt-in via VLLM_DSV4_ROCM_MULTI_STREAM (#41820).
+        aux_stream_list = create_dsv4_aux_stream_list()
 
         self.device = current_platform.device_type
         # Reserved topk indices buffer for all Indexer layers to reuse.

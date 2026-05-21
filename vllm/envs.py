@@ -259,6 +259,8 @@ if TYPE_CHECKING:
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
+    VLLM_DSV4_ROCM_MULTI_STREAM: bool = False
+    VLLM_DSV4_ROCM_MULTI_STREAM_DECODE_ONLY: bool = True
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool | None = None
     VLLM_LOG_MODEL_INSPECTION: bool = False
@@ -1873,6 +1875,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # for the default value of 1024 tokens.
     "VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD": lambda: int(
         os.getenv("VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD", "1024")
+    ),
+    # Opt-in ROCm multi-stream overlap for DeepSeek-V4 CSA decode (default +
+    # indexer streams). Disabled by default until validated on MI hardware.
+    "VLLM_DSV4_ROCM_MULTI_STREAM": lambda: bool(
+        int(os.getenv("VLLM_DSV4_ROCM_MULTI_STREAM", "0"))
+    ),
+    # When set, ROCm multi-stream overlap applies only to steps with decode
+    # tokens (prefill stays serial). Ignored on CUDA.
+    "VLLM_DSV4_ROCM_MULTI_STREAM_DECODE_ONLY": lambda: bool(
+        int(os.getenv("VLLM_DSV4_ROCM_MULTI_STREAM_DECODE_ONLY", "1"))
     ),
     # Format for saving torch.compile cache artifacts
     # - "binary": saves as binary file
