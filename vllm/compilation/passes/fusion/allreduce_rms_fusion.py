@@ -951,7 +951,7 @@ class AiterAllreduceFusedRMSNormPattern(BasePattern, VllmPatternReplacement):
             allreduce = self.FUSED_AR_RMSNORM_OP(
                 input_=input,
                 residual=residual,
-                weight=weight,
+                weight=weight.to(input.dtype),
                 epsilon=self.epsilon,
             )
             return allreduce[0], allreduce[1]
@@ -997,7 +997,7 @@ class AiterAllreduceFusedAddRMSNormPattern(BasePattern, VllmPatternReplacement):
             allreduce = self.FUSED_AR_RMSNORM_OP(
                 input_=input,
                 residual=residual,
-                weight=weight,
+                weight=weight.to(input.dtype),
                 epsilon=self.epsilon,
             )
             return allreduce[0], allreduce[1]
@@ -1074,7 +1074,7 @@ class AiterAllreduceFusedRMSNormGroupQuantFP8Pattern(
             result = self.FUSED_AR_RMS_QUANT_OP(
                 input_=input,
                 residual=residual,
-                weight=weight,
+                weight=weight.to(input.dtype),
                 epsilon=self.epsilon,
                 group_size=self.group_size,
             )
@@ -1154,7 +1154,7 @@ class AiterAllreduceFusedAddRMSNormGroupQuantFP8Pattern(
             result = self.FUSED_AR_RMS_QUANT_OP(
                 input_=input,
                 residual=residual,
-                weight=weight,
+                weight=weight.to(input.dtype),
                 epsilon=self.epsilon,
                 group_size=self.group_size,
             )
@@ -1271,7 +1271,7 @@ class AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern(
             fused = self.FUSED_AR_RMS_QUANT_BF16_OP(
                 input_=input_,
                 residual=residual,
-                weight=norm_weight,
+                weight=norm_weight.to(input_.dtype),
                 epsilon=eps,
                 group_size=gs,
             )
