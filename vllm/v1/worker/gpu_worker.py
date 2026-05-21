@@ -1049,7 +1049,10 @@ class Worker(WorkerBase):
 
         model = self.model_runner.model
 
-        with torch.device(self.device):
+        with (
+            set_current_vllm_config(self.vllm_config),
+            torch.device(self.device),
+        ):
             if self._is_checkpoint_format:
                 self.weight_transfer_engine.receive_weights(
                     typed_update_info,
