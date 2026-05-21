@@ -204,9 +204,17 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         assert self.g1_alphas is not None and self.g2_alphas is not None, (
             "g1_alphas and g2_alphas must not be None for FlashInferB12xExperts"
         )
-        assert self.a2_gscale is not None, (
-            "a2_gscale must not be None for FlashInferB12xExperts"
-        )
+        # W4A16 NVFP4 checkpoints may have a2_gscale=None; b12x quantizes FC2
+        # input dynamically, so a uniform 1.0 scale per expert is equivalent
+        # to the bake-in done in process_weights_after_loading for static-
+        # quant checkpoints.
+        fc2_input_scale = self.a2_gscale
+        if fc2_input_scale is None:
+            fc2_input_scale = torch.ones(
+                self.num_local_experts,
+                device=hidden_states.device,
+                dtype=torch.float32,
+            )
 
         top_k = topk_ids.shape[1]
 
@@ -217,7 +225,7 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
             w1_weight=w1,
             w1_weight_sf=self.w1_sf_mma,
             w1_alpha=self.g1_alphas,
-            fc2_input_scale=self.a2_gscale,
+            fc2_input_scale=fc2_input_scale,
             w2_weight=w2,
             w2_weight_sf=self.w2_sf_mma,
             w2_alpha=self.g2_alphas,
