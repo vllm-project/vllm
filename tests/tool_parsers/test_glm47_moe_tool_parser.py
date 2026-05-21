@@ -7,6 +7,7 @@ import json
 from unittest.mock import Mock
 
 import pytest
+from openai.types.responses import FunctionTool
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -174,3 +175,107 @@ class TestGlm47Streaming:
             )
         args = json.loads(glm47_tool_parser.prev_tool_call_arr[0]["arguments"])
         assert args["city"] == "Beijing"
+
+    def test_delays_prefix_only_tool_name_until_exact_match(
+        self, glm47_tool_parser, mock_request
+    ):
+        _reset(glm47_tool_parser)
+        partial_text = (
+            "<tool_call>get<arg_key>city</arg_key>"
+            "<arg_value>Beijing</arg_value></tool_call>"
+        )
+
+        partial = glm47_tool_parser.extract_tool_calls_streaming(
+            previous_text="",
+            current_text=partial_text,
+            delta_text=partial_text,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=mock_request,
+        )
+
+        assert partial is None or not partial.tool_calls
+        assert not glm47_tool_parser.prev_tool_call_arr[0].get("name")
+
+        full_text = (
+            "<tool_call>get_weather<arg_key>city</arg_key>"
+            "<arg_value>Beijing</arg_value></tool_call>"
+        )
+
+        full = glm47_tool_parser.extract_tool_calls_streaming(
+            previous_text=partial_text,
+            current_text=full_text,
+            delta_text="_weather",
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=mock_request,
+        )
+
+        assert full is not None
+        assert full.tool_calls is not None
+        assert len(full.tool_calls) == 2
+        first_delta = full.tool_calls[0]
+        first_function = first_delta.function
+        assert first_function.name == "get_weather"
+        assert first_function.arguments == ""
+        assert json.loads(full.tool_calls[1].function.arguments) == {"city": "Beijing"}
+
+    def test_delays_prefix_only_tool_name_with_function_tools(self, glm47_tokenizer):
+        parser = Glm47MoeModelToolParser(
+            glm47_tokenizer,
+            tools=[
+                FunctionTool(
+                    type="function",
+                    name="get_weather",
+                    description="Get the weather",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "city": {"type": "string"},
+                        },
+                    },
+                )
+            ],
+        )
+        request = Mock(spec=ChatCompletionRequest)
+        request.tools = parser.tools
+        request.tool_choice = "auto"
+
+        _reset(parser)
+        partial_text = (
+            "<tool_call>get<arg_key>city</arg_key>"
+            "<arg_value>Beijing</arg_value></tool_call>"
+        )
+
+        partial = parser.extract_tool_calls_streaming(
+            previous_text="",
+            current_text=partial_text,
+            delta_text=partial_text,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=request,
+        )
+
+        assert partial is None or not partial.tool_calls
+
+        full_text = (
+            "<tool_call>get_weather<arg_key>city</arg_key>"
+            "<arg_value>Beijing</arg_value></tool_call>"
+        )
+        full = parser.extract_tool_calls_streaming(
+            previous_text=partial_text,
+            current_text=full_text,
+            delta_text="_weather",
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=request,
+        )
+
+        assert full is not None
+        assert full.tool_calls is not None
+        assert full.tool_calls[0].function.name == "get_weather"
+        assert json.loads(full.tool_calls[1].function.arguments) == {"city": "Beijing"}

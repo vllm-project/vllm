@@ -38,7 +38,7 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
-from vllm.tool_parsers.utils import partial_tag_overlap
+from vllm.tool_parsers.utils import find_tool_properties, partial_tag_overlap
 
 logger = init_logger(__name__)
 
@@ -129,21 +129,11 @@ class Glm4MoeModelToolParser(ToolParser):
         arg_name: str,
         tools: list[Tool] | None,
     ) -> bool:
-        if tools is None:
+        properties = find_tool_properties(tools, tool_name)
+        if not properties:
+            logger.debug("No tool named '%s'.", tool_name)
             return False
-        for tool in tools:
-            if tool.function.name != tool_name:
-                continue
-            if tool.function.parameters is None:
-                return False
-            arg_type = (
-                tool.function.parameters.get("properties", {})
-                .get(arg_name, {})
-                .get("type", None)
-            )
-            return arg_type == "string"
-        logger.debug("No tool named '%s'.", tool_name)
-        return False
+        return properties.get(arg_name, {}).get("type") == "string"
 
     @staticmethod
     def _tools_enabled(request: ChatCompletionRequest) -> bool:
@@ -329,6 +319,37 @@ class Glm4MoeModelToolParser(ToolParser):
         name = inner_text[:cut].strip()
         return name if name else None
 
+    def _should_delay_tool_name(
+        self,
+        tool_name: str,
+    ) -> bool:
+        """Delay streaming ambiguous prefix-only tool names.
+
+        With speculative decoding, GLM tool names can briefly appear as a
+        prefix of the real tool name in ``current_text``. If we stream that
+        prefix immediately, clients that only keep the first streamed name can
+        get stuck with an invalid name like ``get`` instead of
+        ``get_weather``.
+        """
+        if not self.tools:
+            return False
+
+        has_exact_match = False
+        has_longer_prefix_match = False
+        for tool in self.tools:
+            candidate = getattr(tool, "name", None)
+            if candidate is None:
+                candidate = getattr(getattr(tool, "function", None), "name", None)
+            if candidate is None:
+                continue
+            if candidate == tool_name:
+                has_exact_match = True
+                continue
+            if candidate.startswith(tool_name):
+                has_longer_prefix_match = True
+
+        return has_longer_prefix_match and not has_exact_match
+
     def _build_args_json_so_far(
         self,
         tool_name: str,
@@ -461,6 +482,9 @@ class Glm4MoeModelToolParser(ToolParser):
             # Extract tool name
             tool_name = self._extract_tool_name_from_region(inner_text)
             if not tool_name:
+                break
+
+            if self._should_delay_tool_name(tool_name):
                 break
 
             # Emit tool name (once per tool call)
