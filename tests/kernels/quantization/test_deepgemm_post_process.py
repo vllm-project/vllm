@@ -19,8 +19,8 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 class TestDeepgemmPostProcess:
     """Test deepgemm_post_process_fp8_weight_block edge cases."""
 
-    def test_bmm_batch_size_zero_returns_original(self):
-        """Test that bmm_batch_size=0 returns original tensors.
+    def test_bmm_batch_size_zero_returns_empty_3d(self):
+        """Test that bmm_batch_size=0 returns empty 3D tensors.
 
         Regression test for Issue #43174: ZeroDivisionError when
         bmm_batch_size is 0 due to TP+EP partitioning.
@@ -39,12 +39,14 @@ class TestDeepgemmPostProcess:
             bmm_batch_size=0,  # Invalid value
         )
 
-        # Should return original tensors unchanged
-        assert result_wq is wq
-        assert result_ws is ws
+        # Should return empty 3D tensors with correct layout
+        assert result_wq.ndim == 3
+        assert result_wq.shape[0] == 0  # Empty batch dimension
+        assert result_ws.ndim == 3
+        assert result_ws.shape[0] == 0  # Empty batch dimension
 
-    def test_bmm_batch_size_negative_returns_original(self):
-        """Test that negative bmm_batch_size returns original tensors."""
+    def test_bmm_batch_size_negative_returns_empty_3d(self):
+        """Test that negative bmm_batch_size returns empty 3D tensors."""
         wq = torch.randn(128, 256, dtype=torch.float8_e4m3fn)
         ws = torch.randn(1, 2, dtype=torch.float32)
         block_shape = (128, 128)
@@ -58,12 +60,19 @@ class TestDeepgemmPostProcess:
             bmm_batch_size=-1,
         )
 
-        assert result_wq is wq
-        assert result_ws is ws
+        # Should return empty 3D tensors with correct layout
+        assert result_wq.ndim == 3
+        assert result_wq.shape[0] == 0  # Empty batch dimension
+        assert result_ws.ndim == 3
+        assert result_ws.shape[0] == 0  # Empty batch dimension
 
     def test_bmm_batch_size_normal_case(self):
-        """Test normal BMM reshape with valid batch size."""
-        g, r, d = 4, 32, 256
+        """Test normal BMM reshape with valid batch size.
+        
+        Note: r must be a multiple of the block size (128) for the
+        view operation to work correctly.
+        """
+        g, r, d = 4, 128, 256  # r=128 is a multiple of block_size=128
         wq = torch.randn(g * r, d, dtype=torch.float8_e4m3fn)
         ws = torch.randn(
             g * r // 128, d // 128, dtype=torch.float32
