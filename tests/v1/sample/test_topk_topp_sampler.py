@@ -6,8 +6,10 @@ from torch import Generator
 
 from vllm.platforms import current_platform
 from vllm.v1.sample.ops.topk_topp_sampler import (
+    _HAS_CPU_TOPP_OP,
     apply_top_k_top_p_cpu,
     apply_top_k_top_p_pytorch,
+    random_sample,
 )
 
 DEVICE_TYPE = current_platform.device_type
@@ -1290,3 +1292,216 @@ class TestCpuTopkTopp:
             finite_in = (logits[i] > float("-inf")).sum().item()
             if finite_in > 0:
                 assert kept > 0, f"Row {i}: no tokens kept"
+
+
+# =============================================================================
+# CPU robustness tests (mirrors TestFlashInferTopkToppRobustness)
+# =============================================================================
+
+
+@pytest.mark.skipif(not _HAS_CPU_TOPP_OP, reason="CPU top-p/top-k kernel unavailable")
+class TestCpuTopkToppRobustness:
+    """Robustness of CPU top-k / top-p sampling to NaN / Inf logits.
+
+    Mirrors TestFlashInferTopkToppRobustness but for the CPU path.
+    A single poisoned request must not crash, produce out-of-range token
+    ids, or corrupt other batch rows.
+    """
+
+    BATCH = 8
+    VOCAB = 32768
+    TOPK = 50
+    TOPP = 0.9
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        torch.set_default_device("cpu")
+        self.generator = Generator(device="cpu").manual_seed(1234)
+
+    def _make_logits(self, pattern: str) -> torch.Tensor:
+        logits = (
+            torch.randn(
+                self.BATCH,
+                self.VOCAB,
+                generator=self.generator,
+                dtype=torch.float32,
+            )
+            * 5.0
+        )
+        if pattern == "clean":
+            return logits
+        if pattern == "nan_one_row":
+            logits[0, :] = float("nan")
+        elif pattern == "nan_few":
+            idx = torch.randperm(self.VOCAB, generator=self.generator)[:16]
+            logits[0, idx] = float("nan")
+        elif pattern == "nan_at_top":
+            top_idx = logits[0].topk(32).indices
+            logits[0, top_idx] = float("nan")
+        elif pattern == "nan_all_rows":
+            logits[:, :] = float("nan")
+        elif pattern == "pos_inf_one_row":
+            logits[0, :] = float("inf")
+        elif pattern == "neg_inf_one_row":
+            logits[0, :] = float("-inf")
+        elif pattern == "mixed_inf_nan":
+            assert self.BATCH >= 3
+            logits[0, :] = float("nan")
+            logits[1, :] = float("inf")
+            logits[2, :] = float("-inf")
+        elif pattern == "degenerate_flat":
+            logits[:, :] = 1.0
+        else:
+            raise ValueError(f"unknown pattern: {pattern}")
+        return logits
+
+    def _check_tokens(self, tokens: torch.Tensor, ctx: str):
+        assert tokens.dim() == 1, f"{ctx}: expected 1-D output, got {tokens.shape}"
+        ids = tokens.tolist()
+        for tid in ids:
+            assert 0 <= tid < self.VOCAB, (
+                f"{ctx}: token id {tid} outside [0, {self.VOCAB})"
+            )
+
+    @pytest.mark.parametrize(
+        "pattern",
+        [
+            "clean",
+            "nan_one_row",
+            "nan_few",
+            "nan_at_top",
+            "nan_all_rows",
+            "pos_inf_one_row",
+            "neg_inf_one_row",
+            "mixed_inf_nan",
+            "degenerate_flat",
+        ],
+    )
+    @pytest.mark.parametrize("path", ["topk_only", "topp_only", "topk_topp"])
+    def test_cpu_handles_pathological_logits(self, pattern: str, path: str):
+        logits = self._make_logits(pattern)
+        k = (
+            torch.full((self.BATCH,), self.TOPK, dtype=torch.int32)
+            if path in ("topk_only", "topk_topp")
+            else None
+        )
+        p = (
+            torch.full((self.BATCH,), self.TOPP, dtype=torch.float32)
+            if path in ("topp_only", "topk_topp")
+            else None
+        )
+
+        masked = apply_top_k_top_p_cpu(logits.clone().contiguous(), k, p)
+        # Rows with any finite value must produce valid samples.
+        finite_rows = masked.isfinite().any(dim=-1)
+        if finite_rows.any():
+            probs = masked[finite_rows].softmax(dim=-1, dtype=torch.float32)
+            probs = torch.nan_to_num(probs, nan=0.0)
+            row_sum = probs.sum(dim=-1, keepdim=True)
+            valid = row_sum.squeeze(-1) > 0
+            if valid.any():
+                probs_valid = probs[valid]
+                row_sum_valid = probs_valid.sum(dim=-1, keepdim=True).clamp(min=1e-12)
+                probs_norm = probs_valid / row_sum_valid
+                sampled = probs_norm.multinomial(1).squeeze(-1)
+                self._check_tokens(sampled, ctx=f"pattern={pattern}, path={path}")
+
+    def test_cross_row_isolation(self):
+        """Row 0 poisoned with NaN must not corrupt rows 1..B-1."""
+        logits = self._make_logits("nan_one_row")
+        k = torch.full((self.BATCH,), self.TOPK, dtype=torch.int32)
+        p = torch.full((self.BATCH,), self.TOPP, dtype=torch.float32)
+        masked = apply_top_k_top_p_cpu(logits.clone().contiguous(), k, p)
+        for i in range(1, self.BATCH):
+            assert masked[i].isfinite().any(), f"row {i} corrupted: no finite values"
+            assert not masked[i].isnan().any(), f"row {i} contains NaN"
+
+
+# =============================================================================
+# CPU distribution-match tests (mirrors TestFlashInferDistributionMatch)
+# =============================================================================
+
+
+class TestCpuDistributionMatch:
+    """Chi-square goodness-of-fit: CPU sampler reproduces expected distribution.
+
+    Mirrors TestFlashInferDistributionMatch but for the CPU path.
+    """
+
+    VOCAB = 32
+    N_SAMPLES = 50_000
+    ALPHA = 1e-6
+    SEED = 0
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        torch.set_default_device("cpu")
+
+    @pytest.mark.parametrize(
+        "topk,topp",
+        [
+            (8, None),
+            (16, None),
+            (None, 0.5),
+            (None, 0.7),
+            (None, 0.99),
+            (8, 0.9),
+            (4, 0.5),
+        ],
+    )
+    def test_distribution_matches_theoretical(self, topk, topp):
+        from scipy.stats import chisquare
+
+        torch.manual_seed(self.SEED)
+        logits_one = torch.randn((1, self.VOCAB), dtype=torch.float32) * 2.0
+
+        k_one = torch.tensor([topk], dtype=torch.int32) if topk is not None else None
+        p_one = torch.tensor([topp], dtype=torch.float32) if topp is not None else None
+        masked = apply_top_k_top_p_pytorch(
+            logits_one.clone(), k_one, p_one, allow_cpu_sync=True
+        )
+        expected_probs = masked.softmax(dim=-1).flatten().cpu().numpy()
+        expected_counts = expected_probs * self.N_SAMPLES
+
+        batch = logits_one.expand(self.N_SAMPLES, self.VOCAB).contiguous()
+        k_batch = (
+            torch.full((self.N_SAMPLES,), topk, dtype=torch.int32)
+            if topk is not None
+            else None
+        )
+        p_batch = (
+            torch.full((self.N_SAMPLES,), topp, dtype=torch.float32)
+            if topp is not None
+            else None
+        )
+
+        processed = apply_top_k_top_p_cpu(batch.clone(), k_batch, p_batch)
+        probs = processed.softmax(dim=-1, dtype=torch.float32)
+        cpu_tokens = random_sample(probs, {})
+        cpu_counts = torch.bincount(cpu_tokens, minlength=self.VOCAB).cpu().numpy()
+        self._chi2_check(
+            cpu_counts,
+            expected_counts,
+            chisquare,
+            label=f"cpu top-k={topk} top-p={topp}",
+        )
+
+    def _chi2_check(self, empirical, expected, chisquare_fn, *, label):
+        import numpy as np
+
+        outside = (expected == 0) & (empirical > 0)
+        assert not outside.any(), (
+            f"{label}: sampled out-of-support tokens "
+            f"(zero expected prob): indices={outside.nonzero()[0].tolist()}"
+        )
+        in_support = expected > 0
+        if int(in_support.sum()) <= 1:
+            return
+        emp = empirical[in_support].astype(np.float64)
+        exp = expected[in_support].astype(np.float64)
+        exp = exp * (emp.sum() / exp.sum())
+        chi2, p_value = chisquare_fn(emp, exp)
+        assert p_value > self.ALPHA, (
+            f"{label}: distribution differs from theoretical: "
+            f"chi2={chi2:.2f} p_value={p_value:.2e} alpha={self.ALPHA}"
+        )

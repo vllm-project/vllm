@@ -7,10 +7,12 @@
 #include <vector>
 
 namespace {
-constexpr float kPadSentinel = -1e30f;  // logits below this are PAD
-constexpr float kBoundaryTol = 1e-5f;   // tie tolerance for top-p cut
-constexpr int kMeanStdSampleN = 8192;   // Pass 0 sample size
-constexpr int kBsearchMaxIters = 32;    // binary-search iteration cap
+constexpr float kPadSentinel = -1e30f;      // logits below this are PAD
+constexpr float kBoundaryTol = 1e-5f;       // tie tolerance for top-p cut
+constexpr int kMeanStdSampleN = 8192;       // Pass 0 sample size
+constexpr int kBsearchMaxIters = 32;        // binary-search iteration cap
+constexpr int kTernarySearchMaxIters = 18;  // matches Triton
+constexpr float kKDuplicateTol = 1e-9f;  // top-k tie tolerance; matches Triton
 }  // namespace
 
 // Matches _NORMAL_CDF_TO_SIGMA_TABLE in topk_topp_triton.py (200 entries).
@@ -38,6 +40,35 @@ static const float NORMAL_CDF_TO_SIGMA_TABLE[200] = {
     1.135f,  1.104f,  1.073f, 1.041f, 1.006f, 0.969f, 0.931f, 0.894f, 0.851f,
     0.806f,  0.757f,  0.702f, 0.643f, 0.574f, 0.498f, 0.405f, 0.288f, 0.134f,
     -0.110f, -3.813f,
+};
+
+// Matches _PERCENTILE_TO_STD_TABLE in topk_topp_triton.py (200 entries).
+static const float PERCENTILE_TO_STD_TABLE[200] = {
+    2.576f,  2.319f,  2.178f,  2.064f,  1.968f,  1.892f,  1.819f,  1.757f,
+    1.708f,  1.659f,  1.616f,  1.568f,  1.526f,  1.492f,  1.456f,  1.420f,
+    1.382f,  1.342f,  1.309f,  1.280f,  1.249f,  1.221f,  1.193f,  1.169f,
+    1.145f,  1.121f,  1.095f,  1.073f,  1.050f,  1.030f,  1.008f,  0.987f,
+    0.966f,  0.945f,  0.926f,  0.910f,  0.891f,  0.871f,  0.854f,  0.837f,
+    0.819f,  0.803f,  0.784f,  0.767f,  0.753f,  0.734f,  0.719f,  0.702f,
+    0.690f,  0.675f,  0.658f,  0.640f,  0.625f,  0.609f,  0.595f,  0.578f,
+    0.564f,  0.550f,  0.537f,  0.521f,  0.509f,  0.495f,  0.481f,  0.466f,
+    0.453f,  0.439f,  0.424f,  0.410f,  0.397f,  0.383f,  0.370f,  0.356f,
+    0.343f,  0.330f,  0.316f,  0.302f,  0.289f,  0.274f,  0.261f,  0.247f,
+    0.235f,  0.223f,  0.209f,  0.196f,  0.184f,  0.172f,  0.159f,  0.149f,
+    0.137f,  0.124f,  0.112f,  0.100f,  0.086f,  0.074f,  0.062f,  0.050f,
+    0.035f,  0.023f,  0.009f,  -0.003f, -0.015f, -0.027f, -0.039f, -0.052f,
+    -0.063f, -0.074f, -0.085f, -0.097f, -0.109f, -0.122f, -0.134f, -0.147f,
+    -0.158f, -0.171f, -0.184f, -0.196f, -0.210f, -0.223f, -0.235f, -0.248f,
+    -0.261f, -0.275f, -0.289f, -0.302f, -0.317f, -0.328f, -0.341f, -0.353f,
+    -0.368f, -0.382f, -0.396f, -0.410f, -0.426f, -0.439f, -0.452f, -0.465f,
+    -0.480f, -0.493f, -0.507f, -0.521f, -0.537f, -0.551f, -0.568f, -0.582f,
+    -0.597f, -0.614f, -0.628f, -0.643f, -0.658f, -0.673f, -0.691f, -0.706f,
+    -0.721f, -0.738f, -0.754f, -0.769f, -0.789f, -0.808f, -0.824f, -0.838f,
+    -0.857f, -0.877f, -0.893f, -0.912f, -0.929f, -0.947f, -0.965f, -0.983f,
+    -1.003f, -1.027f, -1.050f, -1.070f, -1.092f, -1.117f, -1.139f, -1.162f,
+    -1.189f, -1.216f, -1.241f, -1.272f, -1.300f, -1.330f, -1.367f, -1.404f,
+    -1.441f, -1.485f, -1.523f, -1.564f, -1.607f, -1.658f, -1.710f, -1.778f,
+    -1.832f, -1.901f, -1.978f, -2.068f, -2.174f, -2.325f, -2.577f, -3.813f,
 };
 
 namespace {
@@ -203,6 +234,269 @@ static float binary_search_buffer(const float* buf, int n, float p_val,
   }
   *sum_above_out = s_hi;
   return hi;
+}
+
+// One vectorised scan over buf[0..n). Returns:
+//   *num_above  = #{i : buf[i] > pivot}
+//   *min_above  = min of {buf[i] | buf[i] > pivot}, or +inf if empty
+//   *num_at_min = #{i : buf[i] > pivot && |buf[i] - *min_above| < tol}
+static void scan_pivot_stats(const float* buf, int n, float pivot, float tol,
+                             int* num_above, float* min_above,
+                             int* num_at_min) {
+  float ma = std::numeric_limits<float>::infinity();
+  int na = 0;
+  int i = 0;
+#if defined(__AVX512F__)
+  const __m512 vpivot = _mm512_set1_ps(pivot);
+  const __m512 vpos_inf =
+      _mm512_set1_ps(std::numeric_limits<float>::infinity());
+  __m512 vmin = vpos_inf;
+  __m512i vcnt = _mm512_setzero_si512();
+  for (; i + 16 <= n; i += 16) {
+    __m512 b = _mm512_loadu_ps(buf + i);
+    __mmask16 above = _mm512_cmp_ps_mask(b, vpivot, _CMP_GT_OQ);
+    na += __builtin_popcount((unsigned)above);
+    __m512 safe = _mm512_mask_blend_ps(above, vpos_inf, b);
+    vmin = _mm512_min_ps(vmin, safe);
+  }
+  // Horizontal reduce min
+  {
+    __m256 lo8 = _mm512_castps512_ps256(vmin);
+    __m256 hi8 = _mm512_extractf32x8_ps(vmin, 1);
+    __m256 m8 = _mm256_min_ps(lo8, hi8);
+    __m128 lo4 = _mm256_castps256_ps128(m8);
+    __m128 hi4 = _mm256_extractf128_ps(m8, 1);
+    __m128 m4 = _mm_min_ps(lo4, hi4);
+    m4 = _mm_min_ps(m4, _mm_movehl_ps(m4, m4));
+    m4 = _mm_min_ss(m4, _mm_shuffle_ps(m4, m4, 1));
+    ma = _mm_cvtss_f32(m4);
+  }
+#elif defined(__AVX2__)
+  const __m256 vpivot256 = _mm256_set1_ps(pivot);
+  const __m256 vpos_inf256 =
+      _mm256_set1_ps(std::numeric_limits<float>::infinity());
+  __m256 vmin_lo = vpos_inf256, vmin_hi = vpos_inf256;
+  for (; i + 16 <= n; i += 16) {
+    __m256 blo = _mm256_loadu_ps(buf + i);
+    __m256 bhi = _mm256_loadu_ps(buf + i + 8);
+    __m256 above_lo = _mm256_cmp_ps(blo, vpivot256, _CMP_GT_OQ);
+    __m256 above_hi = _mm256_cmp_ps(bhi, vpivot256, _CMP_GT_OQ);
+    na += __builtin_popcount((unsigned)_mm256_movemask_ps(above_lo));
+    na += __builtin_popcount((unsigned)_mm256_movemask_ps(above_hi));
+    vmin_lo =
+        _mm256_min_ps(vmin_lo, _mm256_blendv_ps(vpos_inf256, blo, above_lo));
+    vmin_hi =
+        _mm256_min_ps(vmin_hi, _mm256_blendv_ps(vpos_inf256, bhi, above_hi));
+  }
+  {
+    __m256 m8 = _mm256_min_ps(vmin_lo, vmin_hi);
+    __m128 lo4 = _mm256_castps256_ps128(m8);
+    __m128 hi4 = _mm256_extractf128_ps(m8, 1);
+    __m128 m4 = _mm_min_ps(lo4, hi4);
+    m4 = _mm_min_ps(m4, _mm_movehl_ps(m4, m4));
+    m4 = _mm_min_ss(m4, _mm_shuffle_ps(m4, m4, 1));
+    ma = _mm_cvtss_f32(m4);
+  }
+#endif
+  for (; i < n; ++i) {
+    if (buf[i] > pivot) {
+      ++na;
+      if (buf[i] < ma) ma = buf[i];
+    }
+  }
+  *num_above = na;
+  *min_above = ma;
+  *num_at_min = count_within_tol(buf, n, ma, tol);
+}
+
+// Ternary search for the top-k pivot on a pre-gathered buffer.
+// Returns the final pivot value and sets *dup_value_out, *num_dup_out,
+// *num_above_out (count strictly above the chosen pivot).
+static float ternary_search_topk(const float* buf, int n, int k, float lo,
+                                 float hi, float* dup_value_out,
+                                 int* num_dup_out, int* num_above_out) {
+  float final_pivot = (lo + hi) * 0.5f;
+  float dup_value = std::numeric_limits<float>::infinity();
+  int num_dup = 0, num_above = 0;
+  for (int iter = 0; iter < kTernarySearchMaxIters; ++iter) {
+    float p0 = lo + (hi - lo) * (1.0f / 3.0f);
+    float p1 = lo + (hi - lo) * (2.0f / 3.0f);
+    int na0, na1, nd0, nd1;
+    float mn0, mn1;
+    scan_pivot_stats(buf, n, p0, kKDuplicateTol, &na0, &mn0, &nd0);
+    scan_pivot_stats(buf, n, p1, kKDuplicateTol, &na1, &mn1, &nd1);
+
+    bool found0 = (na0 >= k) && (na0 - nd0 < k);
+    bool found1 = (na1 >= k) && (na1 - nd1 < k);
+    if (found1) {
+      final_pivot = p1;
+      dup_value = mn1;
+      num_dup = nd1;
+      num_above = na1;
+      break;
+    }
+    if (found0) {
+      final_pivot = p0;
+      dup_value = mn0;
+      num_dup = nd0;
+      num_above = na0;
+      break;
+    }
+    if (na1 > k)
+      lo = p1;
+    else if (na0 > k)
+      lo = p0;
+    if (na0 < k)
+      hi = p0;
+    else if (na1 < k)
+      hi = p1;
+
+    if (hi - lo < kKDuplicateTol) {
+      final_pivot = (lo + hi) * 0.5f;
+      scan_pivot_stats(buf, n, final_pivot, kKDuplicateTol, &num_above,
+                       &dup_value, &num_dup);
+      break;
+    }
+  }
+  *dup_value_out = dup_value;
+  *num_dup_out = num_dup;
+  *num_above_out = num_above;
+  return final_pivot;
+}
+
+static void top_k_row(float* __restrict__ row, int V, int k_val,
+                      float* __restrict__ outlier_buf) {
+  // Pass 0: mean/std estimate on up to kMeanStdSampleN finite logits.
+  float sum_s = 0.f, sum_sq = 0.f;
+  int nf = 0;
+  for (int i = 0; i < V && nf < kMeanStdSampleN; ++i) {
+    float v = row[i];
+    if (v > kPadSentinel) {
+      sum_s += v;
+      sum_sq += v * v;
+      ++nf;
+    }
+  }
+  float avg = nf > 0 ? sum_s / nf : 0.f;
+  float var = nf > 0 ? sum_sq / nf - avg * avg : 1.f;
+  float std_v = sqrtf(var > 0.f ? var : 0.f);
+
+  int tidx = (int)((double)k_val / V * 200);
+  if (tidx < 0) tidx = 0;
+  if (tidx > 199) tidx = 199;
+  float sigma = PERCENTILE_TO_STD_TABLE[tidx];
+  sigma = sigma + fabsf(sigma) * -0.15f;
+  float outlier_logit = avg + std_v * sigma;
+
+  // Pass 1: max/min + finite count + outlier gather.
+  float max_l = -1e38f, min_l = 1e38f;
+  int n_finite = 0, n_outliers = 0;
+  {
+    int i = 0;
+#if defined(__AVX512F__)
+    const float pos_inf_val = std::numeric_limits<float>::infinity();
+    vec_op::FP32Vec16 maxv(row[0]);
+    vec_op::FP32Vec16 minv(pos_inf_val);
+    const __m512 sentinel = _mm512_set1_ps(kPadSentinel);
+    const __m512 pos_inf = _mm512_set1_ps(pos_inf_val);
+    for (; i + 16 <= V; i += 16) {
+      vec_op::FP32Vec16 v16(row + i);
+      maxv = maxv.max(v16);
+      __mmask16 lt = _mm512_cmp_ps_mask(v16.reg, sentinel, _CMP_LE_OS);
+      __m512 safe = _mm512_mask_blend_ps(lt, v16.reg, pos_inf);
+      minv.reg = _mm512_min_ps(minv.reg, safe);
+      __mmask16 fin = _mm512_cmp_ps_mask(v16.reg, sentinel, _CMP_GT_OQ);
+      n_finite += __builtin_popcount((unsigned)fin);
+    }
+    max_l = maxv.reduce_max();
+    min_l = minv.reduce_min();
+#elif defined(__AVX2__)
+    const float pos_inf_val = std::numeric_limits<float>::infinity();
+    vec_op::FP32Vec16 maxv(row[0]);
+    vec_op::FP32Vec16 minv(pos_inf_val);
+    const __m256 sentinel256 = _mm256_set1_ps(kPadSentinel);
+    const __m256 pos_inf256 = _mm256_set1_ps(pos_inf_val);
+    for (; i + 16 <= V; i += 16) {
+      vec_op::FP32Vec16 v16(row + i);
+      maxv = maxv.max(v16);
+      __m256 lt_lo = _mm256_cmp_ps(v16.reg_low, sentinel256, _CMP_LE_OS);
+      __m256 lt_hi = _mm256_cmp_ps(v16.reg_high, sentinel256, _CMP_LE_OS);
+      minv.reg_low = _mm256_min_ps(
+          minv.reg_low, _mm256_blendv_ps(v16.reg_low, pos_inf256, lt_lo));
+      minv.reg_high = _mm256_min_ps(
+          minv.reg_high, _mm256_blendv_ps(v16.reg_high, pos_inf256, lt_hi));
+      __m256 fin_lo = _mm256_cmp_ps(v16.reg_low, sentinel256, _CMP_GT_OQ);
+      __m256 fin_hi = _mm256_cmp_ps(v16.reg_high, sentinel256, _CMP_GT_OQ);
+      n_finite += __builtin_popcount((unsigned)_mm256_movemask_ps(fin_lo));
+      n_finite += __builtin_popcount((unsigned)_mm256_movemask_ps(fin_hi));
+    }
+    max_l = maxv.reduce_max();
+    min_l = minv.reduce_min();
+#endif
+    for (; i < V; ++i) {
+      float v = row[i];
+      if (v > max_l) max_l = v;
+      if (v > kPadSentinel) {
+        ++n_finite;
+        if (v < min_l) min_l = v;
+      }
+    }
+    for (int j = 0; j < V; ++j)
+      if (row[j] > outlier_logit) outlier_buf[n_outliers++] = row[j];
+  }
+  if (min_l > max_l) min_l = max_l;
+
+  // Edge: fewer finite values than k → keep all.
+  if (n_finite <= k_val) return;
+
+  const float neg_inf = -std::numeric_limits<float>::infinity();
+
+  // Degenerate: all finite values approximately equal — keep first k_val.
+  if (max_l - min_l < kKDuplicateTol) {
+    int kept = 0;
+    for (int i = 0; i < V; ++i) {
+      if (row[i] > kPadSentinel) {
+        if (kept < k_val)
+          ++kept;
+        else
+          row[i] = neg_inf;
+      }
+    }
+    return;
+  }
+
+  // Pass 2: ternary search.
+  float final_pivot, dup_value;
+  int n_dup, n_above;
+  if (n_outliers > k_val) {
+    final_pivot =
+        ternary_search_topk(outlier_buf, n_outliers, k_val, outlier_logit,
+                            max_l, &dup_value, &n_dup, &n_above);
+  } else {
+    final_pivot = ternary_search_topk(row, V, k_val, min_l, max_l, &dup_value,
+                                      &n_dup, &n_above);
+  }
+
+  // Pass 3: apply mask with boundary-tie handling.
+  int n_keep_at_boundary = n_dup - (n_above - k_val);
+  if (n_keep_at_boundary < 0) n_keep_at_boundary = 0;
+  if (n_keep_at_boundary > n_dup) n_keep_at_boundary = n_dup;
+
+  if (n_keep_at_boundary == 0) {
+    mask_write_below(row, V, final_pivot, neg_inf);
+  } else {
+    int kept_boundary = 0;
+    for (int i = 0; i < V; ++i) {
+      float v = row[i];
+      bool keep = v > final_pivot;
+      if (!keep && fabsf(v - dup_value) < kKDuplicateTol &&
+          kept_boundary < n_keep_at_boundary) {
+        keep = true;
+        ++kept_boundary;
+      }
+      if (!keep) row[i] = neg_inf;
+    }
+  }
 }
 
 static void top_p_row(float* __restrict__ row, int V, float p_val,
@@ -416,6 +710,65 @@ void cpu_topp_sampling(torch::Tensor& logits, const torch::Tensor& p) {
 #pragma omp for schedule(dynamic, 1)
     for (int b = 0; b < B; ++b) {
       top_p_row(lp + b * V, V, pp[b], scratch_tls.data(), outlier_tls.data());
+    }
+  }
+}
+
+void cpu_topk_sampling(torch::Tensor& logits, const torch::Tensor& k) {
+  TORCH_CHECK(logits.dim() == 2, "logits must be 2D");
+  TORCH_CHECK(logits.dtype() == torch::kFloat32, "logits must be float32");
+  TORCH_CHECK(k.dim() == 1 && k.size(0) == logits.size(0),
+              "k must be 1D with size == batch size");
+  TORCH_CHECK(k.dtype() == torch::kInt32, "k must be int32");
+  TORCH_CHECK(logits.is_contiguous(), "logits must be contiguous");
+
+  const int B = static_cast<int>(logits.size(0));
+  const int V = static_cast<int>(logits.size(1));
+  float* lp = logits.data_ptr<float>();
+  const int* kp = k.data_ptr<int>();
+
+#pragma omp parallel
+  {
+    thread_local std::vector<float> outlier_tls;
+    if ((int)outlier_tls.size() < V) outlier_tls.resize(V);
+#pragma omp for schedule(dynamic, 1)
+    for (int b = 0; b < B; ++b) {
+      int kv = kp[b];
+      if (kv > 0 && kv < V) top_k_row(lp + b * V, V, kv, outlier_tls.data());
+    }
+  }
+}
+
+void cpu_topk_topp_sampling(torch::Tensor& logits, const torch::Tensor& k,
+                            const torch::Tensor& p) {
+  TORCH_CHECK(logits.dim() == 2, "logits must be 2D");
+  TORCH_CHECK(logits.dtype() == torch::kFloat32, "logits must be float32");
+  TORCH_CHECK(k.dim() == 1 && k.size(0) == logits.size(0),
+              "k must be 1D with size == batch size");
+  TORCH_CHECK(k.dtype() == torch::kInt32, "k must be int32");
+  TORCH_CHECK(p.dim() == 1 && p.size(0) == logits.size(0),
+              "p must be 1D with size == batch size");
+  TORCH_CHECK(logits.is_contiguous(), "logits must be contiguous");
+
+  const int B = static_cast<int>(logits.size(0));
+  const int V = static_cast<int>(logits.size(1));
+  float* lp = logits.data_ptr<float>();
+  const int* kp = k.data_ptr<int>();
+  const float* pp = p.data_ptr<float>();
+
+#pragma omp parallel
+  {
+    thread_local std::vector<float> scratch_tls;
+    thread_local std::vector<float> outlier_tls;
+    if ((int)scratch_tls.size() < V) scratch_tls.resize(V);
+    if ((int)outlier_tls.size() < V) outlier_tls.resize(V);
+#pragma omp for schedule(dynamic, 1)
+    for (int b = 0; b < B; ++b) {
+      float* row = lp + b * V;
+      int kv = kp[b];
+      float pv = pp[b];
+      if (kv > 0 && kv < V) top_k_row(row, V, kv, outlier_tls.data());
+      top_p_row(row, V, pv, scratch_tls.data(), outlier_tls.data());
     }
   }
 }

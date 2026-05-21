@@ -17,11 +17,19 @@ if HAS_TRITON:
     from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
 
 try:
+    from vllm._custom_ops import cpu_topk_sampling as _cpu_topk_sampling_op
+    from vllm._custom_ops import (
+        cpu_topk_topp_sampling as _cpu_topk_topp_sampling_op,
+    )
     from vllm._custom_ops import cpu_topp_sampling as _cpu_topp_sampling_op
 
     _HAS_CPU_TOPP_OP = True
+    _HAS_CPU_TOPK_OP = True
+    _HAS_CPU_TOPK_TOPP_OP = True
 except (ImportError, AttributeError):
     _HAS_CPU_TOPP_OP = False
+    _HAS_CPU_TOPK_OP = False
+    _HAS_CPU_TOPK_TOPP_OP = False
 
 logger = init_logger(__name__)
 
@@ -394,28 +402,52 @@ def apply_top_k_only(logits: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
     return logits.masked_fill_(logits < top_k_mask, -float("inf"))
 
 
+def _apply_top_k_only_cpu(logits: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
+    if not _HAS_CPU_TOPK_OP:
+        return apply_top_k_only(logits, k)
+    V = logits.shape[1]
+    if (k == V).all().item():
+        return logits
+    out = logits.contiguous().clone()
+    _cpu_topk_sampling_op(out, k.to(torch.int32))
+    return out
+
+
 def apply_top_k_top_p_cpu(
     logits: torch.Tensor,
     k: torch.Tensor | None,
     p: torch.Tensor | None,
 ) -> torch.Tensor:
-    """CPU-optimized top-k + top-p. Uses C++ ternary-search kernel for top-p."""
+    """CPU-optimized top-k + top-p. Uses C++ ternary-search kernels."""
     if p is None and k is None:
         return logits
+
     if p is None:
-        return apply_top_k_only(logits, k)
+        return _apply_top_k_only_cpu(logits, k)
 
-    # For joint k+p: apply top-k first so top-p cumsum operates over top-k survivors.
-    if k is not None:
-        logits = apply_top_k_only(logits, k)
+    V = logits.shape[1]
+    k_disabled = k is None or (k == V).all().item()
 
+    if k_disabled:
+        if _HAS_CPU_TOPP_OP:
+            out = logits.contiguous().clone()
+            _cpu_topp_sampling_op(out, p.float())
+            return out
+        return apply_top_k_top_p_pytorch(logits, None, p, allow_cpu_sync=True)
+
+    # Joint k+p path.
+    assert k is not None  # k_disabled=False guarantees k is not None
+    if _HAS_CPU_TOPK_TOPP_OP:
+        out = logits.contiguous().clone()
+        _cpu_topk_topp_sampling_op(out, k.to(torch.int32), p.float())
+        return out
+
+    # Fallback: sequential top-k then top-p.
+    logits = _apply_top_k_only_cpu(logits, k)
     if _HAS_CPU_TOPP_OP:
-        # C++ kernel operates in-place; clone to avoid mutating caller's tensor.
         out = logits.contiguous().clone()
         _cpu_topp_sampling_op(out, p.float())
         return out
-
-    # Fallback: sort-based top-p (k already applied above).
     return apply_top_k_top_p_pytorch(logits, None, p, allow_cpu_sync=True)
 
 
