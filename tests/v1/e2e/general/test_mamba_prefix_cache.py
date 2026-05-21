@@ -527,7 +527,6 @@ def apply_patch(monkeypatch: pytest.MonkeyPatch):
 
 
 @create_new_process_for_each_test()
-@pytest.mark.device_type(DEVICE_TYPE)
 def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
     run_ref_mamba_state_in_subprocess()
     apply_patch(monkeypatch)
