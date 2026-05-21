@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import queue
+import random
 import sys
 import uuid
 import weakref
@@ -1318,6 +1319,18 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
     """Asyncio-compatible client for multi-proc, multi-engine (data parallel)
     EngineCore. Load-balances between multiple engine processes."""
 
+    # When num_engines is small, the deterministic full scan is essentially
+    # free and yields a perfect load distribution. Above this threshold the
+    # per-request O(N) scan starts to dominate the dispatch path, so we
+    # switch to power-of-two-choices: sample two distinct engines uniformly
+    # at random and pick the lower-load one. P2C is O(1) per request and is
+    # expected to reduce imbalance well within the 100 ms coordinator stats
+    # refresh window for the short-lived ``waiting * 4 + running`` score we
+    # use here -- the classic "balls into bins" O(log log N) result assumes
+    # fully shared state which we don't have, but the local frontend view
+    # plus periodic refresh is close enough in practice.
+    _P2C_FULL_SCAN_MAX_ENGINES = 4
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -1354,28 +1367,54 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 request.pooling_params, len(self.core_engines)
             )
         ) is None:
-            current_counts = self.lb_engines
-            # TODO use P2C alg for larger DP sizes
-            num_engines = len(current_counts)
+            eng_index = self._select_engine_by_load()
+            # Increment local waiting count for better balancing between stats
+            # updates from the coordinator (which happen every 100ms).
+            self.lb_engines[eng_index][0] += self.client_count
+
+        chosen_engine = self.core_engines[eng_index]
+        # Record which engine is chosen for this request, to handle aborts.
+        self.reqs_in_flight[request.request_id] = chosen_engine
+        return chosen_engine
+
+    def _select_engine_by_load(self) -> int:
+        """Pick the engine index minimizing the local load score.
+
+        For small DP sizes the deterministic full scan starting from
+        ``eng_start_index`` keeps perfect cold-start spread across multiple
+        clients. Beyond ``_P2C_FULL_SCAN_MAX_ENGINES`` we switch to
+        power-of-two-choices: sample two distinct engines uniformly at
+        random and return the lower-load one.
+        """
+        counts = self.lb_engines
+        num_engines = len(counts)
+
+        if num_engines <= self._P2C_FULL_SCAN_MAX_ENGINES:
             min_score = sys.maxsize
             eng_index = 0
             for i in range(num_engines):
                 # Start from client_index to help with balancing when engines
                 # are empty.
                 idx = (self.eng_start_index + i) % num_engines
-                waiting, running = current_counts[idx]
+                waiting, running = counts[idx]
                 score = waiting * 4 + running
                 if score < min_score:
                     min_score = score
                     eng_index = idx
-            # Increment local waiting count for better balancing between stats
-            # updates from the coordinator (which happen every 100ms).
-            current_counts[eng_index][0] += self.client_count
+            return eng_index
 
-        chosen_engine = self.core_engines[eng_index]
-        # Record which engine is chosen for this request, to handle aborts.
-        self.reqs_in_flight[request.request_id] = chosen_engine
-        return chosen_engine
+        # P2C: sample two distinct engines uniformly at random. The
+        # ``b += 1 if b >= a`` trick draws ``b`` from the remaining
+        # ``num_engines - 1`` slots without an explicit reject loop.
+        a = random.randrange(num_engines)
+        b = random.randrange(num_engines - 1)
+        if b >= a:
+            b += 1
+        waiting_a, running_a = counts[a]
+        waiting_b, running_b = counts[b]
+        score_a = waiting_a * 4 + running_a
+        score_b = waiting_b * 4 + running_b
+        return a if score_a <= score_b else b
 
     async def call_utility_async(self, method: str, *args) -> Any:
         # Only the result from the first engine is returned.
