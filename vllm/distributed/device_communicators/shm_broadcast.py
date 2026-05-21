@@ -38,9 +38,15 @@ from vllm.utils.network_utils import (
     is_valid_ipv6_address,
 )
 
+SPINLOOP_EXT_ENABLED = False
 if envs.VLLM_USE_SPINLOOP_EXT:
-    from vllm.spinloop import spinloop
-
+    try:
+        from vllm.spinloop import spinloop
+        SPINLOOP_EXT_ENABLED = True
+    except ImportError:
+        print(
+            "Warning: spinloop extension could not be loaded, disabling VLLM_USE_SPINLOOP_EXT!"
+        )
 SPINLOOP_TIMEOUT_SECONDS = 0.1
 
 if TYPE_CHECKING:
@@ -552,7 +558,7 @@ class MessageQueue:
                     written_flag = metadata_buffer[0]
                     return not (written_flag and read_count != self.buffer.n_reader)
 
-                if envs.VLLM_USE_SPINLOOP_EXT and not check():
+                if SPINLOOP_EXT_ENABLED and not check():
                     spinloop(metadata_buffer, check, timeout=SPINLOOP_TIMEOUT_SECONDS)
 
                 if not check():
@@ -673,7 +679,7 @@ class MessageQueue:
                     written_flag = metadata_buffer[0]
                     return not (not written_flag or read_flag)
 
-                if envs.VLLM_USE_SPINLOOP_EXT and not check():
+                if SPINLOOP_EXT_ENABLED and not check():
                     spinloop(
                         metadata_buffer[0 : self.local_reader_rank + 1],
                         check,

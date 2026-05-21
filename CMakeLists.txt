@@ -112,6 +112,8 @@ endif()
 #
 # spinloop extension (pure CXX; must stay above the non-CUDA device branch so
 # CPU builds define the target before the early return)
+# This extension requires SABI 3.11 since it relies on Py_buffer support. Loading
+# failure is handled gracefully on vLLM side for lower Python versions.
 #
 set(VLLM_SPINLOOP_EXT_SRC "csrc/spinloop.cpp")
 set(SPINLOOP_COMPILE_FLAGS "")
