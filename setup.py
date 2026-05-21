@@ -18,6 +18,8 @@ import torch
 from packaging.version import Version, parse
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
+from setuptools_rust import Binding, RustExtension
+from setuptools_rust.build import build_rust
 from setuptools_scm import get_version
 from torch.utils.cpp_extension import CUDA_HOME, ROCM_HOME
 
@@ -33,11 +35,24 @@ def load_module_from_path(module_name, path):
 ROOT_DIR = Path(__file__).parent
 logger = logging.getLogger(__name__)
 
+PRECOMPILED_RUST_FRONTEND_PATH = ROOT_DIR / "vllm" / "vllm-rs"
+
 # cannot import envs directly because it depends on vllm,
 #  which is not installed yet
 envs = load_module_from_path("envs", os.path.join(ROOT_DIR, "vllm", "envs.py"))
 
 VLLM_TARGET_DEVICE = envs.VLLM_TARGET_DEVICE
+USE_PRECOMPILED_EXTENSIONS = envs.VLLM_USE_PRECOMPILED
+# VLLM_USE_PRECOMPILED implies precompiled rust frontend too.
+USE_PRECOMPILED_RUST_FRONTEND = (
+    envs.VLLM_USE_PRECOMPILED or envs.VLLM_USE_PRECOMPILED_RUST
+)
+
+
+def should_require_rust_frontend() -> bool:
+    value = os.getenv("VLLM_REQUIRE_RUST_FRONTEND", "")
+    return value.lower() not in ("", "0", "false", "no")
+
 
 if sys.platform.startswith("darwin") and VLLM_TARGET_DEVICE != "cpu":
     logger.warning("VLLM_TARGET_DEVICE automatically set to `cpu` due to macOS")
@@ -405,6 +420,24 @@ class precompiled_build_ext(build_ext):
         return
 
 
+class precompiled_build_rust(build_rust):
+    """Skips local Rust builds when the precompiled wheel already ships vllm-rs."""
+
+    def run(self) -> None:
+        if PRECOMPILED_RUST_FRONTEND_PATH.exists():
+            logger.info(
+                "Skipping local Rust build: using precompiled %s",
+                PRECOMPILED_RUST_FRONTEND_PATH,
+            )
+            return
+
+        logger.warning(
+            "Precompiled wheel did not provide %s; falling back to local Rust build.",
+            PRECOMPILED_RUST_FRONTEND_PATH,
+        )
+        super().run()
+
+
 class precompiled_wheel_utils:
     """Extracts libraries and other files from an existing wheel."""
 
@@ -653,7 +686,11 @@ class precompiled_wheel_utils:
 
     @staticmethod
     def extract_precompiled_and_patch_package(
-        wheel_url_or_path: str, download_filename: str | None
+        wheel_url_or_path: str,
+        download_filename: str | None,
+        *,
+        extract_extensions: bool,
+        extract_rust_frontend: bool,
     ) -> dict:
         import tempfile
         import zipfile
@@ -676,20 +713,26 @@ class precompiled_wheel_utils:
             package_data_patch = {}
 
             with zipfile.ZipFile(wheel_path) as wheel:
-                files_to_copy = [
-                    "vllm/_C.abi3.so",
-                    "vllm/_C_stable_libtorch.abi3.so",
-                    "vllm/_moe_C.abi3.so",
-                    "vllm/_flashmla_C.abi3.so",
-                    "vllm/_flashmla_extension_C.abi3.so",
-                    "vllm/_sparse_flashmla_C.abi3.so",
-                    "vllm/vllm_flash_attn/_vllm_fa2_C.abi3.so",
-                    "vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so",
-                    "vllm/cumem_allocator.abi3.so",
-                    "vllm/spinloop.abi3.so",
-                    # ROCm-specific libraries
-                    "vllm/_rocm_C.abi3.so",
-                ]
+                exact_members = set()
+                if extract_extensions:
+                    exact_members.update(
+                        {
+                            "vllm/_C.abi3.so",
+                            "vllm/_C_stable_libtorch.abi3.so",
+                            "vllm/_moe_C.abi3.so",
+                            "vllm/_flashmla_C.abi3.so",
+                            "vllm/_flashmla_extension_C.abi3.so",
+                            "vllm/_sparse_flashmla_C.abi3.so",
+                            "vllm/vllm_flash_attn/_vllm_fa2_C.abi3.so",
+                            "vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so",
+                            "vllm/cumem_allocator.abi3.so",
+                            "vllm/spinloop.abi3.so",
+                            # ROCm-specific libraries
+                            "vllm/_rocm_C.abi3.so",
+                        }
+                    )
+                if extract_rust_frontend:
+                    exact_members.add("vllm/vllm-rs")
 
                 flash_attn_regex = re.compile(
                     r"vllm/vllm_flash_attn/(?:[^/.][^/]*/)*(?!\.)[^/]*\.py"
@@ -708,27 +751,25 @@ class precompiled_wheel_utils:
                 )
                 # DeepGEMM: extract all files (.py, .so, .cuh, .h, .hpp, etc.)
                 deep_gemm_regex = re.compile(r"vllm/third_party/deep_gemm/.*")
-                file_members = list(
-                    filter(lambda x: x.filename in files_to_copy, wheel.filelist)
-                )
-                file_members += list(
-                    filter(
-                        lambda x: flash_attn_regex.match(x.filename)
-                        and x.filename not in flash_attn_files_to_skip,
-                        wheel.filelist,
-                    )
-                )
-                file_members += list(
-                    filter(
-                        lambda x: triton_kernels_regex.match(x.filename), wheel.filelist
-                    )
-                )
-                file_members += list(
-                    filter(lambda x: flashmla_regex.match(x.filename), wheel.filelist)
-                )
-                file_members += list(
-                    filter(lambda x: deep_gemm_regex.match(x.filename), wheel.filelist)
-                )
+                file_members = []
+                for member in wheel.filelist:
+                    if member.filename in exact_members:
+                        file_members.append(member)
+                        continue
+
+                    if not extract_extensions:
+                        continue
+
+                    if (
+                        (
+                            flash_attn_regex.match(member.filename)
+                            and member.filename not in flash_attn_files_to_skip
+                        )
+                        or triton_kernels_regex.match(member.filename)
+                        or flashmla_regex.match(member.filename)
+                        or deep_gemm_regex.match(member.filename)
+                    ):
+                        file_members.append(member)
 
                 for file in file_members:
                     print(f"[extract] {file.filename}")
@@ -739,6 +780,9 @@ class precompiled_wheel_utils:
                         open(target_path, "wb") as dst,
                     ):
                         shutil.copyfileobj(src, dst)
+                    mode = file.external_attr >> 16
+                    if mode:
+                        os.chmod(target_path, mode)
 
                     pkg = os.path.dirname(file.filename).replace("/", ".")
                     package_data_patch.setdefault(pkg, []).append(
@@ -911,7 +955,7 @@ def get_vllm_version() -> str:
         if envs.VLLM_TARGET_DEVICE == "empty":
             version += f"{sep}empty"
     elif _is_cuda():
-        if envs.VLLM_USE_PRECOMPILED and not envs.VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX:
+        if USE_PRECOMPILED_EXTENSIONS and not envs.VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX:
             version += f"{sep}precompiled"
         else:
             cuda_version = str(get_nvcc_cuda_version())
@@ -1006,7 +1050,7 @@ if _is_hip():
 
 if _is_cuda():
     ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa2_C"))
-    if envs.VLLM_USE_PRECOMPILED or (
+    if USE_PRECOMPILED_EXTENSIONS or (
         CUDA_HOME and get_nvcc_cuda_version() >= Version("12.3")
     ):
         # FA3 requires CUDA 12.3 or later
@@ -1016,7 +1060,7 @@ if _is_cuda():
     ext_modules.append(
         CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa4_cutedsl_C", optional=True)
     )
-    if envs.VLLM_USE_PRECOMPILED or (
+    if USE_PRECOMPILED_EXTENSIONS or (
         CUDA_HOME and get_nvcc_cuda_version() >= Version("12.9")
     ):
         # FlashMLA requires CUDA 12.9 or later
@@ -1045,9 +1089,7 @@ if _is_cpu():
 
 if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm._C"))
-    # also _is_hip() once https://github.com/vllm-project/vllm/issues/35163 is
-    # fixed
-    if _is_cuda():
+    if _is_cuda() or _is_hip():
         ext_modules.append(CMakeExtension(name="vllm._C_stable_libtorch"))
 
 package_data = {
@@ -1067,14 +1109,24 @@ package_data = {
 }
 
 
-# If using precompiled, extract and patch package_data (in advance of setup)
-if envs.VLLM_USE_PRECOMPILED:
+# If using precompiled artifacts, extract and patch package_data in advance.
+if USE_PRECOMPILED_RUST_FRONTEND:
     wheel_url, download_filename = precompiled_wheel_utils.determine_wheel_url()
     patch = precompiled_wheel_utils.extract_precompiled_and_patch_package(
-        wheel_url, download_filename
+        wheel_url,
+        download_filename,
+        extract_extensions=USE_PRECOMPILED_EXTENSIONS,
+        extract_rust_frontend=True,
     )
     for pkg, files in patch.items():
         package_data.setdefault(pkg, []).extend(files)
+
+# If the rust frontend binary is already present in the source tree (e.g.,
+# pre-built in a separate Docker build stage), ship it as-is.
+if PRECOMPILED_RUST_FRONTEND_PATH.exists():
+    vllm_files = package_data.setdefault("vllm", [])
+    if "vllm-rs" not in vllm_files:
+        vllm_files.append("vllm-rs")
 
 if _no_device():
     ext_modules = []
@@ -1084,14 +1136,32 @@ if not ext_modules:
 else:
     cmdclass = {
         "build_ext": precompiled_build_ext
-        if envs.VLLM_USE_PRECOMPILED
+        if USE_PRECOMPILED_EXTENSIONS
         else cmake_build_ext,
     }
+if USE_PRECOMPILED_RUST_FRONTEND or PRECOMPILED_RUST_FRONTEND_PATH.exists():
+    cmdclass["build_rust"] = precompiled_build_rust
+
+# Rust frontend binary, built via setuptools-rust and installed into the
+# package directory alongside the Python modules.
+# TODO: we may use `RustBin` to directly install it into `bin` directory, but this
+# requires extra work on using precompiled binaries.
+rust_extensions = [
+    RustExtension(
+        target="vllm.vllm-rs",
+        path="rust/src/cmd/Cargo.toml",
+        args=["--bin", "vllm-rs"],
+        features=["native-tls-vendored"],
+        binding=Binding.Exec,
+        optional=not should_require_rust_frontend(),
+    ),
+]
 
 setup(
     # static metadata should rather go in pyproject.toml
     version=get_vllm_version(),
     ext_modules=ext_modules,
+    rust_extensions=rust_extensions,
     install_requires=get_requirements(),
     extras_require={
         # AMD Zen CPU optimizations via zentorch
