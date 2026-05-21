@@ -221,6 +221,99 @@ class TestExtractToolCalls:
         assert args == {"value": 42}
         assert isinstance(args["value"], int)
 
+    @pytest.mark.skip_global_cleanup
+    def test_composed_schema_converts_object_and_array_params(self):
+        """Composed JSON Schema types must still drive DSML type coercion."""
+        tool = ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="set_timer",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "wait": {
+                            "anyOf": [
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "type": {"const": "until"},
+                                        "date": {"type": "string"},
+                                    },
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "type": {"const": "for"},
+                                        "minutes": {"type": "number"},
+                                    },
+                                },
+                            ],
+                        },
+                        "patches": {
+                            "oneOf": [
+                                {"type": "array", "items": {"type": "object"}},
+                                {"type": "null"},
+                            ],
+                        },
+                    },
+                },
+            ),
+        )
+        parser = make_parser(tools=[tool])
+        model_output = (
+            f"{FC_START}\n"
+            f'{INV_START}set_timer">\n'
+            f'{PARAM_START}wait" string="false">'
+            f'{{"type":"for","minutes":2880}}'
+            f"{PARAM_END}\n"
+            f'{PARAM_START}patches" string="false">'
+            f'[{{"op":"replace","path":"/schedule","value":"quiet"}}]'
+            f"{PARAM_END}\n"
+            f"{INV_END}\n"
+            f"{FC_END}"
+        )
+        result = parser.extract_tool_calls(model_output, None)
+        assert result.tools_called
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {
+            "wait": {"type": "for", "minutes": 2880},
+            "patches": [{"op": "replace", "path": "/schedule", "value": "quiet"}],
+        }
+        assert isinstance(args["wait"], dict)
+        assert isinstance(args["patches"], list)
+
+    @pytest.mark.skip_global_cleanup
+    def test_string_attr_true_preserves_literal_for_composed_schema(self):
+        tool = ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="set_timer",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "wait": {
+                            "anyOf": [
+                                {"type": "object"},
+                                {"type": "null"},
+                            ],
+                        },
+                    },
+                },
+            ),
+        )
+        parser = make_parser(tools=[tool])
+        model_output = (
+            f"{FC_START}\n"
+            f'{INV_START}set_timer">\n'
+            f'{PARAM_START}wait" string="true">'
+            f'{{"type":"for","minutes":2880}}'
+            f"{PARAM_END}\n"
+            f"{INV_END}\n"
+            f"{FC_END}"
+        )
+        result = parser.extract_tool_calls(model_output, None)
+        assert result.tools_called
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"wait": '{"type":"for","minutes":2880}'}
+
     def test_arguments_wrapper_repaired(self):
         """A single 'arguments' wrapper parameter must be unwrapped when it
         is not part of the tool schema and the inner object matches schema fields."""
@@ -580,6 +673,50 @@ class TestExtractToolCallsStreaming:
         args = json.loads(args_str)
         assert args == {"value": "42"}
         assert isinstance(args["value"], str)
+
+    @pytest.mark.skip_global_cleanup
+    def test_composed_schema_conversion_in_streaming(self):
+        tool = ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="set_timer",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "wait": {
+                            "anyOf": [
+                                {"type": "object"},
+                                {"type": "null"},
+                            ],
+                        },
+                        "patches": {
+                            "oneOf": [
+                                {"type": "array", "items": {"type": "object"}},
+                                {"type": "null"},
+                            ],
+                        },
+                    },
+                },
+            ),
+        )
+        parser = make_parser(tools=[tool])
+        full_text = (
+            f"{FC_START}\n"
+            f'{INV_START}set_timer">\n'
+            f'{PARAM_START}wait" string="false">'
+            f'{{"type":"for","minutes":2880}}'
+            f"{PARAM_END}\n"
+            f'{PARAM_START}patches" string="false">'
+            f'[{{"op":"replace","path":"/schedule","value":"quiet"}}]'
+            f"{PARAM_END}\n"
+            f"{INV_END}\n"
+            f"{FC_END}"
+        )
+        deltas = self._stream(parser, full_text)
+        args = json.loads(self._reconstruct_args(deltas))
+        assert args == {
+            "wait": {"type": "for", "minutes": 2880},
+            "patches": [{"op": "replace", "path": "/schedule", "value": "quiet"}],
+        }
 
     def test_multiple_tools_streaming(self, parser):
         full_text = (
