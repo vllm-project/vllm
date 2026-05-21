@@ -331,7 +331,15 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         )
 
         wo_a_fp8 = self.wo_a.weight
-        wo_a_scale = self.wo_a.weight_scale_inv
+        # CompressedTensorsW8A16Fp8 BLOCK strategy renames `weight_scale` ->
+        # `weight_scale_inv` in process_weights_after_loading
+        # (compressed_tensors_w8a16_fp8.py:130). The W8A8Fp8 BLOCK strategy
+        # delegates to fp8_linear.process_weights_after_loading, which preserves
+        # whichever name was on disk (`weight_scale` or `weight_scale_inv`).
+        # Fall back so both scheme paths reach the same einsum entry point.
+        wo_a_scale = getattr(self.wo_a, "weight_scale_inv", None)
+        if wo_a_scale is None:
+            wo_a_scale = self.wo_a.weight_scale
 
         z = torch.empty(
             (num_tokens, self.n_local_groups, self.o_lora_rank),
