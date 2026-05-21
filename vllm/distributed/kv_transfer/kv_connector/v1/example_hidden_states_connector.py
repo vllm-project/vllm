@@ -32,8 +32,10 @@ def extract_from_kv_cache(
     num_tokens: int,
 ) -> torch.Tensor:
     """Extract data from KV cache."""
-    block_size = kv_cache.shape[1]
-    return kv_cache[slot_mapping // block_size, slot_mapping % block_size][:num_tokens]
+    block_size = kv_cache.shape[2]
+    return kv_cache[slot_mapping // block_size, :, slot_mapping % block_size][
+        :num_tokens
+    ]
 
 
 @dataclass
