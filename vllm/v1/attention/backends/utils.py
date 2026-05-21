@@ -29,6 +29,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
@@ -414,8 +415,6 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
     decode_query_start_loc[1:] = torch.cumsum(num_decode_tokens, dim=0)
     # `.item()` reductions here are unavoidable — the CommonAttentionMetadata
     # fields below need Python ints. Feature is opt-in (kv_sharing_fast_prefill).
-    from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-
     with gpu_sync_allowed():
         decode_max_query_len = int(num_decode_tokens.max().item())
         total_num_decode_tokens = int(num_decode_tokens.sum().item())

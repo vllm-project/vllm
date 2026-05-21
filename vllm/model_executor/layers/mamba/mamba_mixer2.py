@@ -45,6 +45,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.parameter import BasevLLMParameter
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
@@ -888,8 +889,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 # These are small (per-request) and are known-unavoidable
                 # D2H reads; allow the one-shot sync instead of paying a
                 # per-iteration D2H cost.
-                from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-
                 with gpu_sync_allowed():
                     block_idx_first_cpu = block_idx_first_scheduled_token_p.tolist()
                     block_idx_last_cpu = block_idx_last_scheduled_token_p.tolist()

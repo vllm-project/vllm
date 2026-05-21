@@ -89,6 +89,7 @@ from vllm.multimodal.processing.processor import (
     PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -964,8 +965,6 @@ class Qwen2_5OmniConditionalGenerationMixin:
         # `torch.full((chunk_num.sum(),), ...)` which syncs on a GPU scalar
         # reduction. Third-party; suppress at the integration boundary. The
         # subsequent `.tolist()` on GPU output lengths is also unavoidable.
-        from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-
         with gpu_sync_allowed():
             audio_outputs = self.audio_tower(
                 input_features.to(self.audio_tower.dtype),
@@ -1462,8 +1461,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         # `.item()` reductions are unavoidable without refactoring the
         # interleave-merge to be fully GPU-resident. Run under an
         # allowed-sync block since this happens once per MM embed call.
-        from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-
         with gpu_sync_allowed():
             input_ids_cpu = input_ids.cpu()
             is_video = is_multimodal & (input_ids_cpu == video_token_id)

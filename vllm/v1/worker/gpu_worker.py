@@ -45,7 +45,7 @@ from vllm.profiler.wrapper import CudaProfilerWrapper, TorchProfilerWrapper
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.tracing import instrument
-from vllm.utils.gpu_sync_debug import with_gpu_sync_check
+from vllm.utils.gpu_sync_debug import enable_gpu_sync_check, with_gpu_sync_check
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import set_random_seed
@@ -722,8 +722,6 @@ class Worker(WorkerBase):
 
         # Warmup / first-compile is done — activate the `VLLM_GPU_SYNC_CHECK`
         # gate so subsequent `execute_model` / `sample_tokens` calls enforce it.
-        from vllm.utils.gpu_sync_debug import enable_gpu_sync_check
-
         enable_gpu_sync_check()
 
         return CompilationTimes(

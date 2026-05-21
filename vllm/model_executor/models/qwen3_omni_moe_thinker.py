@@ -80,6 +80,7 @@ from vllm.multimodal.processing.processor import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processor import cached_processor_from_config
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -431,8 +432,6 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         # Compute chunk information. `feature_lens` is small (per-audio) so
         # pull to CPU once to compute total chunk count and split sizes
         # without per-iteration D2H syncs.
-        from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-
         chunk_num = torch.ceil(feature_lens / (self.n_window * 2)).long()
 
         with gpu_sync_allowed():

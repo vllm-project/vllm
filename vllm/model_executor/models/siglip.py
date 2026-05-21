@@ -58,6 +58,7 @@ from vllm.multimodal.processing import (
     TimingContext,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsQuant
@@ -1117,8 +1118,6 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         # have data-dependent output shapes that always sync on CUDA. This
         # runs once per pooling call. Compute boundaries on CPU (single D2H
         # for `boundary_mask`) then upload the final flip-index tensor.
-        from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-
         position_diffs = position_ids[1:] - position_ids[:-1]
         boundary_mask = position_diffs <= 0
 

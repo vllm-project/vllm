@@ -46,6 +46,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 if TYPE_CHECKING:
     from transformers import BatchFeature, PreTrainedModel
@@ -394,7 +395,6 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             # padding images via boolean-mask indexing, LlavaOnevision
             # branches on per-sample batch counts). These are third-party and
             # not something we can refactor here.
-            from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
             # ROCm: Force math SDP backend for vision encoder to avoid accuracy issues
             # with flash_sdp and mem_efficient_sdp

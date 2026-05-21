@@ -1453,8 +1453,6 @@ class Qwen2_5_VLForConditionalGeneration(
 
             # Boolean-mask indexing has a data-dependent output shape and
             # always syncs on CUDA; runs once per video in the EVS path.
-            from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-
             with gpu_sync_allowed():
                 emb = emb[retention_mask]
                 positions = positions[retention_mask]

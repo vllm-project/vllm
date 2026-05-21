@@ -87,6 +87,7 @@ from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.transformers_utils.processors.qwen3_asr import (
     Qwen3ASRProcessor,
 )
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 logger = init_logger(__name__)
 _ASR_TEXT_TAG = "<asr_text>"
@@ -376,8 +377,6 @@ class Qwen3ASRForConditionalGeneration(
         )
         # `.tolist()` on GPU output lengths forces a D2H sync; split sizes are
         # data-dependent so this is unavoidable.
-        from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-
         with gpu_sync_allowed():
             split_sizes = audio_output_lengths.tolist()
         return audio_features.split(split_sizes)

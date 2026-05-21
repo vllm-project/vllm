@@ -24,6 +24,7 @@ from vllm.model_executor.layers.quantization import (
     QuantizationMethods,
 )
 from vllm.platforms import current_platform
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import direct_register_custom_op
 
 
@@ -293,8 +294,6 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
         # BnB's `int8_vectorwise_quant` branches on `outliers.any()` which
         # forces a D2H sync; this is third-party code we can't refactor,
         # and it's a per-layer fixed cost in int8 quant mode.
-        from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-
         original_type = x.dtype
         original_shape = x.shape
         reshape_after_matmul = False
