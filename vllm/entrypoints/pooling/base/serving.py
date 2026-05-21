@@ -55,6 +55,7 @@ class PoolingServingBase(PoolingServingObservabilityMixin, ABC):
         self.return_tokens_as_token_ids = return_tokens_as_token_ids
         self.log_error_stack = log_error_stack
         self.chat_template_config = chat_template_config
+        self.is_tracing_enabled = is_tracing_enabled
 
         # Shared thread pool executor for preprocessing and postprocessing.
         self._executor: Executor = models.renderer._executor
@@ -65,7 +66,7 @@ class PoolingServingBase(PoolingServingObservabilityMixin, ABC):
             self._postprocessing, executor=self._executor
         )
 
-        PoolingServingObservabilityMixin.__init__(self, is_tracing_enabled)
+        PoolingServingObservabilityMixin.__init__(self)
 
     async def __call__(
         self,
@@ -75,33 +76,33 @@ class PoolingServingBase(PoolingServingObservabilityMixin, ABC):
         arrival_time = time.time_ns()
         time_offset = 0
 
-        if self.is_tracing_enabled:
+        if self.is_tracing_request:
             arrival_ts = time.monotonic_ns()
             time_offset = arrival_time - arrival_ts
 
         io_processor = self.get_io_processor(request)
         ctx = await self._init_ctx(io_processor, request, raw_request)
 
-        if self.is_tracing_enabled:
+        if self.is_tracing_request:
             ctx.arrival_time = arrival_time
             ctx.time_offset = time_offset
 
         async with self._maybe_tracing(ctx, io_processor, raw_request):
             await self._preprocessing_async(io_processor, ctx)
 
-            if self.is_tracing_enabled:
+            if self.is_tracing_request:
                 preprocessing_finished_ts = time.monotonic_ns()
                 ctx.preprocessing_finished = time_offset + preprocessing_finished_ts
 
             await self._engine_call(ctx)
 
-            if self.is_tracing_enabled:
+            if self.is_tracing_request:
                 engine_call_ts = time.monotonic_ns()
                 ctx.engine_call_finished = time_offset + engine_call_ts
 
             response = await self._postprocessing_async(io_processor, ctx)
 
-            if self.is_tracing_enabled:
+            if self.is_tracing_request:
                 postprocessing_finished_ts = time.monotonic_ns()
                 ctx.postprocessing_finished = time_offset + postprocessing_finished_ts
 

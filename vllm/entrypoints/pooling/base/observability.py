@@ -8,6 +8,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import Request
 
+from vllm.config import VllmConfig
+from vllm.config.observability import Scope
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
 from vllm.entrypoints.pooling.typing import PoolingServeContext
@@ -29,16 +31,30 @@ from vllm.tracing.otel import (
 
 
 class PoolingServingObservabilityMixin(ABC):
+    vllm_config: VllmConfig
     engine_client: EngineClient
+    is_tracing_enabled: bool
 
     _maybe_get_links = staticmethod(maybe_get_links)
     _maybe_start_span = staticmethod(maybe_start_span)
     _maybe_start_span_async = staticmethod(maybe_start_span_async)
     _get_span_context = staticmethod(get_span_context)
 
-    def __init__(self, is_tracing_enabled):
-        self.is_tracing_enabled = is_tracing_enabled
-        if self.is_tracing_enabled:
+    scope: set[Scope] = {"request", "entrypoint"}
+    scope_request: Scope = "request"
+    scope_endpoint: Scope = "entrypoint"
+    span_request = "vllm.request"
+    span_entrypoint_preprocessing = "vllm.entrypoint.preprocessing"
+    span_entrypoint_engine_call = "vllm.entrypoint.engine_call"
+    span_entrypoint_postprocessing = "vllm.entrypoint.postprocessing"
+
+    def __init__(self):
+        self.traced_scopes = (
+            self.scope & self.vllm_config.observability_config.traced_scopes
+        )
+        self.is_tracing_request = self.is_tracing_enabled and self.traced_scopes
+
+        if self.is_tracing_request:
             from opentelemetry.trace.propagation.tracecontext import (
                 TraceContextTextMapPropagator,
             )
@@ -53,18 +69,10 @@ class PoolingServingObservabilityMixin(ABC):
             self.propagator = TraceContextTextMapPropagator()
 
             self.trace_provider = init_otel_trace_provider(otlp_endpoint)
-            self.scope_request = "vllm.request"
-            self.scope_endpoint = "vllm.entrypoint"
             self.scope_endpoint_attributes = {
-                "vllm.process_kind": "entrypoint",
                 "vllm.process_count": f"{api_process_count}",
                 "vllm.process_name": process_title,
             }
-
-            self.span_request = "vllm.request"
-            self.span_entrypoint_preprocessing = "vllm.entrypoint.preprocessing"
-            self.span_entrypoint_engine_call = "vllm.entrypoint.engine_call"
-            self.span_entrypoint_postprocessing = "vllm.entrypoint.postprocessing"
 
     async def _get_trace_headers(
         self,
@@ -92,24 +100,28 @@ class PoolingServingObservabilityMixin(ABC):
     ):
         raw_trace_headers = await self._get_trace_headers(raw_request)
 
-        if not self.is_tracing_enabled:
+        if not self.is_tracing_request or self.scope_request not in self.traced_scopes:
+            ctx.trace_headers = raw_trace_headers
             yield
             return
 
         request_tracer = self.trace_provider.get_tracer(self.scope_request)
-        entrypoint_tracer = self.trace_provider.get_tracer(
-            self.scope_endpoint, attributes=self.scope_endpoint_attributes
-        )
         trace_context = self.propagator.extract(raw_trace_headers)
-
         request_span = request_tracer.start_span(
             self.span_request, context=trace_context, start_time=ctx.arrival_time
         )
         request_span_context = get_span_context(request_span)
-
-        ctx.trace_headers = raw_trace_headers
-        ctx.entrypoint_tracer = entrypoint_tracer
         ctx.request_span_context = request_span_context
+
+        if self.scope_endpoint not in self.traced_scopes:
+            trace_headers: Mapping[str, str] = {}
+            self.propagator.inject(trace_headers, context=request_span_context)
+            ctx.trace_headers = trace_headers
+        else:
+            entrypoint_tracer = self.trace_provider.get_tracer(
+                self.scope_endpoint, attributes=self.scope_endpoint_attributes
+            )
+            ctx.entrypoint_tracer = entrypoint_tracer
 
         try:
             yield

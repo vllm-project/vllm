@@ -83,7 +83,7 @@ from vllm.config.model import (
     TokenizerMode,
 )
 from vllm.config.multimodal import MMCacheType, MMEncoderTPMode, MMTensorIPC
-from vllm.config.observability import DetailedTraceModules
+from vllm.config.observability import DetailedTraceModules, Scope
 from vllm.config.parallel import (
     All2AllBackend,
     DataParallelBackend,
@@ -630,6 +630,7 @@ class EngineArgs:
     enable_logging_iteration_details: bool = (
         ObservabilityConfig.enable_logging_iteration_details
     )
+    traced_scopes: set[Scope] | None = ObservabilityConfig.traced_scopes
     enable_mm_processor_stats: bool = ObservabilityConfig.enable_mm_processor_stats
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
     scheduler_cls: str | type[object] | None = SchedulerConfig.scheduler_cls
@@ -1331,6 +1332,10 @@ class EngineArgs:
         observability_group.add_argument(
             "--enable-logging-iteration-details",
             **observability_kwargs["enable_logging_iteration_details"],
+        )
+        observability_group.add_argument(
+            "--traced-scopes",
+            **observability_kwargs["traced_scopes"],
         )
 
         # Scheduler arguments
@@ -2165,6 +2170,7 @@ class EngineArgs:
             enable_mfu_metrics=self.enable_mfu_metrics,
             enable_mm_processor_stats=self.enable_mm_processor_stats,
             enable_logging_iteration_details=self.enable_logging_iteration_details,
+            traced_scopes=self.traced_scopes
         )
 
         # Compilation config overrides

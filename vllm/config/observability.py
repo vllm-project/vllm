@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from functools import cached_property
-from typing import Any, Literal, cast
+from typing import Any, Literal, cast, get_args
 
 from packaging.version import parse
 from pydantic import Field, field_validator, model_validator
@@ -12,6 +12,9 @@ from vllm.config.utils import config
 from vllm.utils.hashing import safe_hash
 
 DetailedTraceModules = Literal["model", "worker", "all"]
+
+Scope = Literal["startup", "request", "entrypoint", "llm_request"]
+SCOPES: tuple[Scope, ...] = get_args(Scope)
 
 
 @config
@@ -44,6 +47,9 @@ class ObservabilityConfig:
 
     Note that collecting detailed timing information for each request can be
     expensive."""
+
+    traced_scopes: set[Scope] = None  # type: ignore[assignment]
+    """Allow users to disable certain scopes to reduce overhead."""
 
     kv_cache_metrics: bool = False
     """Enable KV cache residency metrics (lifetime, idle time, reuse gaps).
@@ -150,3 +156,23 @@ class ObservabilityConfig:
                 "collect_detailed_traces requires `--otlp-traces-endpoint` to be set."
             )
         return self
+
+    @field_validator("traced_scopes", mode="before")
+    @classmethod
+    def _validate_traced_scopes(
+        cls, value: str | tuple[Scope, ...] | None
+    ) -> set[Scope]:
+        if value is None or value == "all":
+            scopes = SCOPES
+        elif isinstance(value, str):
+            scopes = cast(tuple[Scope, ...], value.split(","))
+        else:
+            scopes = tuple(value)
+
+        for scope in scopes:
+            if scope not in SCOPES:
+                raise ValueError(
+                    f"Invalid scope: {value}. Valid scopes are: {', '.join(SCOPES)}"
+                )
+
+        return set(scopes)
