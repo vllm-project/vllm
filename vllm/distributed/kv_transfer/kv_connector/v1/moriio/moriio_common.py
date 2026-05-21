@@ -12,7 +12,6 @@ import regex as re
 import torch
 import zmq
 
-from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
@@ -162,8 +161,10 @@ class TransferError(MoRIIOError):
     pass
 
 
-def get_moriio_mode() -> MoRIIOMode:
-    read_mode = envs.VLLM_MORIIO_CONNECTOR_READ_MODE
+def get_moriio_mode(kv_transfer_config) -> MoRIIOMode:
+    read_mode = bool(
+        kv_transfer_config.kv_connector_extra_config.get("read_mode", False)
+    )
     logger.debug("MoRIIO Connector read_mode: %s", read_mode)
     if read_mode:
         return MoRIIOMode.READ
@@ -189,6 +190,10 @@ class MoRIIOConfig:
     dp_rank: int
     dp_size: int
     tp_size: int
+    read_mode: bool = False
+    qp_per_transfer: int = 1
+    post_batch_size: int = -1
+    num_workers: int = 1
 
     @classmethod
     def from_vllm_config(cls, vllm_config: VllmConfig) -> "MoRIIOConfig":
@@ -199,6 +204,16 @@ class MoRIIOConfig:
         # local_kv_port     -> service port for mori engine
         # notify_port       -> For synchronizing stages between prefill and decode
         # handshake_port    -> For initial handshake between mori engine
+
+        # Optional tuning knobs
+        # read_mode        -> If true, run the connector in READ mode (consumer
+        #                     pulls KV from producer) instead of the default
+        #                     WRITE mode.
+        # qp_per_transfer  -> Number of RDMA Queue Pairs per KV transfer.
+        # post_batch_size  -> Batch size for posting transfer work requests
+        #                     (-1 lets the MoRI backend choose).
+        # num_workers      -> Number of background worker threads the MoRI
+        #                     engine uses for transfer processing.
 
         # TODO : merge notify_port and handshake_port to simplify port management
         #        supports non-contiguous ports
@@ -227,6 +242,10 @@ class MoRIIOConfig:
             dp_rank=dp_rank,
             dp_size=dp_size,
             tp_size=tp_size,
+            read_mode=bool(extra_config.get("read_mode", False)),
+            qp_per_transfer=int(extra_config.get("qp_per_transfer", 1)),
+            post_batch_size=int(extra_config.get("post_batch_size", -1)),
+            num_workers=int(extra_config.get("num_workers", 1)),
         )
 
 

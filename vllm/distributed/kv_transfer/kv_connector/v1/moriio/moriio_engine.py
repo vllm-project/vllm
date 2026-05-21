@@ -8,7 +8,6 @@ import msgpack
 import torch
 import zmq
 
-from vllm import envs
 from vllm.logger import init_logger
 from vllm.utils.network_utils import (
     make_zmq_path,
@@ -374,17 +373,19 @@ class MoRIIOWrapper:
         )
         self.moriio_engine = moriio_engine
 
-    def set_backend_type(self, backend_type):
+    def set_backend_type(
+        self,
+        backend_type,
+        qp_per_transfer: int = 1,
+        post_batch_size: int = -1,
+        num_workers: int = 1,
+    ):
         assert self.moriio_engine is not None, "MoRIIO engine must be set first"
-        qp_per_transfer = envs.VLLM_MORIIO_QP_PER_TRANSFER
-        post_batch_size = envs.VLLM_MORIIO_POST_BATCH_SIZE
-        num_worker_threads = envs.VLLM_MORIIO_NUM_WORKERS
-        poll_mode = PollCqMode.POLLING
         rdma_cfg = RdmaBackendConfig(
             qp_per_transfer,
             post_batch_size,
-            num_worker_threads,
-            poll_mode,
+            num_workers,
+            PollCqMode.POLLING,
         )
         self.moriio_engine.create_backend(backend_type, rdma_cfg)
 
