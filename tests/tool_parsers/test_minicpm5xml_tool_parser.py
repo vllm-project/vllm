@@ -3,10 +3,12 @@
 # ruff: noqa: E501
 
 import json
+import random
 from unittest.mock import MagicMock
 
 import pytest
 
+from tests.tool_parsers.utils import run_tool_extraction_streaming
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
@@ -175,6 +177,123 @@ def test_cdata_multiline(parser: ToolParser) -> None:
     assert args["date"] == "2024-06-27"
 
 
+def test_tokenizer_space_marker(parser: ToolParser) -> None:
+    request = make_request(make_tools_weather())
+    text = (
+        '<function\u0120name="get_weather">'
+        '<param\u0120name="city">上海</param>'
+        '<param\u0120name="date">2024-06-27</param>'
+        "</function>\n"
+    )
+    out = parser.extract_tool_calls(text, request)
+    assert out.tools_called
+    assert_tool_calls(
+        out.tool_calls,
+        [make_tool_call("get_weather", {
+            "city": "上海",
+            "date": "2024-06-27",
+        })],
+    )
+
+
+def test_extract_tool_calls_streaming_partial_chunks(parser: ToolParser) -> None:
+    request = make_request(make_tools_weather())
+    chunks = [
+        '<function name="get_weather">',
+        '<param name="city">',
+        "上海</param><param name=\"date\">2024-06-27</param></function>\n",
+    ]
+    reconstructor = run_tool_extraction_streaming(
+        parser,
+        chunks,
+        request,
+        assert_one_tool_per_delta=False,
+    )
+    assert len(reconstructor.tool_calls) == 1
+    assert reconstructor.tool_calls[0].function.name == "get_weather"
+    assert json.loads(reconstructor.tool_calls[0].function.arguments) == {
+        "city": "上海",
+        "date": "2024-06-27",
+    }
+
+
+def test_extract_tool_calls_streaming_tokenizer_space_marker(
+    parser: ToolParser,
+) -> None:
+    request = make_request(make_tools_weather())
+    chunks = [
+        '<function\u0120name="get_weather">',
+        '<param\u0120name="city">',
+        "上海</param><param\u0120name=\"date\">2024-06-27</param></function>\n",
+    ]
+    reconstructor = run_tool_extraction_streaming(
+        parser,
+        chunks,
+        request,
+        assert_one_tool_per_delta=False,
+    )
+    assert len(reconstructor.tool_calls) == 1
+    assert json.loads(reconstructor.tool_calls[0].function.arguments) == {
+        "city": "上海",
+        "date": "2024-06-27",
+    }
+
+
+def test_extract_tool_calls_streaming_incremental_arguments(
+    parser: ToolParser,
+) -> None:
+    request = make_request([
+        _tool(
+            "get_current_weather",
+            {
+                "type": "object",
+                "properties": {
+                    "city": {"type": "string"},
+                    "state": {"type": "string"},
+                    "unit": {"type": "string"},
+                },
+                "required": ["city", "state", "unit"],
+            },
+        )
+    ])
+    text = (
+        '<function name="get_current_weather">'
+        '<param name="city">Dallas</param>'
+        '<param name="state">TX</param>'
+        '<param name="unit">fahrenheit</param>'
+        "</function>"
+    )
+    chunks = [
+        text[:37],
+        text[:70],
+        text,
+    ]
+    prev = ""
+    arguments = ""
+    for chunk in [text[:37], text[37:70], text[70:]]:
+        current = prev + chunk
+        delta = parser.extract_tool_calls_streaming(
+            prev,
+            current,
+            chunk,
+            [],
+            [],
+            [],
+            request,
+        )
+        if delta and delta.tool_calls:
+            arg_delta = delta.tool_calls[0].function.arguments
+            if arg_delta:
+                arguments += arg_delta
+        prev = current
+
+    assert json.loads(arguments) == {
+        "city": "Dallas",
+        "state": "TX",
+        "unit": "fahrenheit",
+    }
+
+
 def test_unknown_tool_block_preserved(parser: ToolParser) -> None:
     request = make_request(make_tools_weather())
     text = (
@@ -279,3 +398,67 @@ def test_no_required_and_zero_param_valid(parser: ToolParser) -> None:
     assert len(out.tool_calls) == 1
     args = json.loads(out.tool_calls[0].function.arguments)
     assert args == {}
+
+
+def _random_chunks(text: str, min_len: int, max_len: int) -> list[str]:
+    chunks: list[str] = []
+    index = 0
+    while index < len(text):
+        size = random.randint(min_len, max_len)
+        chunks.append(text[index:index + size])
+        index += size
+    return chunks
+
+
+def test_extract_tool_calls_streaming_single(parser: ToolParser) -> None:
+    request = make_request(make_tools_weather())
+    text = (
+        "Intro before.\n"
+        '<function name="get_weather">'
+        '<param name="city">上海</param>'
+        '<param name="date">2024-06-27</param>'
+        "</function>\n"
+        "Outro after.\n"
+    )
+    random.seed(0)
+    reconstructor = run_tool_extraction_streaming(
+        parser,
+        _random_chunks(text, 1, 4),
+        request,
+    )
+    assert "Intro before." in reconstructor.other_content
+    assert "Outro after." in reconstructor.other_content
+    assert len(reconstructor.tool_calls) == 1
+    assert reconstructor.tool_calls[0].function.name == "get_weather"
+    assert json.loads(reconstructor.tool_calls[0].function.arguments) == {
+        "city": "上海",
+        "date": "2024-06-27",
+    }
+
+
+def test_extract_tool_calls_streaming_multiple(parser: ToolParser) -> None:
+    tools = make_tools_weather() + make_tools_sum()
+    request = make_request(tools)
+    text = (
+        "Head\n"
+        '<function name="get_weather"><param name="city">北京</param></function>\n'
+        "TXT\n"
+        '<function name="sum_values"><param name="nums">[7,8,9]</param>'
+        '<param name="exact">false</param></function>\n'
+        "Tail\n"
+    )
+    random.seed(1)
+    reconstructor = run_tool_extraction_streaming(
+        parser,
+        _random_chunks(text, 1, 5),
+        request,
+    )
+    assert "Head" in reconstructor.other_content
+    assert "TXT" in reconstructor.other_content
+    assert "Tail" in reconstructor.other_content
+    assert len(reconstructor.tool_calls) == 2
+    assert json.loads(reconstructor.tool_calls[0].function.arguments)["city"] == "北京"
+    assert json.loads(reconstructor.tool_calls[1].function.arguments) == {
+        "nums": [7, 8, 9],
+        "exact": False,
+    }
