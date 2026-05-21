@@ -3,10 +3,13 @@
 
 
 import asyncio
+import io
 import time
 from collections.abc import AsyncGenerator
 from collections.abc import Sequence as GenericSequence
 
+import numpy as np
+import pybase64 as base64
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
@@ -194,6 +197,9 @@ class ServingTokens(OpenAIServing):
             else await self._get_trace_headers(raw_request.headers)
         )
 
+        # Extract data_parallel_rank from header (router can inject it)
+        data_parallel_rank = self._get_data_parallel_rank(raw_request)
+
         result_generator = self.engine_client.generate(
             engine_input,
             sampling_params,
@@ -201,6 +207,7 @@ class ServingTokens(OpenAIServing):
             lora_request=lora_request,
             trace_headers=trace_headers,
             priority=request.priority,
+            data_parallel_rank=data_parallel_rank,
         )
 
         assert result_generator is not None
@@ -255,11 +262,24 @@ class ServingTokens(OpenAIServing):
             else:
                 logprobs = None
 
+            # Encode routed_experts for transport. JSON can't carry raw
+            # bytes, so we write the ndarray as a ``.npy`` byte stream
+            # and base64-encode it. ``pybase64`` is ~3x faster than the
+            # stdlib ``base64`` on large payloads thanks to SIMD.
+            # This is the only base64 hop in the pipeline -- the
+            # engine<->API-server link is binary msgpack + zmq.
+            routed_experts_b64 = None
+            if output.routed_experts is not None:
+                buf = io.BytesIO()
+                np.save(buf, output.routed_experts)
+                routed_experts_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+
             choice_data = GenerateResponseChoice(
                 index=output.index,
                 logprobs=logprobs,
                 finish_reason=output.finish_reason if output.finish_reason else "stop",
                 token_ids=as_list(output.token_ids),
+                routed_experts=routed_experts_b64,
             )
 
             choices.append(choice_data)
@@ -444,10 +464,12 @@ class ServingTokens(OpenAIServing):
                         logprob=max(step_token.logprob, -9999.0),
                         top_logprobs=[
                             ChatCompletionLogProb(
-                                token=token,
-                                logprob=max(p[1].logprob, -9999.0),
+                                token=f"token_id:{token_id}",
+                                logprob=max(logprob.logprob, -9999.0),
                             )
-                            for i, p in enumerate(step_top_logprobs.items())
+                            for i, (token_id, logprob) in enumerate(
+                                step_top_logprobs.items()
+                            )
                             if num_output_top_logprobs is not None
                             and i < max(num_output_top_logprobs, 1)
                         ],
