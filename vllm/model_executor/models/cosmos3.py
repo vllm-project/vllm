@@ -48,3 +48,7 @@ class Cosmos3ForConditionalGeneration(Qwen3VLForConditionalGeneration):
         )
         if overrides:
             self.allow_patterns_overrides = list(overrides)
+            # default_loader auto-detects safetensors only when the pattern is
+            # exactly "*.safetensors"; nested patterns route to pt_weights_iterator.
+            if any(p.endswith(".safetensors") for p in self.allow_patterns_overrides):
+                vllm_config.load_config.load_format = "safetensors"
