@@ -9,7 +9,6 @@ from collections.abc import Callable, Generator
 from typing import Any
 
 import numpy as np
-import regex as re
 import torch
 from huggingface_hub import HfApi
 from packaging import version
@@ -281,19 +280,6 @@ class BitsAndBytesModelLoader(BaseModelLoader):
     def _param_accepts_bnb_4bit_packed(param: nn.Parameter) -> bool:
         return bool(getattr(param, "use_bitsandbytes_4bit", False))
 
-    @staticmethod
-    def _dequantize_prequant_4bit_weight(
-        weight_tensor: torch.Tensor,
-        quant_state: Any,
-        target_param: nn.Parameter,
-    ) -> torch.Tensor:
-        from bitsandbytes.functional import dequantize_4bit
-
-        weight_tensor = weight_tensor.to(device=current_platform.device_type)
-        return dequantize_4bit(weight_tensor, quant_state).to(
-            device=target_param.device, dtype=target_param.dtype
-        )
-
     def _quantized_8bit_generator(
         self, hf_weights_files, use_safetensors, quant_state_dict
     ) -> Generator:
@@ -377,24 +363,25 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                     if target_param_name is not None
                     else None
                 )
-                if target_param is not None and not self._param_accepts_bnb_4bit_packed(
-                    target_param
-                ):
+                if target_param is not None:
+                    if not self._param_accepts_bnb_4bit_packed(target_param):
+                        raise ValueError(
+                            "Pre-quantized BNB 4bit weight "
+                            f"{mapped_weight_name} targets parameter "
+                            f"{target_param_name}, but the target parameter was "
+                            "not initialized as a vLLM BNB 4-bit packed "
+                            "parameter. This usually means the module did not "
+                            "receive quant_config or its nn.Linear layers were "
+                            "not replaced with vLLM linear layers."
+                        )
                     logger.debug(
-                        "Dequantizing pre-quantized BNB 4bit weight %s "
-                        "for target parameter %s. "
-                        "packed_shape=%s, packed_dtype=%s, "
-                        "target_shape=%s, target_dtype=%s, target_device=%s",
+                        "Keeping pre-quantized BNB 4bit weight %s packed. "
+                        "target_parameter=%s, has_target=True, packed_shape=%s, "
+                        "packed_dtype=%s",
                         mapped_weight_name,
                         target_param_name,
                         tuple(weight_tensor.shape),
                         weight_tensor.dtype,
-                        tuple(target_param.shape),
-                        target_param.dtype,
-                        target_param.device,
-                    )
-                    weight_tensor = self._dequantize_prequant_4bit_weight(
-                        weight_tensor, quant_state, target_param
                     )
                 else:
                     logger.debug(
@@ -407,7 +394,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                         tuple(weight_tensor.shape),
                         weight_tensor.dtype,
                     )
-                    quant_state_dict[mapped_weight_name] = quant_state
+                quant_state_dict[mapped_weight_name] = quant_state
                 yield org_weight_name, weight_tensor
             else:
                 yield org_weight_name, weight_tensor
@@ -792,7 +779,6 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         from vllm.model_executor.models.utils import is_pp_missing_parameter
 
         param_dict = self.param_dict
-        self._duplicate_k_eq_v_quant_states(model, quant_state_dict)
         for quant_param_name in quant_state_dict:
             if is_pp_missing_parameter(quant_param_name, model):
                 continue
@@ -840,60 +826,6 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 non_stacked_param_name
             ]
         return stacked_quant_state_dict
-
-    def _get_k_eq_v_layer_indices(self, model: nn.Module) -> set[int]:
-        config = getattr(model, "config", None)
-        text_config = getattr(config, "text_config", config)
-        if not getattr(text_config, "attention_k_eq_v", False):
-            return set()
-
-        layer_types = getattr(text_config, "layer_types", None)
-        if layer_types is None:
-            return set()
-
-        return {
-            layer_idx
-            for layer_idx, layer_type in enumerate(layer_types)
-            if layer_type == "full_attention"
-        }
-
-    def _duplicate_k_eq_v_quant_states(
-        self, model: nn.Module, quant_state_dict: dict
-    ) -> None:
-        k_eq_v_layer_indices = self._get_k_eq_v_layer_indices(model)
-        if not k_eq_v_layer_indices:
-            return
-
-        for quant_param_name, quant_state in list(quant_state_dict.items()):
-            if not quant_param_name.endswith(".self_attn.k_proj.weight"):
-                continue
-
-            match = re.search(
-                r"(?:^|\.)layers\.(\d+)\.self_attn\.k_proj\.weight$", quant_param_name
-            )
-            if match is None or int(match.group(1)) not in k_eq_v_layer_indices:
-                continue
-
-            v_quant_param_name = (
-                quant_param_name.removesuffix(".self_attn.k_proj.weight")
-                + ".self_attn.v_proj.weight"
-            )
-            if v_quant_param_name in quant_state_dict:
-                continue
-
-            target_param_name = self._resolve_target_param_name(quant_param_name)
-            v_target_param_name = self._resolve_target_param_name(v_quant_param_name)
-            if target_param_name is None or target_param_name != v_target_param_name:
-                continue
-
-            quant_state_dict[v_quant_param_name] = quant_state
-            logger.debug(
-                "Duplicated BNB quant state for Gemma4 k_eq_v layer: %s -> %s "
-                "(target parameter %s).",
-                quant_param_name,
-                v_quant_param_name,
-                target_param_name,
-            )
 
     def _bind_quant_states_to_params(
         self, model: nn.Module, stacked_quant_state_dict: dict
@@ -948,6 +880,14 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                     "Following weights were not initialized from "
                     f"checkpoint: {weights_not_loaded}"
                 )
+
+        adjust_quant_state_dict = getattr(model, "adjust_bnb_quant_state_dict", None)
+        if callable(adjust_quant_state_dict):
+            adjust_quant_state_dict(
+                quant_state_dict=quant_state_dict,
+                resolve_target_param_name=self._resolve_target_param_name,
+            )
+
         expert_quant_state_dict = self._fuse_moe_quant_states(model, quant_state_dict)
 
         stacked_quant_state_dict = self._stack_quantization_states(

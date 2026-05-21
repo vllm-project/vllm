@@ -18,7 +18,7 @@
 # limitations under the License.
 """Gemma 4 model implementation for vLLM."""
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import replace
 from itertools import islice
 
@@ -87,6 +87,59 @@ logger = init_logger(__name__)
 
 def _remap_gemma4_expert_weight_name(name: str) -> str:
     return re.sub(r"(?<!\.moe)\.experts\.(\d+)\.", r".moe.experts.\1.", name)
+
+
+def duplicate_gemma4_k_eq_v_bnb_quant_states(
+    config,
+    quant_state_dict: dict,
+    resolve_target_param_name: Callable[[str], str | None],
+) -> None:
+    text_config = getattr(config, "text_config", config)
+    if not getattr(text_config, "attention_k_eq_v", False):
+        return
+
+    layer_types = getattr(text_config, "layer_types", None)
+    if layer_types is None:
+        return
+
+    k_eq_v_layer_indices = {
+        layer_idx
+        for layer_idx, layer_type in enumerate(layer_types)
+        if layer_type == "full_attention"
+    }
+    if not k_eq_v_layer_indices:
+        return
+
+    for quant_param_name, quant_state in list(quant_state_dict.items()):
+        if not quant_param_name.endswith(".self_attn.k_proj.weight"):
+            continue
+
+        match = re.search(
+            r"(?:^|\.)layers\.(\d+)\.self_attn\.k_proj\.weight$", quant_param_name
+        )
+        if match is None or int(match.group(1)) not in k_eq_v_layer_indices:
+            continue
+
+        v_quant_param_name = (
+            quant_param_name.removesuffix(".self_attn.k_proj.weight")
+            + ".self_attn.v_proj.weight"
+        )
+        if v_quant_param_name in quant_state_dict:
+            continue
+
+        target_param_name = resolve_target_param_name(quant_param_name)
+        v_target_param_name = resolve_target_param_name(v_quant_param_name)
+        if target_param_name is None or target_param_name != v_target_param_name:
+            continue
+
+        quant_state_dict[v_quant_param_name] = quant_state
+        logger.debug(
+            "Duplicated BNB quant state for Gemma4 k_eq_v layer: %s -> %s "
+            "(target parameter %s).",
+            quant_param_name,
+            v_quant_param_name,
+            target_param_name,
+        )
 
 
 @triton.jit
@@ -1614,6 +1667,17 @@ class Gemma4ForCausalLM(
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
+
+    def adjust_bnb_quant_state_dict(
+        self,
+        quant_state_dict: dict,
+        resolve_target_param_name: Callable[[str], str | None],
+    ) -> None:
+        duplicate_gemma4_k_eq_v_bnb_quant_states(
+            self.config,
+            quant_state_dict,
+            resolve_target_param_name,
+        )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         # Checkpoint weight names use "language_model." prefix (from the

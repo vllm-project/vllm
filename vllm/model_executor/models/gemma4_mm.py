@@ -15,7 +15,7 @@ reason about temporal order.
 """
 
 import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Annotated, Any, Literal
 
 import numpy as np
@@ -40,8 +40,15 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
+from vllm.model_executor.models.gemma4 import (
+    Gemma4ForCausalLM,
+    duplicate_gemma4_k_eq_v_bnb_quant_states,
+)
 from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.models.transformers.utils import (
+    log_replacement,
+    replace_linear_class,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -100,6 +107,33 @@ def _get_max_soft_tokens(
         return images_kwargs.get("max_soft_tokens"), False
 
     return None, False
+
+
+def _replace_tower_linear_with_vllm_linear(
+    module: nn.Module,
+    quant_config: QuantizationConfig | None,
+    prefix: str,
+) -> None:
+    if quant_config is None or quant_config.get_name() != "bitsandbytes":
+        return
+
+    for child_name, child_module in module.named_children():
+        child_prefix = maybe_prefix(prefix, child_name)
+        if isinstance(child_module, nn.Linear):
+            new_module = replace_linear_class(
+                child_module,
+                style="replicate",
+                quant_config=quant_config,
+                prefix=child_prefix,
+            )
+            setattr(module, child_name, new_module)
+            log_replacement(child_prefix, child_module, new_module)
+        else:
+            _replace_tower_linear_with_vllm_linear(
+                child_module,
+                quant_config,
+                child_prefix,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -962,6 +996,11 @@ class Gemma4ForConditionalGeneration(
         # ---- Vision tower (shared by image and video) ----
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.vision_tower = AutoModel.from_config(config=config.vision_config)
+            _replace_tower_linear_with_vllm_linear(
+                self.vision_tower,
+                quant_config,
+                maybe_prefix(prefix, "vision_tower"),
+            )
             self.embed_vision = Gemma4MultimodalEmbedder(
                 config.vision_config,
                 config.text_config,
@@ -978,6 +1017,11 @@ class Gemma4ForConditionalGeneration(
                 # from the checkpoint (e.g. inv_timescales for relative
                 # position embeddings, softcap, gradient_clipping).
                 self.audio_tower.post_init()
+                _replace_tower_linear_with_vllm_linear(
+                    self.audio_tower,
+                    quant_config,
+                    maybe_prefix(prefix, "audio_tower"),
+                )
                 self.embed_audio = Gemma4MultimodalEmbedder(
                     config.audio_config,
                     config.text_config,
@@ -1036,6 +1080,17 @@ class Gemma4ForConditionalGeneration(
         self.num_expert_groups = self.language_model.num_expert_groups
         self.num_shared_experts = self.language_model.num_shared_experts
         self.num_redundant_experts = self.language_model.num_redundant_experts
+
+    def adjust_bnb_quant_state_dict(
+        self,
+        quant_state_dict: dict,
+        resolve_target_param_name: Callable[[str], str | None],
+    ) -> None:
+        duplicate_gemma4_k_eq_v_bnb_quant_states(
+            self.config,
+            quant_state_dict,
+            resolve_target_param_name,
+        )
 
     # ------------------------------------------------------------------ #
     # Input parsing

@@ -5,6 +5,7 @@ import sys
 import types
 from typing import Any
 
+import pytest
 import torch
 
 from vllm.config.load import LoadConfig
@@ -12,25 +13,24 @@ from vllm.model_executor.model_loader.bitsandbytes_loader import (
     BitsAndBytesModelLoader,
 )
 from vllm.model_executor.model_loader.utils import ParamMapping
+from vllm.model_executor.models.gemma4 import (
+    duplicate_gemma4_k_eq_v_bnb_quant_states,
+)
 
 
-def _install_fake_bitsandbytes(monkeypatch, dequantized_weight: torch.Tensor):
+def _install_fake_bitsandbytes(monkeypatch):
     functional = types.ModuleType("bitsandbytes.functional")
 
     class FakeQuantState:
-        shape = tuple(dequantized_weight.shape)
-        dtype = dequantized_weight.dtype
+        shape = (2, 3)
+        dtype = torch.float16
 
         @classmethod
         def from_dict(cls, quant_state, device):
             return cls()
 
-    def dequantize_4bit(weight, quant_state):
-        return dequantized_weight.clone()
-
     functional_any: Any = functional
     functional_any.QuantState = FakeQuantState
-    functional_any.dequantize_4bit = dequantize_4bit
 
     bitsandbytes = types.ModuleType("bitsandbytes")
     bitsandbytes_any: Any = bitsandbytes
@@ -62,11 +62,10 @@ def _loader_for_entries(entries, param_dict):
     return loader
 
 
-def test_prequant_4bit_plain_param_is_dequantized(monkeypatch):
+def test_prequant_4bit_plain_param_fails_fast(monkeypatch):
     packed_weight = torch.arange(3, dtype=torch.uint8).reshape(3, 1)
-    dequantized_weight = torch.arange(6, dtype=torch.float32).reshape(2, 3)
     target_param = torch.nn.Parameter(torch.empty(2, 3, dtype=torch.float16))
-    _install_fake_bitsandbytes(monkeypatch, dequantized_weight)
+    _install_fake_bitsandbytes(monkeypatch)
 
     loader = _loader_for_entries(
         _bnb_4bit_entries("plain.weight", packed_weight),
@@ -74,27 +73,20 @@ def test_prequant_4bit_plain_param_is_dequantized(monkeypatch):
     )
     quant_state_dict: dict[str, Any] = {}
 
-    loaded = list(loader._quantized_4bit_generator([], True, quant_state_dict))
+    with pytest.raises(ValueError, match="not initialized as a vLLM BNB"):
+        list(loader._quantized_4bit_generator([], True, quant_state_dict))
 
-    assert len(loaded) == 1
-    assert loaded[0][0] == "plain.weight"
-    assert loaded[0][1].shape == target_param.shape
-    assert loaded[0][1].dtype == target_param.dtype
-    torch.testing.assert_close(
-        loaded[0][1], dequantized_weight.to(dtype=target_param.dtype)
-    )
     assert quant_state_dict == {}
 
 
 def test_prequant_4bit_bnb_param_keeps_packed_weight(monkeypatch):
     packed_weight = torch.arange(3, dtype=torch.uint8).reshape(3, 1)
-    dequantized_weight = torch.arange(6, dtype=torch.float32).reshape(2, 3)
     target_param = torch.nn.Parameter(
         torch.empty_like(packed_weight), requires_grad=False
     )
     target_param.use_bitsandbytes_4bit = True
     target_param.pack_factor = 2
-    _install_fake_bitsandbytes(monkeypatch, dequantized_weight)
+    _install_fake_bitsandbytes(monkeypatch)
 
     loader = _loader_for_entries(
         _bnb_4bit_entries("bnb.weight", packed_weight),
@@ -111,9 +103,12 @@ def test_prequant_4bit_bnb_param_keeps_packed_weight(monkeypatch):
 
 def test_prequant_4bit_renames_only_last_packed_module_match(monkeypatch):
     packed_weight = torch.arange(3, dtype=torch.uint8).reshape(3, 1)
-    dequantized_weight = torch.arange(6, dtype=torch.float32).reshape(2, 3)
-    target_param = torch.nn.Parameter(torch.empty(2, 3, dtype=torch.float16))
-    _install_fake_bitsandbytes(monkeypatch, dequantized_weight)
+    target_param = torch.nn.Parameter(
+        torch.empty_like(packed_weight), requires_grad=False
+    )
+    target_param.use_bitsandbytes_4bit = True
+    target_param.pack_factor = 2
+    _install_fake_bitsandbytes(monkeypatch)
 
     loader = _loader_for_entries(
         _bnb_4bit_entries("q_proj_adapter.layer.q_proj.weight", packed_weight),
@@ -126,22 +121,18 @@ def test_prequant_4bit_renames_only_last_packed_module_match(monkeypatch):
 
     assert len(loaded) == 1
     assert loaded[0][0] == "q_proj_adapter.layer.q_proj.weight"
-    assert loaded[0][1].shape == target_param.shape
-    torch.testing.assert_close(
-        loaded[0][1], dequantized_weight.to(dtype=target_param.dtype)
-    )
-    assert quant_state_dict == {}
+    assert loaded[0][1] is packed_weight
+    assert "q_proj_adapter.layer.q_proj.weight" in quant_state_dict
 
 
 def test_prequant_4bit_packed_bnb_param_keeps_packed_weight(monkeypatch):
     packed_weight = torch.arange(3, dtype=torch.uint8).reshape(3, 1)
-    dequantized_weight = torch.arange(6, dtype=torch.float32).reshape(2, 3)
     target_param = torch.nn.Parameter(
         torch.empty_like(packed_weight), requires_grad=False
     )
     target_param.use_bitsandbytes_4bit = True
     target_param.pack_factor = 2
-    _install_fake_bitsandbytes(monkeypatch, dequantized_weight)
+    _install_fake_bitsandbytes(monkeypatch)
 
     loader = _loader_for_entries(
         _bnb_4bit_entries("layer.q_proj.weight", packed_weight),
@@ -157,7 +148,7 @@ def test_prequant_4bit_packed_bnb_param_keeps_packed_weight(monkeypatch):
     assert "layer.q_proj.weight" in quant_state_dict
 
 
-def test_stack_quantization_states_duplicates_gemma4_k_eq_v_state():
+def test_gemma4_bnb_quant_state_hook_duplicates_k_eq_v_state():
     target_param = torch.nn.Parameter(
         torch.empty(4, 1, dtype=torch.uint8), requires_grad=False
     )
@@ -191,6 +182,11 @@ def test_stack_quantization_states_duplicates_gemma4_k_eq_v_state():
         )
     )
 
+    duplicate_gemma4_k_eq_v_bnb_quant_states(
+        model.config,
+        quant_state_dict,
+        loader._resolve_target_param_name,
+    )
     stacked = loader._stack_quantization_states(model, quant_state_dict)
 
     assert stacked["language_model.model.layers.5.self_attn.qkv_proj.weight"] == {
@@ -200,7 +196,7 @@ def test_stack_quantization_states_duplicates_gemma4_k_eq_v_state():
     }
 
 
-def test_stack_quantization_states_does_not_duplicate_non_k_eq_v_state():
+def test_gemma4_bnb_quant_state_hook_does_not_duplicate_non_k_eq_v_state():
     target_param = torch.nn.Parameter(
         torch.empty(4, 1, dtype=torch.uint8), requires_grad=False
     )
@@ -234,6 +230,11 @@ def test_stack_quantization_states_does_not_duplicate_non_k_eq_v_state():
         )
     )
 
+    duplicate_gemma4_k_eq_v_bnb_quant_states(
+        model.config,
+        quant_state_dict,
+        loader._resolve_target_param_name,
+    )
     stacked = loader._stack_quantization_states(model, quant_state_dict)
 
     assert stacked["language_model.model.layers.5.self_attn.qkv_proj.weight"] == {
