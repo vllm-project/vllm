@@ -91,7 +91,13 @@ def _build_tool_maps(
         required = params.get("required", []) if isinstance(params, dict) else []
         try:
             name_to_required[name] = set(required)
-        except Exception:
+        except TypeError:
+            logger.warning(
+                "Failed to parse 'required' field for tool %s. "
+                "It should be a list of strings. Got: %s",
+                name,
+                required,
+            )
             name_to_required[name] = set()
 
     return set(name_to_tool.keys()), name_to_allowed_props, name_to_required, name_to_tool
