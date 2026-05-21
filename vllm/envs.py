@@ -182,6 +182,7 @@ if TYPE_CHECKING:
     VLLM_FLASHINFER_MOE_BACKEND: Literal["throughput", "latency", "masked_gemm"] = (
         "latency"
     )
+    VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
     VLLM_XGRAMMAR_CACHE_MB: int = 0
@@ -208,6 +209,8 @@ if TYPE_CHECKING:
     ] = "NONE"
     VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16: bool = True
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: int | None = None
+    VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_MB: int | None = None
+    VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB: int | None = None
     VLLM_MORIIO_CONNECTOR_READ_MODE: bool = False
     VLLM_MORIIO_QP_PER_TRANSFER: int = 1
     VLLM_MORIIO_POST_BATCH_SIZE: int = -1
@@ -1121,6 +1124,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB": lambda: maybe_convert_int(
         os.environ.get("VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB", None)
     ),
+    # Custom quick allreduce kernel for MI3* cards.
+    # Controls the minimum allowed number of data bytes(MB) required to use
+    # custom quick allreduce communication.
+    # If unset, use the built-in threshold table.
+    "VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_MB": lambda: maybe_convert_int(
+        os.environ.get("VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_MB", None)
+    ),
+    # Controls the minimum tensor size (KB, where 1 KB = 1024 bytes) required
+    # to use the configured QuickReduce codec. Smaller tensors use FP
+    # QuickReduce. This does not affect QuickReduce eligibility.
+    "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB": lambda: maybe_convert_int(
+        os.environ.get("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB", None)
+    ),
     # Divisor for dynamic query scale factor calculation for FP8 KV Cache
     "Q_SCALE_CONSTANT": lambda: int(os.getenv("Q_SCALE_CONSTANT", "200")),
     # Divisor for dynamic key scale factor calculation for FP8 KV Cache
@@ -1419,6 +1435,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "latency",
         ["throughput", "latency", "masked_gemm"],
     ),
+    # Override the directory for the FlashInfer autotune config cache.
+    "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR": lambda: os.getenv(
+        "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", None
+    ),
     # Flashinfer fused allreduce backend.
     "VLLM_FLASHINFER_ALLREDUCE_BACKEND": env_with_choices(
         "VLLM_FLASHINFER_ALLREDUCE_BACKEND",
@@ -1535,6 +1555,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "VLLM_NVFP4_GEMM_BACKEND",
         None,
         [
+            "flashinfer-b12x",
             "flashinfer-cudnn",
             "flashinfer-trtllm",
             "flashinfer-cutlass",
@@ -1933,6 +1954,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_LOG_STATS_INTERVAL",
         "VLLM_DEBUG_LOG_API_SERVER_RESPONSE",
         "VLLM_TUNED_CONFIG_FOLDER",
+        "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR",
         "VLLM_ENGINE_ITERATION_TIMEOUT_S",
         "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
         "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
