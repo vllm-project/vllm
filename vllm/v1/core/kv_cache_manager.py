@@ -111,7 +111,6 @@ class KVCacheBlocks:
 class KVCacheManager:
     def __init__(
         self,
-        vllm_config: VllmConfig,
         kv_cache_config: KVCacheConfig,
         max_model_len: int,
         hash_block_size: int,
@@ -141,7 +140,6 @@ class KVCacheManager:
         self.prefix_cache_stats = PrefixCacheStats() if log_stats else None
 
         self.coordinator = get_kv_cache_coordinator(
-            vllm_config=vllm_config,
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
             max_num_batched_tokens=max_num_batched_tokens,
