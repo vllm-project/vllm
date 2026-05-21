@@ -4,9 +4,11 @@
 
 Single class, two role branches:
 
-- **Producer**: binds a ZMQ ROUTER, runs a router thread that ingests
-  `XferReq` messages, posts NIXL WRITEs against its NIXL-registered
-  mmap region, and fires `XferAck`s back to peers each step.
+- **Producer**: binds a ZMQ ROUTER and owns a single router thread
+  (`_run_router`) that ingests `XferReq` messages, posts NIXL WRITEs
+  against its NIXL-registered mmap region, polls completions on every
+  loop iteration, and sends `XferAck`s back to peers via the same
+  ROUTER socket.
 - **Consumer**: lazy ZMQ DEALER pool keyed by `(peer_host, peer_port)` plus
   a local `_remote_encodings` of outstanding transfers, a `_ready` set of
   arrived-but-not-yet-loaded mm_hashes, a `_loaded` mmap cache that keeps
@@ -15,23 +17,27 @@ Single class, two role branches:
 
 Locking
 -------
-The producer runs two threads: the main scheduler thread and a ZMQ
-router thread (`_run_router`). Two locks are involved:
+The producer runs two threads: the main scheduler thread and the
+router thread (`_run_router`). NIXL state — `_in_flight`, the
+`_handle_xfer_req` ↔ `_sweep_completions` pair, and ROUTER socket I/O
+— lives entirely on the router thread, so completion polling no longer
+depends on the LLM scheduler running. Two locks are involved:
 
-- `self._lock` guards the three producer-side datastructs the router
-  thread touches: `_local_encodings`, `_in_flight`, and `_pending_nacks`.
+- `self._lock` guards the three producer-side datastructs that both
+  threads touch: `_local_encodings`, `_in_flight`, and `_pending_nacks`.
 - `self._region` has its own internal lock for the free pool and per-
   block ref counts.
 
 When both locks are held, the order is **scheduler lock first, region
 lock second**. Three sites hold them together: `_handle_xfer_req`
-(lookup + pin), `_sweep_completions` (lookup + unpin), and
-`_producer_fifo_alloc` (try_free + `_local_encodings` mutation, in one
-sweep). The eviction sweep must be atomic against the router thread's
-lookup-then-pin: if `try_free` succeeded but `_local_encodings` still mapped
-the mm_hash, the router thread could pin blocks we just put on the free
-list. Holding the scheduler lock across the whole sweep closes that
-window without changing lock order.
+(lookup + pin) and `_sweep_completions` (lookup + unpin) on the router
+thread, and `_producer_fifo_alloc` (try_free + `_local_encodings`
+mutation, in one sweep) on the main thread. The eviction sweep must be
+atomic against the router thread's lookup-then-pin: if `try_free`
+succeeded but `_local_encodings` still mapped the mm_hash, the router
+thread could pin blocks we just put on the free list. Holding the
+scheduler lock across the whole sweep closes that window without
+changing lock order.
 """
 
 import contextlib
@@ -204,8 +210,6 @@ class ECCPUScheduler:
             self._pending_nacks: list[tuple[bytes, str]] = []
 
             self._router: zmq.Socket | None = None
-            self._inproc_send: zmq.Socket | None = None
-            self._inproc_recv: zmq.Socket | None = None
             self._router_t: threading.Thread | None = None
             self._stop_event = threading.Event()
             self._peer_host = envs.VLLM_EC_SIDE_CHANNEL_HOST
@@ -221,13 +225,6 @@ class ECCPUScheduler:
                 socket_type=zmq.ROUTER,
                 bind=True,
             )
-            _inproc_addr = f"inproc://ec-acks-{self._engine_id}"
-            self._inproc_recv = self._zmq_ctx.socket(
-                zmq.PAIR
-            )  # router thread: recv acks
-            self._inproc_recv.bind(_inproc_addr)
-            self._inproc_send = self._zmq_ctx.socket(zmq.PAIR)  # main thread: send acks
-            self._inproc_send.connect(_inproc_addr)
             self._router_t = threading.Thread(
                 target=self._run_router,
                 name="ec-nixl-router",
@@ -255,71 +252,54 @@ class ECCPUScheduler:
     # ==========================================================================
 
     def _run_router(self) -> None:
-        """Ingest XferReqs from the ROUTER, post NIXL WRITEs.
+        """Ingest XferReqs, post NIXL WRITEs, poll completions, send acks.
 
-        The router thread owns the ROUTER socket exclusively — it both
-        recvs XferReqs and sends XferAcks. The main thread queues ack
-        instructions over an inproc PAIR socket (`_inproc_send`), which
-        the router thread drains from `_inproc_recv` and forwards to the
-        ROUTER. This keeps the ROUTER single-threaded (ZMQ rule: one
-        thread per socket at a time).
+        The router thread owns the ROUTER socket exclusively (ZMQ rule:
+        one thread per socket) and is the single owner of the
+        producer-side NIXL state machine: it accepts XferReqs, posts
+        WRITEs, polls in-flight completions on each loop iteration, and
+        sends XferAcks directly via ROUTER. Decoupled from LLM scheduling
+        so that a producer which has finished its encode and gone idle
+        still advances completions for any in-flight transfers.
         """
         assert self._router is not None
-        assert self._inproc_recv is not None
         poller = zmq.Poller()
         poller.register(self._router, zmq.POLLIN)
-        poller.register(self._inproc_recv, zmq.POLLIN)
         while not self._stop_event.is_set():
+            # Tighter poll while transfers are in flight so completion
+            # latency tracks NIXL progress rather than the 1s idle tick.
+            with self._lock:
+                in_flight = bool(self._in_flight)
+            timeout_ms = 5 if in_flight else 1000
             try:
-                events = dict(poller.poll(timeout=1000))
+                events = dict(poller.poll(timeout=timeout_ms))
             except zmq.ContextTerminated:
                 return
             except Exception:
                 logger.exception("ec: router poll failed")
                 continue
-            # ACKs received from main thread to router thread:
-            if self._inproc_recv in events:
-                while True:
-                    try:
-                        identity, ok_byte, mm_hash_b = self._inproc_recv.recv_multipart(
-                            flags=zmq.NOBLOCK
-                        )
-                    except zmq.Again:
-                        break
-                    except Exception:
-                        logger.exception("ec: inproc recv failed")
-                        break
-                    try:
-                        ok = ok_byte == b"\x01"
-                        payload = self._encoder.encode(
-                            XferAck(mm_hash=mm_hash_b.decode(), ok=ok)
-                        )
-                        # Send ACKs to consumer
-                        self._router.send_multipart([identity, b"", payload])
-                    except Exception:
-                        logger.exception(
-                            "ec: failed to forward XferAck mm_hash=%s",
-                            mm_hash_b,
-                        )
-            # Requests received from consumers:
             if self._router in events:
                 try:
                     identity, _, payload = self._router.recv_multipart(
                         flags=zmq.NOBLOCK
                     )
                 except zmq.Again:
-                    continue
+                    pass
                 except zmq.ContextTerminated:
                     return
                 except Exception:
                     logger.exception("ec: router recv failed")
-                    continue
-                try:
-                    req = self._xfer_req_decoder.decode(payload)
-                except (msgspec.DecodeError, msgspec.ValidationError):
-                    logger.warning("ec: dropped malformed XferReq")
-                    continue
-                self._handle_xfer_req(identity, req)
+                else:
+                    try:
+                        req = self._xfer_req_decoder.decode(payload)
+                    except (msgspec.DecodeError, msgspec.ValidationError):
+                        logger.warning("ec: dropped malformed XferReq")
+                    else:
+                        self._handle_xfer_req(identity, req)
+            try:
+                self._sweep_completions()
+            except Exception:
+                logger.exception("ec: sweep_completions failed")
 
     def _handle_xfer_req(self, identity: bytes, req: XferReq) -> None:
         if req.connector_version != EC_CONNECTOR_VERSION:
@@ -429,9 +409,8 @@ class ECCPUScheduler:
     def _sweep_completions(self) -> None:
         """Poll in-flight xfer state and emit acks.
 
-        NIXL polling runs lock-free so the router thread can keep
-        accepting XferReqs in parallel; ack instructions are queued to
-        the router thread via the inproc PAIR socket.
+        NIXL polling runs lock-free; acks and NACKs are sent directly
+        via the ROUTER socket (router thread only — no inproc relay).
 
         Branches on `check_xfer_state` mirror the KV NIXL connector
         (`kv_transfer/.../nixl/worker.py:_pop_done_transfers`):
@@ -510,14 +489,14 @@ class ECCPUScheduler:
     def _send_xfer_acks(self, routes: list[tuple[bytes, str]], ok: bool) -> None:
         if not routes:
             return
-        assert self._inproc_send is not None
-        ok_byte = b"\x01" if ok else b"\x00"
+        assert self._router is not None
         for identity, mm_hash in routes:
             try:
-                self._inproc_send.send_multipart([identity, ok_byte, mm_hash.encode()])
+                payload = self._encoder.encode(XferAck(mm_hash=mm_hash, ok=ok))
+                self._router.send_multipart([identity, b"", payload])
             except Exception:
                 logger.exception(
-                    "ec: failed to queue XferAck mm_hash=%s ok=%s", mm_hash, ok
+                    "ec: failed to send XferAck mm_hash=%s ok=%s", mm_hash, ok
                 )
 
     def request_finished(
@@ -818,9 +797,6 @@ class ECCPUScheduler:
                 self._pending_save[mm_hash] = indices
                 meta.saves[mm_hash] = indices
 
-            # (c) Drive completion polling / ack sending.
-            self._sweep_completions()
-
         if self._is_consumer:
             # (a) Drain any fresh ack arrivals.
             self._drain_acks()
@@ -940,16 +916,11 @@ class ECCPUScheduler:
         if self._is_producer and self._router_t is not None:
             self._stop_event.set()
             self._router_t.join(timeout=5)
-            for sock, name in [
-                (self._router, "router"),
-                (self._inproc_recv, "inproc_recv"),
-                (self._inproc_send, "inproc_send"),
-            ]:
-                if sock is not None:
-                    try:
-                        sock.close(linger=0)
-                    except Exception:
-                        logger.debug("ec: %s close failed", name, exc_info=True)
+            if self._router is not None:
+                try:
+                    self._router.close(linger=0)
+                except Exception:
+                    logger.debug("ec: router close failed", exc_info=True)
 
         if self._is_consumer:
             for entry in self._peer_pool.values():

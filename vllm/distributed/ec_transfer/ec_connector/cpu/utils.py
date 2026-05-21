@@ -54,7 +54,7 @@ def setup_ec_region(vllm_config: "VllmConfig") -> ECRegionLayout:
     hidden_dim = vllm_config.model_config.get_inputs_embeds_size()
     element_size = torch.empty(0, dtype=dtype).element_size()
     block_size_bytes = hidden_dim * element_size
-    num_blocks = int(ec_config.get_from_extra_config("num_ec_blocks", 256))
+    num_blocks = int(ec_config.get_from_extra_config("num_ec_blocks", 100000))
 
     region = ECSharedRegion(
         instance_id=ec_config.engine_id,
