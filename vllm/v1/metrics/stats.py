@@ -176,6 +176,12 @@ class SchedulerStats:
     num_waiting_reqs: int = 0  # length of the "waiting" request queue
     num_skipped_waiting_reqs: int = 0  # length of the "skipped waiting" queue
 
+    num_running_tokens: int = 0
+    """Sum of (num_tokens - num_computed_tokens) across all running requests."""
+    num_waiting_tokens: int = 0
+    """Sum of (num_tokens - num_computed_tokens) across all waiting and
+    skipped_waiting requests."""
+
     # These are used for internal DP load-balancing.
     step_counter: int = 0
     current_wave: int = 0

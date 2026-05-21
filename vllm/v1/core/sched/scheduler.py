@@ -1748,9 +1748,24 @@ class Scheduler(SchedulerInterface):
 
         scheduler_output.num_invalid_spec_tokens = num_invalid_spec_tokens
 
-    def get_request_counts(self) -> tuple[int, int]:
-        """Returns (num_running_reqs, num_waiting_reqs)."""
-        return len(self.running), len(self.waiting) + len(self.skipped_waiting)
+    def get_request_counts(self) -> tuple[int, int, int, int]:
+        """Returns (num_running_reqs, num_waiting_reqs,
+        num_running_tokens, num_waiting_tokens)."""
+        num_running = len(self.running)
+        num_waiting = len(self.waiting) + len(self.skipped_waiting)
+
+        num_running_tokens = sum(
+            r.num_tokens - r.num_computed_tokens for r in self.running
+        )
+        num_waiting_tokens = sum(
+            r.num_tokens - r.num_computed_tokens
+            for r in self.waiting
+        ) + sum(
+            r.num_tokens - r.num_computed_tokens
+            for r in self.skipped_waiting
+        )
+
+        return num_running, num_waiting, num_running_tokens, num_waiting_tokens
 
     def add_request(self, request: Request) -> None:
         existing = self.requests.get(request.request_id)
@@ -1980,10 +1995,13 @@ class Scheduler(SchedulerInterface):
         connector_stats_payload = (
             kv_connector_stats.data if kv_connector_stats else None
         )
+        _, _, num_running_tokens, num_waiting_tokens = self.get_request_counts()
         return SchedulerStats(
             num_running_reqs=len(self.running),
             num_waiting_reqs=len(self.waiting),
             num_skipped_waiting_reqs=len(self.skipped_waiting),
+            num_running_tokens=num_running_tokens,
+            num_waiting_tokens=num_waiting_tokens,
             kv_cache_usage=self.kv_cache_manager.usage,
             prefix_cache_stats=prefix_cache_stats,
             connector_prefix_cache_stats=connector_prefix_cache_stats,

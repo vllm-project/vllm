@@ -197,12 +197,19 @@ def _make_pooling_request(
     )
 
 
+def _make_mock_vllm_config():
+    return SimpleNamespace(
+        parallel_config=SimpleNamespace(data_parallel_token_lb=False)
+    )
+
+
 def test_dplb_late_interaction_sticky_routing():
     client = object.__new__(DPLBAsyncMPClient)
+    client.vllm_config = _make_mock_vllm_config()
     client.client_count = 1
     client.reqs_in_flight = {}
     client.core_engines = [b"\x00\x00", b"\x01\x00", b"\x02\x00"]
-    client.lb_engines = [[0, 0], [0, 0], [0, 0]]
+    client.lb_engines = [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]]
     client.eng_start_index = 0
 
     query_key = "rerank-abc-query-0"
@@ -223,10 +230,11 @@ def test_dplb_late_interaction_sticky_routing():
 
 def test_dplb_non_late_interaction_still_uses_lb():
     client = object.__new__(DPLBAsyncMPClient)
+    client.vllm_config = _make_mock_vllm_config()
     client.client_count = 1
     client.reqs_in_flight = {}
     client.core_engines = [b"\x00\x00", b"\x01\x00", b"\x02\x00"]
-    client.lb_engines = [[2, 1], [0, 0], [1, 0]]
+    client.lb_engines = [[2, 1, 0, 0], [0, 0, 0, 0], [1, 0, 0, 0]]
     client.eng_start_index = 0
 
     request = make_request(SamplingParams(max_tokens=1))
@@ -234,6 +242,29 @@ def test_dplb_non_late_interaction_still_uses_lb():
 
     assert chosen_engine == client.core_engines[1]
     assert client.lb_engines[1][0] == 1
+
+
+def test_dplb_token_lb_dispatches_to_fewest_tokens():
+    """Token-aware LB picks the engine with fewest total tokens,
+    even when it has more waiting requests."""
+    client = object.__new__(DPLBAsyncMPClient)
+    client.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(data_parallel_token_lb=True)
+    )
+    client.client_count = 1
+    client.reqs_in_flight = {}
+    client.core_engines = [b"\x00\x00", b"\x01\x00"]
+    # Engine 0: 1 waiting req, 10000 waiting tokens (big prefill)
+    # Engine 1: 2 waiting reqs, 2000 waiting tokens (small prefills)
+    # Request-level LB: eng0 wins (4 < 8)
+    # Token-level LB: eng1 wins (2000 < 10000)
+    client.lb_engines = [[1, 0, 10000, 0], [2, 0, 2000, 0]]
+    client.eng_start_index = 0
+
+    request = make_request(SamplingParams(max_tokens=1))
+    chosen_engine = client.get_core_engine_for_request(request)
+
+    assert chosen_engine == client.core_engines[1]
 
 
 def loop_until_done(client: EngineCoreClient, outputs: dict):

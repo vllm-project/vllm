@@ -223,8 +223,9 @@ class SchedulerInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def get_request_counts(self) -> tuple[int, int]:
-        """Returns (num_running_reqs, num_waiting_reqs)."""
+    def get_request_counts(self) -> tuple[int, int, int, int]:
+        """Returns (num_running_reqs, num_waiting_reqs,
+        num_running_tokens, num_waiting_tokens)."""
         raise NotImplementedError
 
     @abstractmethod

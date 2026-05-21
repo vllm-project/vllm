@@ -146,6 +146,12 @@ class ParallelConfig:
     between local data parallel ranks, but an external LB balances
     between vLLM nodes/replicas. Set explicitly in conjunction with
     --data-parallel-start-rank."""
+    data_parallel_token_lb: bool = False
+    """Whether to use token-aware DP load balancing. When enabled, the
+    internal load balancer dispatches requests to the DP rank with the
+    fewest total tokens (waiting_tokens + running_remaining_tokens).
+    This improves balance for prefill-heavy workloads where work is
+    proportional to token count rather than request count."""
     is_moe_model: bool | None = None
     """Whether the deployed model is MoE (if known)."""
     enable_expert_parallel: bool = False

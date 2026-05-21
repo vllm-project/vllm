@@ -1037,6 +1037,10 @@ class EngineArgs:
             **parallel_kwargs["data_parallel_external_lb"],
         )
         parallel_group.add_argument(
+            "--data-parallel-token-lb",
+            **parallel_kwargs["data_parallel_token_lb"],
+        )
+        parallel_group.add_argument(
             "--enable-expert-parallel",
             "-ep",
             **parallel_kwargs["enable_expert_parallel"],
