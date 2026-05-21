@@ -141,4 +141,12 @@ fn factory_new_resolves_default_patterns() {
         factory.resolve_name_for_model("NousResearch/Hermes-3-Llama-3.1-8B"),
         Some(names::HERMES)
     );
+    assert_eq!(
+        factory.resolve_name_for_model("MiniMax/MiniMax-M2-01"),
+        Some(names::MINIMAX_M2)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("org/mm-m2-base"),
+        Some(names::MINIMAX_M2)
+    );
 }

@@ -91,7 +91,8 @@ impl ToolParserFactory {
             .register_pattern("gemma4", names::GEMMA4)
             .register_pattern("gemma-4", names::GEMMA4)
             .register_pattern("kimi-k2", names::KIMI_K2)
-            .register_pattern("minimax", names::MINIMAX_M2);
+            .register_pattern("minimax", names::MINIMAX_M2)
+            .register_pattern("mm-m2", names::MINIMAX_M2);
 
         factory
     }
