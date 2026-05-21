@@ -159,7 +159,7 @@ def get_routing_method_type(
 
     if scoring_func == "softmax":
         if renormalize:
-            return RoutingMethodType.Renormalize
+            return RoutingMethodType.RenormalizeNaive
         else:
             return RoutingMethodType.Default
 
