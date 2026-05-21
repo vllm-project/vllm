@@ -226,23 +226,45 @@ def test_remapped_get_top_tokens_returns_target_ids(model_cls):
 
 
 @pytest.mark.parametrize("method", ["dflash", "eagle3"])
-def test_greedy_sample_uses_get_top_tokens_for_vocab_remap(method):
+def test_greedy_sample_respects_explicit_local_argmax_reduction_disable(method):
     proposer = _create_proposer(method, num_speculative_tokens=2)
     hidden_states = torch.randn(
         2, proposer.hidden_size, dtype=proposer.dtype, device=proposer.device
     )
-    expected = torch.tensor([11, 29], dtype=torch.int64, device=proposer.device)
+    expected = torch.tensor([1, 0], dtype=torch.int64, device=proposer.device)
 
     proposer.model = mock.MagicMock()
     proposer.use_local_argmax_reduction = False
     proposer.model.draft_id_to_target_id = torch.tensor([0], device=proposer.device)
-    proposer.model.get_top_tokens.return_value = expected
+    proposer.model.get_top_tokens.return_value = torch.tensor(
+        [11, 29], dtype=torch.int64, device=proposer.device
+    )
+    proposer.model.compute_logits.return_value = torch.tensor(
+        [[0.0, 1.0, 0.0], [3.0, 2.0, 1.0]],
+        dtype=proposer.dtype,
+        device=proposer.device,
+    )
 
     sampled = proposer._greedy_sample(hidden_states)
 
-    proposer.model.get_top_tokens.assert_called_once_with(hidden_states)
-    proposer.model.compute_logits.assert_not_called()
+    proposer.model.get_top_tokens.assert_not_called()
+    proposer.model.compute_logits.assert_called_once_with(hidden_states)
     assert torch.equal(sampled, expected)
+
+
+@pytest.mark.parametrize("method", ["dflash", "eagle3"])
+def test_auto_local_argmax_reduction_enables_for_remapped_top_tokens(method):
+    proposer = _create_proposer(method, num_speculative_tokens=2)
+
+    proposer.model = mock.MagicMock()
+    proposer.use_local_argmax_reduction = None
+    proposer.model.supports_remapped_top_tokens = True
+    proposer.model.draft_id_to_target_id = torch.tensor([0], device=proposer.device)
+    proposer.model.get_top_tokens = mock.MagicMock()
+
+    proposer._resolve_local_argmax_reduction()
+
+    assert proposer.use_local_argmax_reduction is True
 
 
 def test_prepare_inputs():

@@ -110,7 +110,7 @@ class SpecDecodeBaseProposer:
         self.parallel_drafting_hidden_state_tensor: torch.Tensor | None = None
         if self.parallel_drafting:
             self._init_parallel_drafting_params()
-        self.use_local_argmax_reduction: bool = (
+        self.use_local_argmax_reduction: bool | None = (
             self.speculative_config.use_local_argmax_reduction
         )
 
@@ -390,13 +390,7 @@ class SpecDecodeBaseProposer:
 
     def _greedy_sample(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Greedy-sample draft tokens from hidden states."""
-        has_vocab_remap = (
-            hasattr(self.model, "draft_id_to_target_id")
-            and self.model.draft_id_to_target_id is not None
-        )
-        if self.use_local_argmax_reduction or (
-            has_vocab_remap and hasattr(self.model, "get_top_tokens")
-        ):
+        if self.use_local_argmax_reduction:
             return self.model.get_top_tokens(hidden_states)
         return self.model.compute_logits(hidden_states).argmax(dim=-1)
 
@@ -1254,6 +1248,7 @@ class SpecDecodeBaseProposer:
 
         self._maybe_share_embeddings(target_language_model)
         self._maybe_share_lm_head(target_language_model)
+        self._resolve_local_argmax_reduction()
 
         if (
             self.parallel_drafting
@@ -1418,6 +1413,20 @@ class SpecDecodeBaseProposer:
                 "Detected MTP model with topk_indices_buffer. "
                 "Sharing target model topk_indices_buffer with the draft model."
             )
+
+    def _resolve_local_argmax_reduction(self) -> None:
+        if self.use_local_argmax_reduction is None:
+            self.use_local_argmax_reduction = bool(
+                hasattr(self.model, "get_top_tokens")
+                and getattr(self.model, "supports_remapped_top_tokens", False)
+                and hasattr(self.model, "draft_id_to_target_id")
+                and self.model.draft_id_to_target_id is not None
+            )
+            if self.use_local_argmax_reduction:
+                logger.info_once(
+                    "Auto-enabling local argmax reduction for remapped draft "
+                    "token generation."
+                )
 
         if self.use_local_argmax_reduction:
             if not hasattr(self.model, "get_top_tokens"):
