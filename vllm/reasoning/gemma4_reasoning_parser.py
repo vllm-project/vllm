@@ -138,7 +138,7 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
 
         reasoning, content = super().extract_reasoning(model_output, request)
         if reasoning is not None:
-            reasoning = _strip_thought_label(reasoning)
+            reasoning = _strip_thought_label(reasoning) or None
         return reasoning, content
 
     # ------------------------------------------------------------------
@@ -219,8 +219,14 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
                 else:
                     if len(self._reasoning_text) >= prefix_len:
                         self._prefix_stripped = True
-                        result.reasoning = ""
-                        return result
+                        # The entire delta was the stripped prefix —
+                        # suppress the empty reasoning delta.  If the base
+                        # parser extracted post-reasoning text (e.g. tool
+                        # call markup), forward that content so the
+                        # DelegatingParser can hand it to the tool parser.
+                        if result.content:
+                            return DeltaMessage(content=result.content)
+                        return None
                     return None
 
         # Case 2: Accumulated text is a strict prefix of

@@ -256,3 +256,60 @@ def test_reasoning_only_no_tool_call(parser, tokenizer):
     assert content is not None
     assert "42" in content
     assert len(tool_calls) == 0
+
+
+def test_empty_thinking_block_tool_call_no_reasoning_leak(parser, tokenizer):
+    """Empty thinking block (<|channel>thought\\n<channel|>) followed by a
+    tool call must NOT emit an empty-string reasoning_content delta.
+
+    When the model produces only the 'thought\\n' role label (nothing after
+    it inside the channel) the prefix-stripping logic previously returned
+    DeltaMessage(reasoning='') — an empty string, not None.  The harness
+    received {"reasoning_content": ""} and mis-rendered it.  The fix makes
+    the parser return None (or forward the post-channel content only) so
+    no empty reasoning delta is ever emitted.
+
+    Exercises both token-by-token and single-delta delivery.
+    """
+    vocab = tokenizer.get_vocab()
+    enc = getattr(tokenizer, "tokenizer", tokenizer)
+
+    # Token-by-token: each token arrives individually.
+    token_strings = (
+        ["<|channel>", "thought", "\n", "<channel|>"]
+        + ["<|tool_call>", "call", ":", "find", "{", "path", ":", '<|"|>',
+           "research", '<|"|>', "}", "<tool_call|>"]
+    )
+    reasoning, content, tool_calls = _run_streaming(parser, token_strings, tokenizer)
+
+    assert reasoning is None, (
+        f"empty thinking block must not emit reasoning_content; got {reasoning!r}"
+    )
+    assert len(tool_calls) >= 1, "tool call must still be parsed"
+    assert tool_calls[0].function.name == "find"
+
+    # Single-delta: the whole output arrives in one chunk (stream-interval 20).
+    parser2_instance = type(parser)(tokenizer)
+    type(parser2_instance).reasoning_parser_cls = type(parser).reasoning_parser_cls
+    type(parser2_instance).tool_parser_cls = type(parser).tool_parser_cls
+
+    # Build a fresh parser with the correct classes set.
+    from vllm.parser.abstract_parser import _WrappedParser
+    from vllm.reasoning.gemma4_reasoning_parser import Gemma4ReasoningParser
+    from vllm.tool_parsers.gemma4_tool_parser import Gemma4ToolParser
+    _WrappedParser.reasoning_parser_cls = Gemma4ReasoningParser
+    _WrappedParser.tool_parser_cls = Gemma4ToolParser
+    parser2 = _WrappedParser(tokenizer)
+
+    full_text = (
+        '<|channel>thought\n<channel|>'
+        '<|tool_call>call:find{path:<|"|>research<|"|>}<tool_call|>'
+    )
+    reasoning2, content2, tool_calls2 = _run_single_delta(parser2, full_text, tokenizer)
+
+    assert reasoning2 is None, (
+        f"single-delta empty thinking must not emit reasoning_content; "
+        f"got {reasoning2!r}"
+    )
+    assert len(tool_calls2) >= 1, "tool call must still be parsed in single-delta mode"
+    assert tool_calls2[0].function.name == "find"

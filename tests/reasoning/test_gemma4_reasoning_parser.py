@@ -111,7 +111,7 @@ THOUGHT_PREFIX = {
 }
 THOUGHT_PREFIX_ONLY = {
     "output": "<|channel>thought\n<channel|>",
-    "reasoning": "",
+    "reasoning": None,  # empty thinking block → no reasoning_content emitted
     "content": None,
     "is_reasoning_end": True,
 }
