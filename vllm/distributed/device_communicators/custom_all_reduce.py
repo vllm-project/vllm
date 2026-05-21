@@ -241,7 +241,7 @@ class CustomAllreduce:
         # for 4 or more non NVLink-capable GPUs, custom allreduce provides
         # little performance improvement over NCCL.
         if self.world_size == 2 or self.fully_connected:
-            return inp_size < self.max_size
+            return inp_size <= self.max_size
         return False
 
     def all_reduce(
