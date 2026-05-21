@@ -362,6 +362,8 @@ docker run \
     --entrypoint="" \
     -e "HF_TOKEN=${HF_TOKEN:-}" \
     -e "ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK:-}" \
+    -e BUILDKITE_PARALLEL_JOB \
+    -e BUILDKITE_PARALLEL_JOB_COUNT \
     -e "CMDS=${commands}" \
     --name "${container_name}" \
     "${image_name}" \
