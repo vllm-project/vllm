@@ -240,20 +240,21 @@ ARG BUILD_OS
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install protoc (used by tonic-build/prost-build) and a basic C toolchain
-# (some rust crates compile C in their build.rs scripts).
+# Install a basic C toolchain (some rust crates compile C in their build.rs
+# scripts) and unzip (used to extract the pinned protoc release below).
 RUN if [ "${BUILD_OS}" = "manylinux" ]; then \
         dnf install -y --setopt=install_weak_deps=False \
-            ca-certificates curl git gcc gcc-c++ make \
-            protobuf-compiler protobuf-devel \
+            ca-certificates curl git gcc gcc-c++ make unzip \
         && dnf clean all && rm -rf /var/cache/dnf; \
     else \
         apt-get update -y \
         && apt-get install -y --no-install-recommends \
-            ca-certificates curl git build-essential \
-            protobuf-compiler libprotobuf-dev \
+            ca-certificates curl git build-essential unzip \
         && rm -rf /var/lib/apt/lists/*; \
     fi
+
+COPY tools/install_protoc.sh /tmp/install_protoc.sh
+RUN /tmp/install_protoc.sh && rm /tmp/install_protoc.sh
 
 # Install rustup; the toolchain itself is pinned by rust-toolchain.toml.
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
