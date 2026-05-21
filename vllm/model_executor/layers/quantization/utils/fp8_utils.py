@@ -1032,31 +1032,10 @@ def deepgemm_post_process_fp8_weight_block(
         # ws: (g*r/128, d/128) -> (g, r/128, d/128)
         g = bmm_batch_size
         assert wq.ndim == 2 and ws.ndim == 2
-
-        # Guard against zero/negative batch size (can occur with TP+EP
-        # partitioning where certain ranks have no local groups assigned).
-        if g <= 0:
-            logger.warning_once(
-                "bmm_batch_size is %d, skipping DeepGEMM BMM reshape. "
-                "This can happen with TP+EP partitioning.",
-                g,
-            )
-            # Return empty 3D tensors with correct layout to maintain
-            # consistency across ranks in distributed environments.
-            d = wq.size(1)
-            # Create empty tensors with the correct 3D shape and layout.
-            # r=1 is arbitrary here since the batch dimension is 0.
-            wq_empty = wq.new_zeros((0, 1, d))
-            ws_empty = ws.new_zeros((0, 1, d // quant_block_shape[1]))
-            dg_ws = transform_sf_into_required_layout(
-                sf=ws_empty,
-                mn=1,
-                k=d,
-                recipe=(1, quant_block_shape[0], quant_block_shape[1]),
-                num_groups=0,
-                is_sfa=False,
-            )
-            return wq_empty, dg_ws
+        assert g > 0, (
+            f"bmm_batch_size must be > 0, got {g}. "
+            f"This indicates TP size exceeds n_groups."
+        )
 
         d = wq.size(1)
         r = wq.size(0) // g

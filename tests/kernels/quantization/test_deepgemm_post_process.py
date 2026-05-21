@@ -19,52 +19,42 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 class TestDeepgemmPostProcess:
     """Test deepgemm_post_process_fp8_weight_block edge cases."""
 
-    def test_bmm_batch_size_zero_returns_empty_3d(self):
-        """Test that bmm_batch_size=0 returns empty 3D tensors.
+    def test_bmm_batch_size_zero_raises_assertion(self):
+        """Test that bmm_batch_size=0 raises AssertionError.
 
         Regression test for Issue #43174: ZeroDivisionError when
         bmm_batch_size is 0 due to TP+EP partitioning.
+        Now we explicitly assert that this case is invalid.
         """
         wq = torch.randn(128, 256, dtype=torch.float8_e4m3fn)
         ws = torch.randn(1, 2, dtype=torch.float32)
         block_shape = (128, 128)
 
-        # Should not raise ZeroDivisionError
-        result_wq, result_ws = deepgemm_post_process_fp8_weight_block(
-            wq=wq,
-            ws=ws,
-            quant_block_shape=block_shape,
-            use_e8m0=False,
-            is_bmm=True,
-            bmm_batch_size=0,  # Invalid value
-        )
+        with pytest.raises(AssertionError, match="bmm_batch_size must be > 0"):
+            deepgemm_post_process_fp8_weight_block(
+                wq=wq,
+                ws=ws,
+                quant_block_shape=block_shape,
+                use_e8m0=False,
+                is_bmm=True,
+                bmm_batch_size=0,  # Invalid value
+            )
 
-        # Should return empty 3D tensors with correct layout
-        assert result_wq.ndim == 3
-        assert result_wq.shape[0] == 0  # Empty batch dimension
-        assert result_ws.ndim == 3
-        assert result_ws.shape[0] == 0  # Empty batch dimension
-
-    def test_bmm_batch_size_negative_returns_empty_3d(self):
-        """Test that negative bmm_batch_size returns empty 3D tensors."""
+    def test_bmm_batch_size_negative_raises_assertion(self):
+        """Test that negative bmm_batch_size raises AssertionError."""
         wq = torch.randn(128, 256, dtype=torch.float8_e4m3fn)
         ws = torch.randn(1, 2, dtype=torch.float32)
         block_shape = (128, 128)
 
-        result_wq, result_ws = deepgemm_post_process_fp8_weight_block(
-            wq=wq,
-            ws=ws,
-            quant_block_shape=block_shape,
-            use_e8m0=False,
-            is_bmm=True,
-            bmm_batch_size=-1,
-        )
-
-        # Should return empty 3D tensors with correct layout
-        assert result_wq.ndim == 3
-        assert result_wq.shape[0] == 0  # Empty batch dimension
-        assert result_ws.ndim == 3
-        assert result_ws.shape[0] == 0  # Empty batch dimension
+        with pytest.raises(AssertionError, match="bmm_batch_size must be > 0"):
+            deepgemm_post_process_fp8_weight_block(
+                wq=wq,
+                ws=ws,
+                quant_block_shape=block_shape,
+                use_e8m0=False,
+                is_bmm=True,
+                bmm_batch_size=-1,
+            )
 
     def test_bmm_batch_size_normal_case(self):
         """Test normal BMM reshape with valid batch size.
@@ -93,59 +83,3 @@ class TestDeepgemmPostProcess:
         assert result_ws.shape[0] == g
 
 
-class TestDeepgemmPostProcessIntegration:
-    """Integration tests for empty rank handling."""
-
-    def test_empty_bmm_tensor_can_be_replaced(self):
-        """Test that empty 3D tensors can be used with replace_parameter.
-
-        This simulates the flow in DeepGemmFp8BlockScaledMMKernel.
-        """
-        wq = torch.randn(128, 256, dtype=torch.float8_e4m3fn)
-        ws = torch.randn(1, 2, dtype=torch.float32)
-        block_shape = (128, 128)
-
-        # Simulate empty rank
-        result_wq, result_ws = deepgemm_post_process_fp8_weight_block(
-            wq=wq,
-            ws=ws,
-            quant_block_shape=block_shape,
-            use_e8m0=False,
-            is_bmm=True,
-            bmm_batch_size=0,
-        )
-
-        # Verify the tensors can be used as layer parameters
-        # They should be contiguous and have the right ndim
-        assert result_wq.is_contiguous()
-        assert result_ws.is_contiguous()
-        assert result_wq.ndim == 3
-        assert result_ws.ndim == 3
-        assert result_wq.shape[0] == 0
-        assert result_ws.shape[0] == 0
-
-    @pytest.mark.skipif(
-        not torch.cuda.is_available(), reason="CUDA not available"
-    )
-    def test_empty_bmm_tensor_on_cuda(self):
-        """Test empty 3D tensors are correctly created on CUDA device."""
-        device = torch.device("cuda")
-        wq = torch.randn(128, 256, dtype=torch.float8_e4m3fn, device=device)
-        ws = torch.randn(1, 2, dtype=torch.float32, device=device)
-        block_shape = (128, 128)
-
-        result_wq, result_ws = deepgemm_post_process_fp8_weight_block(
-            wq=wq,
-            ws=ws,
-            quant_block_shape=block_shape,
-            use_e8m0=False,
-            is_bmm=True,
-            bmm_batch_size=0,
-        )
-
-        assert result_wq.device.type == "cuda"
-        assert result_ws.device.type == "cuda"
-        assert result_wq.shape[0] == 0
-        assert result_ws.shape[0] == 0
-        assert result_wq.ndim == 3
-        assert result_ws.ndim == 3
