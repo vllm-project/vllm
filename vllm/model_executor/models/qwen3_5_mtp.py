@@ -96,6 +96,26 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
             prefix=f"{prefix}.fc",
         )
 
+        if (
+            quant_config is not None
+            and quant_config.get_name() == "compressed-tensors"
+            and hasattr(quant_config, "ignore")
+        ):
+            num_experts = getattr(config, "num_experts", 0)
+            extra: list[str] = []
+            for idx in range(self.num_mtp_layers):
+                for eid in range(num_experts):
+                    for proj in ("gate_proj", "up_proj", "down_proj"):
+                        extra.append(f"{prefix}.layers.{idx}.mlp.experts.{eid}.{proj}")
+            new_entries = [n for n in extra if n not in quant_config.ignore]
+            quant_config.ignore.extend(new_entries)
+            if new_entries:
+                logger.info(
+                    "Qwen3_5MTP: extended compressed-tensors ignore with "
+                    "%d per-expert MTP linears (BF16 in the checkpoint)",
+                    len(new_entries),
+                )
+
         self.layers = torch.nn.ModuleList(
             Qwen3_5DecoderLayer(
                 vllm_config,
@@ -381,6 +401,7 @@ class Qwen3_5MTP(nn.Module, SupportsMultiModal):
                 self.lm_head = ParallelLMHead(
                     config.vocab_size,
                     config.hidden_size,
+                    quant_config=self.quant_config,
                     prefix=maybe_prefix(prefix, "lm_head"),
                 )
         else:
