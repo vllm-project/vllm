@@ -109,6 +109,20 @@ class QuantizationConfig(ABC):
         raise NotImplementedError
 
     @classmethod
+    def get_inflight_quantization_config(cls) -> dict[str, Any] | None:
+        """Default config for plugin-managed inflight quantization.
+
+        Return None when the quantization method must be configured from the
+        checkpoint or explicit user input.
+        """
+        return None
+
+    @classmethod
+    def get_effective_weight_bytes(cls) -> float | None:
+        """Effective bytes per weight used for perf estimation."""
+        return None
+
+    @classmethod
     def override_quantization_method(
         cls,
         hf_quant_cfg: dict[str, Any],
@@ -196,6 +210,15 @@ class QuantizationConfig(ABC):
         # TODO: revision is never passed currently in vllm.py,
         # but is used in subclasses, should we remove this parameter?
         pass
+
+    @classmethod
+    def verify_model_config(cls, model_config: Any) -> None:
+        """Allow quantization methods to validate or update ModelConfig."""
+        return
+
+    def supports_unaligned_mlp(self) -> bool:
+        """Whether this quantization supports MLP sizes outside kernel alignment."""
+        return False
 
     def is_mxfp4_quant(self, prefix: str, layer: torch.nn.Module) -> bool:
         """

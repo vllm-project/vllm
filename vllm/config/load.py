@@ -48,7 +48,6 @@ class LoadConfig:
       Streamer.
     - "runai_streamer_sharded" will load weights from pre-sharded checkpoint
       files using Run:ai Model Streamer.
-    - "bitsandbytes" will load the weights using bitsandbytes quantization.
     - "sharded_state" will load weights from pre-sharded checkpoint files,
       supporting efficient loading of tensor-parallel models.
     - "gguf" will load weights from GGUF format files (details specified in

@@ -9,7 +9,6 @@ from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
-from vllm.model_executor.model_loader.bitsandbytes_loader import BitsAndBytesModelLoader
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.model_executor.model_loader.gguf_loader import GGUFModelLoader
@@ -31,7 +30,6 @@ logger = init_logger(__name__)
 LoadFormats = Literal[
     "auto",
     "hf",
-    "bitsandbytes",
     "dummy",
     "fastsafetensors",
     "gguf",
@@ -48,7 +46,6 @@ LoadFormats = Literal[
 _LOAD_FORMAT_TO_MODEL_LOADER: dict[str, type[BaseModelLoader]] = {
     "auto": DefaultModelLoader,
     "hf": DefaultModelLoader,
-    "bitsandbytes": BitsAndBytesModelLoader,
     "dummy": DummyModelLoader,
     "fastsafetensors": DefaultModelLoader,
     "gguf": GGUFModelLoader,
@@ -117,8 +114,18 @@ def register_model_loader(load_format: str):
     return _wrapper
 
 
+def has_model_loader(load_format: str) -> bool:
+    from vllm.plugins import load_general_plugins
+
+    load_general_plugins()
+    return load_format in _LOAD_FORMAT_TO_MODEL_LOADER
+
+
 def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
     """Get a model loader based on the load format."""
+    from vllm.plugins import load_general_plugins
+
+    load_general_plugins()
     load_format = load_config.load_format
     if load_format not in _LOAD_FORMAT_TO_MODEL_LOADER:
         raise ValueError(f"Load format `{load_format}` is not supported")
@@ -143,12 +150,12 @@ def get_model(
 __all__ = [
     "get_model",
     "get_model_loader",
+    "has_model_loader",
     "get_architecture_class_name",
     "get_model_architecture",
     "get_model_cls",
     "register_model_loader",
     "BaseModelLoader",
-    "BitsAndBytesModelLoader",
     "GGUFModelLoader",
     "DefaultModelLoader",
     "DummyModelLoader",

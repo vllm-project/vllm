@@ -123,13 +123,6 @@ def test_distributed(
     [
         ("TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ", {}),
         ("TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ", {}),
-        (
-            "meta-llama/Llama-3.2-1B-Instruct",
-            {
-                "quantization": "bitsandbytes",
-            },
-        ),
-        ("unsloth/tinyllama-bnb-4bit", {}),
     ],
 )
 @pytest.mark.parametrize("max_tokens", [32])

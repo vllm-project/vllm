@@ -1614,8 +1614,11 @@ class EngineArgs:
                 )
 
     def create_load_config(self) -> LoadConfig:
-        if self.quantization == "bitsandbytes":
-            self.load_format = "bitsandbytes"
+        if self.quantization is not None:
+            from vllm.model_executor.model_loader import has_model_loader
+
+            if has_model_loader(self.quantization):
+                self.load_format = self.quantization
 
         if self.load_format == "tensorizer":
             if hasattr(self.model_loader_extra_config, "to_serializable"):
@@ -2066,9 +2069,11 @@ class EngineArgs:
                 "decreasing num_speculative_tokens"
             )
 
-        # bitsandbytes pre-quantized model need a specific model loader
-        if model_config.quantization == "bitsandbytes":
-            self.quantization = self.load_format = "bitsandbytes"
+        if model_config.quantization is not None:
+            from vllm.model_executor.model_loader import has_model_loader
+
+            if has_model_loader(model_config.quantization):
+                self.quantization = self.load_format = model_config.quantization
 
         # Attention config overrides
         attention_config = copy.deepcopy(self.attention_config)

@@ -179,6 +179,10 @@ class TorchAOConfig(QuantizationConfig):
         return cls(ao_config, skip_modules, is_checkpoint_torchao_serialized)
 
     @classmethod
+    def get_effective_weight_bytes(cls) -> float | None:
+        return 0.5
+
+    @classmethod
     def from_config_file(cls, config_file: str) -> "TorchAOConfig":
         """Initialize class from a config file. Example:
         ```
@@ -250,6 +254,9 @@ class TorchAOConfig(QuantizationConfig):
                 return UnquantizedLinearMethod()
 
         return TorchAOLinearMethod(self)
+
+    def supports_unaligned_mlp(self) -> bool:
+        return True
 
     def get_scaled_act_names(self) -> list[str]:
         return []

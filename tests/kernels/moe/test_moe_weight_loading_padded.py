@@ -292,31 +292,24 @@ class TestWeightLoadingWithPaddedHiddenSize:
             torch.zeros(original_hidden, padded_intermediate - original_intermediate),
         )
 
-    def test_bnb_shape_mismatch_raises(self):
-        """BnB + padded hidden_size should raise via weight_loader."""
+    def test_custom_weight_loader_hook_raises(self):
+        """Custom quant methods can intercept expert weight loading."""
         from unittest.mock import MagicMock
 
-        num_experts = 1
-        padded_packed = 3072  # padded packed size
-        original_packed = 2688  # original packed size
-
-        # Build a param that looks like a BnB 4-bit MoE weight.
-        param_data = torch.zeros(num_experts, padded_packed, 1, dtype=torch.uint8)
-        param = torch.nn.Parameter(param_data, requires_grad=False)
-        param.use_bitsandbytes_4bit = True
-
-        loaded_weight = torch.randint(0, 255, (original_packed, 1), dtype=torch.uint8)
-
-        # Minimal FusedMoE mock so weight_loader reaches the BnB path.
         moe = MagicMock(spec=FusedMoE)
         moe.quant_config = None
-        moe.quant_method = MagicMock()
-        moe.quant_method.__class__.__name__ = "BitsAndBytesMethod"
-        moe._expert_map = None
-        moe.tp_rank = 0
+        moe._map_global_expert_id_to_local_expert_id = lambda expert_id: expert_id
 
-        # Call the real weight_loader (unbound) with our mock as self.
-        with pytest.raises(ValueError, match="BitsAndBytes"):
+        class DummyQuantMethod:
+            def load_expert_weight(self, **kwargs):
+                raise ValueError("custom loader called")
+
+        moe.quant_method = DummyQuantMethod()
+
+        param = torch.nn.Parameter(torch.zeros(1, 1), requires_grad=False)
+        loaded_weight = torch.zeros(1, 1)
+
+        with pytest.raises(ValueError, match="custom loader called"):
             FusedMoE.weight_loader(
                 moe,
                 param,
