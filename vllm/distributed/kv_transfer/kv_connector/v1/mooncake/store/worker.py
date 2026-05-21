@@ -650,6 +650,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             ready_event,
             name="KVCacheStoreRecvingThread",
         )
+        # _invalid_block_ids can be access by both the Worker and RecvingThread
         self._invalid_block_ids_lock = threading.Lock()
         self._invalid_block_ids: set[int] = set()
         self.disk_offload_buffer_budget_bytes = disk_offload_buffer_budget_bytes
