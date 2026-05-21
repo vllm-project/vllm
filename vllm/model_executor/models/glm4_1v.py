@@ -779,19 +779,21 @@ class Glm4vVisionTransformer(nn.Module):
                 .flatten()
             )
 
-            lengths = [h * w]
+            lengths = [h * w] * t
             image_shapes = torch.tensor([[t, h, w]], device=device)
+
+            h_coords_repeated = h_coords.repeat(t)
+            w_coords_repeated = w_coords.repeat(t)
 
             embeds = self.embeddings(
                 embeddings=torch.zeros(
-                    h * w, self.hidden_size, device=device, dtype=dtype
+                    h * w * t, self.hidden_size, device=device, dtype=dtype
                 ),
                 lengths=lengths,
                 image_shapes=image_shapes,
-                h_coords=h_coords,
-                w_coords=w_coords,
+                h_coords=h_coords_repeated,
+                w_coords=w_coords_repeated,
             )
-            embeds = embeds.repeat(t, 1)
             all_embeds.append(embeds)
 
         return torch.cat(all_embeds, dim=0).to(dtype)
