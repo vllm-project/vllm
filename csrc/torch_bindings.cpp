@@ -194,6 +194,19 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert", torch::kCUDA,
            &fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert);
 
+  // Full-cache per-tensor FP8 variant for FlashInfer sparse MLA. Reuses the
+  // same CUDA warp-slot kernel structure as the legacy UE8M0 op, but writes Q
+  // to a separate FP8 tensor and KV into a full 512-wide FP8 paged cache.
+  ops.def(
+      "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert("
+      "Tensor q, Tensor kv, Tensor! q_fp8, Tensor! k_cache, "
+      "Tensor slot_mapping, Tensor position_ids, Tensor cos_sin_cache, "
+      "Tensor fp8_scale, Tensor q_fp8_scale_inv, float eps, "
+      "int cache_block_size) -> ()");
+  ops.impl("fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert",
+           torch::kCUDA,
+           &fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert);
+
   // Apply repetition penalties to logits in-place
   ops.def(
       "apply_repetition_penalties_(Tensor! logits, Tensor prompt_mask, "

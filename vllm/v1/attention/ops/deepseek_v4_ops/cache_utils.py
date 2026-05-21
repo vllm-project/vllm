@@ -34,128 +34,6 @@ def _has_dequant_gather_k_cutedsl() -> bool:
         return False
 
 
-@triton.jit
-def _apply_gptj_rope_512(
-    values,
-    position,
-    cos_sin_cache_ptr,
-    cos_sin_stride,
-    HEAD_SIZE: tl.constexpr,
-    ROPE_HEAD_DIM: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    NUM_PAIRS: tl.constexpr = BLOCK_SIZE // 2
-    NOPE_PAIRS: tl.constexpr = (HEAD_SIZE - ROPE_HEAD_DIM) // 2
-    HALF_ROPE: tl.constexpr = ROPE_HEAD_DIM // 2
-
-    pairs = tl.reshape(values, (NUM_PAIRS, 2))
-    even, odd = tl.split(pairs)
-
-    pair_idx = tl.arange(0, NUM_PAIRS)
-    rope_pair_local = pair_idx - NOPE_PAIRS
-    is_rope_pair = rope_pair_local >= 0
-    cs_idx = tl.maximum(rope_pair_local, 0)
-
-    cache_base = cos_sin_cache_ptr + position * cos_sin_stride
-    cos_v = tl.load(cache_base + cs_idx, mask=is_rope_pair, other=1.0)
-    sin_v = tl.load(cache_base + HALF_ROPE + cs_idx, mask=is_rope_pair, other=0.0)
-
-    new_even = tl.where(is_rope_pair, even * cos_v - odd * sin_v, even)
-    new_odd = tl.where(is_rope_pair, odd * cos_v + even * sin_v, odd)
-    return tl.interleave(new_even, new_odd)
-
-
-@triton.jit
-def _qnorm_rope_insert_full_cache_kernel(
-    q_ptr,
-    q_stride0,
-    q_stride1,
-    q_fp8_ptr,
-    q_fp8_stride0,
-    q_fp8_stride1,
-    q_fp8_scale_inv_ptr,
-    kv_ptr,
-    kv_stride0,
-    slot_mapping_ptr,
-    positions_ptr,
-    cos_sin_cache_ptr,
-    cos_sin_stride,
-    k_cache_ptr,
-    cache_stride0,
-    cache_stride1,
-    cache_block_size,
-    fp8_scale_ptr,
-    eps,
-    HEAD_SIZE: tl.constexpr,
-    ROPE_HEAD_DIM: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-    STORE_Q_FP8: tl.constexpr,
-    STORE_KV_FP8: tl.constexpr,
-):
-    token_idx = tl.program_id(0)
-    head_idx = tl.program_id(1)
-    offsets = tl.arange(0, BLOCK_SIZE)
-    mask = offsets < HEAD_SIZE
-
-    position = tl.load(positions_ptr + token_idx)
-
-    q_row = q_ptr + token_idx * q_stride0 + head_idx * q_stride1
-    values = tl.load(q_row + offsets, mask=mask, other=0.0).to(tl.float32)
-    variance = tl.sum(values * values, axis=0) / HEAD_SIZE
-    values *= tl.rsqrt(variance + eps)
-
-    values = _apply_gptj_rope_512(
-        values,
-        position,
-        cos_sin_cache_ptr,
-        cos_sin_stride,
-        HEAD_SIZE,
-        ROPE_HEAD_DIM,
-        BLOCK_SIZE,
-    )
-    if STORE_Q_FP8:
-        q_fp8_scale_inv = tl.load(q_fp8_scale_inv_ptr)
-        q_fp8_row = q_fp8_ptr + token_idx * q_fp8_stride0 + head_idx * q_fp8_stride1
-        q_fp8_values = tl.clamp(values * q_fp8_scale_inv, -448.0, 448.0)
-        tl.store(q_fp8_row + offsets, q_fp8_values.to(tl.float8e4nv), mask=mask)
-    else:
-        tl.store(q_row + offsets, values.to(tl.bfloat16), mask=mask)
-
-    if head_idx != 0:
-        return
-
-    slot_idx = tl.load(slot_mapping_ptr + token_idx)
-    if slot_idx < 0:
-        return
-
-    kv_values = tl.load(
-        kv_ptr + token_idx * kv_stride0 + offsets, mask=mask, other=0.0
-    ).to(tl.float32)
-    kv_values = _apply_gptj_rope_512(
-        kv_values,
-        position,
-        cos_sin_cache_ptr,
-        cos_sin_stride,
-        HEAD_SIZE,
-        ROPE_HEAD_DIM,
-        BLOCK_SIZE,
-    )
-
-    block_idx = slot_idx // cache_block_size
-    pos_in_block = slot_idx % cache_block_size
-    cache_row = (
-        k_cache_ptr
-        + block_idx.to(tl.int64) * cache_stride0
-        + (pos_in_block * cache_stride1)
-    )
-    if STORE_KV_FP8:
-        fp8_scale = tl.load(fp8_scale_ptr)
-        kv_values = tl.clamp(kv_values / fp8_scale, -448.0, 448.0)
-        tl.store(cache_row + offsets, kv_values.to(tl.float8e4nv), mask=mask)
-    else:
-        tl.store(cache_row + offsets, kv_values.to(tl.bfloat16), mask=mask)
-
-
 def qnorm_rope_and_insert_full_k_cache(
     q: torch.Tensor,
     kv: torch.Tensor,
@@ -169,55 +47,61 @@ def qnorm_rope_and_insert_full_k_cache(
     q_fp8: torch.Tensor | None = None,
     q_fp8_scale_inv: torch.Tensor | None = None,
 ) -> None:
-    """Apply DeepSeek V4 Q RMSNorm/RoPE and insert full-width BF16/FP8 KV.
+    """Apply DeepSeek V4 Q RMSNorm/RoPE and insert full-width FP8 KV.
 
     This path is for FlashInfer's DeepSeek V4 sparse MLA launcher, which accepts
-    full 512-wide BF16 or per-tensor FP8 E4M3 KV pools. The existing 584-byte
-    UE8M0 cache path remains handled by the CUDA fused op.
+    full 512-wide per-tensor FP8 E4M3 KV pools. The existing 584-byte UE8M0
+    cache path remains handled by the CUDA fused op.
     """
     assert q.dim() == 3 and q.shape[-1] == 512
     assert kv.dim() == 2 and kv.shape[-1] == 512
     assert q.dtype == torch.bfloat16
     assert kv.dtype == torch.bfloat16
-    assert k_cache.dtype in (torch.bfloat16, torch.float8_e4m3fn)
+    assert k_cache.dtype == torch.float8_e4m3fn
     assert positions.dtype in (torch.int32, torch.int64)
     assert cos_sin_cache.dtype == torch.float32
-    if q_fp8 is not None:
-        assert q_fp8.dtype == torch.float8_e4m3fn
-        assert q_fp8.dim() == 3 and q_fp8.shape[0] == q.shape[0]
-        assert q_fp8.shape[1] == q.shape[1]
-        assert q_fp8.shape[-1] == q.shape[-1]
-        assert q_fp8_scale_inv is not None
-        assert q_fp8_scale_inv.dtype == torch.float32
-        assert q_fp8_scale_inv.numel() == 1
+    assert q_fp8 is not None
+    assert q_fp8.dtype == torch.float8_e4m3fn
+    assert q_fp8.dim() == 3 and q_fp8.shape == q.shape
+    assert q_fp8_scale_inv is not None
+    assert q_fp8_scale_inv.dtype == torch.float32
+    assert q_fp8_scale_inv.numel() == 1
 
-    num_tokens_full, num_heads, _ = q.shape
-    _qnorm_rope_insert_full_cache_kernel[(num_tokens_full, num_heads)](
+    cuda_full_cache_fp8_op = (
+        "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert"
+    )
+    assert hasattr(torch.ops._C, cuda_full_cache_fp8_op)
+    assert q.is_cuda
+    assert kv.is_cuda
+    assert q_fp8.is_cuda
+    assert k_cache.is_cuda
+    assert slot_mapping.is_cuda
+    assert slot_mapping.dtype == torch.int64
+    assert positions.is_cuda
+    assert cos_sin_cache.is_cuda
+    assert fp8_scale.is_cuda
+    assert q_fp8_scale_inv.is_cuda
+    assert q.is_contiguous()
+    assert kv.is_contiguous()
+    assert q_fp8.is_contiguous()
+    assert k_cache.dim() == 3
+    assert k_cache.stride(-1) == 1
+
+    positions_i64 = (
+        positions if positions.dtype == torch.int64 else positions.to(torch.int64)
+    )
+    torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
         q,
-        q.stride(0),
-        q.stride(1),
-        q_fp8 if q_fp8 is not None else q,
-        q_fp8.stride(0) if q_fp8 is not None else q.stride(0),
-        q_fp8.stride(1) if q_fp8 is not None else q.stride(1),
-        q_fp8_scale_inv if q_fp8_scale_inv is not None else fp8_scale,
         kv,
-        kv.stride(0),
-        slot_mapping,
-        positions,
-        cos_sin_cache,
-        cos_sin_cache.stride(0),
+        q_fp8,
         k_cache,
-        k_cache.stride(0),
-        k_cache.stride(1),
-        cache_block_size,
+        slot_mapping,
+        positions_i64,
+        cos_sin_cache,
         fp8_scale,
+        q_fp8_scale_inv,
         eps,
-        HEAD_SIZE=512,
-        ROPE_HEAD_DIM=64,
-        BLOCK_SIZE=512,
-        STORE_Q_FP8=q_fp8 is not None,
-        STORE_KV_FP8=k_cache.dtype == torch.float8_e4m3fn,
-        num_warps=8,
+        cache_block_size,
     )
 
 

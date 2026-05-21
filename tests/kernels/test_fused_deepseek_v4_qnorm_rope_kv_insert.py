@@ -21,6 +21,7 @@ import torch
 
 from vllm.v1.attention.ops.deepseek_v4_ops import (
     dequantize_and_gather_k_cache,
+    qnorm_rope_and_insert_full_k_cache,
     quantize_and_insert_k_cache,
 )
 
@@ -68,7 +69,7 @@ def apply_rope_gptj_last_k(
     nope_dim = head_dim - rope_dim
 
     # Gather cos/sin for each token position: [num_tokens, rope_dim]
-    cs = cos_sin_cache[positions].to(torch.float32)  # [N, rope_dim]
+    cs = cos_sin_cache[positions.long()].to(torch.float32)  # [N, rope_dim]
     cos = cs[..., :half]  # [N, half]
     sin = cs[..., half:]  # [N, half]
 
@@ -113,6 +114,12 @@ def _op_available() -> bool:
     return hasattr(torch.ops._C, "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert")
 
 
+def _full_cache_fp8_op_available() -> bool:
+    return hasattr(
+        torch.ops._C, "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert"
+    )
+
+
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available() or not _op_available(),
     reason="CUDA not available or fused DeepseekV4 op not built in",
@@ -123,6 +130,37 @@ def _call_fused(q, kv, k_cache, slot_mapping, positions, cos_sin_cache, eps, bs)
     torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
         q, kv, k_cache, slot_mapping, positions, cos_sin_cache, eps, bs
     )
+
+
+def _fp8_full_cache_reference(
+    q,
+    kv,
+    k_cache,
+    q_fp8,
+    slot_mapping,
+    positions,
+    cos_sin_cache,
+    eps,
+    block_size,
+    fp8_scale,
+    q_fp8_scale_inv,
+):
+    q_ref = rmsnorm_no_weight(q, eps)
+    q_ref = apply_rope_gptj_last_k(q_ref, positions, cos_sin_cache)
+    q_fp8.copy_(
+        torch.clamp(q_ref.float() * q_fp8_scale_inv, -FP8_MAX, FP8_MAX).to(
+            torch.float8_e4m3fn
+        )
+    )
+
+    kv_ref = apply_rope_gptj_last_k(kv, positions, cos_sin_cache)
+    valid = slot_mapping >= 0
+    slots = slot_mapping[valid]
+    block_idx = slots // block_size
+    pos_in_block = slots % block_size
+    k_cache[block_idx, pos_in_block] = torch.clamp(
+        kv_ref[valid].float() / fp8_scale, -FP8_MAX, FP8_MAX
+    ).to(torch.float8_e4m3fn)
 
 
 # ── Test 1: Q path numerical parity ──────────────────────────────────────────
@@ -357,3 +395,75 @@ def test_combined_q_and_kv(num_tokens: int, n_heads: int, block_size: int):
 
     torch.testing.assert_close(q_fused, q_ref, rtol=1e-2, atol=1e-2)
     torch.testing.assert_close(k_cache_fused, k_cache_ref, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    not _full_cache_fp8_op_available(),
+    reason="full-cache per-tensor FP8 DeepseekV4 op not built in",
+)
+@pytest.mark.parametrize("num_tokens", [4, 17])
+@pytest.mark.parametrize("n_heads", [8, 17])
+@pytest.mark.parametrize("positions_dtype", [torch.int32, torch.int64])
+def test_full_cache_per_tensor_fp8_matches_reference(
+    num_tokens: int,
+    n_heads: int,
+    positions_dtype: torch.dtype,
+):
+    torch.manual_seed(4)
+    device = "cuda"
+    dtype = torch.bfloat16
+    eps = 1e-6
+    block_size = 16
+    max_pos = 4096
+
+    q = torch.randn(num_tokens, n_heads, HEAD_DIM, dtype=dtype, device=device)
+    kv = torch.randn(num_tokens, HEAD_DIM, dtype=dtype, device=device)
+    positions = torch.arange(num_tokens, dtype=positions_dtype, device=device)
+    cos_sin_cache = make_cos_sin_cache(max_pos, ROPE_DIM, torch.float32, device)
+
+    num_blocks = (num_tokens + block_size - 1) // block_size + 1
+    slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    fp8_scale = torch.tensor([1.0], dtype=torch.float32, device=device)
+    q_fp8_scale_inv = torch.tensor([1.0], dtype=torch.float32, device=device)
+
+    q_fp8_ref = torch.empty_like(q, dtype=torch.float8_e4m3fn)
+    q_fp8_fused = torch.empty_like(q, dtype=torch.float8_e4m3fn)
+    k_cache_ref = torch.empty(
+        num_blocks, block_size, HEAD_DIM, dtype=torch.float8_e4m3fn, device=device
+    )
+    k_cache_fused = torch.empty_like(k_cache_ref)
+
+    _fp8_full_cache_reference(
+        q,
+        kv,
+        k_cache_ref,
+        q_fp8_ref,
+        slot_mapping,
+        positions,
+        cos_sin_cache,
+        eps,
+        block_size,
+        fp8_scale,
+        q_fp8_scale_inv,
+    )
+
+    qnorm_rope_and_insert_full_k_cache(
+        q.clone(),
+        kv,
+        k_cache_fused,
+        slot_mapping,
+        positions,
+        cos_sin_cache,
+        eps,
+        block_size,
+        fp8_scale,
+        q_fp8=q_fp8_fused,
+        q_fp8_scale_inv=q_fp8_scale_inv,
+    )
+
+    torch.testing.assert_close(
+        q_fp8_fused.float(), q_fp8_ref.float(), rtol=0, atol=0.25
+    )
+    torch.testing.assert_close(
+        k_cache_fused.float(), k_cache_ref.float(), rtol=0, atol=0.25
+    )
