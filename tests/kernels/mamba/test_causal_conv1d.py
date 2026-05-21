@@ -349,7 +349,7 @@ def test_causal_conv1d_varlen(
         weight,
         bias=bias,
         conv_states=final_states,
-        query_start_loc=cumsum.cuda(),
+        query_start_loc=cumsum.to(device),
         cache_indices=padded_state_indices,
         has_initial_state=has_initial_states,
         activation=activation,
