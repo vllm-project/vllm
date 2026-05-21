@@ -1,15 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from collections.abc import Callable
 from contextlib import suppress
+from typing import Any
 
 import torch
 import torch._inductor.pattern_matcher as pm
 import torch.distributed.distributed_c10d as c10d
 import torch.fx as fx
 from torch._inductor.pattern_matcher import PatternMatcherPass
-from torch.distributed._symmetric_memory import enable_symm_mem_for_group
+from torch.distributed._symmetric_memory import (
+    enable_symm_mem_for_group,
+    get_symm_mem_workspace,
+)
 
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
@@ -19,7 +24,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import current_stream, direct_register_custom_op
 
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import (
@@ -32,6 +37,38 @@ from ..vllm_inductor_pass import (
 FP8_DTYPE = current_platform.fp8_dtype()
 
 logger = init_logger(__name__)
+
+_fp4_rs_streams: dict[int, Any] = {}
+
+
+def _cuda_module() -> Any:
+    return vars(torch)["cuda"]
+
+
+def _get_fp4_rs_stream(device: torch.device) -> Any:
+    device_index = device.index
+    if device_index is None:
+        device_index = torch.accelerator.current_device_index()
+    if device_index not in _fp4_rs_streams:
+        _fp4_rs_streams[device_index] = _cuda_module().Stream(device=device_index)
+    return _fp4_rs_streams[device_index]
+
+
+def _align_bytes(size: int, alignment: int = 256) -> int:
+    return ((size + alignment - 1) // alignment) * alignment
+
+
+def _storage_offset(byte_offset: int, dtype: torch.dtype) -> int:
+    return byte_offset // torch.empty((), dtype=dtype).element_size()
+
+
+def _fp4_rs_stripe_sizes(chunk_m: int) -> list[int]:
+    if chunk_m < 8192:
+        return [chunk_m]
+    first = (chunk_m // 2 // 128) * 128
+    if first == 0 or first == chunk_m:
+        return [chunk_m]
+    return [first, chunk_m - first]
 
 
 def _flashinfer_scaled_mm_out(
@@ -311,6 +348,247 @@ def fused_all_gather_flashinfer_fp4_matmul(
     return output
 
 
+def fused_flashinfer_fp4_matmul_reduce_scatter_fake(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    A_scale: torch.Tensor,
+    B_scale: torch.Tensor,
+    alpha: torch.Tensor,
+    reduce_op: str,
+    scatter_dim: int,
+    world_size: int,
+    vllm_group_name: str,
+    c10d_group_name: str,
+    out_dtype: torch.dtype | None = None,
+    use_8x4_sf_layout: bool = False,
+    backend: str = "cutlass",
+) -> torch.Tensor:
+    del A_scale, B_scale, alpha, reduce_op, vllm_group_name, c10d_group_name
+    del use_8x4_sf_layout, backend
+    result_shape = list(A.shape)
+    result_shape[scatter_dim] //= world_size
+    result_shape[-1] = B.shape[1]
+    return torch.empty(result_shape, dtype=out_dtype or torch.bfloat16, device=A.device)
+
+
+def _get_vllm_pynccl_comm(vllm_group_name: str):
+    from vllm.distributed.parallel_state import _groups
+
+    if vllm_group_name not in _groups:
+        raise RuntimeError(f"vLLM group {vllm_group_name} is not found")
+    group = _groups[vllm_group_name]()
+    if group is None:
+        raise RuntimeError(f"vLLM group {vllm_group_name} is destroyed")
+    pynccl_comm = getattr(group.device_communicator, "pynccl_comm", None)
+    if pynccl_comm is None:
+        raise RuntimeError("FP4 GEMM reduce-scatter requires vLLM PyNCCL")
+    return pynccl_comm
+
+
+def _fp4_rs_workspace_buffers(
+    c10d_group_name: str,
+    *,
+    world_size: int,
+    max_stripe_m: int,
+    k_fp4: int,
+    n: int,
+    A_dtype: torch.dtype,
+    A_scale_shape: torch.Size,
+    A_scale_dtype: torch.dtype,
+    out_dtype: torch.dtype,
+) -> tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]]:
+    a_shape = (world_size * max_stripe_m, k_fp4)
+    scale_shape = (world_size * max_stripe_m, A_scale_shape[1])
+    partial_shape = (world_size * max_stripe_m, n)
+
+    a_nbytes = torch.empty((), dtype=A_dtype).element_size()
+    a_nbytes *= a_shape[0] * a_shape[1]
+    scale_nbytes = torch.empty((), dtype=A_scale_dtype).element_size()
+    scale_nbytes *= scale_shape[0] * scale_shape[1]
+    partial_nbytes = torch.empty((), dtype=out_dtype).element_size()
+    partial_nbytes *= partial_shape[0] * partial_shape[1]
+
+    offsets: list[tuple[int, torch.Size | tuple[int, ...], torch.dtype]] = []
+    offset = 0
+    for _ in range(2):
+        offset = _align_bytes(offset)
+        offsets.append((offset, a_shape, A_dtype))
+        offset += a_nbytes
+        offset = _align_bytes(offset)
+        offsets.append((offset, scale_shape, A_scale_dtype))
+        offset += scale_nbytes
+        offset = _align_bytes(offset)
+        offsets.append((offset, partial_shape, out_dtype))
+        offset += partial_nbytes
+
+    workspace = get_symm_mem_workspace(c10d_group_name, _align_bytes(offset))
+    rank = workspace.rank
+    buffers = [
+        workspace.get_buffer(
+            rank,
+            shape,
+            dtype,
+            _storage_offset(byte_offset, dtype),
+        )
+        for byte_offset, shape, dtype in offsets
+    ]
+    a_workspaces = [buffers[0], buffers[3]]
+    scale_workspaces = [buffers[1], buffers[4]]
+    partial_workspaces = [buffers[2], buffers[5]]
+    return a_workspaces, scale_workspaces, partial_workspaces
+
+
+def _run_fp4_full_gemm_nccl_rs(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    A_scale: torch.Tensor,
+    B_scale: torch.Tensor,
+    alpha: torch.Tensor,
+    *,
+    pynccl_comm,
+    c10d_group_name: str,
+    world_size: int,
+    out_dtype: torch.dtype,
+    use_8x4_sf_layout: bool,
+    backend: str,
+) -> torch.Tensor:
+    partial_nbytes = (
+        A.shape[0] * B.shape[1] * torch.empty((), dtype=out_dtype).element_size()
+    )
+    workspace = get_symm_mem_workspace(c10d_group_name, _align_bytes(partial_nbytes))
+    partial = workspace.get_buffer(
+        workspace.rank,
+        (A.shape[0], B.shape[1]),
+        out_dtype,
+    )
+    _flashinfer_fp4_mm_out(
+        A,
+        B,
+        scale_a=A_scale,
+        scale_b=B_scale,
+        alpha=alpha,
+        out=partial,
+        out_dtype=out_dtype,
+        use_8x4_sf_layout=use_8x4_sf_layout,
+        backend=backend,
+    )
+    out = torch.empty(
+        (A.shape[0] // world_size, B.shape[1]), dtype=out_dtype, device=A.device
+    )
+    pynccl_comm.reduce_scatter(out, partial)
+    return out
+
+
+def fused_flashinfer_fp4_matmul_reduce_scatter(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    A_scale: torch.Tensor,
+    B_scale: torch.Tensor,
+    alpha: torch.Tensor,
+    reduce_op: str,
+    scatter_dim: int,
+    world_size: int,
+    vllm_group_name: str,
+    c10d_group_name: str,
+    out_dtype: torch.dtype | None = None,
+    use_8x4_sf_layout: bool = False,
+    backend: str = "cutlass",
+) -> torch.Tensor:
+    if reduce_op != "sum" or scatter_dim != 0:
+        raise RuntimeError("FP4 GEMM reduce-scatter currently supports sum on dim 0")
+    if A.shape[0] % world_size != 0:
+        raise RuntimeError("FP4 GEMM reduce-scatter requires equal NCCL chunks")
+
+    out_dtype = out_dtype or torch.bfloat16
+    pynccl_comm = _get_vllm_pynccl_comm(vllm_group_name)
+    chunk_m = A.shape[0] // world_size
+    n = B.shape[1]
+
+    overlap_enabled = os.getenv("VLLM_NVFP4_RS_OVERLAP", "1") != "0"
+    can_overlap = (
+        overlap_enabled
+        and backend in ("cutlass", "cudnn")
+        and not use_8x4_sf_layout
+        and A.is_contiguous()
+        and A_scale.ndim == 2
+        and A_scale.shape[0] >= A.shape[0]
+        and chunk_m % 128 == 0
+    )
+    stripe_ms = _fp4_rs_stripe_sizes(chunk_m) if can_overlap else [chunk_m]
+    if len(stripe_ms) == 1:
+        return _run_fp4_full_gemm_nccl_rs(
+            A,
+            B,
+            A_scale,
+            B_scale,
+            alpha,
+            pynccl_comm=pynccl_comm,
+            c10d_group_name=c10d_group_name,
+            world_size=world_size,
+            out_dtype=out_dtype,
+            use_8x4_sf_layout=use_8x4_sf_layout,
+            backend=backend,
+        )
+
+    a_workspaces, scale_workspaces, partial_workspaces = _fp4_rs_workspace_buffers(
+        c10d_group_name,
+        world_size=world_size,
+        max_stripe_m=max(stripe_ms),
+        k_fp4=A.shape[1],
+        n=n,
+        A_dtype=A.dtype,
+        A_scale_shape=A_scale.shape,
+        A_scale_dtype=A_scale.dtype,
+        out_dtype=out_dtype,
+    )
+    out = torch.empty((chunk_m, n), dtype=out_dtype, device=A.device)
+
+    producer_stream = current_stream()
+    comm_stream = _get_fp4_rs_stream(A.device)
+    producer_events = [_cuda_module().Event() for _ in range(2)]
+    comm_events = [_cuda_module().Event() for _ in range(2)]
+
+    stripe_start = 0
+    for stripe_idx, stripe_m in enumerate(stripe_ms):
+        slot = stripe_idx % 2
+        if stripe_idx >= 2:
+            producer_stream.wait_event(comm_events[slot])
+
+        a_workspace = a_workspaces[slot][: world_size * stripe_m]
+        scale_workspace = scale_workspaces[slot][: world_size * stripe_m]
+        partial_workspace = partial_workspaces[slot][: world_size * stripe_m]
+        for rank in range(world_size):
+            src_start = rank * chunk_m + stripe_start
+            src_stop = src_start + stripe_m
+            dst_start = rank * stripe_m
+            dst_stop = dst_start + stripe_m
+            a_workspace[dst_start:dst_stop].copy_(A[src_start:src_stop])
+            scale_workspace[dst_start:dst_stop].copy_(A_scale[src_start:src_stop])
+
+        _flashinfer_fp4_mm_out(
+            a_workspace,
+            B,
+            scale_a=scale_workspace,
+            scale_b=B_scale,
+            alpha=alpha,
+            out=partial_workspace,
+            out_dtype=out_dtype,
+            use_8x4_sf_layout=use_8x4_sf_layout,
+            backend=backend,
+        )
+        producer_events[slot].record(producer_stream)
+
+        with _cuda_module().stream(comm_stream):
+            comm_stream.wait_event(producer_events[slot])
+            out_slice = out[stripe_start : stripe_start + stripe_m]
+            pynccl_comm.reduce_scatter(out_slice, partial_workspace, stream=comm_stream)
+            comm_events[slot].record(comm_stream)
+        stripe_start += stripe_m
+
+    producer_stream.wait_stream(comm_stream)
+    return out
+
+
 direct_register_custom_op(
     op_name="fused_flashinfer_scaled_matmul_reduce_scatter",
     op_func=fused_flashinfer_scaled_matmul_reduce_scatter,
@@ -327,6 +605,12 @@ direct_register_custom_op(
     op_name="fused_all_gather_flashinfer_fp4_matmul",
     op_func=fused_all_gather_flashinfer_fp4_matmul,
     fake_impl=fused_all_gather_flashinfer_fp4_matmul_fake,
+)
+
+direct_register_custom_op(
+    op_name="fused_flashinfer_fp4_matmul_reduce_scatter",
+    op_func=fused_flashinfer_fp4_matmul_reduce_scatter,
+    fake_impl=fused_flashinfer_fp4_matmul_reduce_scatter_fake,
 )
 
 
@@ -897,6 +1181,84 @@ class FlashInferAllGatherFP4Pattern(
         return _replacement
 
 
+class FlashInferFP4ReduceScatterPattern(
+    BasePattern, VllmPatternReplacement[..., torch.Tensor]
+):
+    def __init__(
+        self,
+        dtype: torch.dtype,
+        device: str | None,
+        backend: str,
+        use_8x4_sf_layout: bool,
+    ) -> None:
+        super().__init__(dtype, device)
+        self.backend = backend
+        self.use_8x4_sf_layout = use_8x4_sf_layout
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        a_2d = torch.empty([16, 8], device=self.device, dtype=torch.uint8)
+        b_2d = torch.empty([8, 16], device=self.device, dtype=torch.uint8)
+        a_scale = torch.empty([128, 4], device=self.device, dtype=torch.uint8)
+        b_scale = torch.empty([4, 16], device=self.device, dtype=torch.uint8)
+        alpha = torch.empty([], device=self.device, dtype=torch.float32)
+        return [a_2d, b_2d, a_scale, b_scale, alpha]
+
+    @property
+    def pattern(self) -> Callable[..., torch.Tensor]:
+        def _pattern(
+            a_2d: torch.Tensor,
+            b_2d: torch.Tensor,
+            a_scale: torch.Tensor,
+            b_scale: torch.Tensor,
+            alpha: torch.Tensor,
+        ) -> torch.Tensor:
+            mm = torch.ops.vllm.flashinfer_mm_fp4.default(
+                a_2d,
+                b_2d,
+                a_scale,
+                b_scale,
+                alpha,
+                self.dtype,
+                self.use_8x4_sf_layout,
+                self.backend,
+            )
+            return torch.ops.vllm.reduce_scatter.default(
+                mm,
+                dim=0,
+                world_size=self.tp_size,
+                group_name=self.tp.unique_name,
+            )
+
+        return _pattern
+
+    @property
+    def replacement(self) -> Callable[..., torch.Tensor]:
+        def _replacement(
+            a_2d: torch.Tensor,
+            b_2d: torch.Tensor,
+            a_scale: torch.Tensor,
+            b_scale: torch.Tensor,
+            alpha: torch.Tensor,
+        ) -> torch.Tensor:
+            return torch.ops.vllm.fused_flashinfer_fp4_matmul_reduce_scatter.default(
+                a_2d,
+                b_2d,
+                a_scale,
+                b_scale,
+                alpha,
+                "sum",
+                0,
+                self.tp_size,
+                self.tp.unique_name,
+                self.tp.device_group.group_name,
+                self.dtype,
+                self.use_8x4_sf_layout,
+                self.backend,
+            )
+
+        return _replacement
+
+
 class AsyncTPPass(VllmFusionPatternMatcherPass):
     @enable_fake_mode
     def __init__(self, config: VllmConfig) -> None:
@@ -934,6 +1296,26 @@ class AsyncTPPass(VllmFusionPatternMatcherPass):
                     FlashInferBMMFP8ReduceScatterPattern(self.model_dtype, self.device)
                 )
             if hasattr(torch.ops.vllm, "flashinfer_mm_fp4"):
+                fp4_rs_enabled = os.getenv("VLLM_NVFP4_RS_FUSION", "1") != "0"
+                if fp4_rs_enabled:
+                    for backend in ("cutlass", "cudnn"):
+                        self.register(
+                            FlashInferFP4ReduceScatterPattern(
+                                self.model_dtype,
+                                self.device,
+                                backend,
+                                use_8x4_sf_layout=False,
+                            )
+                        )
+                    for use_8x4_sf_layout in (False, True):
+                        self.register(
+                            FlashInferFP4ReduceScatterPattern(
+                                self.model_dtype,
+                                self.device,
+                                "trtllm",
+                                use_8x4_sf_layout=use_8x4_sf_layout,
+                            )
+                        )
                 for backend in ("cutlass", "cudnn"):
                     for a_scale_view in ("float8_uint8", "uint8"):
                         self.register(
@@ -956,11 +1338,6 @@ class AsyncTPPass(VllmFusionPatternMatcherPass):
                                 a_scale_view=a_scale_view,
                             )
                         )
-                # NVFP4 reduce-scatter does not need scale communication: FP4
-                # scales are consumed by the local GEMM and only BF16 partial
-                # outputs are reduced. Keep this PR scoped to the all-gather
-                # path; reduce-scatter needs a dedicated FP4 producer rather
-                # than the existing FP8-style helper.
 
         self.dump_patterns(config, self.pm_pass)
 
