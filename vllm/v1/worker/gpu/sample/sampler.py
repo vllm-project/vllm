@@ -218,7 +218,7 @@ class Sampler:
         if use_flashinfer:
             sampled = flashinfer_sample(processed_logits, top_k, top_p).to(torch.int64)
         else:
-            apply_top_k_top_p(logits, top_k, top_p)
+            processed_logits = apply_top_k_top_p(processed_logits, top_k, top_p)
             sampled = gumbel_sample(
                 processed_logits,
                 expanded_idx_mapping,
