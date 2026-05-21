@@ -253,25 +253,25 @@ class PassConfig:
 
             fusion_env_set = os.getenv("VLLM_ENABLE_QKNORM_ROPE_FUSION") is not None
 
-            # If fusion explicitly disabled via env var, respect it
-            if fusion_env_set and not envs.VLLM_ENABLE_QKNORM_ROPE_FUSION:
-                self.enable_qk_norm_rope_fusion = False
-            # Auto-enable on ROCm if AITER is enabled or fusion env var is set
-            elif current_platform.is_rocm() and (
-                envs.VLLM_ENABLE_QKNORM_ROPE_FUSION or envs.VLLM_ROCM_USE_AITER
-            ):
-                self.enable_qk_norm_rope_fusion = True
-                if envs.VLLM_ROCM_USE_AITER and not fusion_env_set:
-                    logger.info_once(
-                        "QK-Norm+RoPE fusion auto-enabled via AITER",
-                        scope="global",
-                    )
+            # Fusion requires AITER on ROCm
+            if current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER:
+                # AITER enabled: fusion auto-enabled unless explicitly disabled
+                if fusion_env_set and not envs.VLLM_ENABLE_QKNORM_ROPE_FUSION:
+                    self.enable_qk_norm_rope_fusion = False
                 else:
-                    logger.info_once(
-                        "QK-Norm+RoPE fusion enabled",
-                        scope="global",
-                    )
+                    self.enable_qk_norm_rope_fusion = True
+                    if not fusion_env_set:
+                        logger.info_once(
+                            "QK-Norm+RoPE fusion auto-enabled via AITER",
+                            scope="global",
+                        )
+                    else:
+                        logger.info_once(
+                            "QK-Norm+RoPE fusion enabled",
+                            scope="global",
+                        )
             else:
+                # AITER not enabled: fusion disabled
                 self.enable_qk_norm_rope_fusion = False
 
         if not self.eliminate_noops:
