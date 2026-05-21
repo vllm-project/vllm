@@ -9,12 +9,12 @@ from vllm.model_executor.layers.sparse_attn_indexer import (
     _decode_logits_width,
     _decode_topk_logits_width,
 )
-from vllm.platforms import current_platform
-from vllm.utils.math_utils import cdiv
 from vllm.models.deepseek_v4.nvidia.ops import (
     sm12x_deep_gemm_fallbacks,
     sm12x_mqa,
 )
+from vllm.platforms import current_platform
+from vllm.utils.math_utils import cdiv
 
 
 def _make_indexer_kv_cache(
@@ -124,6 +124,13 @@ def test_decode_topk_logits_width_keeps_topk_kernel_width():
     assert _decode_topk_logits_width(262144, 128, 512) == 512
     assert _decode_topk_logits_width(300, 128, 512) == 300
     assert _decode_topk_logits_width(0, 128, 512) == 0
+
+
+def test_sm120_direct_mqa_logits_block_m_prefers_short_prefill_tile():
+    assert sm12x_mqa._fp8_mqa_logits_block_m(1024, 1024) == 16
+    assert sm12x_mqa._fp8_mqa_logits_block_m(4096, 4096) == 16
+    assert sm12x_mqa._fp8_mqa_logits_block_m(16384, 16384) == 16
+    assert sm12x_mqa._fp8_mqa_logits_block_m(65536, 65536) == 64
 
 
 @pytest.mark.skipif(
