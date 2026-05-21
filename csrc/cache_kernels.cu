@@ -388,6 +388,34 @@ __global__ void reshape_and_cache_flash_kernel(
   }
 }
 
+// nan_flag bit layout (FP8 KV cache only):
+//   bit 0 = FP8 NaN in kv_c write    (byte & 0x7F) == 0x7F
+//   bit 1 = FP8 NaN in k_pe write
+//   bit 2 = Inf in kv_c source
+//   bit 3 = Inf in k_pe source
+//   bit 4 = NaN in kv_c source
+//   bit 5 = NaN in k_pe source
+
+__device__ __forceinline__ bool is_inf_bits(__nv_bfloat16 v) {
+  return (*reinterpret_cast<const uint16_t*>(&v) & 0x7FFFu) == 0x7F80u;
+}
+__device__ __forceinline__ bool is_inf_bits(uint16_t v) {
+  return (v & 0x7FFFu) == 0x7C00u;
+}
+__device__ __forceinline__ bool is_inf_bits(float v) {
+  return (__float_as_uint(v) & 0x7FFFFFFFu) == 0x7F800000u;
+}
+
+__device__ __forceinline__ bool is_nan_bits(__nv_bfloat16 v) {
+  return (*reinterpret_cast<const uint16_t*>(&v) & 0x7FFFu) > 0x7F80u;
+}
+__device__ __forceinline__ bool is_nan_bits(uint16_t v) {
+  return (v & 0x7FFFu) > 0x7C00u;
+}
+__device__ __forceinline__ bool is_nan_bits(float v) {
+  return (__float_as_uint(v) & 0x7FFFFFFFu) > 0x7F800000u;
+}
+
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
 __global__ void concat_and_cache_mla_kernel(
     const scalar_t* __restrict__ kv_c,  // [num_tokens, kv_lora_rank]
@@ -402,7 +430,8 @@ __global__ void concat_and_cache_mla_kernel(
     const int kv_lora_rank,                    //
     const int pe_dim,                          //
     const int block_size,                      //
-    const float* scale                         //
+    const float* scale,                        //
+    int32_t* nan_flag  // nullable
 ) {
   const int64_t token_idx = blockIdx.x;
   const int64_t slot_idx = slot_mapping[token_idx];
@@ -414,7 +443,8 @@ __global__ void concat_and_cache_mla_kernel(
   const int64_t block_offset = slot_idx % block_size;
 
   auto copy = [&](const scalar_t* __restrict__ src, cache_t* __restrict__ dst,
-                  int src_stride, int dst_stride, int size, int offset) {
+                  int src_stride, int dst_stride, int size, int offset,
+                  int nan_bit, int inf_bit) {
     for (int i = threadIdx.x; i < size; i += blockDim.x) {
       const int64_t src_idx = token_idx * src_stride + i;
       const int64_t dst_idx =
@@ -422,14 +452,30 @@ __global__ void concat_and_cache_mla_kernel(
       if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
         dst[dst_idx] = src[src_idx];
       } else {
-        dst[dst_idx] =
-            fp8::scaled_convert<cache_t, scalar_t, kv_dt>(src[src_idx], *scale);
+        scalar_t sv = src[src_idx];
+        cache_t out =
+            fp8::scaled_convert<cache_t, scalar_t, kv_dt>(sv, *scale);
+        dst[dst_idx] = out;
+        if (nan_flag != nullptr) {
+          int hit = 0;
+          if ((static_cast<uint8_t>(out) & 0x7Fu) == 0x7Fu) {
+            atomicOr(&nan_flag[0], (1 << nan_bit)); hit = 1;
+          }
+          if (is_inf_bits(sv)) {
+            atomicOr(&nan_flag[0], (1 << inf_bit)); hit = 1;
+          }
+          if (is_nan_bits(sv)) {
+            atomicOr(&nan_flag[0], (1 << (inf_bit + 2))); hit = 1;
+          }
+          if (hit)
+            atomicMin(&nan_flag[1], static_cast<int32_t>(token_idx));
+        }
       }
     }
   };
 
-  copy(kv_c, kv_cache, kv_c_stride, block_stride, kv_lora_rank, 0);
-  copy(k_pe, kv_cache, k_pe_stride, block_stride, pe_dim, kv_lora_rank);
+  copy(kv_c, kv_cache, kv_c_stride, block_stride, kv_lora_rank, 0, 0, 2);
+  copy(k_pe, kv_cache, k_pe_stride, block_stride, pe_dim, kv_lora_rank, 1, 3);
 }
 
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
@@ -446,7 +492,8 @@ __global__ void concat_and_cache_ds_mla_kernel(
     const int kv_lora_rank,                    //
     const int pe_dim,                          //
     const int block_size,                      //
-    const float* scale                         //
+    const float* scale,                        //
+    int32_t* nan_flag  // nullable — same bit layout as concat_and_cache_mla_kernel
 ) {
   const int64_t token_idx = blockIdx.x;
   const int64_t slot_idx = slot_mapping[token_idx];
@@ -481,6 +528,19 @@ __global__ void concat_and_cache_ds_mla_kernel(
     const int64_t dst_idx = kv_lora_rank / 2 + 8 + pe_idx_start;
     // Vectorized store of two 16-bit values, performed as one 32-bit store
     *reinterpret_cast<int32_t*>(&kv_cache_16bit[dst_idx]) = vals;
+    // RoPE is stored as bf16 (no FP8 conversion) — check source for Inf/NaN
+    if (nan_flag != nullptr) {
+      const scalar_t* pe_vals = reinterpret_cast<const scalar_t*>(&vals);
+      int hit = 0;
+      if (is_inf_bits(pe_vals[0]) || is_inf_bits(pe_vals[1])) {
+        atomicOr(&nan_flag[0], (1 << 3)); hit = 1;
+      }
+      if (is_nan_bits(pe_vals[0]) || is_nan_bits(pe_vals[1])) {
+        atomicOr(&nan_flag[0], (1 << 5)); hit = 1;
+      }
+      if (hit)
+        atomicMin(&nan_flag[1], static_cast<int32_t>(token_idx));
+    }
     return;
   }
 
@@ -533,6 +593,23 @@ __global__ void concat_and_cache_ds_mla_kernel(
   // Store as aligned 64-bit writes
   *reinterpret_cast<uint64_t*>(&kv_cache[dst_idx_base]) =
       *reinterpret_cast<const uint64_t*>(result);
+
+  // Check FP8 output for NaN and source bf16 for Inf/NaN
+  if (nan_flag != nullptr) {
+    int fp8_nan = 0, src_inf = 0, src_nan = 0;
+#pragma unroll
+    for (int i = 0; i < 8; i++) {
+      fp8_nan |= ((result[i] & 0x7Fu) == 0x7Fu);
+      src_inf |= is_inf_bits(vals[i]);
+      src_nan |= is_nan_bits(vals[i]);
+    }
+    int hit = 0;
+    if (fp8_nan) { atomicOr(&nan_flag[0], (1 << 0)); hit = 1; }
+    if (src_inf) { atomicOr(&nan_flag[0], (1 << 2)); hit = 1; }
+    if (src_nan) { atomicOr(&nan_flag[0], (1 << 4)); hit = 1; }
+    if (hit)
+      atomicMin(&nan_flag[1], static_cast<int32_t>(token_idx));
+  }
 }
 
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
@@ -810,10 +887,9 @@ void reshape_and_cache_flash(
           reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),              \
           slot_mapping.data_ptr<int64_t>(), block_stride, entry_stride, \
           kv_c_stride, k_pe_stride, kv_lora_rank, pe_dim, block_size,   \
-          reinterpret_cast<const float*>(scale.data_ptr()));
+          reinterpret_cast<const float*>(scale.data_ptr()),             \
+          nan_flag_ptr);
 
-// KV_T is the data type of key and value tensors.
-// CACHE_T is the stored data type of kv-cache.
 #define CALL_CONCAT_AND_CACHE_DS_MLA(KV_T, CACHE_T, KV_DTYPE)           \
   vllm::concat_and_cache_ds_mla_kernel<KV_T, CACHE_T, KV_DTYPE>         \
       <<<grid, block, 0, stream>>>(                                     \
@@ -822,7 +898,8 @@ void reshape_and_cache_flash(
           reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),              \
           slot_mapping.data_ptr<int64_t>(), block_stride, entry_stride, \
           kv_c_stride, k_pe_stride, kv_lora_rank, pe_dim, block_size,   \
-          reinterpret_cast<const float*>(scale.data_ptr()));
+          reinterpret_cast<const float*>(scale.data_ptr()),             \
+          nan_flag_ptr);
 
 void concat_and_cache_mla(
     torch::Tensor& kv_c,          // [num_tokens, kv_lora_rank]
@@ -830,7 +907,8 @@ void concat_and_cache_mla(
     torch::Tensor& kv_cache,      // [num_blocks, block_size, (kv_lora_rank +
                                   // pe_dim)]
     torch::Tensor& slot_mapping,  // [num_tokens] or [num_actual_tokens]
-    const std::string& kv_cache_dtype, torch::Tensor& scale) {
+    const std::string& kv_cache_dtype, torch::Tensor& scale,
+    std::optional<torch::Tensor> nan_flag) {
   // NOTE(woosuk): In vLLM V1, key.size(0) can be different from
   // slot_mapping.size(0) because of padding for CUDA graphs.
   // In vLLM V0, key.size(0) is always equal to slot_mapping.size(0) because
@@ -866,6 +944,10 @@ void concat_and_cache_mla(
 
   const at::cuda::OptionalCUDAGuard device_guard(device_of(kv_c));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  int32_t* nan_flag_ptr = nan_flag.has_value()
+      ? nan_flag.value().data_ptr<int32_t>()
+      : nullptr;
 
   if (kv_cache_dtype == "fp8_ds_mla") {
     dim3 grid(num_tokens);

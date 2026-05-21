@@ -265,6 +265,23 @@ class ModelRunnerOutput:
     # req_id -> num_nans_in_logits
     num_nans_in_logits: dict[str, int] | None = None
 
+    nan_origin_component: int = -1
+    nan_origin_component_real: int = -1
+    nan_origin_component_padded: int = -1
+    nan_in_hidden_states: bool = False
+    nan_first_layer_hidden: int = -1
+    nan_first_layer_residual: int = -1
+    nan_real_output: bool = False
+    nan_padded_output: bool = False
+    nan_kv_write_ever: bool = False
+    nan_kv_post_write_ever: bool = False
+    nan_kv_post_write_first_layer: int = -1
+
+    kv_cache_nan_total_blocks: int = 0
+    kv_cache_nan_affected_layers: int = 0
+    kv_cache_nan_per_layer: list[int] = field(default_factory=list)
+    kv_cache_nan_block_ids: list[list[int]] = field(default_factory=list)
+
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
 

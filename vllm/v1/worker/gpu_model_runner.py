@@ -513,6 +513,27 @@ class GPUModelRunner(
         Will be lazily initialized when the model is loaded.
         """
 
+        # NaN origin tracking. Three sticky int32 flags (never reset).
+        self._nan_origin_flag: torch.Tensor | None = None
+        self._nan_origin_flag_real: torch.Tensor | None = None
+        self._nan_origin_flag_padded: torch.Tensor | None = None
+        self._nan_real_mask: torch.Tensor | None = None
+        self._nan_per_layer_hidden: torch.Tensor | None = None
+        self._nan_per_layer_residual: torch.Tensor | None = None
+
+        # KV cache NaN write tracking.
+        self._nan_kv_write_ever: torch.Tensor | None = None
+        self._nan_kv_post_write_ever: torch.Tensor | None = None
+        self._nan_kv_post_write_per_layer: torch.Tensor | None = None
+
+        # KV cache NaN audit state.
+        self._kv_audit_interval: int = envs.VLLM_KV_CACHE_NAN_AUDIT
+        self._kv_audit_step: int = 0
+        self._kv_audit_total_blocks: int = 0
+        self._kv_audit_affected_layers: int = 0
+        self._kv_audit_per_layer: list[int] = []
+        self._kv_audit_block_ids: list[list[int]] = []
+
         # Lazy initializations
         # self.model: nn.Module  # Set after load_model
         # Initialize in initialize_kv_cache
@@ -3523,8 +3544,27 @@ class GPUModelRunner(
         list[int],
     ]:
         num_nans_in_logits = {}
+        nan_origin_component = -1
+        nan_origin_component_real = -1
+        nan_origin_component_padded = -1
+        nan_first_layer_hidden = -1
+        nan_first_layer_residual = -1
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
             num_nans_in_logits = self._get_nans_in_logits(logits)
+            if self._nan_origin_flag is not None:
+                nan_origin_component = int(self._nan_origin_flag.item())
+                nan_origin_component_real = int(
+                    self._nan_origin_flag_real.item())
+                nan_origin_component_padded = int(
+                    self._nan_origin_flag_padded.item())
+                h_flags = self._nan_per_layer_hidden
+                r_flags = self._nan_per_layer_residual
+                if h_flags is not None and h_flags.any():
+                    nan_first_layer_hidden = int(
+                        h_flags.nonzero(as_tuple=True)[0][0].item())
+                if r_flags is not None and r_flags.any():
+                    nan_first_layer_residual = int(
+                        r_flags.nonzero(as_tuple=True)[0][0].item())
 
         num_reqs = self.input_batch.num_reqs
         discard_sampled_tokens_req_indices = np.nonzero(
@@ -3645,6 +3685,11 @@ class GPUModelRunner(
             req_ids_output_copy,
             req_id_to_index_output_copy,
             invalid_req_indices,
+            nan_origin_component,
+            nan_origin_component_real,
+            nan_origin_component_padded,
+            nan_first_layer_hidden,
+            nan_first_layer_residual,
         )
 
     @contextmanager
@@ -4202,6 +4247,54 @@ class GPUModelRunner(
             self.model_config.is_encoder_decoder and num_encoder_reqs > 0
         )
 
+        # KV cache NaN audit — runs outside CUDA graph boundary.
+        if self._kv_audit_interval > 0 and self.kv_caches:
+            self._kv_audit_step += 1
+            if self._kv_audit_step >= self._kv_audit_interval:
+                self._kv_audit_step = 0
+                (self._kv_audit_total_blocks,
+                 self._kv_audit_affected_layers,
+                 self._kv_audit_per_layer,
+                 self._kv_audit_block_ids) = (
+                    self._audit_kv_cache_nans())
+
+        # Update real-token mask for NaN tracking.
+        if self._nan_origin_flag is not None:
+            num_real = scheduler_output.total_num_scheduled_tokens
+            self._nan_real_mask.fill_(False)
+            self._nan_real_mask[:num_real] = True
+
+            from vllm.model_executor.layers.attention.attention import (
+                NAN_COMPONENT_KV_CACHE_PRE_FORWARD,
+                nan_check_enabled,
+            )
+            if nan_check_enabled(NAN_COMPONENT_KV_CACHE_PRE_FORWARD):
+                all_latched = (self._nan_origin_flag.item() != -1)
+                real_latched = (self._nan_origin_flag_real.item() != -1)
+                padded_latched = (self._nan_origin_flag_padded.item() != -1)
+                if not (all_latched and real_latched and padded_latched):
+                    kv_has_nan = False
+                    for kv in self.kv_caches:
+                        if kv.numel() == 0:
+                            continue
+                        if kv.element_size() == 1:
+                            raw = kv.view(torch.uint8)
+                            if ((raw & 0x7F) == 0x7F).any().item():
+                                kv_has_nan = True
+                                break
+                        else:
+                            if torch.isnan(kv).any().item():
+                                kv_has_nan = True
+                                break
+                    if kv_has_nan:
+                        cid = NAN_COMPONENT_KV_CACHE_PRE_FORWARD
+                        if not all_latched:
+                            self._nan_origin_flag.fill_(cid)
+                        if not real_latched:
+                            self._nan_origin_flag_real.fill_(cid)
+                        if not padded_latched:
+                            self._nan_origin_flag_padded.fill_(cid)
+
         # Run the model.
         # Use persistent buffers for CUDA graphs.
         # When spec decode is enabled, defer connector finalization
@@ -4483,6 +4576,11 @@ class GPUModelRunner(
                 req_ids_output_copy,
                 req_id_to_index_output_copy,
                 invalid_req_indices,
+                nan_origin_component,
+                nan_origin_component_real,
+                nan_origin_component_padded,
+                nan_first_layer_hidden,
+                nan_first_layer_residual,
             ) = self._bookkeeping_sync(
                 scheduler_output,
                 sampler_output,
@@ -4509,6 +4607,23 @@ class GPUModelRunner(
         kv_connector_output = self.kv_connector_output
         self.kv_connector_output = None
 
+        # Collect KV cache NaN state (outside CUDA graph).
+        nan_kv_write_ever = False
+        nan_kv_post_write_ever = False
+        nan_kv_post_write_first_layer = -1
+        nan_in_hidden_states = False
+        nan_real_output = False
+        nan_padded_output = False
+        if self._nan_kv_write_ever is not None:
+            nan_kv_write_ever = bool(self._nan_kv_write_ever.item())
+        if self._nan_kv_post_write_ever is not None:
+            nan_kv_post_write_ever = bool(self._nan_kv_post_write_ever.item())
+        if (self._nan_kv_post_write_per_layer is not None
+                and self._nan_kv_post_write_per_layer.any()):
+            nan_kv_post_write_first_layer = int(
+                self._nan_kv_post_write_per_layer.nonzero(
+                    as_tuple=True)[0][0].item())
+
         with record_function_or_nullcontext("gpu_model_runner: ModelRunnerOutput"):
             output = ModelRunnerOutput(
                 req_ids=req_ids_output_copy,
@@ -4521,6 +4636,21 @@ class GPUModelRunner(
                 if self.supports_mm_inputs
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
+                nan_origin_component=nan_origin_component,
+                nan_origin_component_real=nan_origin_component_real,
+                nan_origin_component_padded=nan_origin_component_padded,
+                nan_in_hidden_states=nan_in_hidden_states,
+                nan_first_layer_hidden=nan_first_layer_hidden,
+                nan_first_layer_residual=nan_first_layer_residual,
+                nan_real_output=nan_real_output,
+                nan_padded_output=nan_padded_output,
+                nan_kv_write_ever=nan_kv_write_ever,
+                nan_kv_post_write_ever=nan_kv_post_write_ever,
+                nan_kv_post_write_first_layer=nan_kv_post_write_first_layer,
+                kv_cache_nan_total_blocks=self._kv_audit_total_blocks,
+                kv_cache_nan_affected_layers=self._kv_audit_affected_layers,
+                kv_cache_nan_per_layer=self._kv_audit_per_layer,
+                kv_cache_nan_block_ids=self._kv_audit_block_ids,
                 cudagraph_stats=cudagraph_stats,
                 routed_experts=None,
             )
@@ -5147,6 +5277,9 @@ class GPUModelRunner(
             self.get_model(), "requires_sequential_video_encoding"
         )  # Temporary hack for dynamic res video w/o support for bs>1 yet
 
+        if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
+            self._setup_nan_detection_flags()
+
         if (
             self._moe_model is not None
             and self.parallel_config.enable_eplb
@@ -5456,6 +5589,113 @@ class GPUModelRunner(
             return num_nans_in_logits
         except IndexError:
             return {}
+
+    def _setup_nan_detection_flags(self) -> None:
+        """Pre-allocate shared NaN origin flags and assign to modules."""
+        from vllm.model_executor.layers.attention.mla_attention import (
+            MLAAttention,
+        )
+        from vllm.model_executor.models.deepseek_v2 import (
+            DeepseekV2DecoderLayer,
+        )
+
+        self._nan_origin_flag = torch.full(
+            (1,), -1, dtype=torch.int32, device=self.device)
+        self._nan_origin_flag_real = torch.full(
+            (1,), -1, dtype=torch.int32, device=self.device)
+        self._nan_origin_flag_padded = torch.full(
+            (1,), -1, dtype=torch.int32, device=self.device)
+        self._nan_real_mask = torch.zeros(
+            self.max_num_tokens, dtype=torch.bool, device=self.device)
+        self._nan_kv_write_ever = torch.zeros(
+            1, dtype=torch.int32, device=self.device)
+        self._nan_kv_post_write_ever = torch.zeros(
+            1, dtype=torch.int32, device=self.device)
+
+        num_layers = sum(
+            1 for m in self.model.modules()
+            if isinstance(m, DeepseekV2DecoderLayer)
+        )
+        self._nan_per_layer_hidden = torch.zeros(
+            num_layers, dtype=torch.bool, device=self.device)
+        self._nan_per_layer_residual = torch.zeros(
+            num_layers, dtype=torch.bool, device=self.device)
+        self._nan_kv_post_write_per_layer = torch.zeros(
+            num_layers, dtype=torch.int32, device=self.device)
+
+        from vllm.model_executor.layers.vocab_parallel_embedding import (
+            VocabParallelEmbedding,
+        )
+        for name, module in self.model.named_modules():
+            if isinstance(module, VocabParallelEmbedding):
+                w = module.weight.data
+                nan_mask = torch.isnan(w)
+                if nan_mask.any():
+                    nan_rows = nan_mask.any(dim=-1).nonzero(
+                        as_tuple=True)[0]
+                    nan_count = int(nan_mask.sum().item())
+                    logger.error(
+                        "EMBEDDING WEIGHT NaN: %s has %d NaN values "
+                        "in %d/%d rows (first 10 rows: %s)",
+                        name, nan_count, len(nan_rows), w.shape[0],
+                        nan_rows[:10].tolist())
+                else:
+                    logger.info(
+                        "Embedding weight check OK: %s [%s] all finite",
+                        name, list(w.shape))
+
+        for module in self.model.modules():
+            if isinstance(module, Attention):
+                module._nan_flag = self._nan_origin_flag
+                module._nan_flag_real = self._nan_origin_flag_real
+                module._nan_flag_padded = self._nan_origin_flag_padded
+                module._nan_real_mask = self._nan_real_mask
+            elif isinstance(module, MLAAttention):
+                module._nan_flag = self._nan_origin_flag
+                module._nan_flag_real = self._nan_origin_flag_real
+                module._nan_flag_padded = self._nan_origin_flag_padded
+                module._nan_real_mask = self._nan_real_mask
+                if envs.VLLM_NAN_KV_WRITE_CHECK:
+                    module._nan_kv_write_ever = self._nan_kv_write_ever
+                if envs.VLLM_NAN_KV_POST_WRITE_CHECK:
+                    module._nan_kv_post_write_ever = (
+                        self._nan_kv_post_write_ever)
+                    module._nan_kv_post_write_per_layer = (
+                        self._nan_kv_post_write_per_layer)
+                parts = module.layer_name.split('.')
+                for i, p in enumerate(parts):
+                    if p == 'layers' and i + 1 < len(parts):
+                        module._nan_layer_idx = int(parts[i + 1])
+                        break
+
+    @staticmethod
+    def _has_nan_per_block(kv: torch.Tensor) -> torch.Tensor:
+        """Return bool tensor of shape (shape[0],) indicating NaN blocks."""
+        if kv.element_size() == 1:
+            raw = kv.reshape(kv.shape[0], -1).view(torch.uint8)
+            return ((raw & 0x7F) == 0x7F).any(dim=1)
+        return torch.isnan(kv.reshape(kv.shape[0], -1)).any(dim=1)
+
+    def _audit_kv_cache_nans(
+        self,
+    ) -> tuple[int, int, list[int], list[list[int]]]:
+        """Scan KV cache tensors for NaN blocks, per layer."""
+        per_layer: list[int] = []
+        block_ids: list[list[int]] = []
+        total = 0
+        affected = 0
+        for layer_idx, kv in enumerate(self.kv_caches):
+            nan_mask = self._has_nan_per_block(kv)
+            count = int(nan_mask.sum().item())
+            per_layer.append(count)
+            total += count
+            if count > 0:
+                affected += 1
+                block_ids.append(
+                    nan_mask.nonzero(as_tuple=False).flatten().tolist())
+            else:
+                block_ids.append([])
+        return total, affected, per_layer, block_ids
 
     @contextmanager
     def maybe_randomize_inputs(

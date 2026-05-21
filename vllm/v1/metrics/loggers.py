@@ -147,6 +147,42 @@ class LoggingStatLogger(StatLoggerBase):
         self.num_corrupted_reqs += iteration_stats.num_corrupted_reqs
         self.num_preemptions += iteration_stats.num_preempted_reqs
 
+    def _track_nan_stats(self, scheduler_stats: SchedulerStats):
+        if scheduler_stats.nan_phase:
+            origin_real = scheduler_stats.nan_origin_name_real or "none"
+            origin_all = scheduler_stats.nan_origin_name or "none"
+            extras = []
+            if scheduler_stats.nan_in_final_norm:
+                extras.append("final_norm")
+            if scheduler_stats.nan_in_lm_head:
+                extras.append("lm_head")
+            if scheduler_stats.nan_in_logits:
+                extras.append("logits")
+            if scheduler_stats.nan_real_output:
+                extras.append("REAL_OUTPUT")
+            if scheduler_stats.nan_padded_output:
+                extras.append("padded_output")
+
+            layer_info = ""
+            if scheduler_stats.nan_first_layer_hidden >= 0:
+                layer_info += (f" first_layer_hidden="
+                              f"{scheduler_stats.nan_first_layer_hidden}")
+            if scheduler_stats.nan_first_layer_residual >= 0:
+                layer_info += (f" first_layer_residual="
+                              f"{scheduler_stats.nan_first_layer_residual}")
+            extra_str = f" also_in={'+'.join(extras)}" if extras else ""
+            pad_info = ""
+            if origin_all != origin_real:
+                pad_info = f" origin_all_tokens={origin_all}"
+            logger.warning(
+                "NaN ORIGIN(real): %s during %s phase%s%s%s",
+                origin_real,
+                scheduler_stats.nan_phase,
+                layer_info,
+                extra_str,
+                pad_info,
+            )
+
     def _get_throughput(self, tracked_stats: int, now: float) -> float:
         # Compute summary metrics for tracked stats
         delta_time = now - self.last_log_time
@@ -190,6 +226,8 @@ class LoggingStatLogger(StatLoggerBase):
                 self.last_scheduler_stats = scheduler_stats
             if (perf_stats := scheduler_stats.perf_stats) and self._enable_perf_stats():
                 self.perf_metrics_logging.observe(perf_stats)
+            if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
+                self._track_nan_stats(scheduler_stats)
         if mm_cache_stats:
             self.mm_caching_metrics.observe(mm_cache_stats)
 
@@ -538,6 +576,206 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.counter_corrupted_requests = create_metric_per_engine(
                 counter_corrupted_requests, per_engine_labelvalues
             )
+
+            counter_nan_occurrences = self._counter_cls(
+                name="vllm:nan_occurrences_total",
+                documentation=(
+                    "Number of forward steps where NaN was first produced "
+                    "by a given component, labeled by source and batch phase."
+                ),
+                labelnames=labelnames + ["source", "phase"],
+            )
+            self.counter_nan_occurrences: dict[
+                tuple[str, str], dict[int, Counter]
+            ] = {}
+            from vllm.model_executor.layers.attention.attention import (
+                NAN_COMPONENT_NAMES,
+            )
+            all_sources = list(NAN_COMPONENT_NAMES.values()) + [
+                "logits", "final_norm", "lm_head",
+                "real_output", "padded_output",
+            ]
+            for source in all_sources:
+                for phase in ("prefill", "decode", "mixed"):
+                    self.counter_nan_occurrences[(source, phase)] = {
+                        idx: counter_nan_occurrences.labels(
+                            model_name, str(idx), dp_rank, local_rank,
+                            source, phase
+                        )
+                        for idx in engine_indexes
+                    }
+
+            gauge_nan_origin = self._gauge_cls(
+                name="vllm:nan_origin_component",
+                documentation=(
+                    "Component ID that first produced NaN this step "
+                    "(-1 = no NaN)."
+                ),
+                labelnames=labelnames,
+            )
+            self.gauge_nan_origin = create_metric_per_engine(
+                gauge_nan_origin, per_engine_labelvalues
+            )
+            for g in self.gauge_nan_origin.values():
+                g.set(-1)
+
+            gauge_nan_origin_real = self._gauge_cls(
+                name="vllm:nan_origin_component_real",
+                documentation=(
+                    "Sticky component ID that first produced NaN in REAL "
+                    "tokens (-1 = no NaN ever in real tokens)."
+                ),
+                labelnames=labelnames,
+            )
+            self.gauge_nan_origin_real = create_metric_per_engine(
+                gauge_nan_origin_real, per_engine_labelvalues
+            )
+            for g in self.gauge_nan_origin_real.values():
+                g.set(-1)
+
+            gauge_nan_origin_padded = self._gauge_cls(
+                name="vllm:nan_origin_component_padded",
+                documentation=(
+                    "Sticky component ID that first produced NaN in PADDED "
+                    "tokens (-1 = no NaN ever in padded tokens)."
+                ),
+                labelnames=labelnames,
+            )
+            self.gauge_nan_origin_padded = create_metric_per_engine(
+                gauge_nan_origin_padded, per_engine_labelvalues
+            )
+            for g in self.gauge_nan_origin_padded.values():
+                g.set(-1)
+
+            gauge_nan_first_layer_hidden = self._gauge_cls(
+                name="vllm:nan_first_layer_hidden",
+                documentation=(
+                    "First decoder layer index where hidden_states "
+                    "contains NaN (-1 if none)."
+                ),
+                labelnames=labelnames,
+            )
+            self.gauge_nan_first_layer_hidden = create_metric_per_engine(
+                gauge_nan_first_layer_hidden, per_engine_labelvalues
+            )
+            for g in self.gauge_nan_first_layer_hidden.values():
+                g.set(-1)
+
+            gauge_nan_first_layer_residual = self._gauge_cls(
+                name="vllm:nan_first_layer_residual",
+                documentation=(
+                    "First decoder layer index where residual "
+                    "contains NaN (-1 if none)."
+                ),
+                labelnames=labelnames,
+            )
+            self.gauge_nan_first_layer_residual = create_metric_per_engine(
+                gauge_nan_first_layer_residual, per_engine_labelvalues
+            )
+            for g in self.gauge_nan_first_layer_residual.values():
+                g.set(-1)
+
+            gauge_nan_kv_write_ever = self._gauge_cls(
+                name="vllm:nan_kv_write_ever",
+                documentation=(
+                    "Sticky flag: 1 if NaN was ever detected in KV cache "
+                    "write inputs on this rank. Never resets to 0."
+                ),
+                multiprocess_mode="mostrecent",
+                labelnames=labelnames,
+            )
+            self.gauge_nan_kv_write_ever = create_metric_per_engine(
+                gauge_nan_kv_write_ever, per_engine_labelvalues
+            )
+            for g in self.gauge_nan_kv_write_ever.values():
+                g.set(0)
+
+            gauge_nan_kv_post_write_ever = self._gauge_cls(
+                name="vllm:nan_kv_post_write_ever",
+                documentation=(
+                    "Sticky flag: 1 if NaN detected in KV cache "
+                    "AFTER write (post-quantization). Never resets."
+                ),
+                multiprocess_mode="mostrecent",
+                labelnames=labelnames,
+            )
+            self.gauge_nan_kv_post_write_ever = create_metric_per_engine(
+                gauge_nan_kv_post_write_ever, per_engine_labelvalues
+            )
+            for g in self.gauge_nan_kv_post_write_ever.values():
+                g.set(0)
+
+            gauge_nan_kv_post_write_first_layer = self._gauge_cls(
+                name="vllm:nan_kv_post_write_first_layer",
+                documentation=(
+                    "First decoder layer index where NaN was written "
+                    "to KV cache (post-quantization). -1 = none. Sticky."
+                ),
+                multiprocess_mode="mostrecent",
+                labelnames=labelnames,
+            )
+            self.gauge_nan_kv_post_write_first_layer = (
+                create_metric_per_engine(
+                    gauge_nan_kv_post_write_first_layer,
+                    per_engine_labelvalues
+                )
+            )
+            for g in self.gauge_nan_kv_post_write_first_layer.values():
+                g.set(-1)
+
+        if envs.VLLM_KV_CACHE_NAN_AUDIT > 0:
+            gauge_kv_nan_total = self._gauge_cls(
+                name="vllm:kv_cache_nan_total_blocks",
+                documentation=(
+                    "Total KV cache blocks containing NaN across all layers."
+                ),
+                multiprocess_mode="mostrecent",
+                labelnames=labelnames,
+            )
+            self.gauge_kv_nan_total = create_metric_per_engine(
+                gauge_kv_nan_total, per_engine_labelvalues
+            )
+            for g in self.gauge_kv_nan_total.values():
+                g.set(0)
+            gauge_kv_nan_layers = self._gauge_cls(
+                name="vllm:kv_cache_nan_affected_layers",
+                documentation=(
+                    "Number of KV cache layers containing at least one "
+                    "NaN block."
+                ),
+                multiprocess_mode="mostrecent",
+                labelnames=labelnames,
+            )
+            self.gauge_kv_nan_layers = create_metric_per_engine(
+                gauge_kv_nan_layers, per_engine_labelvalues
+            )
+            for g in self.gauge_kv_nan_layers.values():
+                g.set(0)
+            self._gauge_kv_nan_per_layer = self._gauge_cls(
+                name="vllm:kv_cache_nan_blocks_per_layer",
+                documentation="NaN blocks in KV cache per layer.",
+                multiprocess_mode="mostrecent",
+                labelnames=labelnames + ["layer"],
+            )
+            self._gauge_kv_nan_block_ids = self._gauge_cls(
+                name="vllm:kv_cache_nan_block_ids",
+                documentation=(
+                    "NaN block count per layer; blocks label lists "
+                    "affected block indices."
+                ),
+                multiprocess_mode="mostrecent",
+                labelnames=labelnames + ["layer", "blocks"],
+            )
+            self._prev_nan_block_keys: dict[int, set[tuple[str, str]]] = {
+                eid: set() for eid in per_engine_labelvalues
+            }
+            num_layers = getattr(
+                vllm_config.model_config.hf_config,
+                "num_hidden_layers", 0)
+            for lv in per_engine_labelvalues.values():
+                for layer in range(num_layers):
+                    self._gauge_kv_nan_per_layer.labels(
+                        *lv, str(layer)).set(0)
 
         counter_prefix_cache_queries = self._counter_cls(
             name="vllm:prefix_cache_queries",
@@ -1135,6 +1373,76 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     self.labelname_max_lora: self.max_lora,
                 }
                 self.gauge_lora_info.labels(**lora_info_labels).set_to_current_time()
+
+            if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
+                self.gauge_nan_origin[engine_idx].set(
+                    scheduler_stats.nan_origin_component)
+                self.gauge_nan_origin_real[engine_idx].set(
+                    scheduler_stats.nan_origin_component_real)
+                self.gauge_nan_origin_padded[engine_idx].set(
+                    scheduler_stats.nan_origin_component_padded)
+                if scheduler_stats.nan_phase:
+                    phase = scheduler_stats.nan_phase
+                    if scheduler_stats.nan_origin_name_real:
+                        self.counter_nan_occurrences[
+                            (scheduler_stats.nan_origin_name_real, phase)
+                        ][engine_idx].inc()
+                    if scheduler_stats.nan_in_logits:
+                        self.counter_nan_occurrences[
+                            ("logits", phase)][engine_idx].inc()
+                    if scheduler_stats.nan_in_final_norm:
+                        self.counter_nan_occurrences[
+                            ("final_norm", phase)][engine_idx].inc()
+                    if scheduler_stats.nan_in_lm_head:
+                        self.counter_nan_occurrences[
+                            ("lm_head", phase)][engine_idx].inc()
+                    if scheduler_stats.nan_real_output:
+                        self.counter_nan_occurrences[
+                            ("real_output", phase)][engine_idx].inc()
+                    if scheduler_stats.nan_padded_output:
+                        self.counter_nan_occurrences[
+                            ("padded_output", phase)][engine_idx].inc()
+                self.gauge_nan_first_layer_hidden[engine_idx].set(
+                    scheduler_stats.nan_first_layer_hidden)
+                self.gauge_nan_first_layer_residual[engine_idx].set(
+                    scheduler_stats.nan_first_layer_residual)
+                if scheduler_stats.nan_kv_write_ever:
+                    self.gauge_nan_kv_write_ever[engine_idx].set(1)
+                if scheduler_stats.nan_kv_post_write_ever:
+                    self.gauge_nan_kv_post_write_ever[engine_idx].set(1)
+                if scheduler_stats.nan_kv_post_write_first_layer >= 0:
+                    self.gauge_nan_kv_post_write_first_layer[
+                        engine_idx].set(
+                        scheduler_stats.nan_kv_post_write_first_layer)
+
+            if envs.VLLM_KV_CACHE_NAN_AUDIT > 0:
+                self.gauge_kv_nan_total[engine_idx].set(
+                    scheduler_stats.kv_cache_nan_total_blocks)
+                self.gauge_kv_nan_layers[engine_idx].set(
+                    scheduler_stats.kv_cache_nan_affected_layers)
+                lv = self.per_engine_labelvalues[engine_idx]
+                for layer_idx, count in enumerate(
+                    scheduler_stats.kv_cache_nan_per_layer
+                ):
+                    self._gauge_kv_nan_per_layer.labels(
+                        *lv, str(layer_idx)
+                    ).set(count)
+                cur_keys: set[tuple[str, str]] = set()
+                for layer_idx, blk_ids in enumerate(
+                    scheduler_stats.kv_cache_nan_block_ids
+                ):
+                    if not blk_ids:
+                        continue
+                    layer_s = str(layer_idx)
+                    blocks_s = ",".join(str(b) for b in blk_ids)
+                    cur_keys.add((layer_s, blocks_s))
+                    self._gauge_kv_nan_block_ids.labels(
+                        *lv, layer_s, blocks_s).set(len(blk_ids))
+                prev = self._prev_nan_block_keys[engine_idx]
+                for key in prev - cur_keys:
+                    self._gauge_kv_nan_block_ids.labels(
+                        *lv, key[0], key[1]).set(0)
+                self._prev_nan_block_keys[engine_idx] = cur_keys
 
         if mm_cache_stats is not None:
             self.counter_mm_cache_queries[engine_idx].inc(mm_cache_stats.queries)

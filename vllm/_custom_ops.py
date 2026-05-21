@@ -2640,6 +2640,9 @@ def reshape_and_cache_flash(
     )
 
 
+import cache_nan_ext as _cache_nan_ext
+
+
 def concat_and_cache_mla(
     kv_c: torch.Tensor,
     k_pe: torch.Tensor,
@@ -2647,9 +2650,10 @@ def concat_and_cache_mla(
     slot_mapping: torch.Tensor,
     kv_cache_dtype: str,
     scale: torch.Tensor,
+    nan_flag: torch.Tensor | None = None,
 ) -> None:
-    torch.ops._C_cache_ops.concat_and_cache_mla(
-        kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale
+    _cache_nan_ext.concat_and_cache_mla(
+        kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale, nan_flag
     )
 
 

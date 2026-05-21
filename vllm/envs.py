@@ -206,6 +206,11 @@ if TYPE_CHECKING:
     VLLM_KV_CACHE_LAYOUT: Literal["NHD", "HND"] | None = None
     VLLM_SSM_CONV_STATE_LAYOUT: Literal["SD", "DS"] | None = None
     VLLM_COMPUTE_NANS_IN_LOGITS: bool = False
+    VLLM_NAN_CHECK_COMPONENTS: str = "all"
+    VLLM_NAN_KV_WRITE_CHECK: bool = True
+    VLLM_NAN_KV_POST_WRITE_CHECK: bool = True
+    VLLM_NAN_MOE_COMBINE_CHECK: bool = True
+    VLLM_KV_CACHE_NAN_AUDIT: int = 0
     VLLM_USE_NVFP4_CT_EMULATIONS: bool = False
     VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: Literal[
         "FP", "INT8", "INT6", "INT4", "NONE"
@@ -1561,6 +1566,31 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # or bad hardware but it may add compute overhead.
     "VLLM_COMPUTE_NANS_IN_LOGITS": lambda: bool(
         int(os.getenv("VLLM_COMPUTE_NANS_IN_LOGITS", "0"))
+    ),
+    # Comma-separated component IDs for selective NaN check barriers.
+    # "all" = every checkpoint (default), "none" = no checkpoints,
+    # e.g. "2,7,10" = only QKV_PROJ, ATTENTION, MOE.
+    "VLLM_NAN_CHECK_COMPONENTS": lambda: os.getenv(
+        "VLLM_NAN_CHECK_COMPONENTS", "all"
+    ),
+    # Enable pre-write KV cache NaN checks (nan_sticky_check on kv inputs).
+    "VLLM_NAN_KV_WRITE_CHECK": lambda: bool(
+        int(os.getenv("VLLM_NAN_KV_WRITE_CHECK", "1"))
+    ),
+    # Enable post-write KV cache NaN checks (reads back written slots).
+    # Disable with VLLM_NAN_KV_POST_WRITE_CHECK=0 to save ~550 MB CUDA
+    # graph memory (fancy-index + bitwise intermediates x 61 layers).
+    "VLLM_NAN_KV_POST_WRITE_CHECK": lambda: bool(
+        int(os.getenv("VLLM_NAN_KV_POST_WRITE_CHECK", "1"))
+    ),
+    # Enable expert_nan_inf_latch checks around EP combine in MoE runner.
+    "VLLM_NAN_MOE_COMBINE_CHECK": lambda: bool(
+        int(os.getenv("VLLM_NAN_MOE_COMBINE_CHECK", "1"))
+    ),
+    # Audit KV cache for NaN before every N-th model call.
+    # 0 = disabled (default), N > 0 = check every N steps.
+    "VLLM_KV_CACHE_NAN_AUDIT": lambda: int(
+        os.getenv("VLLM_KV_CACHE_NAN_AUDIT", "0")
     ),
     # Controls whether or not emulations are used for NVFP4
     # generations on machines < 100 for compressed-tensors

@@ -780,3 +780,269 @@ direct_register_custom_op(
     mutates_args=["output", "output_block_scale"],
     fake_impl=unified_attention_with_output_fake,
 )
+
+
+# ---------------------------------------------------------------------------
+# NaN / Inf detection custom ops
+# ---------------------------------------------------------------------------
+
+NAN_COMPONENT_EMBEDDING = 0
+NAN_COMPONENT_INPUT_LN = 1
+NAN_COMPONENT_QKV_PROJ = 2
+NAN_COMPONENT_Q_A_LN = 3
+NAN_COMPONENT_Q_B_PROJ = 4
+NAN_COMPONENT_KV_A_LN = 5
+NAN_COMPONENT_ROTARY = 6
+NAN_COMPONENT_ATTENTION = 7
+NAN_COMPONENT_O_PROJ = 8
+NAN_COMPONENT_POST_ATTN_LN = 9
+NAN_COMPONENT_MOE = 10
+NAN_COMPONENT_PRE_NORM_HIDDEN = 11
+NAN_COMPONENT_PRE_NORM_RESIDUAL = 12
+NAN_COMPONENT_MLP_OUTPUT = 14
+NAN_COMPONENT_KV_CACHE_IN = 15
+NAN_COMPONENT_ATTN_WORKSPACE = 16
+NAN_COMPONENT_ATTN_Q_ABSORBED = 17
+NAN_COMPONENT_ATTN_FA3_OUT = 18
+NAN_COMPONENT_ATTN_V_UP_PROJ = 19
+NAN_COMPONENT_ATTN_MHA_OUT = 20
+NAN_COMPONENT_ATTN_MQA_Q = 21
+NAN_COMPONENT_KV_CACHE_IN_KPE = 22
+NAN_COMPONENT_KV_CACHE_IN_COMPILED = 23
+NAN_COMPONENT_KV_CACHE_IN_KPE_COMPILED = 24
+NAN_COMPONENT_KV_CACHE_POST_WRITE = 25
+NAN_COMPONENT_KV_CACHE_POST_WRITE_COMPILED = 26
+NAN_COMPONENT_KV_CACHE_PRE_FORWARD = 27
+NAN_COMPONENT_MLP_INPUT = 28
+NAN_COMPONENT_MLP_GATE_UP = 29
+NAN_COMPONENT_MLP_ACT = 30
+NAN_COMPONENT_MLP_DOWN = 31
+NAN_COMPONENT_MOE_ROUTED_OUT = 32
+NAN_COMPONENT_MOE_SHARED_OUT = 33
+NAN_COMPONENT_MOE_AFTER_SCALE = 34
+NAN_COMPONENT_MOE_AFTER_SHARED_ADD = 35
+NAN_COMPONENT_MOE_EXPERT_INPUT = 36
+NAN_COMPONENT_MOE_EXPERT_INPUT_INF = 37
+NAN_COMPONENT_MOE_EXPERT_GEMM1 = 38
+NAN_COMPONENT_MOE_EXPERT_GEMM1_INF = 39
+NAN_COMPONENT_MOE_EXPERT_GEMM2 = 40
+NAN_COMPONENT_MOE_EXPERT_GEMM2_INF = 41
+NAN_COMPONENT_MOE_FUSED_OUT = 42
+NAN_COMPONENT_MOE_FUSED_OUT_INF = 43
+NAN_COMPONENT_MOE_TOPK_WEIGHTS = 44
+NAN_COMPONENT_MOE_TOPK_WEIGHTS_INF = 45
+NAN_COMPONENT_MOE_FINALIZE = 46
+NAN_COMPONENT_MOE_FINALIZE_INF = 47
+NAN_COMPONENT_MOE_PRE_COMBINE = 48
+NAN_COMPONENT_MOE_PRE_COMBINE_INF = 49
+NAN_COMPONENT_MOE_POST_COMBINE = 50
+NAN_COMPONENT_MOE_POST_COMBINE_INF = 51
+
+NAN_COMPONENT_NAMES = {
+    NAN_COMPONENT_EMBEDDING: "embedding",
+    NAN_COMPONENT_INPUT_LN: "input_ln",
+    NAN_COMPONENT_QKV_PROJ: "qkv_proj",
+    NAN_COMPONENT_Q_A_LN: "q_a_ln",
+    NAN_COMPONENT_Q_B_PROJ: "q_b_proj",
+    NAN_COMPONENT_KV_A_LN: "kv_a_ln",
+    NAN_COMPONENT_ROTARY: "rotary",
+    NAN_COMPONENT_ATTENTION: "attention",
+    NAN_COMPONENT_O_PROJ: "o_proj",
+    NAN_COMPONENT_POST_ATTN_LN: "post_attn_ln",
+    NAN_COMPONENT_MOE: "moe",
+    NAN_COMPONENT_PRE_NORM_HIDDEN: "pre_norm_hidden",
+    NAN_COMPONENT_PRE_NORM_RESIDUAL: "pre_norm_residual",
+    NAN_COMPONENT_MLP_OUTPUT: "mlp_output",
+    NAN_COMPONENT_KV_CACHE_IN: "kv_cache_in",
+    NAN_COMPONENT_ATTN_WORKSPACE: "attn_workspace",
+    NAN_COMPONENT_ATTN_Q_ABSORBED: "attn_q_absorbed",
+    NAN_COMPONENT_ATTN_FA3_OUT: "attn_fa3_out",
+    NAN_COMPONENT_ATTN_V_UP_PROJ: "attn_v_up_proj",
+    NAN_COMPONENT_ATTN_MHA_OUT: "attn_mha_out",
+    NAN_COMPONENT_ATTN_MQA_Q: "attn_mqa_q",
+    NAN_COMPONENT_KV_CACHE_IN_KPE: "kv_cache_in_kpe",
+    NAN_COMPONENT_KV_CACHE_IN_COMPILED: "kv_cache_in_compiled",
+    NAN_COMPONENT_KV_CACHE_IN_KPE_COMPILED: "kv_cache_in_kpe_compiled",
+    NAN_COMPONENT_KV_CACHE_POST_WRITE: "kv_cache_post_write",
+    NAN_COMPONENT_KV_CACHE_POST_WRITE_COMPILED: "kv_cache_post_write_compiled",
+    NAN_COMPONENT_KV_CACHE_PRE_FORWARD: "kv_cache_pre_forward",
+    NAN_COMPONENT_MLP_INPUT: "mlp_input",
+    NAN_COMPONENT_MLP_GATE_UP: "mlp_gate_up",
+    NAN_COMPONENT_MLP_ACT: "mlp_act",
+    NAN_COMPONENT_MLP_DOWN: "mlp_down",
+    NAN_COMPONENT_MOE_ROUTED_OUT: "moe_routed_out",
+    NAN_COMPONENT_MOE_SHARED_OUT: "moe_shared_out",
+    NAN_COMPONENT_MOE_AFTER_SCALE: "moe_after_scale",
+    NAN_COMPONENT_MOE_AFTER_SHARED_ADD: "moe_after_shared_add",
+    NAN_COMPONENT_MOE_EXPERT_INPUT: "moe_expert_input",
+    NAN_COMPONENT_MOE_EXPERT_INPUT_INF: "moe_expert_input_inf",
+    NAN_COMPONENT_MOE_EXPERT_GEMM1: "moe_expert_gemm1",
+    NAN_COMPONENT_MOE_EXPERT_GEMM1_INF: "moe_expert_gemm1_inf",
+    NAN_COMPONENT_MOE_EXPERT_GEMM2: "moe_expert_gemm2",
+    NAN_COMPONENT_MOE_EXPERT_GEMM2_INF: "moe_expert_gemm2_inf",
+    NAN_COMPONENT_MOE_FUSED_OUT: "moe_fused_out",
+    NAN_COMPONENT_MOE_FUSED_OUT_INF: "moe_fused_out_inf",
+    NAN_COMPONENT_MOE_TOPK_WEIGHTS: "moe_topk_weights",
+    NAN_COMPONENT_MOE_TOPK_WEIGHTS_INF: "moe_topk_weights_inf",
+    NAN_COMPONENT_MOE_FINALIZE: "moe_finalize",
+    NAN_COMPONENT_MOE_FINALIZE_INF: "moe_finalize_inf",
+    NAN_COMPONENT_MOE_PRE_COMBINE: "moe_input",
+    NAN_COMPONENT_MOE_PRE_COMBINE_INF: "moe_router_logits",
+    NAN_COMPONENT_MOE_POST_COMBINE: "moe_post_combine",
+    NAN_COMPONENT_MOE_POST_COMBINE_INF: "moe_post_combine_inf",
+}
+
+_NAN_ENABLED_COMPONENTS: frozenset[int] | None = None
+
+
+def nan_check_enabled(component_id: int) -> bool:
+    """Return True if the NaN barrier for this component should fire."""
+    global _NAN_ENABLED_COMPONENTS
+    if _NAN_ENABLED_COMPONENTS is None:
+        import vllm.envs as envs
+        raw = envs.VLLM_NAN_CHECK_COMPONENTS
+        if raw == "all":
+            _NAN_ENABLED_COMPONENTS = frozenset(range(52))
+        elif raw == "none":
+            _NAN_ENABLED_COMPONENTS = frozenset()
+        else:
+            _NAN_ENABLED_COMPONENTS = frozenset(
+                int(x.strip()) for x in raw.split(","))
+    return component_id in _NAN_ENABLED_COMPONENTS
+
+
+def nan_first_component(tensor: torch.Tensor, flag_all: torch.Tensor,
+                        flag_real: torch.Tensor, flag_padded: torch.Tensor,
+                        component_id: int,
+                        real_mask: torch.Tensor) -> None:
+    if not tensor.is_floating_point() or tensor.element_size() == 1:
+        return
+    flat = tensor.reshape(tensor.shape[0], -1)
+    token_sums = flat.sum(dim=-1)
+    mask_n = real_mask[:token_sums.shape[0]]
+
+    s_all = token_sums.sum()
+    _nan_latch_flag(flag_all, s_all != s_all, component_id)
+
+    real_sums = torch.where(mask_n, token_sums, 0.0)
+    s_real = real_sums.sum()
+    _nan_latch_flag(flag_real, s_real != s_real, component_id)
+
+    padded_sums = torch.where(mask_n, 0.0, token_sums)
+    s_padded = padded_sums.sum()
+    _nan_latch_flag(flag_padded, s_padded != s_padded, component_id)
+
+
+def _nan_latch_flag(flag: torch.Tensor, detected: torch.Tensor,
+                    component_id: int) -> None:
+    not_yet = (flag[0] == -1)
+    write = (detected & not_yet).to(torch.int32)
+    flag[0] = flag[0] * (1 - write) + component_id * write
+
+
+def nan_first_component_fake(tensor: torch.Tensor, flag_all: torch.Tensor,
+                             flag_real: torch.Tensor,
+                             flag_padded: torch.Tensor, component_id: int,
+                             real_mask: torch.Tensor) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="nan_first_component",
+    op_func=nan_first_component,
+    mutates_args=["flag_all", "flag_real", "flag_padded"],
+    fake_impl=nan_first_component_fake,
+)
+
+
+def nan_sticky_check(tensor: torch.Tensor, flag: torch.Tensor) -> None:
+    if not tensor.is_floating_point() or tensor.element_size() == 1:
+        return
+    s = tensor.sum()
+    has_nan = (s != s).to(torch.int32)
+    flag[0] = torch.maximum(flag[0], has_nan)
+
+
+def nan_sticky_check_fake(tensor: torch.Tensor, flag: torch.Tensor) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="nan_sticky_check",
+    op_func=nan_sticky_check,
+    mutates_args=["flag"],
+    fake_impl=nan_sticky_check_fake,
+)
+
+
+def expert_nan_inf_latch(tensor: torch.Tensor, flag: torch.Tensor,
+                         nan_component_id: int,
+                         inf_component_id: int) -> None:
+    if not tensor.is_floating_point() or tensor.element_size() == 1:
+        return
+    s = tensor.sum()
+    _nan_latch_flag(flag, s != s, nan_component_id)
+    _nan_latch_flag(flag, torch.isinf(s), inf_component_id)
+
+
+def expert_nan_inf_latch_fake(tensor: torch.Tensor, flag: torch.Tensor,
+                              nan_component_id: int,
+                              inf_component_id: int) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="expert_nan_inf_latch",
+    op_func=expert_nan_inf_latch,
+    mutates_args=["flag"],
+    fake_impl=expert_nan_inf_latch_fake,
+)
+
+
+def nan_kv_cache_post_write_check(
+    kv_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    flag: torch.Tensor,
+    per_layer_flag: torch.Tensor | None,
+    layer_idx: int,
+) -> None:
+    if kv_cache.numel() == 0:
+        return
+    flat_slots = slot_mapping.flatten()
+    safe_slots = torch.clamp(flat_slots, min=0)
+    valid_mask = (flat_slots >= 0)
+
+    kv_flat = kv_cache.reshape(-1, kv_cache.shape[-1])
+    written = kv_flat[safe_slots]
+
+    if written.dtype == torch.uint8:
+        has_nan_per_slot = ((written & 0x7F) == 0x7F).any(dim=-1)
+        has_nan = (has_nan_per_slot & valid_mask).any().to(torch.int32)
+    else:
+        slot_sums = written.sum(dim=-1)
+        valid_sums = torch.where(valid_mask, slot_sums, 0.0)
+        s = valid_sums.sum()
+        has_nan = (s != s).to(torch.int32)
+    flag[0] = torch.maximum(flag[0], has_nan)
+
+    if per_layer_flag is not None and layer_idx >= 0:
+        per_layer_flag[layer_idx] = torch.maximum(
+            per_layer_flag[layer_idx], has_nan)
+
+
+def nan_kv_cache_post_write_check_fake(
+    kv_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    flag: torch.Tensor,
+    per_layer_flag: torch.Tensor | None,
+    layer_idx: int,
+) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="nan_kv_cache_post_write_check",
+    op_func=nan_kv_cache_post_write_check,
+    mutates_args=["flag", "per_layer_flag"],
+    fake_impl=nan_kv_cache_post_write_check_fake,
+)

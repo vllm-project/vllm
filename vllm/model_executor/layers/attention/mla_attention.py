@@ -218,6 +218,7 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.attention.attention import (
     _init_kv_cache_quant,
     get_attention_context,
+    nan_check_enabled,
     set_default_quant_scales,
     should_load_quant_weights,
 )
@@ -519,6 +520,16 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             compile_native=True,
         )
 
+        # NaN origin tracking — assigned by model runner.
+        self._nan_flag: torch.Tensor | None = None
+        self._nan_flag_real: torch.Tensor | None = None
+        self._nan_flag_padded: torch.Tensor | None = None
+        self._nan_real_mask: torch.Tensor | None = None
+        self._nan_kv_write_ever: torch.Tensor | None = None
+        self._nan_kv_post_write_ever: torch.Tensor | None = None
+        self._nan_kv_post_write_per_layer: torch.Tensor | None = None
+        self._nan_layer_idx: int = -1
+
     @property
     def chunked_prefill_workspace_size(self) -> int:
         if self._chunked_prefill_workspace_size is None:
@@ -562,14 +573,37 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             assert isinstance(slot_mapping, dict), (
                 f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
             )
+            if self._nan_flag is not None and nan_check_enabled(15):
+                torch.ops.vllm.nan_first_component(
+                    kv_c_normed, self._nan_flag,
+                    self._nan_flag_real, self._nan_flag_padded,
+                    15, self._nan_real_mask)
+            if self._nan_flag is not None and nan_check_enabled(22):
+                torch.ops.vllm.nan_first_component(
+                    k_pe, self._nan_flag,
+                    self._nan_flag_real, self._nan_flag_padded,
+                    22, self._nan_real_mask)
+            if self._nan_kv_write_ever is not None:
+                torch.ops.vllm.nan_sticky_check(
+                    kv_c_normed, self._nan_kv_write_ever)
+                torch.ops.vllm.nan_sticky_check(
+                    k_pe, self._nan_kv_write_ever)
+            layer_slot_mapping = slot_mapping.get(self.layer_name)
             self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
                 kv_c_normed,
                 k_pe,
                 self_kv_cache,
-                slot_mapping.get(self.layer_name),
+                layer_slot_mapping,
                 self.kv_cache_dtype,
                 self._k_scale,
             )
+            if (self._nan_kv_post_write_ever is not None
+                    and layer_slot_mapping is not None):
+                torch.ops.vllm.nan_kv_cache_post_write_check(
+                    self_kv_cache, layer_slot_mapping,
+                    self._nan_kv_post_write_ever,
+                    self._nan_kv_post_write_per_layer,
+                    self._nan_layer_idx)
             output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
             self.forward_impl(
                 q,
@@ -582,6 +616,21 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             return output
         else:
             encoded = _encode_layer_name(self.layer_name)
+            if self._nan_flag is not None and nan_check_enabled(23):
+                torch.ops.vllm.nan_first_component(
+                    kv_c_normed, self._nan_flag,
+                    self._nan_flag_real, self._nan_flag_padded,
+                    23, self._nan_real_mask)
+            if self._nan_flag is not None and nan_check_enabled(24):
+                torch.ops.vllm.nan_first_component(
+                    k_pe, self._nan_flag,
+                    self._nan_flag_real, self._nan_flag_padded,
+                    24, self._nan_real_mask)
+            if self._nan_kv_write_ever is not None:
+                torch.ops.vllm.nan_sticky_check(
+                    kv_c_normed, self._nan_kv_write_ever)
+                torch.ops.vllm.nan_sticky_check(
+                    k_pe, self._nan_kv_write_ever)
             kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
                 kv_c_normed,
                 k_pe,
@@ -589,6 +638,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 self.kv_cache_dtype,
                 self._k_scale,
             )
+            if self._nan_kv_post_write_ever is not None:
+                torch.ops.vllm.nan_kv_cache_post_write_check_compiled(
+                    self.layer_name,
+                    self._nan_kv_post_write_ever,
+                    self._nan_kv_post_write_per_layer,
+                    self._nan_layer_idx,
+                    kv_cache_dummy_dep,
+                )
             output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
             torch.ops.vllm.unified_mla_attention_with_output(
                 q,
@@ -1034,6 +1091,48 @@ direct_register_custom_op(
     op_name="unified_mla_kv_cache_update",
     op_func=unified_mla_kv_cache_update,
     fake_impl=unified_mla_kv_cache_update_fake,
+)
+
+
+def nan_kv_cache_post_write_check_compiled(
+    layer_name: str,
+    flag: torch.Tensor,
+    per_layer_flag: torch.Tensor | None,
+    layer_idx: int,
+    dummy_dep: torch.Tensor,
+) -> None:
+    from vllm.model_executor.layers.attention.attention import (
+        nan_kv_cache_post_write_check,
+    )
+    forward_context = get_forward_context()
+    attn_layer = forward_context.no_compile_layers[layer_name]
+    kv_cache = attn_layer.kv_cache
+    if kv_cache.numel() == 0:
+        return
+    slot_mapping = forward_context.slot_mapping
+    assert isinstance(slot_mapping, dict)
+    layer_slot_mapping = slot_mapping.get(layer_name)
+    if layer_slot_mapping is not None:
+        nan_kv_cache_post_write_check(
+            kv_cache, layer_slot_mapping, flag,
+            per_layer_flag, layer_idx)
+
+
+def nan_kv_cache_post_write_check_compiled_fake(
+    layer_name: str,
+    flag: torch.Tensor,
+    per_layer_flag: torch.Tensor | None,
+    layer_idx: int,
+    dummy_dep: torch.Tensor,
+) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="nan_kv_cache_post_write_check_compiled",
+    op_func=nan_kv_cache_post_write_check_compiled,
+    mutates_args=["flag", "per_layer_flag"],
+    fake_impl=nan_kv_cache_post_write_check_compiled_fake,
 )
 
 

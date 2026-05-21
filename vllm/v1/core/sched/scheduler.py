@@ -1291,6 +1291,23 @@ class Scheduler(SchedulerInterface):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         pooler_outputs = model_runner_output.pooler_output
         num_nans_in_logits = model_runner_output.num_nans_in_logits
+        nan_origin_component = model_runner_output.nan_origin_component
+        nan_origin_component_real = model_runner_output.nan_origin_component_real
+        nan_origin_component_padded = model_runner_output.nan_origin_component_padded
+        nan_in_hidden_states = model_runner_output.nan_in_hidden_states
+        nan_first_layer_hidden = model_runner_output.nan_first_layer_hidden
+        nan_first_layer_residual = model_runner_output.nan_first_layer_residual
+        nan_real_output = model_runner_output.nan_real_output
+        nan_padded_output = model_runner_output.nan_padded_output
+        nan_kv_write_ever = model_runner_output.nan_kv_write_ever
+        nan_kv_post_write_ever = model_runner_output.nan_kv_post_write_ever
+        nan_kv_post_write_first_layer = (
+            model_runner_output.nan_kv_post_write_first_layer)
+        kv_cache_nan_total_blocks = model_runner_output.kv_cache_nan_total_blocks
+        kv_cache_nan_affected_layers = (
+            model_runner_output.kv_cache_nan_affected_layers)
+        kv_cache_nan_per_layer = model_runner_output.kv_cache_nan_per_layer
+        kv_cache_nan_block_ids = model_runner_output.kv_cache_nan_block_ids
         kv_connector_output = model_runner_output.kv_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
 
@@ -1588,9 +1605,59 @@ class Scheduler(SchedulerInterface):
                     )
             finished_req_ids.clear()
 
+        # Compute NaN source/phase info for metrics.
+        nan_in_logits = (num_nans_in_logits is not None
+                         and any(v > 0 for v in num_nans_in_logits.values()))
+        nan_in_final_norm = nan_in_hidden_states
+        nan_in_lm_head = nan_in_logits and not nan_in_hidden_states
+        has_any_nans = (nan_origin_component >= 0 or nan_in_logits
+                        or nan_in_hidden_states
+                        or nan_real_output or nan_padded_output)
+        nan_phase: str | None = None
+        if has_any_nans:
+            batch_has_prefill = False
+            batch_has_decode = False
+            for req_id, num_tokens in num_scheduled_tokens.items():
+                request = self.requests.get(req_id)
+                if request is None:
+                    continue
+                computed_before = request.num_computed_tokens - num_tokens
+                if computed_before < request.num_prompt_tokens:
+                    batch_has_prefill = True
+                else:
+                    batch_has_decode = True
+                if batch_has_prefill and batch_has_decode:
+                    break
+            if batch_has_prefill and batch_has_decode:
+                nan_phase = "mixed"
+            elif batch_has_prefill:
+                nan_phase = "prefill"
+            else:
+                nan_phase = "decode"
+
+        from vllm.model_executor.layers.attention.attention import (
+            NAN_COMPONENT_NAMES,
+        )
+        nan_origin_name = NAN_COMPONENT_NAMES.get(nan_origin_component)
+        nan_origin_name_real = NAN_COMPONENT_NAMES.get(
+            nan_origin_component_real)
+        nan_origin_name_padded = NAN_COMPONENT_NAMES.get(
+            nan_origin_component_padded)
+
         if (
             stats := self.make_stats(
-                spec_decoding_stats, kv_connector_stats, cudagraph_stats, perf_stats
+                spec_decoding_stats, kv_connector_stats, cudagraph_stats,
+                perf_stats,
+                nan_origin_component, nan_origin_name,
+                nan_origin_component_real, nan_origin_name_real,
+                nan_origin_component_padded, nan_origin_name_padded,
+                nan_in_logits, nan_in_final_norm, nan_in_lm_head,
+                nan_first_layer_hidden, nan_first_layer_residual,
+                nan_real_output, nan_padded_output, nan_phase,
+                nan_kv_write_ever, nan_kv_post_write_ever,
+                nan_kv_post_write_first_layer,
+                kv_cache_nan_total_blocks, kv_cache_nan_affected_layers,
+                kv_cache_nan_per_layer, kv_cache_nan_block_ids,
             )
         ) is not None:
             # Return stats to only one of the front-ends.
@@ -1962,6 +2029,27 @@ class Scheduler(SchedulerInterface):
         kv_connector_stats: KVConnectorStats | None = None,
         cudagraph_stats: CUDAGraphStat | None = None,
         perf_stats: PerfStats | None = None,
+        nan_origin_component: int = -1,
+        nan_origin_name: str | None = None,
+        nan_origin_component_real: int = -1,
+        nan_origin_name_real: str | None = None,
+        nan_origin_component_padded: int = -1,
+        nan_origin_name_padded: str | None = None,
+        nan_in_logits: bool = False,
+        nan_in_final_norm: bool = False,
+        nan_in_lm_head: bool = False,
+        nan_first_layer_hidden: int = -1,
+        nan_first_layer_residual: int = -1,
+        nan_real_output: bool = False,
+        nan_padded_output: bool = False,
+        nan_phase: str | None = None,
+        nan_kv_write_ever: bool = False,
+        nan_kv_post_write_ever: bool = False,
+        nan_kv_post_write_first_layer: int = -1,
+        kv_cache_nan_total_blocks: int = 0,
+        kv_cache_nan_affected_layers: int = 0,
+        kv_cache_nan_per_layer: list[int] | None = None,
+        kv_cache_nan_block_ids: list[list[int]] | None = None,
     ) -> SchedulerStats | None:
         if not self.log_stats:
             return None
@@ -1992,6 +2080,27 @@ class Scheduler(SchedulerInterface):
             kv_connector_stats=connector_stats_payload,
             cudagraph_stats=cudagraph_stats,
             perf_stats=perf_stats,
+            nan_origin_component=nan_origin_component,
+            nan_origin_name=nan_origin_name,
+            nan_origin_component_real=nan_origin_component_real,
+            nan_origin_name_real=nan_origin_name_real,
+            nan_origin_component_padded=nan_origin_component_padded,
+            nan_origin_name_padded=nan_origin_name_padded,
+            nan_in_logits=nan_in_logits,
+            nan_in_final_norm=nan_in_final_norm,
+            nan_in_lm_head=nan_in_lm_head,
+            nan_first_layer_hidden=nan_first_layer_hidden,
+            nan_first_layer_residual=nan_first_layer_residual,
+            nan_real_output=nan_real_output,
+            nan_padded_output=nan_padded_output,
+            nan_phase=nan_phase,
+            nan_kv_write_ever=nan_kv_write_ever,
+            nan_kv_post_write_ever=nan_kv_post_write_ever,
+            nan_kv_post_write_first_layer=nan_kv_post_write_first_layer,
+            kv_cache_nan_total_blocks=kv_cache_nan_total_blocks,
+            kv_cache_nan_affected_layers=kv_cache_nan_affected_layers,
+            kv_cache_nan_per_layer=kv_cache_nan_per_layer or [],
+            kv_cache_nan_block_ids=kv_cache_nan_block_ids or [],
         )
 
     def make_spec_decoding_stats(
