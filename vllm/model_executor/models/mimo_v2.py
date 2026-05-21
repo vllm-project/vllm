@@ -188,6 +188,100 @@ def _mimo_v2_quantize_block_weight(
     return qweight[:rows, :cols].contiguous(), scale
 
 
+def _mimo_v2_copy_presharded_qkv_bf16(
+    *,
+    config,
+    weight_name: str,
+    weight_param: torch.nn.Parameter,
+    loaded_weight: torch.Tensor,
+    tp_rank: int,
+    tp_size: int,
+) -> bool:
+    """Handle a pre-sharded fused-QKV BF16 weight at any local TP factor.
+
+    Returns True if the layout was pre-sharded and handled here; False if the
+    layout isn't pre-sharded and the caller should fall back to the regular
+    per-rank weight_loader.
+
+    The source ships the fused QKV as the row-wise concatenation of
+    ``num_kv_heads`` independently-sharded TP chunks, each laid out as
+    ``[Q_chunk, K_chunk, V_chunk]``. vLLM's ``QKVParallelLinear`` weight
+    loader assumes a canonical ``[Q_global, K_global, V_global]`` layout, so
+    handing it the pre-sharded tensor produces structurally wrong slices.
+    Reassemble per-rank Q / K / V from the relevant ckpt chunks instead.
+    """
+    layer_idx = extract_layer_index(weight_name)
+    (
+        q_rows,
+        k_rows,
+        v_rows,
+        head_dim,
+        v_head_dim,
+        num_heads,
+        num_kv_heads,
+    ) = _mimo_v2_qkv_dims(config, layer_idx)
+
+    ckpt_tp = num_kv_heads
+    q_heads_per_ckpt_rank = divide(num_heads, ckpt_tp)
+    ckpt_q_rows = q_heads_per_ckpt_rank * head_dim
+    ckpt_k_rows = head_dim
+    ckpt_v_rows = v_head_dim
+    ckpt_chunk_rows = ckpt_q_rows + ckpt_k_rows + ckpt_v_rows
+
+    if loaded_weight.shape[0] != ckpt_tp * ckpt_chunk_rows:
+        return False
+
+    if tp_size == ckpt_tp:
+        local_weight = loaded_weight.narrow(
+            0, tp_rank * ckpt_chunk_rows, ckpt_chunk_rows
+        )
+    else:
+
+        def chunk_slice(ckpt_rank: int, row_start: int, row_count: int) -> torch.Tensor:
+            base = ckpt_rank * ckpt_chunk_rows + row_start
+            return loaded_weight.narrow(0, base, row_count)
+
+        q_heads_per_rank = divide(num_heads, tp_size)
+        q_head_start = tp_rank * q_heads_per_rank
+        q_head_end = q_head_start + q_heads_per_rank
+        q_parts: list[torch.Tensor] = []
+        next_q_head = q_head_start
+        while next_q_head < q_head_end:
+            ckpt_rank = next_q_head // q_heads_per_ckpt_rank
+            ckpt_head_start = ckpt_rank * q_heads_per_ckpt_rank
+            part_head_end = min(q_head_end, ckpt_head_start + q_heads_per_ckpt_rank)
+            part_rows = (part_head_end - next_q_head) * head_dim
+            part_start = (next_q_head - ckpt_head_start) * head_dim
+            q_parts.append(chunk_slice(ckpt_rank, part_start, part_rows))
+            next_q_head = part_head_end
+
+        if tp_size >= num_kv_heads:
+            num_replicas = divide(tp_size, num_kv_heads)
+            kv_head_start = tp_rank // num_replicas
+            kv_head_count = 1
+        else:
+            kv_head_count = divide(num_kv_heads, tp_size)
+            kv_head_start = tp_rank * kv_head_count
+        kv_head_end = kv_head_start + kv_head_count
+        k_parts = [
+            chunk_slice(ckpt_rank, ckpt_q_rows, ckpt_k_rows)
+            for ckpt_rank in range(kv_head_start, kv_head_end)
+        ]
+        v_parts = [
+            chunk_slice(ckpt_rank, ckpt_q_rows + ckpt_k_rows, ckpt_v_rows)
+            for ckpt_rank in range(kv_head_start, kv_head_end)
+        ]
+        local_weight = torch.cat([*q_parts, *k_parts, *v_parts], dim=0).contiguous()
+
+    if tuple(local_weight.shape) != tuple(weight_param.shape):
+        raise ValueError(
+            f"{weight_name} local shard has shape {tuple(local_weight.shape)}, "
+            f"expected {tuple(weight_param.shape)}."
+        )
+    weight_param.data.copy_(local_weight.to(weight_param.device))
+    return True
+
+
 def _mimo_v2_copy_paired_qkv_fp8(
     *,
     config,
@@ -222,7 +316,7 @@ def _mimo_v2_copy_paired_qkv_fp8(
     # Detect ckpt_tp from scale shape; weight shape alone is degenerate.
     ckpt_tp = None
     q_heads_per_ckpt_rank = None
-    ckpt_q_rows = ckpt_k_rows = ckpt_v_rows = 0
+    ckpt_q_rows = ckpt_k_rows = 0
     ckpt_chunk_rows = ckpt_chunk_scale_rows = 0
     for candidate in range(min(num_heads, num_kv_heads), 0, -1):
         if num_heads % candidate != 0 or num_kv_heads % candidate != 0:
@@ -242,7 +336,6 @@ def _mimo_v2_copy_paired_qkv_fp8(
             q_heads_per_ckpt_rank = cand_q_heads
             ckpt_q_rows = cand_q_rows
             ckpt_k_rows = cand_k_rows
-            ckpt_v_rows = cand_v_rows
             ckpt_chunk_rows = cand_chunk_rows
             ckpt_chunk_scale_rows = cand_chunk_scale_rows
             break
@@ -319,9 +412,10 @@ def _mimo_v2_copy_paired_qkv_fp8(
                         kv_head_end, ckpt_head_start + kv_heads_per_ckpt_rank
                     )
                     part_rows = (part_head_end - next_kv_head) * per_head_rows
-                    part_start = intra_chunk_offset + (
-                        next_kv_head - ckpt_head_start
-                    ) * per_head_rows
+                    part_start = (
+                        intra_chunk_offset
+                        + (next_kv_head - ckpt_head_start) * per_head_rows
+                    )
                     parts.append(dequant_ckpt_shard(ckpt_rank, part_start, part_rows))
                     next_kv_head = part_head_end
                 return parts
@@ -1016,10 +1110,29 @@ class MiMoV2Model(nn.Module):
                 if not has_paired_qkv:
                     if name in params_dict:
                         param = params_dict[name]
-                        weight_loader = getattr(
-                            param, "weight_loader", default_weight_loader
+                        # Detect pre-sharded BF16 layout first. This applies
+                        # when the source's fused QKV is the row-wise concat
+                        # of per-ckpt-TP chunks (e.g. after Quark dequantizes
+                        # the source FP8 to BF16 in --file2file_quantization).
+                        # Vllm's QKVParallelLinear loader assumes canonical
+                        # [Q_global,K,V] and would incorrectly slice the pre-sharded
+                        # tensor; reassemble per-rank Q/K/V from ckpt chunks.
+                        handled = (
+                            qkv_kind == "weight"
+                            and _mimo_v2_copy_presharded_qkv_bf16(
+                                config=self.config,
+                                weight_name=name,
+                                weight_param=param,
+                                loaded_weight=loaded_weight,
+                                tp_rank=tp_rank,
+                                tp_size=tp_size,
+                            )
                         )
-                        weight_loader(param, loaded_weight)
+                        if not handled:
+                            weight_loader = getattr(
+                                param, "weight_loader", default_weight_loader
+                            )
+                            weight_loader(param, loaded_weight)
                         loaded_params.add(name)
                     continue
 
