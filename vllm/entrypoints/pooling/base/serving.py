@@ -92,26 +92,28 @@ class PoolingServingBase(ABC):
             otlp_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
             assert otlp_endpoint is not None
 
-            api_process_count = (getattr(engine_client, "api_process_count", 1))
+            api_process_count = getattr(engine_client, "api_process_count", 1)
             api_process_rank = getattr(engine_client, "_api_process_rank", 0)
             process_title = f"APIServer_{api_process_rank}"
 
             self.propagator = TraceContextTextMapPropagator()
 
             # service.name -> otel.scope.name
-            self.request_trace_provider = init_otel_trace_provider(
-                otlp_endpoint, extra_attributes={"service.name": "vllm.request"}
+            self.trace_provider = init_otel_trace_provider(
+                otlp_endpoint, extra_attributes={"service.name": "vllm"}
             )
+            self.scope_request = "vllm.request"
+            self.scope_endpoint = "vllm.entrypoint"
+            self.scope_endpoint_attributes = {
+                "vllm.process_kind": "entrypoint",
+                "vllm.process_count": f"{api_process_count}",
+                "vllm.process_name": process_title,
+            }
 
-            self.entrypoint_trace_provider = init_otel_trace_provider(
-                otlp_endpoint,
-                extra_attributes={
-                    "service.name": "vllm.entrypoint",
-                    "vllm.process_kind": "entrypoint",
-                    "vllm.process_count": f"{api_process_count}",
-                    "vllm.process_name": process_title,
-                },
-            )
+            self.span_request = "vllm.request"
+            self.span_entrypoint_preprocessing = "vllm.entrypoint.preprocessing"
+            self.span_entrypoint_engine_call = "vllm.entrypoint.engine_call"
+            self.span_entrypoint_postprocessing = "vllm.entrypoint.postprocessing"
 
     @asynccontextmanager
     async def maybe_tracing(
@@ -125,12 +127,14 @@ class PoolingServingBase(ABC):
             yield
             return
 
-        request_tracer = self.request_trace_provider.get_tracer("vllm.request")
-        entrypoint_tracer = self.entrypoint_trace_provider.get_tracer("vllm.entrypoint")
+        request_tracer = self.trace_provider.get_tracer(self.scope_request)
+        entrypoint_tracer = self.trace_provider.get_tracer(
+            self.scope_endpoint, attributes=self.scope_endpoint_attributes
+        )
         trace_context = self.propagator.extract(raw_trace_headers)
 
         request_span = request_tracer.start_span(
-            "vllm.request", context=trace_context, start_time=ctx.arrival_time
+            self.span_request, context=trace_context, start_time=ctx.arrival_time
         )
         request_span_context = get_span_context(request_span)
 
@@ -208,7 +212,7 @@ class PoolingServingBase(ABC):
     ):
         with maybe_start_span(
             ctx.entrypoint_tracer,
-            "vllm.entrypoint.preprocessing",
+            self.span_entrypoint_preprocessing,
             context=ctx.request_span_context,
             links=ctx.entrypoint_span_links,
         ) as span:
@@ -222,7 +226,7 @@ class PoolingServingBase(ABC):
     ):
         with maybe_start_span(
             ctx.entrypoint_tracer,
-            "vllm.entrypoint.postprocessing",
+            self.span_entrypoint_postprocessing,
             context=ctx.request_span_context,
             links=ctx.entrypoint_span_links,
         ) as span:
@@ -233,7 +237,7 @@ class PoolingServingBase(ABC):
     async def _engine_call(self, ctx):
         async with maybe_start_span_async(
             ctx.entrypoint_tracer,
-            "vllm.entrypoint.engine_call",
+            self.span_entrypoint_engine_call,
             context=ctx.request_span_context,
             links=ctx.entrypoint_span_links,
         ) as span:
