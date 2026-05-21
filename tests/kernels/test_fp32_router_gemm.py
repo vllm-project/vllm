@@ -12,7 +12,7 @@ from vllm._custom_ops import fp32_router_gemm
 
 NUM_EXPERTS = 256
 HIDDEN_DIM = 3072
-# Absolute tolerance for fp32 kernel vs float64 reference
+# Absolute tolerance for fp32 kernel vs float32 reference
 ATOL_FP32 = 2e-4
 ATOL_BF16 = 2e-2  # bf16 activation has lower precision
 
