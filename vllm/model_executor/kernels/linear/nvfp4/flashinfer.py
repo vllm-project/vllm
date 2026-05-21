@@ -62,16 +62,14 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
         output_size = layer.output_size_per_partition
         output_dtype = x.dtype
         output_shape = [*x.shape[:-1], output_size]
+        weights_padding_bytes = getattr(layer, "weights_padding_cols", 0)
 
         x_fp4, x_blockscale = scaled_fp4_quant(
             x,
             layer.input_global_scale_inv,
             is_sf_swizzled_layout=True,
             backend="flashinfer-cutlass",
-        )
-
-        x_fp4 = pad_nvfp4_activation_for_cutlass(
-            x_fp4, getattr(layer, "weights_padding_cols", 0)
+            padded_n=x.shape[-1] + weights_padding_bytes * 2,
         )
 
         out = flashinfer_scaled_fp4_mm(
@@ -193,16 +191,14 @@ class FlashInferCudnnNvFp4LinearKernel(NvFp4LinearKernel):
         output_size = layer.output_size_per_partition
         output_dtype = x.dtype
         output_shape = [*x.shape[:-1], output_size]
+        weights_padding_bytes = getattr(layer, "weights_padding_cols", 0)
 
         x_fp4, x_blockscale = scaled_fp4_quant(
             x,
             layer.input_global_scale_inv,
             is_sf_swizzled_layout=True,
             backend="flashinfer-cudnn",
-        )
-
-        x_fp4 = pad_nvfp4_activation_for_cutlass(
-            x_fp4, getattr(layer, "weights_padding_cols", 0)
+            padded_n=x.shape[-1] + weights_padding_bytes * 2,
         )
 
         out = flashinfer_scaled_fp4_mm(

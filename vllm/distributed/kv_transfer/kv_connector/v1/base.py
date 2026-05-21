@@ -62,6 +62,7 @@ if TYPE_CHECKING:
         PromMetricT,
     )
     from vllm.forward_context import ForwardContext
+    from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
@@ -184,7 +185,7 @@ class KVConnectorBase_V1(ABC):
         self,
         vllm_config: "VllmConfig",
         role: KVConnectorRole,
-        kv_cache_config: "KVCacheConfig | None" = None,
+        kv_cache_config: "KVCacheConfig",
     ):
         logger.warning(
             "Initializing KVConnectorBase_V1. This API is experimental and "
@@ -197,13 +198,6 @@ class KVConnectorBase_V1(ABC):
         else:
             raise ValueError("kv_transfer_config must be set for KVConnectorBase_V1")
         self._kv_cache_config = kv_cache_config
-        if self._kv_cache_config is None:
-            logger.warning(
-                "KVConnectorBase_V1 initialized without kv_cache_config. "
-                "This is deprecated - please update your connector to accept "
-                "kv_cache_config as the third constructor argument and pass it "
-                "to super().__init__()."
-            )
         self._role = role
 
     @property
@@ -446,6 +440,16 @@ class KVConnectorBase_V1(ABC):
     # Scheduler-side methods
     # ==============================
 
+    def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
+        """
+        Bind the GPU block pool to the connector for per-GPU block status tracking.
+        For example, inc/dec ref counts, or iterate over the prefix cache blocks.
+
+        Args:
+            gpu_block_pool: the GPU block pool.
+        """
+        return
+
     @abstractmethod
     def get_num_new_matched_tokens(
         self,
@@ -516,6 +520,14 @@ class KVConnectorBase_V1(ABC):
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
         pass
+
+    def on_new_request(self, request: "Request") -> None:
+        """Called by the scheduler when a new request is added.
+
+        Connectors can override this to inspect the request and perform
+        bookkeeping. The default implementation is a no-op.
+        """
+        return
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
         """

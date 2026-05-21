@@ -432,3 +432,52 @@ def test_chunked_local_attention_get_num_blocks_to_allocate():
         )
         == 15
     )
+
+
+def test_predictor_matches_allocator_blocks_calculation_with_admission_cap():
+    """In forward steps, `get_num_blocks_to_allocate` must return exactly what
+    `allocate_new_blocks` will pull; otherwise `block_pool.get_new_blocks`
+    raises `ValueError: Cannot get N free blocks from the pool`.
+    """
+    block_size = 2
+    sliding_window = 8  # 4-block live window
+    cap = sliding_window // block_size
+
+    spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=sliding_window,
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=100, enable_caching=True, hash_block_size=block_size
+    )
+    manager = SlidingWindowManager(
+        spec,
+        block_pool=block_pool,
+        enable_caching=False,
+        kv_cache_group_id=0,
+        max_admission_blocks_per_request=cap,
+    )
+
+    request_id = "req"
+    total_computed = 0
+    # Walk through request forward steps. Check num_blocks returned by
+    # `get_num_blocks_to_allocate` matches what `allocate_new_blocks` pulls
+    for num_tokens in (4, 8, 12, 16):
+        predicted = manager.get_num_blocks_to_allocate(
+            request_id=request_id,
+            num_tokens=num_tokens,
+            new_computed_blocks=[],
+            total_computed_tokens=total_computed,
+            num_tokens_main_model=num_tokens,
+        )
+        new_blocks = manager.allocate_new_blocks(
+            request_id, num_tokens=num_tokens, num_tokens_main_model=num_tokens
+        )
+        assert predicted == len(new_blocks), (
+            f"num_tokens={num_tokens}: predictor returned {predicted} "
+            f"but allocator pulled {len(new_blocks)}"
+        )
+        total_computed = num_tokens
