@@ -90,6 +90,7 @@ def _process_b12x_weights(
 @pytest.mark.parametrize("e", [8, 16])
 @pytest.mark.parametrize("topk", [1, 2, 4])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("activation_precision", ["fp4", "bf16"])
 @torch.inference_mode()
 def test_flashinfer_b12x_moe(
     m: int,
@@ -98,6 +99,7 @@ def test_flashinfer_b12x_moe(
     e: int,
     topk: int,
     dtype: torch.dtype,
+    activation_precision: str,
     workspace_init,
 ):
     """Test FlashInferB12xExperts against a BF16 torch reference.
@@ -106,6 +108,14 @@ def test_flashinfer_b12x_moe(
     dispatch, W1 GEMM, SwiGLU, and W2 GEMM into one call.  We verify
     correctness against ``torch_moe`` using generous tolerances to account
     for the internal FP4 quantization of activations and weights.
+
+    Two activation precisions are exercised:
+      * ``fp4`` (W4A4, modelopt path): activations re-quantized to FP4
+        before each GEMM. Set ``a1_gscale`` / ``a2_gscale`` on the quant
+        config (any non-None tensor enables this branch).
+      * ``bf16`` (W4A16, compressed-tensors `nvfp4-pack-quantized` path):
+        activations kept in BF16; the kernel dequantizes weights instead.
+        ``a1_gscale`` / ``a2_gscale`` are left as ``None``.
 
     Scale convention
     ----------------
@@ -169,13 +179,26 @@ def test_flashinfer_b12x_moe(
         # All per-expert alphas are 1.0 (global_scale = 1.0, no compensation).
         ones_e = torch.ones(e, device="cuda", dtype=torch.float32)
 
+        # W4A4: pass identity activation global scales; B12x re-quantizes
+        # activations to FP4.  W4A16: leave them as None; activations stay
+        # in BF16 and the kernel dequantizes weights instead.
+        if activation_precision == "fp4":
+            a1_gscale = ones_e
+            a2_gscale = ones_e
+            source_format = "modelopt"
+        else:
+            a1_gscale = None
+            a2_gscale = None
+            source_format = "compressed_tensors"
+
         quant_config = nvfp4_moe_quant_config(
             g1_alphas=ones_e,
             g2_alphas=ones_e,
-            a1_gscale=ones_e,
-            a2_gscale=ones_e,
+            a1_gscale=a1_gscale,
+            a2_gscale=a2_gscale,
             w1_scale=w1_blockscale,
             w2_scale=w2_blockscale,
+            source_format=source_format,
         )
 
         moe_config = make_dummy_moe_config(
@@ -190,6 +213,9 @@ def test_flashinfer_b12x_moe(
             moe_config=moe_config,
             quant_config=quant_config,
         )
+        # Cross-check the precision/source-format auto-detection.
+        assert experts.activation_precision == activation_precision
+        assert experts.source_format == source_format
         _process_b12x_weights(
             experts,
             w1_blockscale,
@@ -235,6 +261,7 @@ def test_flashinfer_b12x_moe(
 @pytest.mark.parametrize("e", [8, 16])
 @pytest.mark.parametrize("topk", [1, 2, 4])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("activation_precision", ["fp4", "bf16"])
 @torch.inference_mode()
 def test_flashinfer_b12x_moe_relu2(
     m: int,
@@ -243,6 +270,7 @@ def test_flashinfer_b12x_moe_relu2(
     e: int,
     topk: int,
     dtype: torch.dtype,
+    activation_precision: str,
     workspace_init,
 ):
     """Test FlashInferB12xExperts with ReLU2 (non-gated) activation.
@@ -250,6 +278,10 @@ def test_flashinfer_b12x_moe_relu2(
     ReLU2 is used by Nemotron-H style models.  Unlike the gated SiLU
     path, w1 has shape [E, N, K] (not [E, 2N, K]) and the activation
     is relu(x)^2 without a gate/up split.
+
+    Parametrized over ``activation_precision`` (``"fp4"`` for W4A4 /
+    modelopt and ``"bf16"`` for W4A16 / compressed-tensors); Nemotron-H 3.5
+    is the production user of the ReLU2 + W4A16 combination.
     """
     set_random_seed(7)
     with set_current_vllm_config(
@@ -287,13 +319,23 @@ def test_flashinfer_b12x_moe_relu2(
 
         ones_e = torch.ones(e, device="cuda", dtype=torch.float32)
 
+        if activation_precision == "fp4":
+            a1_gscale = ones_e
+            a2_gscale = ones_e
+            source_format = "modelopt"
+        else:
+            a1_gscale = None
+            a2_gscale = None
+            source_format = "compressed_tensors"
+
         quant_config = nvfp4_moe_quant_config(
             g1_alphas=ones_e,
             g2_alphas=ones_e,
-            a1_gscale=ones_e,
-            a2_gscale=ones_e,
+            a1_gscale=a1_gscale,
+            a2_gscale=a2_gscale,
             w1_scale=w1_blockscale,
             w2_scale=w2_blockscale,
+            source_format=source_format,
         )
 
         moe_config = make_dummy_moe_config(
@@ -310,6 +352,8 @@ def test_flashinfer_b12x_moe_relu2(
             moe_config=moe_config,
             quant_config=quant_config,
         )
+        assert experts.activation_precision == activation_precision
+        assert experts.source_format == source_format
         _process_b12x_weights(
             experts,
             w1_blockscale,
@@ -362,4 +406,5 @@ def test_flashinfer_b12x_moe_relu2(
 
 
 if __name__ == "__main__":
-    test_flashinfer_b12x_moe(16, 128, 256, 8, 2, torch.bfloat16)
+    test_flashinfer_b12x_moe(16, 128, 256, 8, 2, torch.bfloat16, "fp4")
+    test_flashinfer_b12x_moe(16, 128, 256, 8, 2, torch.bfloat16, "bf16")
