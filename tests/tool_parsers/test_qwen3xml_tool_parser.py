@@ -2,12 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import json
+
 import pytest
 
 from tests.tool_parsers.common_tests import (
     ToolParserTestConfig,
     ToolParserTests,
 )
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+    ChatCompletionToolsParam,
+)
+from vllm.tokenizers import TokenizerLike
+from vllm.tool_parsers.qwen3xml_tool_parser import Qwen3XMLToolParser
 
 
 class TestQwen3xmlToolParser(ToolParserTests):
@@ -70,3 +78,53 @@ class TestQwen3xmlToolParser(ToolParserTests):
             },
             supports_typed_arguments=False,
         )
+
+
+def test_complex_array_arguments_parse_json_literals(
+    default_tokenizer: TokenizerLike,
+):
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "ask_user_question",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "questions": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "question": {"type": "string"},
+                                    "multiSelect": {"type": "boolean"},
+                                    "answer": {"type": "null"},
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        )
+    ]
+    model_output = """<tool_call>
+<function=ask_user_question>
+<parameter=questions>
+[{"question": "Favorite color?", "multiSelect": false, "answer": null}]
+</parameter>
+</function>
+</tool_call>"""
+
+    parser = Qwen3XMLToolParser(default_tokenizer, tools=tools)
+    request = ChatCompletionRequest(model="qwen3", messages=[], tools=tools)
+
+    result = parser.extract_tool_calls(model_output, request=request)
+
+    args = json.loads(result.tool_calls[0].function.arguments)
+    assert args["questions"] == [
+        {
+            "question": "Favorite color?",
+            "multiSelect": False,
+            "answer": None,
+        }
+    ]
