@@ -700,6 +700,32 @@ class TestHarmonyPreambleStreaming:
         assert "response.content_part.done" in type_names
         assert "response.output_item.done" in type_names
 
+    def test_preamble_done_omits_text_before_builtin_tool(self) -> None:
+        from vllm.entrypoints.openai.responses.streaming_events import (
+            emit_previous_item_done_events,
+        )
+
+        previous = self._make_previous_item(
+            channel="commentary",
+            recipient=None,
+            text="I'll run Python.",
+        )
+        state = StreamingState()
+        state.current_item_id = "msg_test"
+        state.current_output_index = 0
+        state.current_content_index = 0
+
+        events = emit_previous_item_done_events(
+            previous,
+            state,
+            next_recipient="python",
+        )
+
+        output_item_done = next(
+            event for event in events if event.type == "response.output_item.done"
+        )
+        assert output_item_done.item.content == []
+
     def test_commentary_with_recipient_no_preamble_done(self) -> None:
         """commentary + recipient='functions.X' should route to function call
         done, not preamble done."""

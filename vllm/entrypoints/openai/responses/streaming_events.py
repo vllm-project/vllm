@@ -629,9 +629,13 @@ def emit_previous_item_done_events(
         # omitted when it immediately precedes a tool call.
         include_content = not (
             next_recipient is not None
-            and is_function_recipient(
-                next_recipient,
-                function_tool_names,
+            and (
+                is_function_recipient(next_recipient, function_tool_names)
+                or next_recipient == "python"
+                or next_recipient.startswith("mcp.")
+                or next_recipient.startswith("browser.")
+                or next_recipient.startswith("container.")
+                or is_mcp_tool_by_namespace(next_recipient, function_tool_names)
             )
         )
         return emit_text_output_done_events(
