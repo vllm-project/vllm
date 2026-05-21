@@ -4,10 +4,12 @@ import functools
 import importlib
 import math
 from importlib.util import find_spec
+from threading import Lock
 
 import torch
 import torch.nn.functional as F
 
+import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.forward_context import get_forward_context
 from vllm.platforms import current_platform
@@ -21,6 +23,57 @@ if current_platform.is_rocm():
 else:
     _ON_GFX942 = False
     _ON_GFX950 = False
+
+# Per-process fp32 workspace for the ROCm sparse-MLA decode logits buffer.
+# Decode is called ~num_layers times per forward; allocating a fresh
+# [heads, B*next_n, max_model_len] (or [B*next_n, max_model_len]) tensor each
+# time fragments the caching allocator on long-context, large-batch runs.
+# The buffer is keyed by (device, shape) and refilled with -inf between calls.
+# Prefill has the analogous VLLM_SPARSE_INDEXER_MAX_LOGITS_MB / chunking from
+# PR #36178; this is the decode-side mirror.
+_decode_ws_lock = Lock()
+_decode_ws_3d: dict[tuple[torch.device, int, int, int], torch.Tensor] = {}
+_decode_ws_2d: dict[tuple[torch.device, int, int], torch.Tensor] = {}
+
+
+def _decode_budget_bytes() -> int:
+    return int(envs.VLLM_SPARSE_INDEXER_DECODE_MAX_MB) * 1024 * 1024
+
+
+def _decode_workspace_3d(
+    device: torch.device, heads: int, rows: int, cols: int
+) -> torch.Tensor:
+    key = (device, heads, rows, cols)
+    with _decode_ws_lock:
+        ws = _decode_ws_3d.get(key)
+        if ws is None:
+            ws = torch.full(
+                (heads, rows, cols),
+                float("-inf"),
+                device=device,
+                dtype=torch.float32,
+            )
+            _decode_ws_3d[key] = ws
+        else:
+            ws.fill_(float("-inf"))
+        return ws
+
+
+def _decode_workspace_2d(device: torch.device, rows: int, cols: int) -> torch.Tensor:
+    key = (device, rows, cols)
+    with _decode_ws_lock:
+        ws = _decode_ws_2d.get(key)
+        if ws is None:
+            ws = torch.full(
+                (rows, cols),
+                float("-inf"),
+                device=device,
+                dtype=torch.float32,
+            )
+            _decode_ws_2d[key] = ws
+        else:
+            ws.fill_(float("-inf"))
+        return ws
 
 
 @triton.jit
@@ -387,52 +440,97 @@ def rocm_fp8_paged_mqa_logits(
         aiter_paged_mqa_logits_module = paged_mqa_logits_module()
 
     if aiter_paged_mqa_logits_module is not None:
+        rows = batch_size * next_n
+        cols = max_model_len
+        budget = _decode_budget_bytes()
+        device = q_fp8.device
+
         if _ON_GFX942 or _ON_GFX950:
             deepgemm_fp8_paged_mqa_logits = (
                 aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits
             )
-            batch_size, next_n, heads, _ = q_fp8.shape
-            out_logits = torch.full(
-                [batch_size * next_n, max_model_len],
-                float("-inf"),
-                device="cuda",
-                dtype=torch.float32,
-            )
-            deepgemm_fp8_paged_mqa_logits(
-                q_fp8,
-                kv_cache_fp8,
-                weights,
-                out_logits,
-                context_lens,
-                block_tables,
-                max_model_len,
-                ChunkK=256,
-                Preshuffle=block_size == 64,
-                KVBlockSize=block_size,
-                WavePerEU=2,
-            )
-            return out_logits
+            per_call_bytes = rows * cols * 4
+            # When the per-call working set fits the budget (or the budget is
+            # disabled with 0) run the kernel once over the full batch. The
+            # output is the persistent workspace, so successive calls do not
+            # re-allocate.
+            if budget <= 0 or per_call_bytes <= budget:
+                out_logits = _decode_workspace_2d(device, rows, cols)
+                deepgemm_fp8_paged_mqa_logits(
+                    q_fp8,
+                    kv_cache_fp8,
+                    weights,
+                    out_logits,
+                    context_lens,
+                    block_tables,
+                    max_model_len,
+                    ChunkK=256,
+                    Preshuffle=block_size == 64,
+                    KVBlockSize=block_size,
+                    WavePerEU=2,
+                )
+                return out_logits
+
+            # Otherwise split the batch into chunks that each fit the budget
+            # and copy each chunk's logits into the full output. The aiter
+            # kernel does not consume schedule_metadata on ROCm, so per-chunk
+            # metadata re-derivation is not needed.
+            chunk_b = max(1, budget // (next_n * cols * 4))
+            out_logits_full = _decode_workspace_2d(device, rows, cols)
+            for b0 in range(0, batch_size, chunk_b):
+                b1 = min(batch_size, b0 + chunk_b)
+                chunk_out = _decode_workspace_2d(device, (b1 - b0) * next_n, cols)
+                deepgemm_fp8_paged_mqa_logits(
+                    q_fp8[b0:b1].contiguous(),
+                    kv_cache_fp8,
+                    weights[b0 * next_n : b1 * next_n].contiguous(),
+                    chunk_out,
+                    context_lens[b0:b1].contiguous(),
+                    block_tables[b0:b1].contiguous(),
+                    max_model_len,
+                    ChunkK=256,
+                    Preshuffle=block_size == 64,
+                    KVBlockSize=block_size,
+                    WavePerEU=2,
+                )
+                out_logits_full[b0 * next_n : b1 * next_n].copy_(chunk_out)
+            return out_logits_full
+
         deepgemm_fp8_paged_mqa_logits_stage1 = (
             aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits_stage1
         )
-        batch_size, next_n, heads, _ = q_fp8.shape
-        out_qk = torch.full(
-            (heads, batch_size * next_n, max_model_len),
-            float("-inf"),
-            device="cuda",
-            dtype=torch.float32,
-        )
-        deepgemm_fp8_paged_mqa_logits_stage1(
-            q_fp8,
-            kv_cache_fp8,
-            weights,
-            out_qk,
-            context_lens,
-            block_tables,
-            max_model_len,
-            ChunkQ=heads,
-        )
-        return out_qk.sum(dim=0)
+        per_call_bytes = heads * rows * cols * 4
+        if budget <= 0 or per_call_bytes <= budget:
+            out_qk = _decode_workspace_3d(device, heads, rows, cols)
+            deepgemm_fp8_paged_mqa_logits_stage1(
+                q_fp8,
+                kv_cache_fp8,
+                weights,
+                out_qk,
+                context_lens,
+                block_tables,
+                max_model_len,
+                ChunkQ=heads,
+            )
+            return out_qk.sum(dim=0)
+
+        chunk_b = max(1, budget // (heads * next_n * cols * 4))
+        out_logits_full = _decode_workspace_2d(device, rows, cols)
+        for b0 in range(0, batch_size, chunk_b):
+            b1 = min(batch_size, b0 + chunk_b)
+            chunk_qk = _decode_workspace_3d(device, heads, (b1 - b0) * next_n, cols)
+            deepgemm_fp8_paged_mqa_logits_stage1(
+                q_fp8[b0:b1].contiguous(),
+                kv_cache_fp8,
+                weights[b0 * next_n : b1 * next_n].contiguous(),
+                chunk_qk,
+                context_lens[b0:b1].contiguous(),
+                block_tables[b0:b1].contiguous(),
+                max_model_len,
+                ChunkQ=heads,
+            )
+            out_logits_full[b0 * next_n : b1 * next_n].copy_(chunk_qk.sum(dim=0))
+        return out_logits_full
     else:
         return fp8_paged_mqa_logits_torch(
             q_fp8, kv_cache_fp8, weights, context_lens, block_tables, max_model_len
