@@ -95,8 +95,9 @@ class TopKTopPSampler(nn.Module):
                 import aiter.ops.sampling  # noqa: F401
 
                 self.aiter_ops = torch.ops.aiter
-                logger.info_once(
-                    "Using aiter sampler on ROCm (lazy import, sampling-only)."
+                logger.warning_once(
+                    "Using aiter sampler on ROCm (requires the accuracy fix "
+                    "from ROCm/aiter#2035, Feb 2026+)."
                 )
                 self.forward = self.forward_hip
             except ImportError:
@@ -194,9 +195,6 @@ class TopKTopPSampler(nn.Module):
         p: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Optimized ROCm/aiter path (same structure as forward_cuda)."""
-        # Accuracy issue that disabled this path is fixed in ROCm/aiter#2035.
-        if not envs.VLLM_ROCM_USE_AITER_SAMPLER:
-            return self.forward_native(logits, generators, k, p)
         if (k is None and p is None) or generators:
             if generators:
                 logger.warning_once(
