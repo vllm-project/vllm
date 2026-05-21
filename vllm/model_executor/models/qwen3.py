@@ -43,7 +43,7 @@ from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLine
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.quant_fusion import (
-    FusedAllReduceRMSQuant,
+    fused_ar_rms_norm_quant,
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
@@ -176,6 +176,7 @@ class Qwen3DecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
+        self.tp_size = get_tensor_model_parallel_world_size()
         set_default_rope_theta(config, default_theta=1000000)
         dual_chunk_attention_config = getattr(
             config, "dual_chunk_attention_config", None
@@ -217,16 +218,6 @@ class Qwen3DecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
-        self.fused_input_norm = FusedAllReduceRMSQuant(
-            self.input_layernorm,
-            self.self_attn.qkv_proj,
-            prev_linear=self.mlp.down_proj,
-        )
-        self.fused_post_attn_norm = FusedAllReduceRMSQuant(
-            self.post_attention_layernorm,
-            self.mlp.gate_up_proj,
-            prev_linear=self.self_attn.o_proj,
-        )
 
     def forward(
         self,
@@ -234,13 +225,25 @@ class Qwen3DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        hidden_states, residual = self.fused_input_norm(hidden_states, residual)
+        # residual is None only at layer 0 of the first PP rank (full-rank input).
+        hidden_states, residual = fused_ar_rms_norm_quant(
+            hidden_states,
+            residual,
+            self.input_layernorm,
+            self.self_attn.qkv_proj,
+            do_allreduce=(residual is not None and self.tp_size > 1),
+        )
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
-
-        hidden_states, residual = self.fused_post_attn_norm(hidden_states, residual)
+        hidden_states, residual = fused_ar_rms_norm_quant(
+            hidden_states,
+            residual,
+            self.post_attention_layernorm,
+            self.mlp.gate_up_proj,
+            do_allreduce=(self.tp_size > 1),
+        )
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 

@@ -50,7 +50,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.quant_fusion import (
-    FusedAllReduceRMSQuant,
+    fused_ar_rms_norm_quant,
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -356,6 +356,7 @@ class Qwen2Model(nn.Module, EagleModelMixin):
         self.config = config
         self.quant_config = quant_config
         self.vocab_size = config.vocab_size
+        self.tp_size = get_tensor_model_parallel_world_size()
 
         if get_pp_group().is_first_rank or (
             config.tie_word_embeddings and get_pp_group().is_last_rank
@@ -385,11 +386,6 @@ class Qwen2Model(nn.Module, EagleModelMixin):
         )
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-            self.fused_final_norm = FusedAllReduceRMSQuant(
-                self.norm,
-                linear=None,
-                prev_linear=self.layers[self.end_layer - 1].mlp.down_proj,
-            )
         else:
             self.norm = PPMissingLayer()
 
@@ -428,7 +424,13 @@ class Qwen2Model(nn.Module, EagleModelMixin):
                 {"hidden_states": hidden_states, "residual": residual}
             )
 
-        hidden_states, _ = self.fused_final_norm(hidden_states, residual)
+        hidden_states, _ = fused_ar_rms_norm_quant(
+            hidden_states,
+            residual,
+            self.norm,
+            consumer=None,
+            do_allreduce=(self.tp_size > 1),
+        )
 
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states

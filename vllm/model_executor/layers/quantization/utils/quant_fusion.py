@@ -133,6 +133,63 @@ def _nvfp4(
     return _to_nvfp4_qa(out_q, scale_out, x), residual
 
 
+def _no_quant(
+    norm: torch.nn.Module,
+    x: torch.Tensor,
+    residual: torch.Tensor | None,
+    consumer: torch.nn.Module | None,
+    needs_ar: bool,
+    max_token_num: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if needs_ar and x.ndim == 2:
+        if residual is not None:
+            # AR + add + RMSNorm: x is mutated to the norm result.
+            flashinfer_trtllm_fused_allreduce_norm(
+                allreduce_in=x,
+                residual=residual,
+                norm_out=None,
+                quant_out=None,
+                scale_out=None,
+                rms_gamma=norm.weight.data,
+                rms_eps=norm.variance_epsilon,
+                pattern_code=ar_fusion_patterns.kARResidualRMSNorm,
+                scale_factor=None,
+                world_size=get_tensor_model_parallel_world_size(),
+                launch_with_pdl=True,
+                fp32_acc=True,
+                max_token_num=max_token_num,
+            )
+            return x, residual
+
+        # AR + RMSNorm (no add). Provide a zero residual buffer + dedicated
+        # norm_out; the AR'd input becomes the downstream residual.
+        zero_residual = torch.zeros_like(x)
+        norm_out = torch.empty_like(x)
+        flashinfer_trtllm_fused_allreduce_norm(
+            allreduce_in=x,
+            residual=zero_residual,
+            norm_out=norm_out,
+            quant_out=None,
+            scale_out=None,
+            rms_gamma=norm.weight.data,
+            rms_eps=norm.variance_epsilon,
+            pattern_code=ar_fusion_patterns.kARResidualRMSNorm,
+            scale_factor=None,
+            world_size=get_tensor_model_parallel_world_size(),
+            launch_with_pdl=True,
+            fp32_acc=True,
+            max_token_num=max_token_num,
+        )
+        return norm_out, x
+
+    if needs_ar:
+        x = tensor_model_parallel_all_reduce(x)
+    if residual is None:
+        return norm(x), x
+    out, residual = norm(x, residual)
+    return out, residual
+
+
 def _to_fp8_qa(
     out_q: torch.Tensor, x: torch.Tensor, linear: torch.nn.Module
 ) -> QuantizedActivation:
@@ -164,55 +221,28 @@ QUANT_IMPLS: dict[QuantKey, Callable] = {
 }
 
 
-class FusedAllReduceRMSQuant(torch.nn.Module):
-    """Fused (AllReduce +) RMSNorm (+ input-quant for the consumer linear).
+def fused_ar_rms_norm_quant(
+    hidden_states: torch.Tensor,
+    residual: torch.Tensor | None,
+    norm: torch.nn.Module,
+    consumer: torch.nn.Module | None,
+    *,
+    do_allreduce: bool,
+) -> tuple[torch.Tensor | QuantizedActivation, torch.Tensor]:
+    """Fused (optional AR +) residual-add + RMSNorm (+ input-quant for consumer).
 
-    Decoder layers instantiate one of these per (norm, consumer-linear) pair.
-    Dispatch is resolved once at construction: we read the consumer's
-    ``input_quant_key`` to pick the impl from ``QUANT_IMPLS``, and decide
-    whether the upstream all-reduce is our responsibility by inspecting the
-    producing ``prev_linear`` (RowParallelLinear with ``reduce_results=False``
-    leaves the tensor as per-rank partials).
-
-    The impl returns a ``QuantizedActivation`` carrying the kernel-ready FP8
-    or NVFP4 buffers; the consumer linear unpacks that on the fast path.
+    ``consumer`` is the downstream linear whose ``input_quant_key`` selects the
+    fused quant impl; pass None at sites with no downstream Linear (final norm)
+    or when the consumer's input is unquantized. Caller asserts whether the
+    input is in per-rank partial state via ``do_allreduce``.
     """
-
-    def __init__(
-        self,
-        norm: torch.nn.Module,
-        linear: torch.nn.Module,
-        prev_linear: torch.nn.Module | None = None,
-    ) -> None:
-        super().__init__()
-        self.norm = norm
-        self.linear = linear
-        self.needs_ar = (
-            prev_linear is not None
-            and getattr(prev_linear, "tp_size", 1) > 1
-            and not getattr(prev_linear, "reduce_results", True)
-        )
-        quant_key = getattr(linear, "input_quant_key", None)
-        self.impl = QUANT_IMPLS.get(quant_key) if quant_key is not None else None
-        self.max_token_num = (
-            get_current_vllm_config().scheduler_config.max_num_batched_tokens
-            if self.impl is not None and self.needs_ar
-            else 0
-        )
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        residual: torch.Tensor | None,
-    ) -> tuple[torch.Tensor | QuantizedActivation, torch.Tensor]:
-        if self.impl is not None:
-            return self.impl(
-                self.norm, x, residual, self.linear, self.needs_ar, self.max_token_num
-            )
-
-        if self.needs_ar:
-            x = tensor_model_parallel_all_reduce(x)
-        if residual is None:
-            return self.norm(x), x
-        out, residual = self.norm(x, residual)
-        return out, residual
+    quant_key = (
+        getattr(consumer, "input_quant_key", None) if consumer is not None else None
+    )
+    impl = QUANT_IMPLS.get(quant_key, _no_quant)
+    max_token_num = (
+        get_current_vllm_config().scheduler_config.max_num_batched_tokens
+        if do_allreduce
+        else 0
+    )
+    return impl(norm, hidden_states, residual, consumer, do_allreduce, max_token_num)

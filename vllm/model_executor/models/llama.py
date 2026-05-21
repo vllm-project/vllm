@@ -48,7 +48,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.quant_fusion import (
-    FusedAllReduceRMSQuant,
+    fused_ar_rms_norm_quant,
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -179,7 +179,7 @@ class LlamaAttention(nn.Module):
             output_size=hidden_size,
             bias=bias_o_proj,
             quant_config=quant_config,
-            reduce_results=False,
+            reduce_results=False,  # allreduce is fused with rmsnorm
             prefix=f"{prefix}.o_proj",
         )
 
@@ -269,6 +269,7 @@ class LlamaDecoderLayer(nn.Module):
         quant_config = self.get_quant_config(vllm_config)
 
         self.hidden_size = config.hidden_size
+        self.tp_size = get_tensor_model_parallel_world_size()
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         # Support abacusai/Smaug-72B-v0.1 with attention_bias
         # Support internlm/internlm-7b with bias
@@ -311,21 +312,11 @@ class LlamaDecoderLayer(nn.Module):
             quant_config=quant_config,
             bias=getattr(config, "mlp_bias", False),
             prefix=f"{prefix}.mlp",
-            reduce_results=False,
+            reduce_results=False,  # allreduce is fused with rmsnorm
         )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
-        )
-        self.fused_input_norm = FusedAllReduceRMSQuant(
-            self.input_layernorm,
-            self.self_attn.qkv_proj,
-            prev_linear=self.mlp.down_proj,
-        )
-        self.fused_post_attn_norm = FusedAllReduceRMSQuant(
-            self.post_attention_layernorm,
-            self.mlp.gate_up_proj,
-            prev_linear=self.self_attn.o_proj,
         )
 
     def forward(
@@ -334,10 +325,25 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        hidden_states, residual = self.fused_input_norm(hidden_states, residual)
+        # Self Attention
+        hidden_states, residual = fused_ar_rms_norm_quant(
+            hidden_states,
+            residual,
+            self.input_layernorm,
+            self.self_attn.qkv_proj,
+            # residual is None only at layer 0 of the first PP rank
+            do_allreduce=(residual is not None and self.tp_size > 1),
+        )
         hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
 
-        hidden_states, residual = self.fused_post_attn_norm(hidden_states, residual)
+        # Fully Connected
+        hidden_states, residual = fused_ar_rms_norm_quant(
+            hidden_states,
+            residual,
+            self.post_attention_layernorm,
+            self.mlp.gate_up_proj,
+            do_allreduce=(self.tp_size > 1),
+        )
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
@@ -373,6 +379,7 @@ class LlamaModel(nn.Module, EagleModelMixin):
         self.quant_config = quant_config
 
         self.vocab_size = config.vocab_size
+        self.tp_size = get_tensor_model_parallel_world_size()
 
         if get_pp_group().is_first_rank or (
             config.tie_word_embeddings and get_pp_group().is_last_rank
@@ -391,11 +398,6 @@ class LlamaModel(nn.Module, EagleModelMixin):
         )
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-            self.fused_final_norm = FusedAllReduceRMSQuant(
-                self.norm,
-                linear=None,
-                prev_linear=self.layers[self.end_layer - 1].mlp.down_proj,
-            )
         else:
             self.norm = PPMissingLayer()
 
@@ -437,13 +439,19 @@ class LlamaModel(nn.Module, EagleModelMixin):
             )
 
         if not get_pp_group().is_last_rank:
-            # TODO: with reduce_results=False on down_proj, hidden_states is the
-            # per-rank partial sum. For PP+TP, AR before crossing PP boundaries.
+            # hidden_states stays per-rank partial across PP; receiver's first
+            # layer AR's via fused_ar_rms_norm_quant (residual is not None there).
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
 
-        hidden_states, _ = self.fused_final_norm(hidden_states, residual)
+        hidden_states, _ = fused_ar_rms_norm_quant(
+            hidden_states,
+            residual,
+            self.norm,
+            consumer=None,
+            do_allreduce=(self.tp_size > 1),
+        )
 
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
