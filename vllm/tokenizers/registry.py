@@ -232,7 +232,10 @@ def get_tokenizer(
     # Some models have an incorrect tokenizer_class on the hub.
     # For these model types, bypass AutoTokenizer and use TokenizersBackend directly.
     model_type = getattr(config, "model_type", None) if config else None
-    if model_type in _MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS:
+    if (
+        tokenizer_mode == "hf"
+        and model_type in _MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS
+    ):
         from transformers.tokenization_utils_tokenizers import TokenizersBackend
 
         logger.debug(

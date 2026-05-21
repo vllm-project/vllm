@@ -19,6 +19,7 @@ from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.tokenizers.grok2 import Grok2Tokenizer
 from vllm.tokenizers.hf import CachedHfTokenizer, HfTokenizer
 from vllm.tokenizers.mistral import MistralTokenizer
+from vllm.tokenizers.registry import TokenizerRegistry
 
 BYTELEVEL_SPACE = "\u0120"
 BYTELEVEL_NEWLINE = "\u010a"
@@ -126,6 +127,49 @@ def test_deepseek_v3_ignores_bad_tokenizer_class(
         f"{BYTELEVEL_SPACE}US",
     ]
     assert tokenizer.decode([1, 2, 3, 4]) == "According to\n US"
+
+
+def test_deepseek_v3_respects_explicit_tokenizer_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "deepseek_v3",
+                "architectures": ["DeepseekV3ForCausalLM"],
+            }
+        )
+    )
+
+    class ExplicitModeTokenizer:
+        is_fast = True
+
+        @classmethod
+        def from_pretrained(cls, *args, **kwargs):
+            return cls()
+
+    def load_tokenizer_cls(tokenizer_mode: str):
+        assert tokenizer_mode == "deepseek_v32"
+        return ExplicitModeTokenizer
+
+    def fail_if_tokenizers_backend_is_used(*args, **kwargs):
+        raise AssertionError(
+            "explicit tokenizer modes should not use TokenizersBackend override"
+        )
+
+    monkeypatch.setattr(TokenizerRegistry, "load_tokenizer_cls", load_tokenizer_cls)
+    monkeypatch.setattr(
+        TokenizersBackend, "from_pretrained", fail_if_tokenizers_backend_is_used
+    )
+
+    tokenizer = get_tokenizer(
+        str(tmp_path),
+        tokenizer_mode="deepseek_v32",
+        trust_remote_code=True,
+    )
+
+    assert isinstance(tokenizer, ExplicitModeTokenizer)
 
 
 @pytest.mark.parametrize("tokenizer_name", ["facebook/opt-125m", "gpt2"])
