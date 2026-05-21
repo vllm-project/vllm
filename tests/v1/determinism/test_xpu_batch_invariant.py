@@ -553,4 +553,4 @@ def test_e2e_logprobs_bs1_vs_bsN():
             )
 
     finally:
-        llm.shutdown()
+        del llm
