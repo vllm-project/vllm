@@ -85,6 +85,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     requantize_with_max_scale,
 )
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.parameter import (
     BlockQuantScaleParameter,
     ChannelQuantScaleParameter,
@@ -1601,6 +1602,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             w2_scale_2=layer.w2_weight_scale_2,
             a13_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
+            source_format="modelopt",
         )
 
     @property
@@ -2355,6 +2357,13 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             if quant_algo == "NVFP4":
                 return ModelOptNvFp4LinearMethod(self.nvfp4_config)
             # Layer not in quantized_layers — leave unquantized
+            return UnquantizedLinearMethod()
+
+        if isinstance(layer, ParallelLMHead):
+            if quant_algo == "FP8":
+                return ModelOptFp8LinearMethod(self.fp8_config)
+            if quant_algo == "NVFP4":
+                return ModelOptNvFp4LinearMethod(self.nvfp4_config)
             return UnquantizedLinearMethod()
 
         if isinstance(layer, RoutedExperts):
