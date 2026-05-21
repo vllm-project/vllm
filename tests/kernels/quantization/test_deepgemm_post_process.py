@@ -26,7 +26,7 @@ class TestDeepgemmPostProcess:
         bmm_batch_size is 0 due to TP+EP partitioning.
         Now we explicitly assert that this case is invalid.
         """
-        wq = torch.randn(128, 256, dtype=torch.float8_e4m3fn)
+        wq = torch.randn(128, 256, dtype=torch.float32).to(torch.float8_e4m3fn)
         ws = torch.randn(1, 2, dtype=torch.float32)
         block_shape = (128, 128)
 
@@ -42,7 +42,7 @@ class TestDeepgemmPostProcess:
 
     def test_bmm_batch_size_negative_raises_assertion(self):
         """Test that negative bmm_batch_size raises AssertionError."""
-        wq = torch.randn(128, 256, dtype=torch.float8_e4m3fn)
+        wq = torch.randn(128, 256, dtype=torch.float32).to(torch.float8_e4m3fn)
         ws = torch.randn(1, 2, dtype=torch.float32)
         block_shape = (128, 128)
 
@@ -58,12 +58,12 @@ class TestDeepgemmPostProcess:
 
     def test_bmm_batch_size_normal_case(self):
         """Test normal BMM reshape with valid batch size.
-        
+
         Note: r must be a multiple of the block size (128) for the
         view operation to work correctly.
         """
         g, r, d = 4, 128, 256  # r=128 is a multiple of block_size=128
-        wq = torch.randn(g * r, d, dtype=torch.float8_e4m3fn)
+        wq = torch.randn(g * r, d, dtype=torch.float32).to(torch.float8_e4m3fn)
         ws = torch.randn(
             g * r // 128, d // 128, dtype=torch.float32
         )
