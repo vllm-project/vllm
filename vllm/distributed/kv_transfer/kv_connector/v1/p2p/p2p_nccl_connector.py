@@ -431,10 +431,13 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
                 num_tokens = num_scheduled_tokens + num_computed_tokens
                 assert req_id in self.chunked_prefill
-                assert new_block_ids is not None
-                block_ids = new_block_ids[0]
-                if not resumed_from_preemption:
-                    block_ids = self.chunked_prefill[req_id][0] + block_ids
+                if new_block_ids is None:
+                    assert not resumed_from_preemption
+                    block_ids = self.chunked_prefill[req_id][0]
+                elif resumed_from_preemption:
+                    block_ids = new_block_ids[0]
+                else:
+                    block_ids = self.chunked_prefill[req_id][0] + new_block_ids[0]
                 prompt_token_ids = self.chunked_prefill[req_id][1]
                 assert prompt_token_ids is not None
                 # the request's prompt is chunked prefill again
