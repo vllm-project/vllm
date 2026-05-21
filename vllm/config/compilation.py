@@ -260,16 +260,7 @@ class PassConfig:
                     self.enable_qk_norm_rope_fusion = False
                 else:
                     self.enable_qk_norm_rope_fusion = True
-                    if not fusion_env_set:
-                        logger.info_once(
-                            "QK-Norm+RoPE fusion auto-enabled via AITER",
-                            scope="global",
-                        )
-                    else:
-                        logger.info_once(
-                            "QK-Norm+RoPE fusion enabled",
-                            scope="global",
-                        )
+                    logger.info_once("QK-Norm+RoPE fusion enabled", scope="global")
             else:
                 # AITER not enabled: fusion disabled
                 self.enable_qk_norm_rope_fusion = False
