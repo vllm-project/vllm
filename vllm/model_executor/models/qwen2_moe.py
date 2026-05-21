@@ -54,6 +54,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.utils import tiny_sigmoid_dot
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -109,6 +110,11 @@ class Qwen2MoeMLP(nn.Module):
                 f"Unsupported activation: {hidden_act}. Only silu is supported for now."
             )
         self.act_fn = SiluAndMul()
+        if expert_gate is not None:
+            # tiny_sigmoid_dot fast path in forward() assumes no bias.
+            assert expert_gate.bias is None, (
+                "Qwen2MoeMLP expert_gate must have bias=None"
+            )
         self.expert_gate = expert_gate
 
     def forward(self, x):
@@ -117,7 +123,18 @@ class Qwen2MoeMLP(nn.Module):
         out, _ = self.down_proj(out)
 
         if self.expert_gate is not None:
-            out = F.sigmoid(self.expert_gate(x)[0]) * out
+            # Fuse sigmoid(expert_gate(x)) into one Triton kernel — replaces
+            # the eager 3-launch chain (mul + sum + sigmoid) for the
+            # shared_expert_gate's Linear(hidden, 1) call.  Restricted to
+            # the decode batch=1 case (single token) where the gate result
+            # is a scalar; multi-token paths fall back to the eager Linear.
+            if x.shape[0] == 1:
+                gate_scalar = tiny_sigmoid_dot(
+                    x.reshape(-1), self.expert_gate.weight.data
+                )
+                out = gate_scalar * out
+            else:
+                out = F.sigmoid(self.expert_gate(x)[0]) * out
 
         return out
 

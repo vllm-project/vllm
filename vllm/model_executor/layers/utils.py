@@ -20,23 +20,50 @@ logger = init_logger(__name__)
 
 
 @triton.jit
-def _tiny_dot_kernel(x_ptr, w_ptr, out_ptr, K, BLOCK: tl.constexpr):
+def _tiny_dot_kernel(
+    x_ptr, w_ptr, out_ptr, K, BLOCK: tl.constexpr, APPLY_SIGMOID: tl.constexpr
+):
     offsets = tl.arange(0, BLOCK)
     mask = offsets < K
     x = tl.load(x_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
     w = tl.load(w_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
     acc = tl.sum(x * w, axis=0)
+    if APPLY_SIGMOID:
+        acc = 1.0 / (1.0 + tl.exp(-acc))
+    # tl.store auto-casts acc (fp32) to the dtype of out_ptr;
+    # passing a bf16/fp16 ptr eliminates the post-kernel aten::copy_
+    # that otherwise fires once per layer per decode token.
     tl.store(out_ptr, acc)
 
 
-def _tiny_dot_triton(x_flat: torch.Tensor, w_flat: torch.Tensor) -> torch.Tensor:
+def _tiny_dot_triton(
+    x_flat: torch.Tensor, w_flat: torch.Tensor, apply_sigmoid: bool = False
+) -> torch.Tensor:
     K = x_flat.numel()
     BLOCK = triton.next_power_of_2(K)
-    # Cast to fp32 inside kernel; cast back at the call site.  Matches
-    # the eager (x*w).sum(dtype=x.dtype) semantics.
-    out_f32 = torch.empty((), dtype=torch.float32, device=x_flat.device)
-    _tiny_dot_kernel[(1,)](x_flat, w_flat, out_f32, K=K, BLOCK=BLOCK)
-    return out_f32.to(x_flat.dtype)
+    # Allocate the scalar output directly in the input's dtype so the
+    # in-kernel store does the fp32 -> bf16/fp16 cast (matches the eager
+    # (x*w).sum(dtype=x.dtype) semantics, no extra aten::copy_).
+    out = torch.empty((), dtype=x_flat.dtype, device=x_flat.device)
+    _tiny_dot_kernel[(1,)](
+        x_flat, w_flat, out, K=K, BLOCK=BLOCK, APPLY_SIGMOID=apply_sigmoid
+    )
+    return out
+
+
+def tiny_sigmoid_dot(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """sigmoid((x.flatten() * weight.flatten()).sum()) in one Triton kernel.
+
+    Replaces the eager 3-launch chain (aten::mul + aten::sum + aten::sigmoid)
+    used for Qwen MoE shared_expert_gate where the gate is
+    `Linear(hidden, 1)` and the post-call is sigmoid.  Falls back to the
+    eager chain when Triton or the input shape isn't supported.
+    """
+    if weight.numel() > 4096:
+        return torch.sigmoid((x.reshape(-1) * weight.reshape(-1)).sum(dtype=x.dtype))
+    return _tiny_dot_triton(
+        x.reshape(-1).contiguous(), weight.reshape(-1).contiguous(), apply_sigmoid=True
+    )
 
 
 MOE_LAYER_ROUTER_GATE_SUFFIXES = {
@@ -219,7 +246,7 @@ def rocm_unquantized_gemm_impl(
             with record_function_or_nullcontext(f"DOT {n}x{m}x{k} [tk]"):
                 x_flat = x.reshape(-1).contiguous()
                 w_flat = weight.reshape(-1).contiguous()
-                out = _tiny_dot_triton(x_flat, w_flat)
+                out = _tiny_dot_triton(x_flat, w_flat, apply_sigmoid=False)
                 return out.reshape(*x.shape[:-1], 1)
         with record_function_or_nullcontext(f"DOT {n}x{m}x{k}"):
             x_flat = x.reshape(-1)
