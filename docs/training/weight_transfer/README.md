@@ -4,10 +4,12 @@ vLLM provides a pluggable weight transfer system for synchronizing model weights
 
 ## Architecture
 
-The weight transfer system follows a **two-phase protocol** with a pluggable backend design:
+The weight transfer system follows a **four-phase protocol** with a pluggable backend design:
 
 1. **Initialization** (`init_weight_transfer_engine`): Establishes the communication channel between the trainer and inference workers. Called once before the training loop begins.
-2. **Weight Update** (`update_weights`): Transfers updated weights from the trainer to the inference engine. Called after each training step (or batch of steps).
+2. **Start** (`start_weight_update`): Prepares the inference engine for a weight update.
+3. **Weight Update** (`update_weights`): Transfers updated weights from the trainer to the inference engine. May be called one or more times (e.g., for chunked transfers).
+4. **Finish** (`finish_weight_update`): Finalizes the weight update (e.g., runs post-processing for checkpoint-format weights). Called once after all weights have been transferred.
 
 ## Available Backends
 
@@ -48,7 +50,9 @@ When running vLLM as an HTTP server, the following endpoints are available for w
 | Endpoint | Method | Description |
 | -------- | ------ | ----------- |
 | `/init_weight_transfer_engine` | POST | Initialize the weight transfer engine with backend-specific info |
-| `/update_weights` | POST | Trigger a weight update with backend-specific metadata |
+| `/start_weight_update` | POST | Start a weight update |
+| `/update_weights` | POST | Transfer a batch of weights with backend-specific metadata |
+| `/finish_weight_update` | POST | Finish the weight update and run post-processing |
 | `/pause` | POST | Pause generation before weight sync to handle inflight requests |
 | `/resume` | POST | Resume generation after weight sync |
 | `/get_world_size` | GET | Get the number of inference workers (useful for NCCL world size calculation) |
@@ -64,11 +68,17 @@ Both backends provide static methods that the trainer calls to send weights. The
 # 1. Initialize the transfer engine (backend-specific)
 EngineClass.trainer_init(init_info)
 
-# 2. Send weights to inference workers
+# 2. Start weight update on inference side
+llm.start_weight_update(is_checkpoint_format=True)
+
+# 3. Send weights to inference workers
 EngineClass.trainer_send_weights(
     iterator=model.named_parameters(),
     trainer_args=backend_specific_args,
 )
+
+# 4. Finish weight update on inference side
+llm.finish_weight_update()
 ```
 
 See the [NCCL](nccl.md) and [IPC](ipc.md) pages for backend-specific trainer APIs and full examples.

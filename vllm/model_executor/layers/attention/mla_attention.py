@@ -200,6 +200,7 @@ from tqdm import tqdm
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import (
     CacheConfig,
     ModelConfig,
@@ -259,7 +260,10 @@ from vllm.v1.attention.backend import (
     MLAAttentionImpl,
     SparseMLAAttentionImpl,
 )
-from vllm.v1.attention.backends.mla.prefill import MLAPrefillBackend
+from vllm.v1.attention.backends.mla.prefill import (
+    MLAPrefillBackend,
+    get_mla_prefill_backend,
+)
 from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     split_decodes_and_prefills,
@@ -342,6 +346,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        attn_backend: type[AttentionBackend] | None = None,
         use_sparse: bool = False,
         indexer: object | None = None,
         **extra_impl_args,
@@ -371,14 +376,21 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.quant_config = quant_config
 
         dtype = torch.get_default_dtype()
-        self.attn_backend = get_attn_backend(
-            self.head_size,
-            dtype,
-            kv_cache_dtype,
-            use_mla=True,
-            use_sparse=use_sparse,
-            num_heads=self.num_heads,
-        )
+        if attn_backend is not None:
+            assert attn_backend.is_mla(), (
+                f"MLAAttention: attn_backend must be an MLA backend, "
+                f"got {attn_backend.get_name()} instead"
+            )
+            self.attn_backend = attn_backend
+        else:
+            self.attn_backend = get_attn_backend(
+                self.head_size,
+                dtype,
+                kv_cache_dtype,
+                use_mla=True,
+                use_sparse=use_sparse,
+                num_heads=self.num_heads,
+            )
 
         # FlashMLA Sparse Attention fp8 backend uses "fp8_ds_mla" kv-cache format
         # Automatically convert fp8 kv-cache format to "fp8_ds_mla"
@@ -451,20 +463,32 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.q_pad_num_heads = getattr(self.impl, "q_pad_num_heads", None)
         self.use_direct_call = not current_platform.opaque_attention_op()
 
-        compilation_config = get_current_vllm_config().compilation_config
+        vllm_config = get_current_vllm_config()
+        compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
+
+        prefill_backend_cls = get_mla_prefill_backend(vllm_config)
+        self.prefill_backend = prefill_backend_cls(
+            num_heads=self.num_heads,
+            scale=self.scale,
+            kv_lora_rank=self.kv_lora_rank,
+            qk_nope_head_dim=self.qk_nope_head_dim,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+            v_head_dim=self.v_head_dim,
+            vllm_config=vllm_config,
+        )
 
         self.kv_cache = torch.tensor([])
 
         self.use_sparse = use_sparse
 
-        vllm_config = get_current_vllm_config_or_none()
+        _vllm_config = get_current_vllm_config_or_none()
         self.dcp_a2a = (
-            vllm_config is not None
-            and vllm_config.parallel_config.decode_context_parallel_size > 1
-            and vllm_config.parallel_config.dcp_comm_backend == "a2a"
+            _vllm_config is not None
+            and _vllm_config.parallel_config.decode_context_parallel_size > 1
+            and _vllm_config.parallel_config.dcp_comm_backend == "a2a"
         )
 
         # Initialize q/k/v range constants.
@@ -756,14 +780,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                         attn_out,
                         lse,
                         get_dcp_group(),
-                        is_lse_base_on_e=not getattr(self, "_use_fi_prefill", False),
+                        is_lse_base_on_e=True,
                     )
                 else:
                     attn_out = cp_lse_ag_out_rs(
                         attn_out,
                         lse,
                         get_dcp_group(),
-                        is_lse_base_on_e=not getattr(self, "_use_fi_prefill", False),
+                        is_lse_base_on_e=True,
                     )
 
             # v_up projection
@@ -966,19 +990,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True, YQ=out
             )
         else:
-            # Convert from (B, N * V) to (N, B, V)
-            out = out.transpose(0, 1)
-
-            # Multiply (N, B, L) x (N, L, V) -> (N, B, V)
-            torch.bmm(x, self.W_UV, out=out)  # Reuse "out" to make it "hot"
-
-            # Convert from (N, B, V) to (B, N * V)
-            out_new = out.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
-
-            # Adjust output buffer shape back to the original (B, N * V)
-            N, B, V = out.shape
-            out.resize_((B, N * V))
-            out.copy_(out_new)  # Copy result
+            # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
+            torch.bmm(x, self.W_UV, out=out.transpose(0, 1))
 
 
 def unified_mla_kv_cache_update(
@@ -993,23 +1006,9 @@ def unified_mla_kv_cache_update(
     the data dependency between them to ensure torch.compile preserves ordering.
     """
     layer_name = _resolve_layer_name(layer_name)
-    forward_context = get_forward_context()
-    attn_layer = forward_context.no_compile_layers[layer_name]
-    kv_cache = attn_layer.kv_cache
-
-    # This needs to run even when we don't have metadata yet, so that the op
-    # is correctly captured.
-    if kv_cache.numel() == 0:
-        # Can't update an empty KV cache.
-        return torch.empty(0, device=kv_c_normed.device, dtype=kv_c_normed.dtype)
-
-    slot_mapping = forward_context.slot_mapping
-    assert isinstance(slot_mapping, dict), (
-        f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
-    )
-    layer_slot_mapping = slot_mapping.get(layer_name)
+    _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
     if layer_slot_mapping is not None:
-        attn_layer.impl.do_kv_cache_update(
+        attn_layer.impl.do_kv_cache_update(  # type: ignore[attr-defined]
             kv_c_normed,
             k_pe,
             kv_cache,
@@ -1038,6 +1037,7 @@ direct_register_custom_op(
 )
 
 
+@eager_break_during_capture
 @maybe_transfer_kv_layer
 def unified_mla_attention_with_output(
     q: torch.Tensor,
@@ -1098,6 +1098,7 @@ direct_register_custom_op(
     mutates_args=["output", "output_block_scale"],
     fake_impl=unified_mla_attention_with_output_fake,
     dispatch_key=current_platform.dispatch_key,
+    tags=(torch.Tag.flexible_layout,),
 )
 
 
@@ -1352,6 +1353,7 @@ def backend_supports_prefill_query_quantization() -> bool:
     return backend_cls.get_name() in (
         "FLASHINFER",
         "TRTLLM_RAGGED",
+        "TOKENSPEED_MLA",
     )
 
 
@@ -1522,20 +1524,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 device=device,
             )
 
-        from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
-
-        prefill_backend_cls = get_mla_prefill_backend(vllm_config)
-        self._prefill_backend = prefill_backend_cls(
-            num_heads=self.num_heads,
-            scale=self.model_config.get_head_size() ** -0.5,
-            kv_lora_rank=self.mla_dims.kv_lora_rank,
-            qk_nope_head_dim=self.mla_dims.qk_nope_head_dim,
-            qk_rope_head_dim=self.mla_dims.qk_rope_head_dim,
-            v_head_dim=self.mla_dims.v_head_dim,
-            vllm_config=vllm_config,
-            device=device,
-            layer_names=layer_names,
-        )
+        self._prefill_backend = self.compilation_config.static_forward_context[
+            layer_names[0]
+        ].prefill_backend
 
         supports_spec_decode = self.query_len_support != QueryLenSupport.SINGLE_ONLY
         self._init_reorder_batch_threshold(
@@ -2052,6 +2043,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         use_fp8_prefill = prefill_metadata.q_data_type == current_platform.fp8_dtype()
 
         output = None
+        merge_output = None
         iters = len(prefill_metadata.chunked_context.seq_tot)
         workspace = prefill_metadata.chunked_context.workspace
 
@@ -2127,18 +2119,19 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 output = attn_output
                 output_lse = attn_softmax_lse
             else:
-                output_tmp = torch.empty_like(output)
-                output_lse_tmp = torch.empty_like(output_lse)
+                if merge_output is None:
+                    merge_output = torch.empty_like(output)
+                    merge_output_lse = torch.empty_like(output_lse)
                 merge_attn_states(
-                    output=output_tmp,
-                    output_lse=output_lse_tmp,
+                    output=merge_output,
+                    output_lse=merge_output_lse,
                     prefix_output=output,
                     prefix_lse=output_lse,
                     suffix_output=attn_output,
                     suffix_lse=attn_softmax_lse,
                 )
-                output = output_tmp
-                output_lse = output_lse_tmp
+                output, merge_output = merge_output, output
+                output_lse, merge_output_lse = merge_output_lse, output_lse
 
         return output, output_lse
 
@@ -2162,6 +2155,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         assert prefill_metadata.chunked_context.chunk_size is not None
 
         output = None
+        merge_output = None
         iters = len(prefill_metadata.chunked_context.seq_tot)
         workspace = prefill_metadata.chunked_context.workspace
 
@@ -2233,18 +2227,19 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 output = attn_output
                 output_lse = attn_softmax_lse
             else:
-                output_tmp = torch.empty_like(output)
-                output_lse_tmp = torch.empty_like(output_lse)
+                if merge_output is None:
+                    merge_output = torch.empty_like(output)
+                    merge_output_lse = torch.empty_like(output_lse)
                 merge_attn_states(
-                    output=output_tmp,
-                    output_lse=output_lse_tmp,
+                    output=merge_output,
+                    output_lse=merge_output_lse,
                     prefix_output=output,
                     prefix_lse=output_lse,
                     suffix_output=attn_output,
                     suffix_lse=attn_softmax_lse,
                 )
-                output = output_tmp
-                output_lse = output_lse_tmp
+                output, merge_output = merge_output, output
+                output_lse, merge_output_lse = merge_output_lse, output_lse
 
         return output, output_lse
 

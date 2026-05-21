@@ -3,8 +3,8 @@
 
 import json
 import os
-import platform
 import subprocess
+import sys
 from dataclasses import dataclass
 from functools import cache
 
@@ -78,7 +78,7 @@ def parse_id_list(raw_str: str) -> list[int]:
 
 
 def get_memory_node_info(node_id: int = 0) -> MemoryNodeInfo:
-    if platform.system() == "Darwin":
+    if sys.platform == "darwin":
         # MacOS has no memory node
         return MemoryNodeInfo(
             total_memory=psutil.virtual_memory().total,
@@ -122,17 +122,14 @@ def get_memory_node_info(node_id: int = 0) -> MemoryNodeInfo:
 
 def get_allowed_cpu_list() -> list[LogicalCPUInfo]:
     cpu_list = _get_cpu_list()
-    if platform.system() == "Darwin":
-        return cpu_list
-
-    global_allowed_cpu_id_list = os.sched_getaffinity(0)  # type: ignore[attr-defined]
-    logical_cpu_list = [x for x in cpu_list if x.id in global_allowed_cpu_id_list]
-
-    return logical_cpu_list
+    if sys.platform == "linux":
+        allowed = os.sched_getaffinity(0)
+        return [x for x in cpu_list if x.id in allowed]
+    return cpu_list
 
 
 def get_visible_memory_node() -> list[int]:
-    if platform.system() == "Darwin":
+    if sys.platform == "darwin":
         return [0]
 
     allowed_memory_node_list = get_memory_affinity()
@@ -163,7 +160,7 @@ def _synthesize_cpu_list() -> list[LogicalCPUInfo]:
 
 
 def _get_cpu_list() -> list[LogicalCPUInfo]:
-    if platform.system() == "Darwin":
+    if sys.platform == "darwin":
         # For MacOS, no user-level CPU affinity and SMT, return all CPUs
         return _synthesize_cpu_list()
 
