@@ -14,6 +14,17 @@
 
 namespace vllm {
 namespace moe {
+
+__device__ __forceinline__ int warp_exclusive_scan(int val) {
+  int orig = val;
+#pragma unroll
+  for (int offset = 1; offset < WARP_SIZE; offset <<= 1) {
+    int n = __shfl_up_sync(0xffffffffu, val, offset);
+    if ((threadIdx.x & (WARP_SIZE - 1)) >= offset) val += n;
+  }
+  return val - orig;
+}
+
 namespace batched_moe_align_block_size {
 
 // Note num_threads needs to be 1024 for BlockScan Reduction in the kernel.
@@ -140,10 +151,6 @@ __device__ void _moe_align_block_size(
 
   __syncthreads();
 
-  // Compute prefix sum over token counts per expert
-  using BlockScan = cub::BlockScan<int32_t, 1024>;
-  __shared__ typename BlockScan::TempStorage temp_storage;
-
   int expert_count = 0;
   int expert_id = threadIdx.x;
   if (expert_id < num_experts) {
@@ -153,14 +160,65 @@ __device__ void _moe_align_block_size(
     expert_count = CEILDIV(expert_count, block_size) * block_size;
   }
 
-  int cumsum_val;
-  BlockScan(temp_storage).ExclusiveSum(expert_count, cumsum_val);
-  if (expert_id <= num_experts) {
-    cumsum[cumsum_offset + expert_id] = cumsum_val;
-  }
+  // Two-level warp-based exclusive prefix sum
+  const int scan_size = padded_num_experts;
+  const int num_warps_for_scan = (scan_size + WARP_SIZE - 1) / WARP_SIZE;
+  const int warp_id_local = tid / WARP_SIZE;
+  const int lane_id = tid & (WARP_SIZE - 1);
 
-  if (expert_id == num_experts) {
-    total_tokens_post_pad[model_offset] = cumsum_val;
+  int32_t* scan_buf = shared_counts;
+  int32_t* warp_sums = shared_counts + scan_size;
+
+  if (tid < scan_size) {
+    scan_buf[tid] = (tid < num_experts) ? expert_count : 0;
+  }
+  __syncthreads();
+
+  // Pass 1: compute total via inclusive warp scan
+  int v = (tid < scan_size) ? scan_buf[tid] : 0;
+  int warp_incl = warp_exclusive_scan(v) + v;
+  if (lane_id == WARP_SIZE - 1) warp_sums[warp_id_local] = warp_incl;
+  __syncthreads();
+
+  if (tid < WARP_SIZE) {
+    int wval = (tid < num_warps_for_scan) ? warp_sums[tid] : 0;
+    int wincl = warp_exclusive_scan(wval) + wval;
+    warp_sums[tid] = wincl;
+  }
+  __syncthreads();
+
+  __shared__ int32_t s_total;
+  if (tid == 0) {
+    s_total = warp_sums[num_warps_for_scan - 1];
+    total_tokens_post_pad[model_offset] = s_total;
+  }
+  __syncthreads();
+
+  // Pass 2: exclusive prefix sum
+  if (tid < scan_size) {
+    scan_buf[tid] = (tid < num_experts) ? expert_count : 0;
+  }
+  __syncthreads();
+
+  v = (tid < scan_size) ? scan_buf[tid] : 0;
+  int pre = warp_exclusive_scan(v);
+  if (lane_id == WARP_SIZE - 1) warp_sums[warp_id_local] = pre + v;
+  __syncthreads();
+
+  if (warp_id_local == 0) {
+    int wval = (lane_id < num_warps_for_scan) ? warp_sums[lane_id] : 0;
+    warp_sums[lane_id] = warp_exclusive_scan(wval);
+  }
+  __syncthreads();
+
+  int offset_val = warp_sums[warp_id_local];
+  int cumsum_val = pre + offset_val;
+
+  if (tid < num_experts) {
+    cumsum[cumsum_offset + tid] = cumsum_val;
+  }
+  if (tid == 0) {
+    cumsum[cumsum_offset + num_experts] = s_total;
   }
 
   __syncthreads();
@@ -490,8 +548,6 @@ __global__ void moe_lora_align_block_size_small_batch_expert_kernel(
 }  // namespace moe
 }  // namespace vllm
 
-// taken from
-// https://github.com/sgl-project/sglang/blob/8b5f83ed3b7d2a49ad5c5cd5aa61c5d502f47dbc
 void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
                           int64_t block_size, torch::Tensor sorted_token_ids,
                           torch::Tensor experts_ids,
@@ -501,13 +557,11 @@ void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
 
   int64_t padded_num_experts =
       ((num_experts + WARP_SIZE - 1) / WARP_SIZE) * WARP_SIZE;
+  TORCH_CHECK(padded_num_experts <= 1024,
+              "num_experts must be <= 1024 (padded to warp boundary)");
   int experts_per_warp = WARP_SIZE;
   int threads = 1024;
-  threads = ((threads + WARP_SIZE - 1) / WARP_SIZE) * WARP_SIZE;
 
-  // BlockScan uses 1024 threads and assigns one thread per expert.
-  TORCH_CHECK(padded_num_experts < 1024,
-              "padded_num_experts must be less than 1024");
   auto options_int =
       torch::TensorOptions().dtype(torch::kInt).device(topk_ids.device());
   bool has_expert_map = maybe_expert_map.has_value();
@@ -552,7 +606,7 @@ void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
 
           size_t num_warps = CEILDIV(padded_num_experts, experts_per_warp);
           size_t shared_mem_size =
-              num_warps * experts_per_warp * sizeof(int32_t);
+              (num_warps * experts_per_warp + WARP_SIZE) * sizeof(int32_t);
 
           // launch two threadblocks
           // blockIdx.x == 0: counting experts and aligning
@@ -675,10 +729,8 @@ void moe_lora_align_block_size(
 
   int64_t padded_num_experts =
       ((num_experts + WARP_SIZE - 1) / WARP_SIZE) * WARP_SIZE;
-
-  // BlockScan uses 1024 threads and assigns one thread per expert.
-  TORCH_CHECK(padded_num_experts < 1024,
-              "padded_num_experts must be less than 1024");
+  TORCH_CHECK(padded_num_experts <= 1024,
+              "num_experts must be <= 1024 (padded to warp boundary)");
 
   auto options_int =
       torch::TensorOptions().dtype(torch::kInt).device(topk_ids.device());
@@ -739,7 +791,8 @@ void moe_lora_align_block_size(
           dim3 blockDim(num_thread);
           size_t num_warps = CEILDIV(padded_num_experts, WARP_SIZE);
 
-          size_t shared_mem_size = num_warps * WARP_SIZE * sizeof(int32_t);
+          size_t shared_mem_size =
+              (num_warps * WARP_SIZE + WARP_SIZE) * sizeof(int32_t);
 
           // cumsum buffer
           torch::Tensor cumsum =

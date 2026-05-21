@@ -242,6 +242,48 @@ def test_moe_align_block_size(
     ).all(), "expert_ids should contain valid expert indices"
 
 
+@pytest.mark.parametrize(
+    ("m", "topk", "num_experts", "block_size"),
+    [
+        (256, 2, 993, 64),
+        (512, 2, 1024, 64),
+        (1024, 4, 1024, 128),
+    ],
+)
+def test_moe_align_block_size_large_num_experts(
+    m: int, topk: int, num_experts: int, block_size: int
+):
+    """Test moe_align_block_size when num_experts pads up to 1024."""
+    topk_ids = torch.zeros((m, topk), device="cuda", dtype=torch.int32)
+    for i in range(m):
+        experts = torch.randperm(num_experts, device="cuda")[:topk]
+        topk_ids[i] = experts
+
+    actual_sorted_ids, actual_expert_ids, actual_num_tokens = moe_align_block_size(
+        topk_ids=topk_ids,
+        block_size=block_size,
+        num_experts=num_experts,
+    )
+    golden_sorted_ids, golden_expert_ids, golden_num_tokens = (
+        torch_moe_align_block_size(
+            topk_ids=topk_ids,
+            block_size=block_size,
+            num_experts=num_experts,
+        )
+    )
+
+    torch.testing.assert_close(actual_num_tokens, golden_num_tokens, atol=0, rtol=0)
+    torch.testing.assert_close(actual_expert_ids, golden_expert_ids, atol=0, rtol=0)
+    _verify_expert_level_sorting(
+        actual_sorted_ids,
+        golden_sorted_ids,
+        actual_expert_ids,
+        block_size,
+        actual_num_tokens.item(),
+        m * topk,
+    )
+
+
 @pytest.mark.parametrize("m", [16, 32, 2048])
 @pytest.mark.parametrize("topk", [2, 4])
 @pytest.mark.parametrize("num_experts", [8, 64])
