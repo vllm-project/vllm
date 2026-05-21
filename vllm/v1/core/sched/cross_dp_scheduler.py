@@ -180,6 +180,41 @@ class CrossDPScheduler(Scheduler):
             long_request_threshold=self.long_request_threshold,
         )
         self.requests_to_free_blocks: set[Request] = set()
+        # Track request_ids currently counted in
+        # `self.waiting.running_long_count`. Using a set keeps increments
+        # and decrements symmetric and idempotent regardless of which
+        # release path (preemption, finish, abort, KV-xfer cleanup) is
+        # taken, preventing the counter from going negative.
+        self.long_running_req_ids: set[str] = set()
+
+    def _mark_long_running(self, request: Request) -> None:
+        """Mark *request* as occupying a long-request slot.
+
+        Idempotent: a request already counted will not be counted again.
+        Pair with ``_unmark_long_running`` so that
+        ``running_long_count`` stays consistent regardless of which
+        release path is taken.
+        """
+        if not self.waiting.is_long_request(request):
+            return
+        if request.request_id in self.long_running_req_ids:
+            return
+        self.long_running_req_ids.add(request.request_id)
+        self.waiting.running_long_count += 1
+
+    def _unmark_long_running(self, request: Request) -> None:
+        """Release the long-request slot held by *request*, if any.
+
+        Safe to call on requests that were never counted (e.g. a
+        ``WAITING`` request aborted before it ever entered ``running``)
+        or that have already been released (e.g. preempted then
+        finished). Guarantees ``running_long_count`` never goes
+        negative.
+        """
+        if request.request_id not in self.long_running_req_ids:
+            return
+        self.long_running_req_ids.remove(request.request_id)
+        self.waiting.running_long_count -= 1
 
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         # Advance the number of computed tokens for the request AFTER
@@ -227,12 +262,13 @@ class CrossDPScheduler(Scheduler):
         assert request.is_finished()
 
         """
-        TODO(AoChen): If the req is removed from the running queue,
-        1. the running_long_count should be decremented.
-        2. the request manager should be updated.
-        3. the has_slot_for_long_request should be updated.
+        When a request leaves the running queue (finish, abort, or
+        delayed KV-transfer cleanup) we need to release its long-request
+        slot. ``_unmark_long_running`` is idempotent and a no-op for
+        requests that were never counted (e.g. aborted while still in
+        WAITING), so this stays correct on every release path.
         """
-        self.waiting.running_long_count -= 1 if self.waiting.is_long_request(request) else 0
+        self._unmark_long_running(request)
         self.request_manager.free_req(request)
         self.waiting.has_slot_for_long_request = self.request_manager.has_slot_for_long_request()
 
@@ -693,7 +729,11 @@ class CrossDPScheduler(Scheduler):
         # Per-rank token budgets: each rank can process up to
         # max_num_scheduled_tokens.  CP requests split tokens across ranks,
         # so their per-rank cost is num_tokens / cp_size.
-        rank_budgets = [self.max_num_scheduled_tokens // self.cp_world_size] * self.cp_world_size
+        kv_role = getattr(self.vllm_config.kv_transfer_config, "kv_role", None)
+        if kv_role == 'kv_producer':
+            rank_budgets = [self.max_num_scheduled_tokens // self.cp_world_size] * self.cp_world_size
+        else:
+            rank_budgets = [self.max_num_scheduled_tokens] * self.cp_world_size
 
         def _get_effective_budget(is_long_seq: bool, specify_dp: bool, cp_ranks: list[int] | None = None) -> int:
             """Return the max tokens a request on *cp_ranks* can schedule."""
@@ -849,7 +889,7 @@ class CrossDPScheduler(Scheduler):
                             break
 
                         self.request_manager.free_req(preempted_req)
-                        self.waiting.running_long_count -= 1 if self.waiting.is_long_request(preempted_req) else 0
+                        self._unmark_long_running(preempted_req)
                         self.waiting.has_slot_for_long_request = self.request_manager.has_slot_for_long_request()
 
                     self._preempt_request(preempted_req, scheduled_timestamp)
@@ -1085,7 +1125,11 @@ class CrossDPScheduler(Scheduler):
                     rank_budgets,
                 )
                 if selected_dp is None:
-                    break
+                    # Cannot place this request on any rank right now.
+                    # Skip it and try smaller requests behind it.
+                    self.waiting.pop_request()
+                    skipped_waiting_requests.prepend_request(request)
+                    continue
 
                 if len(selected_dp) > 1:
                     logger.info(f"It's a cp req, selected_dp: {selected_dp}, request id: {request.request_id}")
@@ -1156,7 +1200,7 @@ class CrossDPScheduler(Scheduler):
                     continue
 
                 self.running.append(request)
-                self.waiting.running_long_count += 1 if self.waiting.is_long_request(request) else 0
+                self._mark_long_running(request)
                 self.request_manager.add_req(request)
                 self.waiting.has_slot_for_long_request = self.request_manager.has_slot_for_long_request()
 

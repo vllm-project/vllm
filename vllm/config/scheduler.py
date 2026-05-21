@@ -105,7 +105,7 @@ class SchedulerConfig:
     NOTE: This is not currently configurable. It will be overridden by
     max_num_batched_tokens in case max multimodal embedding size is larger."""
 
-    policy: SchedulerPolicy = "fcfs"
+    policy: SchedulerPolicy = "fcfs"    # DyCP not support priority
     """The scheduling policy to use:\n
     - "fcfs" means first come first served, i.e. requests are handled in order
     of arrival.\n

@@ -2210,7 +2210,11 @@ class EngineArgs:
                 usage_context.value if usage_context else None,
             )
 
-        self.max_num_batched_tokens = self.max_num_batched_tokens * self.dp_per_domain
+        # Docode Node don't support CP prefill， so the CP chunk buffer is unnecessary
+        kv_role = getattr(self.kv_transfer_config, "kv_role", None)
+        if kv_role == 'kv_producer':
+            self.max_num_batched_tokens = self.max_num_batched_tokens * self.dp_per_domain
+
         if orig_max_num_seqs is None:
             assert self.max_num_batched_tokens is not None  # For type checking
             self.max_num_seqs = min(self.max_num_seqs, self.max_num_batched_tokens)
