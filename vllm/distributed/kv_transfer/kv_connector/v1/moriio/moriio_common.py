@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import os
 import threading
 import time
 from collections.abc import Iterator
@@ -176,6 +177,26 @@ def get_port_offset(dp_rank: int, tp_rank: int, tp_size: int = 1) -> int:
     return (dp_rank) * tp_size + tp_rank
 
 
+_DEPRECATED_ENV_VARS: dict[str, str] = {
+    "VLLM_MORIIO_CONNECTOR_READ_MODE": "read_mode",
+    "VLLM_MORIIO_QP_PER_TRANSFER": "qp_per_transfer",
+    "VLLM_MORIIO_POST_BATCH_SIZE": "post_batch_size",
+    "VLLM_MORIIO_NUM_WORKERS": "num_workers",
+}
+
+
+def _warn_deprecated_env_vars() -> None:
+    for env_var, new_key in _DEPRECATED_ENV_VARS.items():
+        if env_var in os.environ:
+            logger.warning_once(
+                "The environment variable %s is deprecated and ignored. "
+                "Set %r inside kv_transfer_config.kv_connector_extra_config "
+                "instead.",
+                env_var,
+                new_key,
+            )
+
+
 @dataclass
 class MoRIIOConfig:
     local_ip: str
@@ -220,6 +241,7 @@ class MoRIIOConfig:
         assert vllm_config.kv_transfer_config is not None, (
             "kv_transfer_config must be set for MoRIIOConnector"
         )
+        _warn_deprecated_env_vars()
         kv_transfer_config = vllm_config.kv_transfer_config
         extra_config = kv_transfer_config.kv_connector_extra_config
         tp_rank = get_tensor_model_parallel_rank()
