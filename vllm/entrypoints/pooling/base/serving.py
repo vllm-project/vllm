@@ -92,7 +92,7 @@ class PoolingServingBase(ABC):
             otlp_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
             assert otlp_endpoint is not None
 
-            api_process_count = getattr(engine_client, "api_process_count", 1)
+            api_process_count = (getattr(engine_client, "api_process_count", 1))
             api_process_rank = getattr(engine_client, "_api_process_rank", 0)
             process_title = f"APIServer_{api_process_rank}"
 
@@ -108,7 +108,7 @@ class PoolingServingBase(ABC):
                 extra_attributes={
                     "service.name": "vllm.entrypoint",
                     "vllm.process_kind": "entrypoint",
-                    "vllm.process_count": api_process_count,
+                    "vllm.process_count": f"{api_process_count}",
                     "vllm.process_name": process_title,
                 },
             )
@@ -134,7 +134,7 @@ class PoolingServingBase(ABC):
         )
         request_span_context = get_span_context(request_span)
 
-        trace_headers = {}
+        trace_headers: Mapping[str, str] = {}
         self.propagator.inject(trace_headers, context=request_span_context)
 
         ctx.trace_headers = raw_trace_headers
