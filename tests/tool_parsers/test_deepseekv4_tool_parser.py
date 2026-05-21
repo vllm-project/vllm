@@ -236,3 +236,52 @@ def test_extract_tool_calls_arguments_wrapper():
     assert result.tools_called
     args = json.loads(result.tool_calls[0].function.arguments)
     assert args == {"location": "Beijing"}
+
+
+@pytest.mark.skip_global_cleanup
+def test_composed_schema_converts_object_and_array_params():
+    tool = ChatCompletionToolsParam(
+        type="function",
+        function={
+            "name": "set_timer",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "wait": {
+                        "anyOf": [
+                            {"type": "object"},
+                            {"type": "null"},
+                        ],
+                    },
+                    "patches": {
+                        "allOf": [
+                            {"type": "array", "items": {"type": "object"}},
+                        ],
+                    },
+                },
+            },
+        },
+    )
+    parser = make_parser(tools=[tool])
+    request = make_request(tools=[tool])
+    model_output = (
+        f"{TC_START}\n"
+        f'{INV_START}set_timer">\n'
+        f'{PARAM_START}wait" string="false">'
+        f'{{"type":"for","minutes":2880}}'
+        f"{PARAM_END}\n"
+        f'{PARAM_START}patches" string="false">'
+        f'[{{"op":"replace","path":"/schedule","value":"quiet"}}]'
+        f"{PARAM_END}\n"
+        f"{INV_END}\n"
+        f"{TC_END}"
+    )
+
+    result = parser.extract_tool_calls(model_output, request)
+
+    assert result.tools_called
+    args = json.loads(result.tool_calls[0].function.arguments)
+    assert args == {
+        "wait": {"type": "for", "minutes": 2880},
+        "patches": [{"op": "replace", "path": "/schedule", "value": "quiet"}],
+    }

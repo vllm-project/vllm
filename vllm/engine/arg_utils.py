@@ -71,7 +71,7 @@ from vllm.config.cache import (
     PrefixCachingHashAlgo,
 )
 from vllm.config.device import Device
-from vllm.config.kernel import IrOpPriorityConfig, MoEBackend
+from vllm.config.kernel import IrOpPriorityConfig, LinearBackend, MoEBackend
 from vllm.config.lora import MaxLoRARanks
 from vllm.config.mamba import MambaBackendEnum
 from vllm.config.model import (
@@ -477,6 +477,7 @@ class EngineArgs:
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     enable_ep_weight_filter: bool = ParallelConfig.enable_ep_weight_filter
     moe_backend: MoEBackend = KernelConfig.moe_backend
+    linear_backend: LinearBackend = KernelConfig.linear_backend
     all2all_backend: All2AllBackend = ParallelConfig.all2all_backend
     enable_elastic_ep: bool = ParallelConfig.enable_elastic_ep
     enable_dbo: bool = ParallelConfig.enable_dbo
@@ -583,6 +584,7 @@ class EngineArgs:
     lora_target_modules: list[str] | None = LoRAConfig.target_modules
     enable_tower_connector_lora: bool = LoRAConfig.enable_tower_connector_lora
     specialize_active_lora: bool = LoRAConfig.specialize_active_lora
+    enable_mixed_moe_lora_format: bool = LoRAConfig.enable_mixed_moe_lora_format
 
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
     num_gpu_blocks_override: int | None = CacheConfig.num_gpu_blocks_override
@@ -605,6 +607,9 @@ class EngineArgs:
     reasoning_parser_plugin: str | None = None
 
     speculative_config: dict[str, Any] | None = None
+    spec_method: str | None = None
+    spec_model: str | None = None
+    spec_tokens: int | None = None
 
     show_hidden_metrics_for_version: str | None = (
         ObservabilityConfig.show_hidden_metrics_for_version
@@ -650,6 +655,7 @@ class EngineArgs:
 
     generation_config: str = ModelConfig.generation_config
     enable_sleep_mode: bool = ModelConfig.enable_sleep_mode
+    enable_cumem_allocator: bool = ModelConfig.enable_cumem_allocator
     override_generation_config: dict[str, Any] = get_field(
         ModelConfig, "override_generation_config"
     )
@@ -833,6 +839,9 @@ class EngineArgs:
         )
         model_group.add_argument(
             "--enable-sleep-mode", **model_kwargs["enable_sleep_mode"]
+        )
+        model_group.add_argument(
+            "--enable-cumem-allocator", **model_kwargs["enable_cumem_allocator"]
         )
         model_group.add_argument("--model-impl", **model_kwargs["model_impl"])
         model_group.add_argument(
@@ -1271,6 +1280,10 @@ class EngineArgs:
         lora_group.add_argument(
             "--specialize-active-lora", **lora_kwargs["specialize_active_lora"]
         )
+        lora_group.add_argument(
+            "--enable-mixed-moe-lora-format",
+            **lora_kwargs["enable_mixed_moe_lora_format"],
+        )
 
         # Observability arguments
         observability_kwargs = get_kwargs(ObservabilityConfig)
@@ -1412,6 +1425,9 @@ class EngineArgs:
         moe_backend_kwargs = kernel_kwargs["moe_backend"]
         moe_backend_kwargs["type"] = lambda s: s.lower().replace("-", "_")
         kernel_group.add_argument("--moe-backend", **moe_backend_kwargs)
+        linear_backend_kwargs = kernel_kwargs["linear_backend"]
+        linear_backend_kwargs["type"] = lambda s: s.lower().replace("-", "_")
+        kernel_group.add_argument("--linear-backend", **linear_backend_kwargs)
 
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)
@@ -1425,6 +1441,12 @@ class EngineArgs:
         vllm_kwargs["speculative_config"]["type"] = optional_type(json.loads)
         vllm_group.add_argument(
             "--speculative-config", "-sc", **vllm_kwargs["speculative_config"]
+        )
+        speculative_kwargs = get_kwargs(SpeculativeConfig)
+        vllm_group.add_argument("--spec-method", **speculative_kwargs["method"])
+        vllm_group.add_argument("--spec-model", **speculative_kwargs["model"])
+        vllm_group.add_argument(
+            "--spec-tokens", **speculative_kwargs["num_speculative_tokens"]
         )
         vllm_group.add_argument(
             "--kv-transfer-config", **vllm_kwargs["kv_transfer_config"]
@@ -1572,6 +1594,7 @@ class EngineArgs:
             generation_config=self.generation_config,
             override_generation_config=self.override_generation_config,
             enable_sleep_mode=self.enable_sleep_mode,
+            enable_cumem_allocator=self.enable_cumem_allocator,
             model_impl=self.model_impl,
             override_attention_dtype=self.override_attention_dtype,
             logits_processors=self.logits_processors,
@@ -1625,6 +1648,21 @@ class EngineArgs:
         """Initializes and returns a SpeculativeConfig object based on
         `speculative_config`.
         """
+        for flag, key, value in (
+            ("--spec-method", "method", self.spec_method),
+            ("--spec-model", "model", self.spec_model),
+            ("--spec-tokens", "num_speculative_tokens", self.spec_tokens),
+        ):
+            if value is None:
+                continue
+            if self.speculative_config is None:
+                self.speculative_config = {}
+            if key in self.speculative_config:
+                raise ValueError(
+                    f"{flag} and --speculative-config['{key}'] are mutually exclusive"
+                )
+            self.speculative_config[key] = value
+
         if self.speculative_config is None:
             return None
 
@@ -2005,6 +2043,7 @@ class EngineArgs:
                 target_modules=self.lora_target_modules,
                 enable_tower_connector_lora=self.enable_tower_connector_lora,
                 specialize_active_lora=self.specialize_active_lora,
+                enable_mixed_moe_lora_format=self.enable_mixed_moe_lora_format,
                 max_cpu_loras=self.max_cpu_loras
                 if self.max_cpu_loras and self.max_cpu_loras > 0
                 else None,
@@ -2085,6 +2124,8 @@ class EngineArgs:
             kernel_config.enable_flashinfer_autotune = self.enable_flashinfer_autotune
         if self.moe_backend != "auto":
             kernel_config.moe_backend = self.moe_backend
+        if self.linear_backend != "auto":
+            kernel_config.linear_backend = self.linear_backend
 
         # Transfer top-level ir_op_priority into KernelConfig.ir_op_priority
         for op_name, op_priority in asdict(self.ir_op_priority).items():

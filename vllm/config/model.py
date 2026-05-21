@@ -80,6 +80,16 @@ else:
 
 logger = init_logger(__name__)
 
+
+def is_cumem_allocator_available() -> bool:
+    try:
+        from vllm.device_allocator.cumem import cumem_available
+    except ImportError:
+        return False
+
+    return cumem_available
+
+
 RunnerOption = Literal["auto", RunnerType]
 ConvertType = Literal["none", "embed", "classify"]
 ConvertOption = Literal["auto", ConvertType]
@@ -295,6 +305,13 @@ class ModelConfig:
     enable_sleep_mode: bool = False
     """Enable sleep mode for the engine (only cuda and
     hip platforms are supported)."""
+    enable_cumem_allocator: bool = False
+    """Enable the custom cumem allocator to leverage advanced GPU memory
+    allocation features such as multi-node NVLink support.
+
+    Sleep mode automatically enables this allocator. Only cuda and hip
+    platforms are supported.
+    """
     model_impl: str | ModelImpl = "auto"
     """Which implementation of the model to use:
 
@@ -312,9 +329,15 @@ class ModelConfig:
     io_processor_plugin: str | None = None
     """IOProcessor plugin name to load at model startup"""
     renderer_num_workers: int = 1
-    """Number of worker threads in the renderer thread pool. This pool
-    handles async tokenization, chat template rendering, and multimodal
-    preprocessing."""
+    """Number of worker threads in the renderer thread pool. The pool is
+    consumed by the async renderer path (e.g. the OpenAI-compatible API
+    server started by `vllm serve`) to parallelize tokenization, chat
+    template rendering, and multimodal preprocessing across concurrent
+    requests.
+
+    The offline `LLM` entrypoint uses the synchronous renderer path and
+    processes prompts (including multimodal preprocessing) serially, so
+    this setting has no effect there."""
 
     # Pooler config
     pooler_config: PoolerConfig | None = None
@@ -510,8 +533,16 @@ class ModelConfig:
                 stacklevel=2,
             )
 
-        if self.enable_sleep_mode and not current_platform.is_sleep_mode_available():
-            raise ValueError("Sleep mode is not supported on current platform.")
+        if self.enable_sleep_mode:
+            if not current_platform.is_sleep_mode_available():
+                raise ValueError("Sleep mode is not supported on current platform.")
+            if not self.enable_cumem_allocator:
+                logger.info_once(
+                    "Enabling cumem allocator because sleep mode requires it."
+                )
+                self.enable_cumem_allocator = True
+        if self.enable_cumem_allocator and not is_cumem_allocator_available():
+            raise ValueError("cumem allocator is not supported on current platform.")
 
         hf_config = get_config(
             self.hf_config_path or self.model,
@@ -546,11 +577,22 @@ class ModelConfig:
         is_generative_model = registry.is_text_generation_model(architectures, self)
         is_pooling_model = registry.is_pooling_model(architectures, self)
 
-        self.runner_type = self._get_runner_type(architectures, self.runner)
+        self.runner_type = self._get_runner_type(
+            architectures, self.runner, self.convert
+        )
         self.convert_type = self._get_convert_type(
             architectures, self.runner_type, self.convert
         )
 
+        if (
+            is_pooling_model
+            and not is_generative_model
+            and self.runner_type in ("draft", "generate")
+        ):
+            raise ValueError(
+                f"Embedding models do not support `--runner {self.runner_type}`. "
+                "Use `--runner pooling` or `--runner auto` for embedding models."
+            )
         if self.runner_type == "generate" and not is_generative_model:
             generate_converts = _RUNNER_CONVERTS["generate"]
             if self.convert_type not in generate_converts:
@@ -884,11 +926,15 @@ class ModelConfig:
         self,
         architectures: list[str],
         runner: RunnerOption,
+        convert: ConvertOption,
     ) -> RunnerType:
         if runner != "auto":
             return runner
 
-        runner_type = self._get_default_runner_type(architectures)
+        if convert in {"auto", "none"}:
+            runner_type = self._get_default_runner_type(architectures)
+        else:
+            runner_type = "pooling"
 
         # Don't log the most common case
         if runner_type != "generate":
