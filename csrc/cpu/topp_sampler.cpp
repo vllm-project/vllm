@@ -529,7 +529,7 @@ static void top_k_row(float* __restrict__ row, int V, int k_val,
   if (n_keep_at_boundary == 0) {
     mask_write_below(row, V, final_pivot, neg_inf);
   } else {
-    apply_boundary_tie_loop(row, V, final_pivot, dup_value, kKDuplicateTol,
+    apply_boundary_tie_loop(row, V, dup_value, dup_value, kKDuplicateTol,
                             n_keep_at_boundary);
   }
 }
@@ -559,6 +559,12 @@ static void top_p_row(float* __restrict__ row, int V, float p_val,
     if (v > kPadSentinel && v < min_l) min_l = v;
   }
   if (min_l > max_l) min_l = max_l;
+
+  const float neg_inf = -std::numeric_limits<float>::infinity();
+  if (p_val <= 0.0f) {
+    mask_write_below(row, V, max_l - kBoundaryTol, neg_inf);
+    return;
+  }
 
 #if defined(__AVX512F__) || defined(__AVX2__)
   DEFINE_FAST_EXP
@@ -628,12 +634,12 @@ static void top_p_row(float* __restrict__ row, int V, float p_val,
   if (n_at_boundary > 0) {
     double remaining = (double)p_val - sum_above;
     if (remaining > 0.0 && (double)boundary_prob > 0.0) {
-      int needed = (int)ceil(remaining / (double)boundary_prob);
-      n_keep_at_boundary = needed < n_at_boundary ? needed : n_at_boundary;
+      int64_t needed64 = (int64_t)ceil(remaining / (double)boundary_prob);
+      if (needed64 < 0) needed64 = 0;
+      if (needed64 > n_at_boundary) needed64 = n_at_boundary;
+      n_keep_at_boundary = (int)needed64;
     }
   }
-
-  const float neg_inf = -std::numeric_limits<float>::infinity();
 
   if (n_keep_at_boundary == 0) {
     mask_write_below(row, V, dup_logit, neg_inf);
@@ -714,13 +720,17 @@ static void top_k_p_row(float* __restrict__ row, int V, int k_val, float p_val,
       if (tk_keep_at_boundary == 0) {
         mask_write_below(row, V, final_pivot, neg_inf);
       } else {
-        apply_boundary_tie_loop(row, V, final_pivot, dup_value, kKDuplicateTol,
+        apply_boundary_tie_loop(row, V, dup_value, dup_value, kKDuplicateTol,
                                 tk_keep_at_boundary);
       }
     }
   }
 
   if (p_val >= 1.0f) return;
+  if (p_val <= 0.0f) {
+    mask_write_below(row, V, max_l - kBoundaryTol, neg_inf);
+    return;
+  }
 
   // Top-k filtered lanes hold neg_inf; exp(-inf)=0 so they don't affect sum.
 #if defined(__AVX512F__) || defined(__AVX2__)
@@ -786,8 +796,10 @@ static void top_k_p_row(float* __restrict__ row, int V, int k_val, float p_val,
   if (n_at_boundary > 0) {
     double remaining = (double)p_val - sum_above;
     if (remaining > 0.0 && (double)boundary_prob > 0.0) {
-      int needed = (int)ceil(remaining / (double)boundary_prob);
-      n_keep_at_boundary = needed < n_at_boundary ? needed : n_at_boundary;
+      int64_t needed64 = (int64_t)ceil(remaining / (double)boundary_prob);
+      if (needed64 < 0) needed64 = 0;
+      if (needed64 > n_at_boundary) needed64 = n_at_boundary;
+      n_keep_at_boundary = (int)needed64;
     }
   }
 
@@ -802,12 +814,14 @@ static void top_k_p_row(float* __restrict__ row, int V, int k_val, float p_val,
 void cpu_topp_sampling(torch::Tensor& logits, const torch::Tensor& p) {
   TORCH_CHECK(logits.dim() == 2, "logits must be 2D");
   TORCH_CHECK(logits.dtype() == torch::kFloat32, "logits must be float32");
+  TORCH_CHECK(p.dtype() == torch::kFloat32, "p must be float32");
   TORCH_CHECK(p.dim() == 1 && p.size(0) == logits.size(0),
               "p must be 1D with size == batch size");
   TORCH_CHECK(logits.is_contiguous(), "logits must be contiguous");
 
   const int B = static_cast<int>(logits.size(0));
   const int V = static_cast<int>(logits.size(1));
+  if (V == 0) return;
   float* lp = logits.data_ptr<float>();
   const float* pp = p.data_ptr<float>();
 
@@ -835,6 +849,7 @@ void cpu_topk_sampling(torch::Tensor& logits, const torch::Tensor& k) {
 
   const int B = static_cast<int>(logits.size(0));
   const int V = static_cast<int>(logits.size(1));
+  if (V == 0) return;
   float* lp = logits.data_ptr<float>();
   const int* kp = k.data_ptr<int>();
 
@@ -857,12 +872,14 @@ void cpu_topk_topp_sampling(torch::Tensor& logits, const torch::Tensor& k,
   TORCH_CHECK(k.dim() == 1 && k.size(0) == logits.size(0),
               "k must be 1D with size == batch size");
   TORCH_CHECK(k.dtype() == torch::kInt32, "k must be int32");
+  TORCH_CHECK(p.dtype() == torch::kFloat32, "p must be float32");
   TORCH_CHECK(p.dim() == 1 && p.size(0) == logits.size(0),
               "p must be 1D with size == batch size");
   TORCH_CHECK(logits.is_contiguous(), "logits must be contiguous");
 
   const int B = static_cast<int>(logits.size(0));
   const int V = static_cast<int>(logits.size(1));
+  if (V == 0) return;
   float* lp = logits.data_ptr<float>();
   const int* kp = k.data_ptr<int>();
   const float* pp = p.data_ptr<float>();
