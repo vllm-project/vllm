@@ -595,9 +595,23 @@ impl EngineCoreClient {
     }
 
     /// Return whether the engine is currently sleeping at any level.
+    ///
+    /// Under data parallel, all engines should agree on the sleep state: a
+    /// divergence signals a control-plane bug. Returns
+    /// `Error::InconsistentUtilityResults` if engines disagree.
     pub async fn is_sleeping(&self) -> Result<bool> {
-        // TODO: we only return the result of the first engine here.
-        Ok(self.call_utility("is_sleeping", ()).await?[0])
+        let results: Vec<bool> = self.call_utility("is_sleeping", ()).await?;
+        // `engine_count >= 1` is enforced during startup handshake, so `results`
+        // is non-empty.
+        let first = results[0];
+        if results.iter().all(|&v| v == first) {
+            Ok(first)
+        } else {
+            Err(Error::InconsistentUtilityResults {
+                method: "is_sleeping".to_string(),
+                values: format!("{results:?}"),
+            })
+        }
     }
 
     /// Reset the multi-modal cache.
@@ -613,18 +627,21 @@ impl EngineCoreClient {
     }
 
     /// Reset the prefix cache and optionally the external connector cache.
+    ///
+    /// Under data parallel, returns `true` only when every engine confirms the
+    /// reset (AND aggregation).
     pub async fn reset_prefix_cache(
         &self,
         reset_running_requests: bool,
         reset_connector: bool,
     ) -> Result<bool> {
-        // TODO: we only return the result of the first engine here.
-        Ok(self
+        let results: Vec<bool> = self
             .call_utility(
                 "reset_prefix_cache",
                 (reset_running_requests, reset_connector),
             )
-            .await?[0])
+            .await?;
+        Ok(results.into_iter().all(|ok| ok))
     }
 
     /// Put the engine to sleep.
