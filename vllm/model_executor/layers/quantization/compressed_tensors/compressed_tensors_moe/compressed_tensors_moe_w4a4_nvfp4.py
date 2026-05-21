@@ -16,11 +16,23 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+    NvFp4MoeBackend,
     convert_to_nvfp4_moe_kernel_format,
     is_global_sf_supported_for_nvfp4_backend,
     make_nvfp4_moe_kernel,
     make_nvfp4_moe_quant_config,
     select_nvfp4_moe_backend,
+)
+
+# Backends for which we've verified EPLB rearrangement preserves the
+# layout the kernel expects (registered Parameters are per-expert
+# leading-dim contiguous, derived scales get refreshed in the
+# after_eplb_rearrangement hook).
+_EPLB_SUPPORTED_NVFP4_BACKENDS = frozenset(
+    {
+        NvFp4MoeBackend.FLASHINFER_CUTEDSL,
+        NvFp4MoeBackend.FLASHINFER_CUTEDSL_BATCHED,
+    }
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa E501
     CompressedTensorsMoEMethod,
@@ -54,6 +66,15 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
             self.nvfp4_backend
         )
+
+    @property
+    def supports_eplb(self) -> bool:
+        # Online / static rearrangement is wired up only for the
+        # CuteDSL backends. Other NVFP4 backends still need their
+        # post-process layout (e.g. TRTLLM weight pre-shuffle, Marlin
+        # repacking) audited for per-expert leading-dim contiguity
+        # before EPLB can rearrange them safely.
+        return self.nvfp4_backend in _EPLB_SUPPORTED_NVFP4_BACKENDS
 
     def create_weights(
         self,
@@ -221,9 +242,35 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         )
 
         replace_parameter(layer, "w13_weight", w13)
-        replace_parameter(layer, "w13_weight_scale", w13_scale)
         replace_parameter(layer, "w2_weight", w2)
-        replace_parameter(layer, "w2_weight_scale", w2_scale)
+
+        if self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL:
+            # flashinfer's convert_sf_to_mma_layout returns a strided
+            # permuted view (shape (32, 4, m_t, 4, k_t, E)) of contiguous
+            # storage laid out as (E, m_t, k_t, 32, 4, 4). EPLB needs a
+            # per-expert leading-dim contiguous view to slice/move
+            # individual experts. The MMA view's permute is
+            # (3, 4, 1, 5, 2, 0); its inverse is (5, 2, 4, 0, 1, 3),
+            # which lands on the underlying (E, ...) contiguous layout
+            # while sharing storage. Register that as the Parameter and
+            # stash the MMA view on the layer as a plain tensor
+            # attribute for the kernel to consume via
+            # get_fused_moe_quant_config.
+            w13_scale_eplb_view = w13_scale.permute(5, 2, 4, 0, 1, 3)
+            w2_scale_eplb_view = w2_scale.permute(5, 2, 4, 0, 1, 3)
+            assert w13_scale_eplb_view.is_contiguous(), (
+                "Expected the inverse-permuted scale view to be contiguous; "
+                "flashinfer's convert_sf_to_mma_layout storage layout may "
+                "have changed."
+            )
+            assert w2_scale_eplb_view.is_contiguous()
+            layer.w13_weight_scale_mma_view = w13_scale
+            layer.w2_weight_scale_mma_view = w2_scale
+            replace_parameter(layer, "w13_weight_scale", w13_scale_eplb_view)
+            replace_parameter(layer, "w2_weight_scale", w2_scale_eplb_view)
+        else:
+            replace_parameter(layer, "w13_weight_scale", w13_scale)
+            replace_parameter(layer, "w2_weight_scale", w2_scale)
         layer.w13_weight_scale_2 = w13_scale_2
         layer.w2_weight_scale_2 = w2_scale_2
         layer.w13_input_scale = a13_scale
@@ -252,16 +299,48 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         )
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
+        if self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL:
+            # Kernel consumes the strided MMA-layout view; the
+            # registered Parameter is the E-leading view of the same
+            # storage so EPLB can rearrange per-expert. Both alias the
+            # same memory -- updates from either propagate.
+            w13_scale = layer.w13_weight_scale_mma_view
+            w2_scale = layer.w2_weight_scale_mma_view
+        else:
+            w13_scale = layer.w13_weight_scale
+            w2_scale = layer.w2_weight_scale
         return make_nvfp4_moe_quant_config(
             backend=self.nvfp4_backend,
-            w13_scale=layer.w13_weight_scale,
-            w2_scale=layer.w2_weight_scale,
+            w13_scale=w13_scale,
+            w2_scale=w2_scale,
             w13_scale_2=layer.w13_weight_scale_2,
             w2_scale_2=layer.w2_weight_scale_2,
             a13_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
             swiglu_limit=getattr(layer, "swiglu_limit", None),
             layer=layer,
+        )
+
+    def after_eplb_rearrangement(self, layer: RoutedExperts) -> None:
+        if self.nvfp4_backend not in _EPLB_SUPPORTED_NVFP4_BACKENDS:
+            return
+        # EPLB moves the registered Parameters (w13_weight,
+        # w13_weight_scale, w13_weight_global_scale, w13_input_global_scale,
+        # and their w2 counterparts) per-expert. But the kernel-facing
+        # derived tensor layer.w13_weight_scale_2 holds the fused
+        # product (1 / w13_weight_global_scale) * w13_input_scale (see
+        # FlashInferCuteDSLExperts.process_weights_after_loading, which
+        # does the .mul_ in place). Its storage is independent of
+        # w13_weight_global_scale, so it doesn't get rearranged with the
+        # globals. Re-derive it in place so the kernel's captured
+        # references stay in sync. ``w13_input_scale`` is a max-broadcast
+        # scalar -- invariant under expert permutation, no refresh
+        # needed.
+        layer.w13_weight_scale_2.copy_(
+            (1.0 / layer.w13_weight_global_scale[:, 0]) * layer.w13_input_scale
+        )
+        layer.w2_weight_scale_2.copy_(
+            (1.0 / layer.w2_weight_global_scale) * layer.w2_input_scale
         )
 
     def apply_monolithic(
