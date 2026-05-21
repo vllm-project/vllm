@@ -19,6 +19,13 @@ from vllm.cute_utils import (
 
 
 class Sm100ChunkOKernel:
+    """Compute per-token output from recurrent and intra-chunk terms.
+
+    Gamma[i,j] = exp(g_cu[i] - g_cu[j])
+    P = mask((Q @ K.T) * Gamma)
+    O = scale * (exp(g_cu) * (Q @ H.T) + P @ V)
+    """
+
     def __init__(
         self,
         H: int,
@@ -290,6 +297,7 @@ class Sm100ChunkOKernel:
                 vdesc_base = sdesc_template | (vaddr >> 4)
 
                 ##### 1st MMA: Q @ K.T #####
+                # do this first to unblock mask(QK)
                 cute.arch.mbarrier_wait(epi_mbar, mask_parity ^ 1)
                 cute.arch.mbarrier_wait(qk_full_mbar + stage_id, tma_parity)
                 _tcgen05.fence_after_thread_sync()
@@ -318,6 +326,7 @@ class Sm100ChunkOKernel:
                     _tcgen05.commit(qk_empty_mbar + stage_id)
 
                 ##### 3rd MMA: P @ V #####
+                # stalled by mask(QK)
                 cute.arch.mbarrier_wait(mask_mbar, mask_parity)
                 _tcgen05.fence_after_thread_sync()
                 with cute.arch.elect_one():
@@ -367,6 +376,7 @@ class Sm100ChunkOKernel:
                     t_ = bos + chunk_id * BT + tid_
                     s_g_cu[tid_] = g_cu[t_, v_head_id] if t_ < eos else Float32(0.0)
 
+                # wait for QK MMA
                 if warp_id_ == 0:
                     cute.arch.mbarrier_wait(qk_mbar, parity)
                 cute.arch.barrier(barrier_id=1, number_of_threads=128)
@@ -387,7 +397,7 @@ class Sm100ChunkOKernel:
                     g_cu_cols[1] = s_g_cu[col + 1]
                     g_cu_cols = g_cu_cols.load().reshape((2, 1))
 
-                    # apply causal mask
+                    # apply gamma and causal mask
                     Gamma = cute.math.exp(g_cu_rows - g_cu_cols, fastmath=True)
                     tmp = qk[None, None, i] * Gamma
                     tmp = cute.where(row_indices >= col_indices + i * 8, tmp, 0.0)
@@ -406,6 +416,7 @@ class Sm100ChunkOKernel:
 
         else:
             # epilogue warps
+            # for ldmatrix layout later
             row0 = warp_id * 16 + lane_id // 4
             row1 = row0 + 8
 
@@ -426,6 +437,7 @@ class Sm100ChunkOKernel:
             )
             # select lane: [total_seq_len, 2, WIDTH/8, V_DIM/WIDTH]
             o_view = o_view[None, ((None, lane_id % 4, None), None)]
+
             for global_chunk_id in range(bid, num_global_chunks, grid_x):
                 seq_id = chunk_indices[global_chunk_id, 0]
                 chunk_id = chunk_indices[global_chunk_id, 1]
@@ -437,6 +449,7 @@ class Sm100ChunkOKernel:
                 g_cu_rows = cute.make_rmem_tensor(2, Float32)
                 g_cu_rows.fill(0.0)
 
+                # load g_cu
                 if chunk_start + row0 < eos:
                     g_cu_rows[0] = cute.math.exp(
                         g_cu[chunk_start + row0, v_head_id], fastmath=True
@@ -496,6 +509,7 @@ class Sm100ChunkOKernel:
 
                 else:
                     # direct gmem store
+                    # TODO: explore doing multiple 1D TMAs
                     for i in cutlass.range_constexpr(V_dim // WIDTH):
                         qh = _tcgen05.ld(
                             warp_id * 32, qh_tmem + i * WIDTH, "16x256b", WIDTH // 8

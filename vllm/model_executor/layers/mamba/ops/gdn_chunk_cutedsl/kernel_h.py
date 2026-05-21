@@ -19,6 +19,17 @@ from vllm.cute_utils import (
 
 
 class Sm100ChunkHKernel:
+    """For each sequence, compute the chunk recurrent update.
+
+    The input V tile is the U output from the KKT/UW kernel. For each chunk:
+        V_new = U - W @ H.T
+        (we actually do V_new.T = U.T - H @ W.T instead)
+
+        H_scaled = H * exp(g_last)
+        V_scaled = V_new * exp(g_last - g)
+        H_new = H_scaled + V_scaled.T @ K
+    """
+
     def __init__(
         self,
         H: int,
@@ -259,6 +270,7 @@ class Sm100ChunkHKernel:
                     parity ^= 1
 
         elif warp_id == 8:
+            # MMA warp
             _tcgen05.alloc(taddr)
             stage_id = 0
             parity = 0
@@ -370,7 +382,8 @@ class Sm100ChunkHKernel:
                     cute.arch.mbarrier_wait(h0_mbar, 0)
                 cute.arch.barrier(barrier_id=1, number_of_threads=128)
 
-                # when H0 is FP32, we need to pack to BF16
+                # when H0 is FP32, we need to pack it to BF16
+                # also store to smem for TMA store later.
                 if cutlass.const_expr(is_f32):
                     for i in cutlass.range_constexpr(K_dim // 32):
                         # H0 smem layout: (V_dim, (32, K_dim/32))
@@ -416,6 +429,8 @@ class Sm100ChunkHKernel:
                 _tcgen05.fence_before_thread_sync()
                 cute.arch.mbarrier_arrive(vk_in_mbar + stage_id)
 
+                # for BF16 H0, we issue TMA store from H0 smem
+                # for FP32 H0, we issue TMA store from H smem (after packing)
                 cute.arch.barrier(barrier_id=1, number_of_threads=128)
                 fence_before_tma_store()
                 if warp_id_ == 3:
@@ -452,7 +467,7 @@ class Sm100ChunkHKernel:
                 _tcgen05.fence_after_thread_sync()
 
                 # load FP32 H from tmem, convert to BF16, store to tmem for 1st MMA,
-                # store to smem for reload later
+                # store to smem for TMA store later.
                 for i in cutlass.range_constexpr(K_dim // 32):
                     h_f32 = _tcgen05.ld(warp_id_ * 32, vk_tmem + i * 32, "32x32b", 32)
                     h_bf16 = cute.make_rmem_tensor(32, BFloat16)
@@ -482,6 +497,7 @@ class Sm100ChunkHKernel:
                 _tcgen05.fence_before_thread_sync()
                 cute.arch.mbarrier_arrive(vk_in_mbar + stage_id)
 
+                # issue TMA store for O kernel
                 cute.arch.barrier(barrier_id=1, number_of_threads=128)
                 fence_before_tma_store()
                 if warp_id_ == 3:
@@ -492,7 +508,7 @@ class Sm100ChunkHKernel:
 
                 stage_id = (stage_id + 1) % num_stages
 
-            # handle final state
+            # handle final state. reuse H0 smem.
             if warp_id_ == 0:
                 cute.arch.mbarrier_wait(vk_done_mbar + vk_stage_id, vk_parity)
             cute.arch.barrier(barrier_id=1, number_of_threads=128)
@@ -549,11 +565,12 @@ class Sm100ChunkHKernel:
             sV_new_view = sV_new_view[None, (None, s_col)]
 
             for chunk_id in range(num_chunks):
+                # wait for V to arrive
                 if warp_id == 0:
                     cute.arch.mbarrier_wait(tma_mbar + stage_id, parity)
                 cute.arch.barrier(barrier_id=2, number_of_threads=128)
 
-                # unpack V from BF16->FP32, then store to tmem for 1st MMA
+                # unpack V BF16->FP32, then store to tmem for 1st MMA
                 # V smem layout: [BT, (64, V_dim/64)] / [BT, V_dim]
                 # each iteration, CTA loads [8, V_dim] tile
                 # (warp loads [8, 32] tile)
@@ -572,6 +589,7 @@ class Sm100ChunkHKernel:
                 _tcgen05.fence_before_thread_sync()
                 cute.arch.mbarrier_arrive(wh_in_mbar + stage_id)
 
+                # load g_cu for scaling
                 if tid < BT:
                     end_t = min(bos + (chunk_id + 1) * BT, eos)
                     last_idx = end_t - 1
@@ -584,6 +602,7 @@ class Sm100ChunkHKernel:
                         )
                     s_v_scale[tid] = val
 
+                # wait for 1st MMA to finish
                 if warp_id == 2:
                     cute.arch.mbarrier_wait(wh_done_mbar + stage_id, parity)
                 elif warp_id == 3:
@@ -592,7 +611,6 @@ class Sm100ChunkHKernel:
                 cute.arch.barrier(barrier_id=2, number_of_threads=128)
                 _tcgen05.fence_after_thread_sync()
 
-                # TODO: load all v_new at once
                 for i in cutlass.range_constexpr(BT // 8):
                     v_new = cute.make_rmem_tensor((4, 2), Float32)
                     tcol = wh_tmem + i * 8
@@ -614,7 +632,7 @@ class Sm100ChunkHKernel:
                         v_scaled[k * 2 + 1] = v_new[k * 2 + 1] * scale1
                     v_scaled_bf16 = v_scaled.load().to(BFloat16).reshape((4, 2))
 
-                    # store V_new BF16 for V kernel
+                    # store V_new BF16 for O kernel
                     s_row = i * 8 + (lane_id % 8)
                     cute.copy(stsm_trans_atom, v_new_bf16, sV_new_view[s_row, None])
 
@@ -630,6 +648,7 @@ class Sm100ChunkHKernel:
                 _tcgen05.fence_before_thread_sync()
                 cute.arch.mbarrier_arrive(vk_in_mbar + stage_id)
 
+                # issue TMA store for V_new
                 cute.arch.barrier(barrier_id=2, number_of_threads=128)
                 fence_before_tma_store()
                 if warp_id == 3:

@@ -20,6 +20,15 @@ from vllm.cute_utils import (
 
 
 class Sm100ChunkUWKernel:
+    """Compute per-chunk KKT inverse preprocessing and U/W tiles.
+
+    Gamma[i,j] = exp(g_cu[i] - g_cu[j])
+    A = strictLower(beta * (K @ K.T) * Gamma)
+    Ai = inverse(I + A)
+    U = (Ai * beta) @ V
+    W = (Ai * beta * exp(g_cu)) @ K
+    """
+
     def __init__(
         self,
         H: int,
@@ -257,7 +266,7 @@ class Sm100ChunkUWKernel:
                 Ab_tmem = Ab_tmem_base + (BT // 2) * stage_id
                 Abg_tmem = Ab_tmem | (16 << 16)
 
-                ##### kkt MMA #####
+                ##### KKT MMA: KKT = K @ K.T #####
                 kaddr = sK[None, None, stage_id].iterator.toint()
                 kdesc_base = sdesc_template | (kaddr >> 4)
 
@@ -280,7 +289,7 @@ class Sm100ChunkUWKernel:
                             )
                     _tcgen05.commit(mma_kkt_mbar + stage_id)
 
-                ##### UW MMA #####
+                ##### U/W MMA: U = Ab @ V, W = Abg @ K #####
                 vaddr = sV[None, None, stage_id].iterator.toint()
                 vdesc = sdesc_template | (vaddr >> 4)
                 kdesc = sdesc_template | (kaddr >> 4)
@@ -382,7 +391,7 @@ class Sm100ChunkUWKernel:
                             g_val += s_g_cu[i - 1]
                     cute.arch.barrier(barrier_id=3, number_of_threads=BT)
 
-                    # store g_cu to gmem for subsequent kernels
+                    # store g_cu to gmem for H and O kernels
                     if in_bounds:
                         g_cu[t, head_id] = g_val
 
@@ -390,7 +399,7 @@ class Sm100ChunkUWKernel:
                     s_g_cu[tid_] = g_val
                     s_g_cu_exp[tid_] = cute.math.exp(g_val) if in_bounds else 0.0
 
-                ##### Phase 2: wait kkt MMA, causal mask, write A to smem #####
+                ##### Phase 2: A = strictLower(beta * kkt * Gamma) #####
                 if warp_id_ == 0:
                     cute.arch.mbarrier_wait(mma_kkt_mbar + stage_id, parity)
                 cute.arch.barrier(barrier_id=1, number_of_threads=128)
@@ -456,7 +465,15 @@ class Sm100ChunkUWKernel:
 
                 cute.arch.barrier(barrier_id=1, number_of_threads=128)
 
-                ##### Phase 3: Newton-Schulz inverse #####
+                ##### Phase 3: matrix inverse #####
+                # we use Newton-Schulz iterations to compute the inverse
+                # of the four 16x16 diagonal blocks.
+                #   Ai_new = 2 Ai - Ai @ M @ Ai
+                #   where M = I + A
+                #
+                # we do this with 2 MMAs:
+                # 1. -AiM = Ai @ (-M)
+                # 2. Ai_new = 2 Ai + (-AiM) @ Ai
                 zeros_f32 = cute.make_rmem_tensor(4, Float32)
                 zeros_f32.fill(0.0)
 
@@ -479,14 +496,16 @@ class Sm100ChunkUWKernel:
                 mma_B = cute.logical_divide(cute.recast_tensor(mma_B_bf16, Uint32), 2)
                 M = cute.logical_divide(cute.recast_tensor(M_bf16, Uint32), 2)
 
+                # initial guess: Ai = I-A
                 cute.copy(ldsm_atom, sA_ldsm[warp_id_, None, warp_id_], Ai_bf16)
                 for i in cutlass.range_constexpr(4):
-                    Ai[i] ^= Uint32(0x80008000)  # negate
+                    Ai[i] ^= Uint32(0x80008000)  # negate A
                 set_diagonal(Ai, lane_id)
 
                 # (4, 2)
                 Ai_f32 = cute.logical_divide(cvt.bf16x2_to_fp32x2(Ai), 4)
 
+                # M is holding -(I+A), stay constant throughout the iterations
                 cute.copy(ldsm_trans_atom, sA_ldsm[warp_id_, None, warp_id_], M_bf16)
                 set_diagonal(M, lane_id)
                 for i in cutlass.range_constexpr(4):
@@ -494,12 +513,14 @@ class Sm100ChunkUWKernel:
 
                 # 3 rounds of Newton-Schulz
                 for _ in cutlass.range_constexpr(3):
+                    # First MMA: -AiM = Ai @ (-M)
                     cute.copy(stsm_atom, Ai_bf16, sA_ldsm[warp_id_, None, warp_id_])
                     cute.arch.sync_warp()
                     acc[None, 0] = mma_bf16(Ai, M[None, 0], zeros_f32)
                     acc[None, 1] = mma_bf16(Ai, M[None, 1], zeros_f32)
                     Ai_bf16.store(acc.load().to(BFloat16))
 
+                    # Second MMA: Ai_new = 2Ai + (-AiM) @ Ai
                     for j in cutlass.range_constexpr(8):
                         Ai_f32[j] *= 2.0
                     cute.copy(
@@ -515,6 +536,7 @@ class Sm100ChunkUWKernel:
                 cute.arch.barrier(barrier_id=1, number_of_threads=128)
 
                 # off-diagonal by 1
+                # Ai[i,i-1] = -Ai[i,i] @ A[i,i-1] @ Ai[i-1,i-1].
                 if warp_id_ > 0:
                     neg_Ai = cute.make_rmem_tensor(4, Uint32)
                     for i in cutlass.range_constexpr(4):
@@ -632,7 +654,6 @@ class Sm100ChunkUWKernel:
                     s_beta_view = cute.make_tensor(s_beta, (2, 4, 2, BT // 16))
                     beta_col = s_beta_view[col_coord].load().reshape((2, 1, 2))
 
-                    # exp is already applied
                     s_g_cu_view = cute.make_tensor(s_g_cu_exp, (2, 4, 2, BT // 16))
                     g_cu_col = s_g_cu_view[col_coord].load().reshape((2, 1, 2))
 
