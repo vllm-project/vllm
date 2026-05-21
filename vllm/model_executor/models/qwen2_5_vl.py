@@ -1849,7 +1849,9 @@ class Qwen2_5_VLForConditionalGeneration(
         return EncoderCudaGraphReplayBuffers(buffers=buffers)
 
     def encoder_cudagraph_forward(
-        self, mm_kwargs: dict[str, Any], buffers: dict[str, torch.Tensor]
+        self,
+        mm_kwargs: dict[str, Any],
+        buffers: dict[str, torch.Tensor],
     ) -> torch.Tensor:
         pixel_values = self._get_pixel_values_by_modality(mm_kwargs)
         grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
