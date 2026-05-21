@@ -32,10 +32,21 @@ from vllm.v1.attention.backends.fa_utils import (
     get_flash_attn_version,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.vllm_flash_attn import (  # type: ignore[attr-defined]
-    flash_attn_varlen_func,
-    get_scheduler_metadata,
-)
+try:
+    from vllm.vllm_flash_attn import (  # type: ignore[attr-defined]
+        flash_attn_varlen_func,
+        get_scheduler_metadata,
+    )
+except ImportError:
+
+    def flash_attn_varlen_func(*args, **kwargs):  # type: ignore[no-redef]
+        raise ImportError(
+            "CUDA flash attention extensions are unavailable. "
+            "FLASH_ATTN_MLA cannot be used without _vllm_fa2_C/_vllm_fa3_C."
+        )
+
+    def get_scheduler_metadata(*args, **kwargs):  # type: ignore[no-redef]
+        return None
 
 logger = init_logger(__name__)
 
