@@ -993,6 +993,9 @@ class Gemma4ForConditionalGeneration(
         self.quant_config = quant_config
         self.multimodal_config = multimodal_config
         self.model_dtype = vllm_config.model_config.dtype
+        self.uses_bnb_quant = (
+            quant_config is not None and quant_config.get_name() == "bitsandbytes"
+        )
 
         # ---- Vision tower (shared by image and video) ----
         with self._mark_tower_model(vllm_config, {"image", "video"}):
@@ -1209,6 +1212,8 @@ class Gemma4ForConditionalGeneration(
         for pv, pp in zip(pixel_values, pixel_position_ids, strict=True):
             pv = pv.unsqueeze(0)  # (1, max_patches, patch_pixels)
             pp = pp.unsqueeze(0)  # (1, max_patches, 2)
+            if self.uses_bnb_quant:
+                pv = pv.to(self.model_dtype)
 
             # Derive the pooler's output_length from the total patch
             # count (including padding).  The vision tower encoder
@@ -1285,6 +1290,8 @@ class Gemma4ForConditionalGeneration(
             for i in range(pv_chunk.shape[0]):
                 pv = pv_chunk[i].unsqueeze(0)
                 pp = pp_chunk[i].unsqueeze(0)
+                if self.uses_bnb_quant:
+                    pv = pv.to(self.model_dtype)
 
                 max_patches = pv.shape[1]
                 output_length = max_patches // pooling_k2
