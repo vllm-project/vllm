@@ -322,11 +322,14 @@ class Config:
         if self.needs_mori() and not has_mori():  # noqa: SIM103
             return False, "Needs MoRI, but MoRI not available."
 
-        if not self.fused_experts_type._supports_current_device():
-            return (
-                False,
-                f"{self.fused_experts_type} not supported on the current device.",
-            )
+        try:
+            if not self.fused_experts_type._supports_current_device():
+                return (
+                    False,
+                    f"{self.fused_experts_type} not supported on the current device.",
+                )
+        except NotImplementedError:
+            pass
 
         return True, None
 
