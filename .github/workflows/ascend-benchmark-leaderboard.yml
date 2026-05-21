@@ -297,6 +297,37 @@ jobs:
       - name: Acquire Ascend hardware lock
         run: bash .github/workflows/scripts/acquire_ascend_hardware_lock.sh
 
+      - name: Runner health preflight (before install)
+        env:
+          VLLM_ASCEND_HUST_REPO: ${{ github.workspace }}/vllm-ascend-hust
+        run: |
+          source "${VLLM_ASCEND_HUST_REPO}/scripts/hust_ascend_manager_helper.sh"
+          source "${VLLM_ASCEND_HUST_REPO}/scripts/use_single_ascend_env.sh"
+          PRECHECK_DIR="${GITHUB_WORKSPACE}/.benchmarks/ci/preinstall-preflight"
+          mkdir -p "$PRECHECK_DIR"
+
+          max_attempts=2
+          attempt=1
+          while [[ "$attempt" -le "$max_attempts" ]]; do
+            echo "[preinstall-preflight] attempt ${attempt}/${max_attempts}"
+            if hust_ascend_manager_run runtime check \
+              --repo "$GITHUB_WORKSPACE" \
+              --python "$PYTHON_BIN" \
+              --require-npu \
+              --json | tee "$PRECHECK_DIR/runtime-check-attempt-${attempt}.json"; then
+              break
+            fi
+            if [[ "$attempt" -eq "$max_attempts" ]]; then
+              hust_ascend_manager_run doctor --json >"$PRECHECK_DIR/doctor.json" 2>&1 || true
+              npu-smi info >"$PRECHECK_DIR/npu-smi-info.txt" 2>&1 || true
+              npu-smi info -m >"$PRECHECK_DIR/npu-smi-map.txt" 2>&1 || true
+              echo "Runner health preflight failed before installation" >&2
+              exit 1
+            fi
+            attempt=$((attempt + 1))
+            sleep 10
+          done
+
       - name: Prepare Ascend runtime and install repos
         env:
           VLLM_ASCEND_HUST_REPO: ${{ github.workspace }}/vllm-ascend-hust
@@ -316,6 +347,21 @@ jobs:
           "${PYTHON_BIN}" -c "import vllm; print(f'vLLM version: {vllm.__version__}')"
           "${PYTHON_BIN}" -c "import importlib; importlib.import_module('vllm.entrypoints.cli.main'); print('vLLM CLI module import: ok')"
 
+      - name: Runner health preflight (before benchmark)
+        env:
+          VLLM_ASCEND_HUST_REPO: ${{ github.workspace }}/vllm-ascend-hust
+        run: |
+          source "${VLLM_ASCEND_HUST_REPO}/scripts/hust_ascend_manager_helper.sh"
+          source "${VLLM_ASCEND_HUST_REPO}/scripts/use_single_ascend_env.sh"
+          PRECHECK_DIR="${GITHUB_WORKSPACE}/.benchmarks/ci/prebenchmark-preflight"
+          mkdir -p "$PRECHECK_DIR"
+          hust_ascend_manager_run runtime check \
+            --repo "$GITHUB_WORKSPACE" \
+            --python "$PYTHON_BIN" \
+            --require-plugin \
+            --require-npu \
+            --json | tee "$PRECHECK_DIR/runtime-check.json"
+
       - name: Run benchmark CI and optional HF sync
         env:
           WORKSPACE_ROOT: ${{ github.workspace }}
@@ -326,7 +372,28 @@ jobs:
           RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
         run: |
           source "${VLLM_ASCEND_HUST_REPO}/scripts/use_single_ascend_env.sh"
-          bash .github/workflows/scripts/run_ascend_benchmark_ci.sh
+          max_attempts=2
+          attempt=1
+          while [[ "$attempt" -le "$max_attempts" ]]; do
+            echo "[benchmark] attempt ${attempt}/${max_attempts}"
+            set +e
+            bash .github/workflows/scripts/run_ascend_benchmark_ci.sh
+            rc=$?
+            set -e
+
+            if [[ "$rc" -eq 0 ]]; then
+              break
+            fi
+
+            if [[ "$rc" -eq 86 && "$attempt" -lt "$max_attempts" ]]; then
+              echo "Detected node-level Ascend runtime failure (87/507899); retrying benchmark once on next scheduling opportunity."
+              bash .github/workflows/scripts/cleanup_ascend_ci_processes.sh || true
+              attempt=$((attempt + 1))
+              continue
+            fi
+
+            exit "$rc"
+          done
 
       - name: Cleanup leftover Ascend CI processes
         if: always()
@@ -378,12 +445,12 @@ jobs:
             f'- Workflow run: [view run]({run_url})',
           ]
           if runner_preflight_failure.is_file():
-            skip_note = (
+            failure_note = (
               '- Runner health: `unhealthy` '
-              '(benchmark skipped before vLLM startup because torch_npu basic allocation failed)'
+              '(benchmark failed before vLLM startup because all visible torch_npu allocations failed)'
             )
-            lines.append(skip_note)
-            comment_lines.append(skip_note)
+            lines.append(failure_note)
+            comment_lines.append(failure_note)
           if raw_result.is_file():
             payload = json.loads(raw_result.read_text(encoding='utf-8'))
             metric_lines = [

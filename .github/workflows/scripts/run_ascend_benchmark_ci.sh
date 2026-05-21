@@ -14,6 +14,8 @@ SUBMISSION_DIR=${SUBMISSION_DIR:-$SUBMISSIONS_ROOT/$RUN_ID}
 AGGREGATE_OUTPUT_DIR=${AGGREGATE_OUTPUT_DIR:-$RESULT_ROOT/leaderboard-data}
 SERVER_LOG=${SERVER_LOG:-$RESULT_ROOT/server.log}
 RUNNER_PREFLIGHT_FAILURE_FILE=${RUNNER_PREFLIGHT_FAILURE_FILE:-$RESULT_ROOT/runner_preflight_failure.txt}
+DIAGNOSTICS_DIR=${DIAGNOSTICS_DIR:-$RESULT_ROOT/diagnostics}
+NODE_ENV_FAILURE_FILE=${NODE_ENV_FAILURE_FILE:-$RESULT_ROOT/node_env_failure.txt}
 BENCH_SCENARIO=${BENCH_SCENARIO:-random-online}
 BENCH_DATASET_PATH=${BENCH_DATASET_PATH:-}
 BENCH_CONSTRAINTS_FILE=${BENCH_CONSTRAINTS_FILE:-}
@@ -59,6 +61,146 @@ server_pid=""
 server_group_pid=""
 marker_pid_file=""
 marker_pgid_file=""
+selected_device=""
+
+NODE_ENV_RETRY_EXIT_CODE=86
+
+is_node_env_failure_text() {
+  local text=${1:-}
+  printf '%s\n' "$text" | grep -Eq "drvRet=87|drvRetCode=87|ErrCode=507899|error code is 507899|rtGetDeviceCount|Can't get ascend_hal device count|driver error:internal error|Resource_Busy\(EL0005\)|The resources are busy"
+}
+
+mark_node_env_failure() {
+  local reason=${1:-unknown}
+  printf '%s\n' "$reason" > "$NODE_ENV_FAILURE_FILE"
+}
+
+collect_ascend_diagnostics() {
+  local phase=${1:-unknown}
+  local phase_dir="$DIAGNOSTICS_DIR/$phase"
+  mkdir -p "$phase_dir"
+
+  {
+    echo "timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "phase=$phase"
+    echo "run_id=$RUN_ID"
+    echo "python_bin=$PYTHON_BIN"
+    echo "ascend_home_path=${ASCEND_HOME_PATH:-<unset>}"
+    echo "ascend_rt_visible_devices=${ASCEND_RT_VISIBLE_DEVICES:-<unset>}"
+    echo "ld_library_path=${LD_LIBRARY_PATH:-<unset>}"
+  } >"$phase_dir/context.txt"
+
+  env | sort >"$phase_dir/env.txt" 2>/dev/null || true
+
+  if command -v npu-smi >/dev/null 2>&1; then
+    npu-smi info >"$phase_dir/npu-smi-info.txt" 2>&1 || true
+    npu-smi info -m >"$phase_dir/npu-smi-map.txt" 2>&1 || true
+  fi
+
+  "$PYTHON_BIN" --version >"$phase_dir/python-version.txt" 2>&1 || true
+  "$PYTHON_BIN" -m pip show torch torch-npu >"$phase_dir/pip-torch-stack.txt" 2>&1 || true
+
+  "$PYTHON_BIN" - <<'PY' >"$phase_dir/torch-stack.json" 2>&1 || true
+import json
+
+payload = {
+    "torch_version": None,
+    "torch_npu_module": None,
+    "torch_npu_import_ok": False,
+    "torch_npu_cann_version": None,
+    "npu_available": None,
+    "device_count": None,
+    "error": None,
+}
+
+try:
+    import torch
+    payload["torch_version"] = getattr(torch, "__version__", None)
+    import torch_npu
+    payload["torch_npu_import_ok"] = True
+    payload["torch_npu_module"] = getattr(torch_npu, "__file__", None)
+    try:
+        from torch_npu import version as torch_npu_version
+        payload["torch_npu_cann_version"] = getattr(torch_npu_version, "cann", None)
+    except Exception:
+        payload["torch_npu_cann_version"] = None
+    try:
+        payload["npu_available"] = bool(torch.npu.is_available())
+        payload["device_count"] = int(torch.npu.device_count())
+    except Exception as exc:
+        payload["error"] = repr(exc)
+except Exception as exc:
+    payload["error"] = repr(exc)
+
+print(json.dumps(payload, ensure_ascii=True, indent=2))
+PY
+
+  if command -v hust-ascend-manager >/dev/null 2>&1; then
+    hust-ascend-manager runtime check --repo "$VLLM_HUST_REPO" --python "$PYTHON_BIN" --require-npu --json >"$phase_dir/runtime-check.json" 2>&1 || true
+    hust-ascend-manager doctor --json >"$phase_dir/doctor.json" 2>&1 || true
+  elif command -v hust_ascend_manager_run >/dev/null 2>&1; then
+    hust_ascend_manager_run runtime check --repo "$VLLM_HUST_REPO" --python "$PYTHON_BIN" --require-npu --json >"$phase_dir/runtime-check.json" 2>&1 || true
+    hust_ascend_manager_run doctor --json >"$phase_dir/doctor.json" 2>&1 || true
+  fi
+
+  if [[ -f "$RUNNER_PREFLIGHT_FAILURE_FILE" ]]; then
+    cp "$RUNNER_PREFLIGHT_FAILURE_FILE" "$phase_dir/runner-preflight-failure.txt" || true
+  fi
+  if [[ -f "$SERVER_LOG" ]]; then
+    cp "$SERVER_LOG" "$phase_dir/server.log" || true
+    tail -n 300 "$SERVER_LOG" >"$phase_dir/server.tail.log" || true
+  fi
+}
+
+enforce_single_runtime_source() {
+  "$PYTHON_BIN" - <<'PY'
+import os
+import pathlib
+import site
+import sys
+
+import torch
+import torch_npu
+
+torch_npu_file = pathlib.Path(torch_npu.__file__).resolve()
+site_roots = [pathlib.Path(p).resolve() for p in site.getsitepackages() if p]
+user_site = site.getusersitepackages()
+if user_site:
+    site_roots.append(pathlib.Path(user_site).resolve())
+
+if not any(root in torch_npu_file.parents for root in site_roots):
+    raise RuntimeError(
+        f"torch_npu module path is outside active site-packages: {torch_npu_file}"
+    )
+
+ascend_home = os.environ.get("ASCEND_HOME_PATH")
+if not ascend_home:
+    raise RuntimeError("ASCEND_HOME_PATH is not set")
+ascend_home_path = pathlib.Path(ascend_home).resolve()
+if not ascend_home_path.exists():
+    raise RuntimeError(f"ASCEND_HOME_PATH does not exist: {ascend_home_path}")
+
+required_lib = ascend_home_path / "lib64" / "libascendcl.so"
+if not required_lib.exists():
+    raise RuntimeError(
+        f"ASCEND_HOME_PATH does not contain libascendcl.so: {required_lib}"
+    )
+
+ld_library_path = os.environ.get("LD_LIBRARY_PATH", "")
+if str(ascend_home_path / "lib64") not in ld_library_path:
+    raise RuntimeError(
+        "LD_LIBRARY_PATH does not include ASCEND_HOME_PATH/lib64"
+    )
+
+device_count = int(torch.npu.device_count())
+if device_count <= 0:
+    raise RuntimeError("torch.npu.device_count() returned 0 during runtime-source check")
+
+print("runtime_source_check=ok")
+print(f"torch_npu_module={torch_npu_file}")
+print(f"ascend_home_path={ascend_home_path}")
+PY
+}
 
 cleanup() {
   if [[ -n "$server_group_pid" ]] && kill -0 "$server_group_pid" 2>/dev/null; then
@@ -96,14 +238,40 @@ if importlib.util.find_spec("torch_npu") is None:
 
 import torch_npu  # noqa: F401
 
-device = os.environ.get("VLLM_ASCEND_TORCH_PREFLIGHT_DEVICE", "npu:0")
-print(f"preflight device={device}")
+preferred_device = os.environ.get("VLLM_ASCEND_TORCH_PREFLIGHT_DEVICE", "npu:0")
+preferred_index = 0
+if ":" in preferred_device:
+  try:
+    preferred_index = int(preferred_device.rsplit(":", 1)[1])
+  except ValueError:
+    preferred_index = 0
+
+device_count = int(torch.npu.device_count())
+if device_count <= 0:
+  raise RuntimeError("torch.npu.device_count() returned 0")
+
+candidate_devices = [
+  f"npu:{(preferred_index + offset) % device_count}"
+  for offset in range(device_count)
+]
+
 print("torch_npu import ok=True")
-if not torch.npu.is_available():
-    raise RuntimeError("torch.npu.is_available() returned False")
-torch.npu.set_device(device)
-_ = torch.zeros(1, device=device)
-print("torch.zeros preflight ok")
+for device in candidate_devices:
+  print(f"preflight device={device}")
+  try:
+    torch.npu.set_device(device)
+    _ = torch.zeros(1, device=device)
+  except Exception as exc:  # noqa: BLE001
+    print(f"preflight failed on {device}: {exc}", file=sys.stderr)
+    continue
+
+  print(f"selected_device={device}")
+  print("torch.zeros preflight ok")
+  break
+else:
+  raise RuntimeError(
+    "torch.npu basic allocation failed on every visible device"
+  )
 PY
 }
 
@@ -115,6 +283,12 @@ ensure_runner_npu_ready() {
 
   while [[ "$attempt" -le "$max_attempts" ]]; do
     if preflight_output=$(run_runner_npu_preflight_once 2>&1); then
+      selected_device=$(printf '%s\n' "$preflight_output" | awk -F= '/^selected_device=/{print $2; exit}')
+      if [[ -n "$selected_device" ]]; then
+        export ASCEND_RT_VISIBLE_DEVICES="${selected_device#npu:}"
+        echo "Selected Ascend device: $selected_device"
+        echo "ASCEND_RT_VISIBLE_DEVICES=$ASCEND_RT_VISIBLE_DEVICES"
+      fi
       rm -f "$RUNNER_PREFLIGHT_FAILURE_FILE"
       return 0
     fi
@@ -129,12 +303,15 @@ ensure_runner_npu_ready() {
     attempt=$((attempt + 1))
   done
 
-  echo "Self-hosted runner NPU runtime is unhealthy before vLLM startup." >&2
-  if [[ "${GITHUB_EVENT_NAME:-}" == "pull_request" ]]; then
-    echo "Skipping benchmark for this PR run because the failure is below vLLM and the runner cannot allocate a basic torch_npu tensor." >&2
-    return 2
+  collect_ascend_diagnostics "preflight-failure"
+  if is_node_env_failure_text "$preflight_output"; then
+    mark_node_env_failure "runner preflight failed with Ascend driver/runtime node-level error"
+    echo "Detected Ascend node-level runtime failure (87/507899)." >&2
+    return "$NODE_ENV_RETRY_EXIT_CODE"
   fi
 
+  echo "Self-hosted runner NPU runtime is unhealthy before vLLM startup." >&2
+  echo "All visible Ascend devices failed the basic torch_npu allocation check." >&2
   return 1
 }
 
@@ -265,6 +442,13 @@ if [[ ! -f "$EFFECTIVE_CONSTRAINTS_FILE" ]]; then
   exit 2
 fi
 
+if ! enforce_single_runtime_source; then
+  collect_ascend_diagnostics "runtime-source-check-failure"
+  mark_node_env_failure "runtime source mismatch between torch_npu and toolkit"
+  echo "Ascend runtime source check failed." >&2
+  exit "$NODE_ENV_RETRY_EXIT_CODE"
+fi
+
 if ! ensure_runner_npu_ready; then
   status=$?
   if [[ "$status" -eq 2 ]]; then
@@ -283,12 +467,22 @@ for attempt in $(seq 1 120); do
   if ! kill -0 "$server_pid" 2>/dev/null; then
     echo "vLLM server exited before becoming ready"
     cat "$SERVER_LOG"
+    collect_ascend_diagnostics "server-exit-before-ready"
+    if is_node_env_failure_text "$(cat "$SERVER_LOG" 2>/dev/null || true)"; then
+      mark_node_env_failure "vllm server exited with Ascend node-level runtime error before ready"
+      exit "$NODE_ENV_RETRY_EXIT_CODE"
+    fi
     exit 1
   fi
 
   if [[ "$attempt" -eq 120 ]]; then
     echo "Timed out waiting for vLLM server to become ready"
     cat "$SERVER_LOG"
+    collect_ascend_diagnostics "server-ready-timeout"
+    if is_node_env_failure_text "$(cat "$SERVER_LOG" 2>/dev/null || true)"; then
+      mark_node_env_failure "vllm server readiness timeout with Ascend node-level runtime errors"
+      exit "$NODE_ENV_RETRY_EXIT_CODE"
+    fi
     exit 1
   fi
 
@@ -303,6 +497,14 @@ done
   --save-result \
   --result-dir "$RESULT_ROOT" \
   --result-filename "$(basename "$RAW_RESULT_FILE")"
+
+if [[ ! -f "$RAW_RESULT_FILE" ]]; then
+  collect_ascend_diagnostics "benchmark-result-missing"
+  if [[ -f "$SERVER_LOG" ]] && is_node_env_failure_text "$(cat "$SERVER_LOG" 2>/dev/null || true)"; then
+    mark_node_env_failure "benchmark failed due to Ascend node-level runtime errors"
+    exit "$NODE_ENV_RETRY_EXIT_CODE"
+  fi
+fi
 
 CORE_VERSION=$("$PYTHON_BIN" - <<'PY'
 import vllm
