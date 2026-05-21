@@ -1315,7 +1315,7 @@ def test_dflash_acceptance_rates(dflash_config):
     expected_acceptance_lengths = {
         "mt-bench": 4.24,
         "humaneval": 6.50,
-        "gsm8k": 6.54 * 0.95,  # runs with a subset of prompts so extra wide tol here
+        "gsm8k": 6.54 * 0.975,  # runs with a subset of prompts so extra wide tol here
     }
 
     tokenizer = spec_llm.get_tokenizer()
@@ -1347,7 +1347,10 @@ def test_dflash_acceptance_rates(dflash_config):
             acceptance_lengths.append(acceptance_len)
 
         mean_acceptance_length = sum(acceptance_lengths) / len(acceptance_lengths)
-        expected_len = expected_len * 0.9
+        # Fairly tight tolerance of 95% against the paper's figures,
+        # watching for regressions. Can be relaxed if test is flaky but be sure to
+        # check for genuine issues such as #40727.
+        expected_len = expected_len * 0.95
         print(
             f"DFlash acceptance_len for {dataset_name}: {mean_acceptance_length:.2f}"
             f" (expected at least {expected_len:.2f})"

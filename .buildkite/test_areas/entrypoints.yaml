@@ -88,6 +88,7 @@ steps:
       - image-build-amd
 
 - label: Entrypoints Integration (API Server 2)
+  device: h200_35gb
   key: entrypoints-integration-api-server-2
   timeout_in_minutes: 130
   working_dir: "/vllm-workspace/tests"
@@ -108,6 +109,7 @@ steps:
       - image-build-amd
 
 - label: Entrypoints Integration (Speech to Text)
+  device: h200_35gb
   key: entrypoints-integration-speech_to_text
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/tests"

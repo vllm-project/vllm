@@ -200,6 +200,7 @@ from tqdm import tqdm
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import (
     CacheConfig,
     ModelConfig,
@@ -1036,6 +1037,7 @@ direct_register_custom_op(
 )
 
 
+@eager_break_during_capture
 @maybe_transfer_kv_layer
 def unified_mla_attention_with_output(
     q: torch.Tensor,
