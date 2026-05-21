@@ -2582,6 +2582,121 @@ def rocm_sparse_attn_decode(
         rope_head_dim,
         "rocm_sparse_attn_decode",
     )
+
+    if _ON_GFX950:
+        _rocm_sparse_attn_decode_hip(
+            q=q,
+            kv_cache=kv_cache,
+            swa_k_cache=swa_k_cache,
+            swa_only=swa_only,
+            topk_indices=topk_indices,
+            topk_lens=topk_lens,
+            swa_indices=swa_indices,
+            swa_lens=swa_lens,
+            swa_ragged_indices=swa_ragged_indices,
+            swa_ragged_indptr=swa_ragged_indptr,
+            topk_ragged_indices=topk_ragged_indices,
+            topk_ragged_indptr=topk_ragged_indptr,
+            attn_sink=attn_sink,
+            scale=scale,
+            nope_head_dim=nope_head_dim,
+            rope_head_dim=rope_head_dim,
+            output=output,
+        )
+    else:
+        _rocm_sparse_attn_decode_triton_path(
+            q=q,
+            kv_cache=kv_cache,
+            swa_k_cache=swa_k_cache,
+            swa_only=swa_only,
+            topk_indices=topk_indices,
+            topk_lens=topk_lens,
+            swa_indices=swa_indices,
+            swa_lens=swa_lens,
+            swa_ragged_indices=swa_ragged_indices,
+            swa_ragged_indptr=swa_ragged_indptr,
+            topk_ragged_indices=topk_ragged_indices,
+            topk_ragged_indptr=topk_ragged_indptr,
+            attn_sink=attn_sink,
+            scale=scale,
+            nope_head_dim=nope_head_dim,
+            rope_head_dim=rope_head_dim,
+            output=output,
+        )
+
+
+def _rocm_sparse_attn_decode_triton_path(
+    q,
+    kv_cache,
+    swa_k_cache,
+    swa_only,
+    topk_indices,
+    topk_lens,
+    swa_indices,
+    swa_lens,
+    swa_ragged_indices,
+    swa_ragged_indptr,
+    topk_ragged_indices,
+    topk_ragged_indptr,
+    attn_sink,
+    scale,
+    nope_head_dim,
+    rope_head_dim,
+    output,
+):
+    main_indices = swa_indices.reshape(swa_indices.shape[0], -1)
+
+    extra_cache = None
+    extra_indices = None
+    if not swa_only:
+        assert kv_cache is not None
+        assert topk_indices is not None or (
+            topk_ragged_indices is not None and topk_ragged_indptr is not None
+        )
+        assert kv_cache.dtype == torch.uint8
+        extra_cache = kv_cache
+        if topk_indices is not None:
+            extra_indices = topk_indices.reshape(topk_indices.shape[0], -1)
+
+    attn_out = _rocm_sparse_attn_decode_triton(
+        q=q,
+        main_cache=swa_k_cache,
+        main_indices=main_indices,
+        scale=scale,
+        attn_sink=None if attn_sink is None else attn_sink[: q.shape[1]],
+        nope_head_dim=nope_head_dim,
+        rope_head_dim=rope_head_dim,
+        extra_cache=extra_cache,
+        extra_indices=extra_indices,
+        main_lengths=swa_lens,
+        extra_lengths=topk_lens,
+        main_ragged_indices=swa_ragged_indices,
+        main_ragged_indptr=swa_ragged_indptr,
+        extra_ragged_indices=topk_ragged_indices,
+        extra_ragged_indptr=topk_ragged_indptr,
+    )
+    output.copy_(attn_out.to(output.dtype))
+
+
+def _rocm_sparse_attn_decode_hip(
+    q,
+    kv_cache,
+    swa_k_cache,
+    swa_only,
+    topk_indices,
+    topk_lens,
+    swa_indices,
+    swa_lens,
+    swa_ragged_indices,
+    swa_ragged_indptr,
+    topk_ragged_indices,
+    topk_ragged_indptr,
+    attn_sink,
+    scale,
+    nope_head_dim,
+    rope_head_dim,
+    output,
+):
     assert nope_head_dim == 448
     assert rope_head_dim == 64
 
@@ -2590,7 +2705,7 @@ def rocm_sparse_attn_decode(
         lengths = (
             swa_lens
             if swa_lens is not None
-            else ((main_indices_dense >= 0).sum(dim=-1, dtype=torch.int32))
+            else (main_indices_dense >= 0).sum(dim=-1, dtype=torch.int32)
         )
         main_ragged_indices, main_ragged_indptr = build_ragged_indices_from_dense(
             main_indices_dense,
@@ -2615,7 +2730,7 @@ def rocm_sparse_attn_decode(
             lengths = (
                 topk_lens
                 if topk_lens is not None
-                else ((ex_dense >= 0).sum(dim=-1, dtype=torch.int32))
+                else (ex_dense >= 0).sum(dim=-1, dtype=torch.int32)
             )
             extra_ragged_indices, extra_ragged_indptr = build_ragged_indices_from_dense(
                 ex_dense,
