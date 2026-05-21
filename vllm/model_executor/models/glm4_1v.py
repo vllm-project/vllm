@@ -754,11 +754,29 @@ class Glm4vVisionTransformer(nn.Module):
         all_embeds = []
 
         for t, h, w in grid_thw:
+            # Use the same coordinate generation logic as rot_pos_emb
+            # to ensure consistent positional embedding interpolation
+            h_coords = torch.arange(h).unsqueeze(1).expand(-1, w)
+            w_coords = torch.arange(w).unsqueeze(0).expand(h, -1)
             h_coords = (
-                torch.arange(h, device=device).unsqueeze(1).expand(h, w).reshape(-1)
+                h_coords.reshape(
+                    h // self.spatial_merge_size,
+                    self.spatial_merge_size,
+                    w // self.spatial_merge_size,
+                    self.spatial_merge_size,
+                )
+                .permute(0, 2, 1, 3)
+                .flatten()
             )
             w_coords = (
-                torch.arange(w, device=device).unsqueeze(0).expand(h, w).reshape(-1)
+                w_coords.reshape(
+                    h // self.spatial_merge_size,
+                    self.spatial_merge_size,
+                    w // self.spatial_merge_size,
+                    self.spatial_merge_size,
+                )
+                .permute(0, 2, 1, 3)
+                .flatten()
             )
 
             lengths = [h * w]
