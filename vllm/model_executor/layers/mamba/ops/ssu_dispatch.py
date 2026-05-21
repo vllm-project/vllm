@@ -77,6 +77,7 @@ def _copy_checkpointing_slots_kernel(
     src_indices,
     dst_indices,
     slot_size: tl.constexpr,
+    slot_stride: tl.constexpr,
     pad_slot_id: tl.constexpr,
     BLOCK: tl.constexpr,
 ) -> None:
@@ -86,8 +87,8 @@ def _copy_checkpointing_slots_kernel(
     src = tl.load(src_indices + slot)
     dst = tl.load(dst_indices + slot)
     valid = (src != pad_slot_id) & (dst != pad_slot_id) & (src != dst)
-    values = tl.load(tensor + src * slot_size + offsets, mask=mask & valid)
-    tl.store(tensor + dst * slot_size + offsets, values, mask=mask & valid)
+    values = tl.load(tensor + src * slot_stride + offsets, mask=mask & valid)
+    tl.store(tensor + dst * slot_stride + offsets, values, mask=mask & valid)
 
 
 class MambaSSUBackend(ABC):
@@ -306,88 +307,104 @@ class FlashInferSSUBackend(MambaSSUBackend):
                     kernel_state_indices,
                     ckpt_cu_seqlens,
                     max_seqlen,
+                    old_x.size(1),
                 )
             )
             kernel_max_seqlen = (
                 ckpt_max_seqlen if ckpt_cu_seqlens is not None else None
             )
-            if ckpt_cu_seqlens is None and kernel_state_indices.numel() > 1:
-                for start in range(kernel_state_indices.numel()):
-                    end = start + 1
-                    chunk_rand_seed = (
-                        torch.randint(
-                            0,
-                            2**32,
-                            (1,),
-                            dtype=torch.int64,
-                            device=state.device,
-                        )
-                        if self._mamba_config.enable_stochastic_rounding
-                        else None
-                    )
-                    chunk_indices = kernel_state_indices[start:end]
+            n_groups = old_B.size(-2)
+            heads_per_group = old_x.size(2) // n_groups
+            use_grouped_checkpointing = (
+                ckpt_cu_seqlens is not None
+                and n_groups > 1
+                and old_x.size(2) % n_groups == 0
+            )
+            if use_grouped_checkpointing:
+                # Slice varlen decode by Mamba group to avoid sparse stale
+                # output lanes in the large all-head FlashInfer specialization.
+                for group_idx in range(n_groups):
+                    head_start = group_idx * heads_per_group
+                    head_end = head_start + heads_per_group
+                    head_slice = slice(head_start, head_end)
+                    group_slice = slice(group_idx, group_idx + 1)
+
+                    state_group = state[:, head_slice].contiguous()
+                    old_x_group = old_x[:, :, head_slice].contiguous()
+                    old_B_group = old_B[:, :, :, group_slice, :].contiguous()
+                    old_dt_group = old_dt[:, :, head_slice, :].contiguous()
+                    old_cumAdt_group = old_cumAdt[
+                        :, :, head_slice, :
+                    ].contiguous()
+                    out_group = torch.empty_like(x_ckpt[:, :, head_slice, :])
+
                     self._checkpointing_kernel(
-                        state,
-                        old_x,
-                        old_B,
-                        old_dt,
-                        old_cumAdt,
+                        state_group,
+                        old_x_group,
+                        old_B_group,
+                        old_dt_group,
+                        old_cumAdt_group,
                         cache_buf_idx,
                         prev_num_accepted_tokens,
-                        x_ckpt[start:end],
-                        dt_ckpt[start:end],
-                        A,
-                        B_ckpt[start:end],
-                        C_ckpt[start:end],
-                        out_ckpt[start:end],
-                        D=D,
-                        z=z_ckpt[start:end] if z_ckpt is not None else None,
-                        dt_bias=dt_bias,
+                        x_ckpt[:, :, head_slice, :].contiguous(),
+                        dt_ckpt[:, :, head_slice, :],
+                        A[head_slice],
+                        B_ckpt[:, :, group_slice, :].contiguous(),
+                        C_ckpt[:, :, group_slice, :].contiguous(),
+                        out_group,
+                        D=D[head_slice] if D is not None else None,
+                        z=(
+                            z_ckpt[:, :, head_slice, :].contiguous()
+                            if z_ckpt is not None
+                            else None
+                        ),
+                        dt_bias=(
+                            dt_bias[head_slice]
+                            if dt_bias is not None
+                            else None
+                        ),
                         dt_softplus=dt_softplus,
-                        state_batch_indices=chunk_indices,
+                        state_batch_indices=kernel_state_indices,
                         pad_slot_id=null_block_id,
-                        rand_seed=chunk_rand_seed,
+                        rand_seed=rand_seed,
                         philox_rounds=self._mamba_config.stochastic_rounding_philox_rounds
                         or 10,
-                        cu_seqlens=None,
-                        max_seqlen=None,
+                        cu_seqlens=ckpt_cu_seqlens,
+                        max_seqlen=kernel_max_seqlen,
                     )
-                    self._update_checkpointing_trackers(
-                        cache_buf_idx,
-                        prev_num_accepted_tokens,
-                        chunk_indices,
-                        None,
-                        ckpt_max_seqlen,
-                        old_x.size(1),
-                        null_block_id,
-                    )
-                return
-            self._checkpointing_kernel(
-                state,
-                old_x,
-                old_B,
-                old_dt,
-                old_cumAdt,
-                cache_buf_idx,
-                prev_num_accepted_tokens,
-                x_ckpt,
-                dt_ckpt,
-                A,
-                B_ckpt,
-                C_ckpt,
-                out_ckpt,
-                D=D,
-                z=z_ckpt,
-                dt_bias=dt_bias,
-                dt_softplus=dt_softplus,
-                state_batch_indices=kernel_state_indices,
-                pad_slot_id=null_block_id,
-                rand_seed=rand_seed,
-                philox_rounds=self._mamba_config.stochastic_rounding_philox_rounds
-                or 10,
-                cu_seqlens=ckpt_cu_seqlens,
-                max_seqlen=kernel_max_seqlen,
-            )
+                    state[:, head_slice].copy_(state_group)
+                    old_x[:, :, head_slice].copy_(old_x_group)
+                    old_B[:, :, :, group_slice, :].copy_(old_B_group)
+                    old_dt[:, :, head_slice, :].copy_(old_dt_group)
+                    old_cumAdt[:, :, head_slice, :].copy_(old_cumAdt_group)
+                    out_ckpt[:, :, head_slice, :].copy_(out_group)
+            else:
+                self._checkpointing_kernel(
+                    state,
+                    old_x,
+                    old_B,
+                    old_dt,
+                    old_cumAdt,
+                    cache_buf_idx,
+                    prev_num_accepted_tokens,
+                    x_ckpt,
+                    dt_ckpt,
+                    A,
+                    B_ckpt,
+                    C_ckpt,
+                    out_ckpt,
+                    D=D,
+                    z=z_ckpt,
+                    dt_bias=dt_bias,
+                    dt_softplus=dt_softplus,
+                    state_batch_indices=kernel_state_indices,
+                    pad_slot_id=null_block_id,
+                    rand_seed=rand_seed,
+                    philox_rounds=self._mamba_config.stochastic_rounding_philox_rounds
+                    or 10,
+                    cu_seqlens=ckpt_cu_seqlens,
+                    max_seqlen=kernel_max_seqlen,
+                )
             self._update_checkpointing_trackers(
                 cache_buf_idx,
                 prev_num_accepted_tokens,
@@ -421,6 +438,7 @@ class FlashInferSSUBackend(MambaSSUBackend):
             out=out,
             rand_seed=rand_seed,
             philox_rounds=self._mamba_config.stochastic_rounding_philox_rounds or 10,
+            algorithm="simple",
         )
         if (
             num_accepted_tokens is None
@@ -478,8 +496,12 @@ class FlashInferSSUBackend(MambaSSUBackend):
         max_seqlen: int | None,
     ) -> torch.Tensor | None:
         del max_seqlen
-        if cu_seqlens is not None and x.shape[0] == state_batch_indices.numel():
-            return None
+        if cu_seqlens is None and x.shape[0] == state_batch_indices.numel():
+            return torch.arange(
+                state_batch_indices.numel() + 1,
+                dtype=torch.int32,
+                device=state_batch_indices.device,
+            )
         return cu_seqlens
 
     @staticmethod
@@ -493,6 +515,7 @@ class FlashInferSSUBackend(MambaSSUBackend):
         state_batch_indices: torch.Tensor,
         cu_seqlens: torch.Tensor | None,
         max_seqlen: int | None,
+        max_window: int,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
@@ -504,6 +527,11 @@ class FlashInferSSUBackend(MambaSSUBackend):
     ]:
         assert out is not None
         if cu_seqlens is not None:
+            x = x.contiguous()
+            B = B.contiguous()
+            C = C.contiguous()
+            if z is not None:
+                z = z.contiguous()
             return (
                 x.unsqueeze(0),
                 dt.unsqueeze(0),
@@ -511,7 +539,7 @@ class FlashInferSSUBackend(MambaSSUBackend):
                 C.unsqueeze(0),
                 z.unsqueeze(0) if z is not None else None,
                 out.unsqueeze(0),
-                max_seqlen or 1,
+                min(max_seqlen or max_window, max_window),
             )
         batch = state_batch_indices.numel()
         tokens_per_batch = x.shape[0] // batch
@@ -578,10 +606,26 @@ class FlashInferSSUBackend(MambaSSUBackend):
         dst_indices: torch.Tensor,
         pad_slot_id: int,
     ) -> None:
+        valid = (
+            (src_indices != pad_slot_id)
+            & (dst_indices != pad_slot_id)
+            & (src_indices != dst_indices)
+        )
+        if not bool(torch.any(valid)):
+            return
+        src_valid = src_indices[valid].to(torch.long)
+        dst_valid = dst_indices[valid].to(torch.long)
+        if bool(torch.isin(dst_valid, src_valid).any()):
+            for tensor in tensors:
+                source = tensor.index_select(0, src_valid).clone()
+                tensor.index_copy_(0, dst_valid, source)
+            return
+
         block = 256
         n_slots = src_indices.numel()
         for tensor in tensors:
             slot_size = tensor[0].numel()
+            slot_stride = tensor.stride(0)
             _copy_checkpointing_slots_kernel[
                 (n_slots, triton.cdiv(slot_size, block))
             ](
@@ -589,6 +633,7 @@ class FlashInferSSUBackend(MambaSSUBackend):
                 src_indices,
                 dst_indices,
                 slot_size,
+                slot_stride,
                 pad_slot_id,
                 BLOCK=block,
             )

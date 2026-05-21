@@ -5,7 +5,12 @@
 import torch
 from torch import nn
 
-from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
+from vllm.config import (
+    CUDAGraphMode,
+    CacheConfig,
+    ModelConfig,
+    get_current_vllm_config,
+)
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -477,6 +482,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
         )
 
         self._ssd_kernels_warmed_up = False
+        self._warmup_ssd_kernels_in_profile = True
 
         # - get hidden_states, B and C after depthwise convolution.
         self.split_hidden_states_B_C_fn = lambda hidden_states_B_C: torch.split(
@@ -491,6 +497,9 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
         vllm_config = get_current_vllm_config()
         compilation_config = vllm_config.compilation_config
+        self._warmup_ssd_kernels_in_profile = (
+            compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+        )
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
@@ -735,23 +744,27 @@ class MambaMixer2(MambaBase, PluggableLayer):
             old_cumAdt = self.kv_cache[5]
             cache_buf_idx = self.kv_cache[6]
             prev_num_accepted_tokens = self.kv_cache[7]
+            old_x_src = old_x
+            old_B_src = old_B
+            old_dt_src = old_dt
+            old_cumAdt_src = old_cumAdt
             cache_buf_idx_src = cache_buf_idx
             prev_num_accepted_tokens_src = prev_num_accepted_tokens
             if not old_x.is_contiguous():
                 old_x = self._get_contiguous_checkpointing_buffer(
-                    old_x, "_checkpointing_old_x"
+                    old_x, "_checkpointing_old_x", copy_source=True
                 )
             if not old_B.is_contiguous():
                 old_B = self._get_contiguous_checkpointing_buffer(
-                    old_B, "_checkpointing_old_B"
+                    old_B, "_checkpointing_old_B", copy_source=True
                 )
             if not old_dt.is_contiguous():
                 old_dt = self._get_contiguous_checkpointing_buffer(
-                    old_dt, "_checkpointing_old_dt"
+                    old_dt, "_checkpointing_old_dt", copy_source=True
                 )
             if not old_cumAdt.is_contiguous():
                 old_cumAdt = self._get_contiguous_checkpointing_buffer(
-                    old_cumAdt, "_checkpointing_old_cumAdt"
+                    old_cumAdt, "_checkpointing_old_cumAdt", copy_source=True
                 )
             if not cache_buf_idx.is_contiguous():
                 cache_buf_idx = self._get_contiguous_checkpointing_buffer(
@@ -791,7 +804,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
         if attn_metadata is None:
             # V1 profile run -- warm up SSD kernels so that autotuning
             # completes before SSM cache allocation.
-            self._warmup_ssd_kernels(projected_states)
+            if self._warmup_ssd_kernels_in_profile:
+                self._warmup_ssd_kernels(projected_states)
             hidden_states_B_C = (
                 hidden_states_B_C.transpose(0, 1).clone().transpose(0, 1)
             ).contiguous()
@@ -1125,6 +1139,14 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 cache_buf_idx=cache_buf_idx,
                 prev_num_accepted_tokens=prev_num_accepted_tokens,
             )
+        if old_x is not old_x_src:
+            old_x_src.copy_(old_x)
+        if old_B is not old_B_src:
+            old_B_src.copy_(old_B)
+        if old_dt is not old_dt_src:
+            old_dt_src.copy_(old_dt)
+        if old_cumAdt is not old_cumAdt_src:
+            old_cumAdt_src.copy_(old_cumAdt)
         if cache_buf_idx is not cache_buf_idx_src:
             cache_buf_idx_src.copy_(cache_buf_idx)
         if prev_num_accepted_tokens is not prev_num_accepted_tokens_src:
@@ -1165,7 +1187,11 @@ def mamba_mixer2(
     layer_name = _resolve_layer_name(layer_name)
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
-    self.conv_ssm_forward(projected_states=projected_states, output=output)
+    ssm_output = self.conv_ssm_forward(
+        projected_states=projected_states, output=output
+    )
+    if ssm_output is not None:
+        output.copy_(ssm_output)
 
 
 def mamba_mixer2_fake(

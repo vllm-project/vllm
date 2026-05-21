@@ -836,6 +836,7 @@ class NemotronHForCausalLM(
             state_size=hf_config.ssm_state_size,
             conv_kernel=hf_config.conv_kernel,
             num_spec=vllm_config.num_speculative_tokens,
+            checkpoint_interval=vllm_config.mamba_config.checkpoint_interval,
         )
 
     @classmethod
