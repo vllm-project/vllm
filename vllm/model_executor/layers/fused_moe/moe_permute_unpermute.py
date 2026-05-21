@@ -85,6 +85,7 @@ class MoEPermuteScratch:
         if self.hidden_size is not None:
             assert n_hidden == self.hidden_size
             assert hidden_states.dtype == self.hidden_dtype
+            assert self.permuted_hidden_states is not None
 
     def token_expert_indices_view(self, n_token: int) -> torch.Tensor:
         return self.token_expert_indices[: n_token * self.topk].view(n_token, self.topk)
@@ -148,12 +149,10 @@ def moe_permute(
             )
         else:
             scratch.validate(hidden_states, topk_ids)
-            assert (
-                scratch.hidden_size is not None
-                and scratch.permuted_hidden_states is not None
-            )
             hidden_numel = permuted_row_size * n_hidden
-            permuted_hidden_states = scratch.permuted_hidden_states[:hidden_numel].view(
+            scratch_hidden_states = scratch.permuted_hidden_states
+            assert scratch_hidden_states is not None
+            permuted_hidden_states = scratch_hidden_states[:hidden_numel].view(
                 permuted_row_size, n_hidden
             )
     assert permuted_hidden_states.size() == (permuted_row_size, n_hidden), (
