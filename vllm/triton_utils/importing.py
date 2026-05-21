@@ -93,6 +93,10 @@ class TritonPlaceholder(types.ModuleType):
 
 
 class TritonLanguagePlaceholder(types.ModuleType):
+    # Mirrors every `triton.language.X` referenced at module-import time in
+    # vllm/ (outside @triton.jit). Names left absent must keep raising
+    # AttributeError so `hasattr(triton.language, ...)` capability probes
+    # (e.g. `gather`, `make_tensor_descriptor`) return False on CPU-only builds.
     def __init__(self):
         super().__init__("triton.language")
         self.constexpr = None
@@ -101,5 +105,6 @@ class TritonLanguagePlaceholder(types.ModuleType):
         self.int32 = None
         self.tensor = None
         self.exp = None
+        self.exp2 = None
         self.log = None
         self.log2 = None
