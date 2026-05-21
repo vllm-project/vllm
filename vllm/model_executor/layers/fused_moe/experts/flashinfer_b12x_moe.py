@@ -84,11 +84,36 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
             "fp4" if quant_config.a1_gscale is not None else "bf16"
         )
 
+        self.source_format = self._detect_source_format()
+
         # Lazily created on first apply() call.
         self._wrapper: object | None = None
         # Populated in process_weights_after_loading.
         self.w1_sf_mma: torch.Tensor | None = None
         self.w2_sf_mma: torch.Tensor | None = None
+
+    @staticmethod
+    def _detect_source_format() -> str:
+        """Walk the constructor's call stack to find the parent quant-method
+        class and map it to a FlashInfer ``source_format`` string.
+
+        ``make_nvfp4_moe_kernel`` instantiates the experts class from the
+        parent method's ``create_weights`` (compressed-tensors) or equivalent
+        (modelopt) — so the parent ``self`` is reachable in an outer frame.
+        Fall back to "modelopt" if no recognized parent is found.
+        """
+        import inspect
+
+        for frame_info in inspect.stack():
+            parent = frame_info.frame.f_locals.get("self")
+            if parent is None:
+                continue
+            cls_name = type(parent).__name__
+            if "CompressedTensors" in cls_name:
+                return "compressed_tensors"
+            if "ModelOpt" in cls_name:
+                return "modelopt"
+        return "modelopt"
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Normalise block scales to absorb the per-expert weight global scale
@@ -239,6 +264,7 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
             num_local_experts=self.num_local_experts,
             activation=self._activation_str,
             activation_precision=self.activation_precision,
+            source_format=self.source_format,
         )
 
     def apply(
