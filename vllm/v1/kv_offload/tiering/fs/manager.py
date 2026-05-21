@@ -57,7 +57,6 @@ class FileSystemTierManager(SecondaryTierManager):
         primary_kv_view: memoryview,
         tier_type: str,
         root_dir: str,
-        cpu_blocks_per_file: int = 1,
         n_read_threads: int = 16,
         n_write_threads: int = 16,
     ):
@@ -68,7 +67,6 @@ class FileSystemTierManager(SecondaryTierManager):
             primary_kv_view: Memoryview of the primary tier's CPU KV cache.
             tier_type: Tier type identifier, set by SecondaryTierFactory.
             root_dir: Root directory for block files.
-            cpu_blocks_per_file: Number of cpu blocks per file.
             n_read_threads: Number of read-priority I/O threads.
             n_write_threads: Number of write-priority I/O threads.
         """
@@ -84,7 +82,7 @@ class FileSystemTierManager(SecondaryTierManager):
         self.file_mapper = FileMapper.from_offloading_spec(
             root_dir=root_dir,
             offloading_spec=offloading_spec,
-            gpu_blocks_per_file=cpu_blocks_per_file * offloading_spec.block_size_factor,
+            gpu_blocks_per_file=offloading_spec.block_size_factor,
         )
 
         # Write config file

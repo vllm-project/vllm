@@ -30,6 +30,7 @@ _MOCK_KV_CACHE_CONFIG.kv_cache_groups = []
 _MOCK_OFFLOADING_SPEC = MagicMock(spec=OffloadingSpec)
 _MOCK_OFFLOADING_SPEC.vllm_config = _MOCK_VLLM_CONFIG
 _MOCK_OFFLOADING_SPEC.kv_cache_config = _MOCK_KV_CACHE_CONFIG
+_MOCK_OFFLOADING_SPEC.block_size_factor = 1
 
 
 # ---------------------------------------------------------------------------
@@ -62,11 +63,12 @@ def make_mapper_from_offloading_spec(**kwargs) -> FileMapper:
     mock_offloading_spec = MagicMock(spec=OffloadingSpec)
     mock_offloading_spec.vllm_config = mock_vllm_config
     mock_offloading_spec.kv_cache_config = mock_kv_cache_config
+    mock_offloading_spec.block_size_factor = kwargs.get("block_size_factor", 1)
 
     return FileMapper.from_offloading_spec(
         root_dir=kwargs.get("root_dir", "/tmp/cache"),
         offloading_spec=mock_offloading_spec,
-        gpu_blocks_per_file=kwargs.get("gpu_blocks_per_file", 1),
+        gpu_blocks_per_file=mock_offloading_spec.block_size_factor,
     )
 
 
@@ -103,13 +105,12 @@ def test_get_run_config_fields():
         model_name="my-model",
         dtype="bfloat16",
         tp_size=2,
-        gpu_blocks_per_file=8,
     )
     cfg = fm.get_run_config()
     assert cfg == {
         "model_name": "my-model",
         "hash_block_size": 16,
-        "gpu_blocks_per_file": 8,
+        "gpu_blocks_per_file": 1,
         "tp_size": 2,
         "pp_size": 1,
         "pcp_size": 1,

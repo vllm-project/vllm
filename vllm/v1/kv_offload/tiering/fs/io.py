@@ -3,11 +3,23 @@
 
 import logging
 import os
+import random
+import threading
 
 logger = logging.getLogger(__name__)
 
 # O_DIRECT is Linux-specific and not available on macOS
 O_DIRECT = getattr(os, "O_DIRECT", 0)
+
+# Thread-local storage for unique temporary file suffixes
+_thread_local = threading.local()
+
+
+def _get_tmp_suffix() -> str:
+    """Generate a thread-local unique suffix for temporary files."""
+    if not hasattr(_thread_local, "tmp_suffix"):
+        _thread_local.tmp_suffix = f"_{random.randint(0, 2**63 - 1)}.tmp"
+    return _thread_local.tmp_suffix
 
 
 def _ensure_dirs(path: str) -> None:
@@ -28,7 +40,7 @@ def store_block(
     if os.path.exists(dest_path):
         return
 
-    tmp_path = dest_path + ".tmp"
+    tmp_path = dest_path + _get_tmp_suffix()
     # Ensure parent directories exist
     _ensure_dirs(dest_path)
 
@@ -38,7 +50,7 @@ def store_block(
     try:
         fd = os.open(
             tmp_path,
-            os.O_CREAT | os.O_WRONLY | os.O_TRUNC | O_DIRECT,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_TRUNC | O_DIRECT,
             0o644,
         )
         try:

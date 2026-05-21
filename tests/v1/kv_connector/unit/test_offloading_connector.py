@@ -30,7 +30,7 @@ elif current_platform.is_rocm():
 #   After page-size unification the mamba and attention groups have
 #   different block sizes.
 MODEL_PARAMS: list[tuple[str, str | None, int | None, bool]] = [
-    ("meta-llama/Llama-3.2-1B-Instruct", backend, 48, False)
+    ("TroyDoesAI/Llama-3.1-8B-Instruct", backend, 48, False)
     for backend in _ATTN_BACKENDS
 ]
 # HMA / Mamba models are only tested on CUDA (not ROCm).
@@ -327,7 +327,7 @@ def test_tiering_offloading() -> None:
     )
 
     llm = LLM(
-        model="meta-llama/Llama-3.2-1B-Instruct",
+        model="TroyDoesAI/Llama-3.1-8B-Instruct",
         max_model_len=4096,
         gpu_memory_utilization=0.5,
         kv_events_config=kv_events_config,
@@ -373,7 +373,7 @@ def test_fs_tiering_offloading(tmp_path) -> None:
     )
 
     llm = LLM(
-        model="meta-llama/Llama-3.2-1B-Instruct",
+        model="TroyDoesAI/Llama-3.1-8B-Instruct",
         max_model_len=512,
         gpu_memory_utilization=0.5,
         kv_events_config=kv_events_config,
