@@ -1293,6 +1293,59 @@ class TestCpuTopkTopp:
             if finite_in > 0:
                 assert kept > 0, f"Row {i}: no tokens kept"
 
+    @pytest.mark.skipif(
+        not _HAS_CPU_TOPP_OP, reason="CPU top-p/top-k kernel unavailable"
+    )
+    @pytest.mark.parametrize("vocab_size", [17, 128, 1024, 32000])
+    @pytest.mark.parametrize("batch_size", [1, 8, 32])
+    def test_fused_equals_sequential(self, batch_size: int, vocab_size: int):
+        """Fused top_k_p_row must produce the same output as sequential
+        top_k_row + top_p_row on non-tied rows (no boundary duplicates).
+
+        Uses torch.allclose with rtol=1e-5, atol=1e-7 because FP64
+        reduction order may differ between the two code paths.
+        """
+        from vllm._custom_ops import (
+            cpu_topk_sampling as _cpu_topk_sampling_op,
+        )
+        from vllm._custom_ops import (
+            cpu_topk_topp_sampling as _cpu_topk_topp_sampling_op,
+        )
+        from vllm._custom_ops import (
+            cpu_topp_sampling as _cpu_topp_sampling_op,
+        )
+
+        # Random non-tied logits; avoid uniform rows so boundary-tie is unlikely.
+        logits = torch.randn(
+            batch_size, vocab_size, generator=self.generator, dtype=torch.float32
+        )
+        k = torch.randint(
+            1,
+            min(50, vocab_size - 1),
+            (batch_size,),
+            generator=self.generator,
+            dtype=torch.int32,
+        )
+        p = (
+            torch.rand(batch_size, generator=self.generator, dtype=torch.float32) * 0.7
+            + 0.2
+        )  # [0.2, 0.9]
+
+        # Sequential path: apply top-k then top-p independently.
+        seq = logits.clone()
+        _cpu_topk_sampling_op(seq, k)
+        _cpu_topp_sampling_op(seq, p)
+
+        # Fused path.
+        fused = logits.clone()
+        _cpu_topk_topp_sampling_op(fused, k, p)
+
+        assert torch.allclose(fused, seq, rtol=1e-5, atol=1e-7), (
+            f"Fused and sequential outputs differ at "
+            f"batch_size={batch_size}, vocab_size={vocab_size}.\n"
+            f"Max abs diff: {(fused - seq).abs().max().item():.2e}"
+        )
+
 
 # =============================================================================
 # CPU robustness tests (mirrors TestFlashInferTopkToppRobustness)
