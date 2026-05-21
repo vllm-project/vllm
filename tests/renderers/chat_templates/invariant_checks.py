@@ -166,60 +166,69 @@ TOOL_CALL_W_REASONING_CASES = {
 PARALLEL_TOOL_CALL_CASES = {
     "parallel_tool_call": (
         USER,
+        Assistant(content=MISSING, tool_uses=[(AUTO, MISSING), (AUTO, MISSING)]),
+    ),
+    "parallel_tool_call_w_content": (
+        USER,
         Assistant(tool_uses=[(AUTO, MISSING), (AUTO, MISSING)]),
     ),
     "parallel_tool_call_partial_response_1": (
         USER,
-        Assistant(tool_uses=[AUTO, (AUTO, MISSING)]),
+        Assistant(content=MISSING, tool_uses=[AUTO, (AUTO, MISSING)]),
     ),
     "parallel_tool_call_partial_response_2": (
         USER,
-        Assistant(tool_uses=[(AUTO, MISSING), AUTO]),
+        Assistant(content=MISSING, tool_uses=[(AUTO, MISSING), AUTO]),
     ),
     "parallel_tool_call_w_response": (
         USER,
-        Assistant(tool_uses=[AUTO, AUTO]),
+        Assistant(content=MISSING, tool_uses=[AUTO, AUTO]),
     ),
     "parallel_tool_call_user_interrupt": (
         USER,
-        Assistant(tool_uses=[AUTO, AUTO]),
+        Assistant(content=MISSING, tool_uses=[AUTO, AUTO]),
         USER,
     ),
     "parallel_tool_turn": (
         USER,
-        Assistant(tool_uses=[AUTO, AUTO]),
+        Assistant(content=MISSING, tool_uses=[AUTO, AUTO]),
         Assistant(),
     ),
     "parallel_tool_turn_user_follow_up": (
         USER,
-        Assistant(tool_uses=[AUTO, AUTO]),
+        Assistant(content=MISSING, tool_uses=[AUTO, AUTO]),
         Assistant(),
         USER,
     ),
     "multi_parallel_tool_call": (
+        USER,
+        Assistant(content=MISSING, tool_uses=[AUTO, AUTO]),
+        Assistant(content=MISSING, tool_uses=[(AUTO, MISSING), (AUTO, MISSING)]),
+    ),
+    "multi_parallel_tool_call_w_content": (
         USER,
         Assistant(tool_uses=[AUTO, AUTO]),
         Assistant(tool_uses=[(AUTO, MISSING), (AUTO, MISSING)]),
     ),
     "multi_parallel_tool_call_partial_response_1": (
         USER,
-        Assistant(tool_uses=[AUTO, AUTO]),
-        Assistant(tool_uses=[AUTO, (AUTO, MISSING)]),
+        Assistant(content=MISSING, tool_uses=[AUTO, AUTO]),
+        Assistant(content=MISSING, tool_uses=[AUTO, (AUTO, MISSING)]),
     ),
     "multi_parallel_tool_call_partial_response_2": (
         USER,
-        Assistant(tool_uses=[AUTO, AUTO]),
-        Assistant(tool_uses=[(AUTO, MISSING), AUTO]),
+        Assistant(content=MISSING, tool_uses=[AUTO, AUTO]),
+        Assistant(content=MISSING, tool_uses=[(AUTO, MISSING), AUTO]),
     ),
     "multi_parallel_tool_call_w_response": (
         USER,
-        Assistant(tool_uses=[AUTO, AUTO]),
-        Assistant(tool_uses=[AUTO, AUTO]),
+        Assistant(content=MISSING, tool_uses=[AUTO, AUTO]),
+        Assistant(content=MISSING, tool_uses=[AUTO, AUTO]),
     ),
     "multi_parallel_tool_turn": (
         USER,
-        Assistant(tool_uses=[AUTO, AUTO]),
-        Assistant(tool_uses=[AUTO, AUTO]),
+        Assistant(content=MISSING, tool_uses=[AUTO, AUTO]),
+        Assistant(content=MISSING, tool_uses=[AUTO, AUTO]),
         Assistant(),
     ),
 }
@@ -227,66 +236,83 @@ PARALLEL_TOOL_CALL_CASES = {
 PARALLEL_TOOL_CALL_W_REASONING_CASES = {
     "parallel_tool_call_w_reasoning": (
         USER,
+        Assistant(
+            reasoning=AUTO,
+            content=MISSING,
+            tool_uses=[(AUTO, MISSING), (AUTO, MISSING)],
+        ),
+    ),
+    "parallel_tool_call_w_reasoning_w_content": (
+        USER,
         Assistant(reasoning=AUTO, tool_uses=[(AUTO, MISSING), (AUTO, MISSING)]),
     ),
     "parallel_tool_call_w_reasoning_partial_response_1": (
         USER,
-        Assistant(reasoning=AUTO, tool_uses=[AUTO, (AUTO, MISSING)]),
+        Assistant(reasoning=AUTO, content=MISSING, tool_uses=[AUTO, (AUTO, MISSING)]),
     ),
     "parallel_tool_call_w_reasoning_partial_response_2": (
         USER,
-        Assistant(reasoning=AUTO, tool_uses=[(AUTO, MISSING), AUTO]),
+        Assistant(reasoning=AUTO, content=MISSING, tool_uses=[(AUTO, MISSING), AUTO]),
     ),
     "parallel_tool_call_w_reasoning_w_response": (
         USER,
-        Assistant(reasoning=AUTO, tool_uses=[AUTO, AUTO]),
+        Assistant(reasoning=AUTO, content=MISSING, tool_uses=[AUTO, AUTO]),
     ),
     "parallel_tool_call_w_reasoning_user_interrupt": (
         USER,
-        Assistant(reasoning=AUTO, tool_uses=[AUTO, AUTO]),
+        Assistant(reasoning=AUTO, content=MISSING, tool_uses=[AUTO, AUTO]),
         USER,
     ),
     "parallel_tool_turn_w_reasoning": (
         USER,
-        Assistant(reasoning=AUTO, tool_uses=[AUTO, AUTO]),
+        Assistant(reasoning=AUTO, content=MISSING, tool_uses=[AUTO, AUTO]),
         Assistant(reasoning=AUTO),
     ),
     "parallel_tool_turn_w_reasoning_user_follow_up": (
         USER,
-        Assistant(reasoning=AUTO, tool_uses=[AUTO, AUTO]),
+        Assistant(reasoning=AUTO, content=MISSING, tool_uses=[AUTO, AUTO]),
         Assistant(reasoning=AUTO),
         USER,
     ),
     "multi_parallel_tool_call_w_reasoning": (
+        USER,
+        Assistant(reasoning=AUTO, content=MISSING, tool_uses=[AUTO, AUTO]),
+        Assistant(
+            reasoning=AUTO,
+            content=MISSING,
+            tool_uses=[(AUTO, MISSING), (AUTO, MISSING)],
+        ),
+    ),
+    "multi_parallel_tool_call_w_reasoning_w_content": (
         USER,
         Assistant(reasoning=AUTO, tool_uses=[AUTO, AUTO]),
         Assistant(reasoning=AUTO, tool_uses=[(AUTO, MISSING), (AUTO, MISSING)]),
     ),
     "multi_parallel_tool_call_w_reasoning_partial_response_1": (
         USER,
-        Assistant(reasoning=AUTO, tool_uses=[AUTO, AUTO]),
-        Assistant(reasoning=AUTO, tool_uses=[AUTO, (AUTO, MISSING)]),
+        Assistant(reasoning=AUTO, content=MISSING, tool_uses=[AUTO, AUTO]),
+        Assistant(reasoning=AUTO, content=MISSING, tool_uses=[AUTO, (AUTO, MISSING)]),
     ),
     "multi_parallel_tool_call_w_reasoning_partial_response_2": (
         USER,
-        Assistant(reasoning=AUTO, tool_uses=[AUTO, AUTO]),
-        Assistant(reasoning=AUTO, tool_uses=[(AUTO, MISSING), AUTO]),
+        Assistant(reasoning=AUTO, content=MISSING, tool_uses=[AUTO, AUTO]),
+        Assistant(reasoning=AUTO, content=MISSING, tool_uses=[(AUTO, MISSING), AUTO]),
     ),
     "multi_parallel_tool_call_w_reasoning_w_response": (
         USER,
-        Assistant(reasoning=AUTO, tool_uses=[AUTO, AUTO]),
-        Assistant(reasoning=AUTO, tool_uses=[AUTO, AUTO]),
+        Assistant(reasoning=AUTO, content=MISSING, tool_uses=[AUTO, AUTO]),
+        Assistant(reasoning=AUTO, content=MISSING, tool_uses=[AUTO, AUTO]),
     ),
     "multi_parallel_tool_turn_w_reasoning": (
         USER,
-        Assistant(reasoning=AUTO, tool_uses=[AUTO, AUTO]),
-        Assistant(reasoning=AUTO, tool_uses=[AUTO, AUTO]),
+        Assistant(reasoning=AUTO, content=MISSING, tool_uses=[AUTO, AUTO]),
+        Assistant(reasoning=AUTO, content=MISSING, tool_uses=[AUTO, AUTO]),
         Assistant(reasoning=AUTO),
     ),
     "multi_parallel_tool_turn_w_reasoning_user_follow_up": (
         USER,
-        Assistant(reasoning=AUTO, tool_uses=[AUTO, AUTO]),
-        Assistant(reasoning=AUTO, tool_uses=[AUTO, AUTO]),
+        Assistant(reasoning=AUTO, content=MISSING, tool_uses=[AUTO, AUTO]),
+        Assistant(reasoning=AUTO, content=MISSING, tool_uses=[AUTO, AUTO]),
         Assistant(reasoning=AUTO),
         USER,
     ),
