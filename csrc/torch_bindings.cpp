@@ -274,6 +274,44 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   //  conditionally compiled so impl in source file
 #endif
+
+#ifdef USE_ROCM
+  // CDNA INT8 / INT4 per-token-head paged-prefill attention (MI300).
+  ops.def(
+      "paged_prefill_attn_cdna_int8("
+      "    Tensor! out, Tensor q, Tensor k_chunk, Tensor v_chunk,"
+      "    Tensor k_cache, Tensor v_cache,"
+      "    Tensor k_scale_cache, Tensor v_scale_cache,"
+      "    Tensor block_table, Tensor cu_seqlens_q, Tensor seq_lens,"
+      "    int max_query_len, float sm_scale, bool causal) -> ()");
+  ops.impl("paged_prefill_attn_cdna_int8", torch::kCUDA,
+           &paged_prefill_attn_cdna_int8);
+
+  ops.def(
+      "paged_prefill_attn_cdna_int4("
+      "    Tensor! out, Tensor q, Tensor k_chunk, Tensor v_chunk,"
+      "    Tensor k_cache, Tensor v_cache,"
+      "    Tensor k_scale_cache, Tensor v_scale_cache,"
+      "    Tensor block_table, Tensor cu_seqlens_q, Tensor seq_lens,"
+      "    int max_query_len, float sm_scale, bool causal) -> ()");
+  ops.impl("paged_prefill_attn_cdna_int4", torch::kCUDA,
+           &paged_prefill_attn_cdna_int4);
+
+  // CDNA INT8 / INT4 per-token-head paged decode (split-KV).
+  ops.def(
+      "pth_decode_int8_cdna("
+      "    Tensor! out, Tensor q, Tensor k_cache, Tensor v_cache,"
+      "    Tensor k_scale_cache, Tensor v_scale_cache,"
+      "    Tensor block_table, Tensor seq_lens, float sm_scale) -> ()");
+  ops.impl("pth_decode_int8_cdna", torch::kCUDA, &pth_decode_int8_cdna);
+
+  ops.def(
+      "pth_decode_int4_cdna("
+      "    Tensor! out, Tensor q, Tensor k_cache, Tensor v_cache,"
+      "    Tensor k_scale_cache, Tensor v_scale_cache,"
+      "    Tensor block_table, Tensor seq_lens, float sm_scale) -> ()");
+  ops.impl("pth_decode_int4_cdna", torch::kCUDA, &pth_decode_int4_cdna);
+#endif
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
@@ -341,6 +379,18 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "convert_fp8(Tensor! dst_cache, Tensor src_cache, float scale, "
       "str kv_cache_dtype) -> ()");
   cache_ops.impl("convert_fp8", torch::kCUDA, &convert_fp8);
+
+#ifdef USE_ROCM
+  // CDNA INT4 per-token-head cache writer.
+  cache_ops.def(
+      "reshape_and_cache_int4_cdna("
+      "    Tensor key, Tensor value,"
+      "    Tensor! key_cache, Tensor! value_cache,"
+      "    Tensor! k_scale_cache, Tensor! v_scale_cache,"
+      "    Tensor slot_mapping) -> ()");
+  cache_ops.impl("reshape_and_cache_int4_cdna", torch::kCUDA,
+                 &reshape_and_cache_int4_cdna);
+#endif
 
   // Gather cache blocks from src_cache to dst, dequantizing from
   // src_cache's dtype to dst's dtype if necessary.

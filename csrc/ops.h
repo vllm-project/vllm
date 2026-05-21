@@ -64,6 +64,46 @@ void merge_attn_states(
 // rms_norm and fused_add_rms_norm declarations also exist in
 // csrc/libtorch_stable/ops.h (torch::stable ABI for CUDA). They remain here
 // because the CPU build still uses these torch::Tensor declarations.
+
+#ifdef USE_ROCM
+// CDNA INT8 / INT4 per-token-head paged-prefill attention (MI300, gfx942/950).
+void paged_prefill_attn_cdna_int8(
+    torch::Tensor& out, torch::Tensor q, torch::Tensor k_chunk,
+    torch::Tensor v_chunk, torch::Tensor k_cache, torch::Tensor v_cache,
+    torch::Tensor k_scale_cache, torch::Tensor v_scale_cache,
+    torch::Tensor block_table, torch::Tensor cu_seqlens_q,
+    torch::Tensor seq_lens, int64_t max_query_len, double sm_scale,
+    bool causal);
+
+void paged_prefill_attn_cdna_int4(
+    torch::Tensor& out, torch::Tensor q, torch::Tensor k_chunk,
+    torch::Tensor v_chunk, torch::Tensor k_cache, torch::Tensor v_cache,
+    torch::Tensor k_scale_cache, torch::Tensor v_scale_cache,
+    torch::Tensor block_table, torch::Tensor cu_seqlens_q,
+    torch::Tensor seq_lens, int64_t max_query_len, double sm_scale,
+    bool causal);
+
+// CDNA INT8 / INT4 per-token-head paged decode (split-KV).
+void pth_decode_int8_cdna(
+    torch::Tensor& out, torch::Tensor q, torch::Tensor k_cache,
+    torch::Tensor v_cache, torch::Tensor k_scale_cache,
+    torch::Tensor v_scale_cache, torch::Tensor block_table,
+    torch::Tensor seq_lens, double sm_scale);
+
+void pth_decode_int4_cdna(
+    torch::Tensor& out, torch::Tensor q, torch::Tensor k_cache,
+    torch::Tensor v_cache, torch::Tensor k_scale_cache,
+    torch::Tensor v_scale_cache, torch::Tensor block_table,
+    torch::Tensor seq_lens, double sm_scale);
+
+// Pack fp16/bf16 K/V into the INT4 per-token-head paged cache, writing the
+// steganographed (scale, zp) fp32 alongside.
+void reshape_and_cache_int4_cdna(
+    torch::Tensor key, torch::Tensor value, torch::Tensor key_cache,
+    torch::Tensor value_cache, torch::Tensor k_scale_cache,
+    torch::Tensor v_scale_cache, torch::Tensor slot_mapping);
+#endif
+
 void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
               double epsilon);
 

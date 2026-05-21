@@ -596,6 +596,25 @@ if (VLLM_GPU_LANG STREQUAL "HIP")
   list(APPEND VLLM_EXT_SRC
     "csrc/custom_quickreduce.cu"
   )
+
+  # CDNA INT8 / INT4 per-token-head KV-cache attention kernels (MI300:
+  # gfx942 / gfx950, optionally gfx90a). The .cu files compile to no-op
+  # stubs on unsupported archs via internal __HIPCC__ + arch macros, so it
+  # is safe to add them unconditionally to the HIP source list; the build
+  # only includes effective code when a supported arch is selected.
+  set(VLLM_CDNA_ATTN_KERNELS
+    "csrc/attention/paged_prefill_attn_cdna_v2_int8.cu"
+    "csrc/attention/paged_prefill_attn_cdna_v2_int4.cu"
+    "csrc/attention/pth_decode_int8_cdna.cu"
+    "csrc/attention/pth_decode_int4_cdna.cu"
+    "csrc/attention/reshape_cache_int4_cdna.cu"
+  )
+  if ("gfx942" IN_LIST VLLM_GPU_ARCHES OR
+      "gfx950" IN_LIST VLLM_GPU_ARCHES OR
+      "gfx90a" IN_LIST VLLM_GPU_ARCHES)
+    list(APPEND VLLM_EXT_SRC ${VLLM_CDNA_ATTN_KERNELS})
+    message(STATUS "Enabling CDNA INT8/INT4 attention kernels")
+  endif()
 # if ROCM endif
 endif()
 
