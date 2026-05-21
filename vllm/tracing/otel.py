@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager, contextmanager
 from typing import Any
 
 from vllm.logger import init_logger
-from vllm.tracing.utils import TRACE_HEADERS, LoadingSpanAttributes
+from vllm.tracing.utils import TRACE_HEADERS, LoadingSpanAttributes, SpanAttributes
 
 logger = init_logger(__name__)
 
@@ -286,7 +286,11 @@ def init_otel_trace_provider(
     # Store the endpoint in environment so child processes can inherit it
     os.environ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] = otlp_traces_endpoint
 
-    resource = Resource.create()
+    attributes = {"service.name": "vllm"}
+    if extra_attributes is not None:
+        attributes.update(**extra_attributes)
+
+    resource = Resource.create(attributes=attributes)
     trace_provider = TracerProvider(resource=resource)
     span_exporter = get_span_exporter(otlp_traces_endpoint)
     trace_provider.add_span_processor(BatchSpanProcessor(span_exporter))
@@ -320,7 +324,11 @@ def maybe_start_span(tracer: Tracer | None, *args, **kwargs):
         start_time = time.time_ns()
         start_ts = time.monotonic_ns()
 
-        span = tracer.start_span(*args, start_time=start_time, **kwargs)
+        attributes = kwargs.pop("attributes", {})
+        attributes[SpanAttributes.GEN_AI_PROCESS_ID] = str(os.getpid())
+        span = tracer.start_span(
+            *args, start_time=start_time, attributes=attributes, **kwargs
+        )
         yield span
         end_ts = time.monotonic_ns()
         end_time = start_time - start_ts + end_ts
@@ -335,8 +343,8 @@ async def maybe_start_span_async(tracer: Tracer | None, *args, **kwargs):
         start_time = time.time_ns()
         start_ts = time.monotonic_ns()
 
-        attributes = kwargs.get("attributes", {})
-        attributes["vllm.process_id"] = str(os.getpid())
+        attributes = kwargs.pop("attributes", {})
+        attributes[SpanAttributes.GEN_AI_PROCESS_ID] = str(os.getpid())
         span = tracer.start_span(
             *args, start_time=start_time, attributes=attributes, **kwargs
         )

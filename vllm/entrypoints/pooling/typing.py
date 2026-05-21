@@ -94,6 +94,8 @@ class PoolingServeContext(Generic[PoolingRequestT]):
     preprocessing_finished: int = 0
     engine_call_finished: int = 0
     postprocessing_finished: int = 0
+    # request attributes
+    request_attributes: dict[str, str] = field(default_factory=dict)
 
     ## for Long Text Embedding with Chunked Processing
     original_engine_inputs: Sequence[EngineInput] | None = None

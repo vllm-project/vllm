@@ -97,9 +97,7 @@ class PoolingServingBase(ABC):
 
             self.propagator = TraceContextTextMapPropagator()
 
-            self.trace_provider = init_otel_trace_provider(
-                otlp_endpoint, extra_attributes={"service.name": "vllm"}
-            )
+            self.trace_provider = init_otel_trace_provider(otlp_endpoint)
             self.scope_request = "vllm.request"
             self.scope_endpoint = "vllm.entrypoint"
             self.scope_endpoint_attributes = {
@@ -117,6 +115,7 @@ class PoolingServingBase(ABC):
     async def maybe_tracing(
         self,
         ctx: PoolingServeContext,
+        io_processor: PoolingIOProcessor,
         raw_request: Request | None = None,
     ):
         raw_trace_headers = await self._get_trace_headers(raw_request)
@@ -136,9 +135,6 @@ class PoolingServingBase(ABC):
         )
         request_span_context = get_span_context(request_span)
 
-        trace_headers: Mapping[str, str] = {}
-        self.propagator.inject(trace_headers, context=request_span_context)
-
         ctx.trace_headers = raw_trace_headers
         ctx.entrypoint_tracer = entrypoint_tracer
         ctx.request_span_context = request_span_context
@@ -146,8 +142,12 @@ class PoolingServingBase(ABC):
         try:
             yield
 
-            request_span.set_attributes(
-                {
+            ctx.request_attributes.update(
+                **{
+                    SpanAttributes.GEN_AI_PROCESS_ID: str(os.getpid()),
+                    SpanAttributes.GEN_AI_REQUEST_ID: ctx.request_id,
+                    SpanAttributes.GEN_AI_POOLING_IO_PROCESSOR: io_processor.__class__.__name__,
+                    SpanAttributes.GEN_AI_POOLING_REQUEST_CLASS: ctx.request.__class__.__name__,
                     SpanAttributes.GEN_AI_LATENCY_PREPROCESSING: (
                         ctx.preprocessing_finished - ctx.arrival_time
                     )
@@ -163,6 +163,10 @@ class PoolingServingBase(ABC):
                 }
             )
 
+            self.update_request_attributes(ctx)
+
+            request_span.set_attributes(ctx.request_attributes)
+
         except Exception as e:
             request_span.set_status(get_status_error())
             request_span.record_exception(e)
@@ -171,6 +175,9 @@ class PoolingServingBase(ABC):
             end_st = time.monotonic_ns()
             end_time = ctx.time_offset + end_st
             request_span.end(end_time)
+
+    def update_request_attributes(self, ctx: PoolingServeContext):
+        return
 
     async def __call__(
         self,
@@ -191,7 +198,7 @@ class PoolingServingBase(ABC):
             ctx.arrival_time = arrival_time
             ctx.time_offset = time_offset
 
-        async with self.maybe_tracing(ctx, raw_request):
+        async with self.maybe_tracing(ctx, io_processor, raw_request):
             await self._preprocessing_async(io_processor, ctx)
 
             if self.is_tracing_enabled:
@@ -226,9 +233,27 @@ class PoolingServingBase(ABC):
             context=ctx.request_span_context,
             links=ctx.entrypoint_span_links,
         ) as span:
-            ctx.entrypoint_span_links = maybe_get_links(span)
+            if span is not None:
+                ctx.entrypoint_span_links = maybe_get_links(span)
 
             return io_processor.pre_process_online(ctx)
+
+    async def _engine_call(self, ctx):
+        async with maybe_start_span_async(
+            ctx.entrypoint_tracer,
+            self.span_entrypoint_engine_call,
+            context=ctx.request_span_context,
+            links=ctx.entrypoint_span_links,
+        ) as span:
+            if span is not None:
+                ctx.entrypoint_span_links = maybe_get_links(span)
+                span_context = get_span_context(span)
+                trace_headers: Mapping[str, str] = {}
+                self.propagator.inject(trace_headers, context=span_context)
+                ctx.trace_headers = trace_headers
+
+            await self._prepare_generators(ctx)
+            await self._collect_batch(ctx)
 
     @torch.inference_mode()
     def _postprocessing(
@@ -243,18 +268,6 @@ class PoolingServingBase(ABC):
             ctx.entrypoint_span_links = maybe_get_links(span)
             io_processor.post_process_online(ctx)
             return self._build_response(ctx)
-
-    async def _engine_call(self, ctx):
-        async with maybe_start_span_async(
-            ctx.entrypoint_tracer,
-            self.span_entrypoint_engine_call,
-            context=ctx.request_span_context,
-            links=ctx.entrypoint_span_links,
-        ) as span:
-            ctx.entrypoint_span_links = maybe_get_links(span)
-
-            await self._prepare_generators(ctx)
-            await self._collect_batch(ctx)
 
     async def _init_ctx(
         self,

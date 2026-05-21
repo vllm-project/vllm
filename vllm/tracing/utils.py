@@ -44,10 +44,17 @@ class SpanAttributes:
     GEN_AI_LATENCY_TIME_IN_MODEL_DECODE = "gen_ai.latency.time_in_model_decode"
     GEN_AI_LATENCY_TIME_IN_MODEL_INFERENCE = "gen_ai.latency.time_in_model_inference"
 
-    # request attributes
+    # Pooling request attributes
+    GEN_AI_POOLING_IO_PROCESSOR = "gen_ai.pooling.io_processor"
+    GEN_AI_POOLING_REQUEST_CLASS = "gen_ai.pooling.request.class"
     GEN_AI_LATENCY_PREPROCESSING = "gen_ai.latency.preprocessing"
     GEN_AI_LATENCY_ENGINE_CALL = "gen_ai.latency.engine_call"
     GEN_AI_LATENCY_POSTPROCESSING = "gen_ai.latency.postprocessing"
+    GEN_AI_POOLING_EMBED_ENCODING_FORMAT = "gen_ai.pooling.embed.encoding.format"
+    GEN_AI_POOLING_EMBED_DTYPE = "gen_ai.pooling.embed.dtype"
+    GEN_AI_POOLING_EMBED_ENDIANNESS = "gen_ai.pooling.embed.endianness"
+
+    GEN_AI_PROCESS_ID = "vllm.process_id"
 
 
 class LoadingSpanAttributes:

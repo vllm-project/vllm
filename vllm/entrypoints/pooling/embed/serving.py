@@ -7,6 +7,7 @@ from typing_extensions import assert_never
 
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
+from vllm.tracing import SpanAttributes
 from vllm.utils.serial_utils import EmbedDType, Endianness
 
 from ..base.serving import PoolingServing
@@ -27,6 +28,8 @@ from .protocol import (
     CohereEmbedRequest,
     CohereEmbedResponse,
     CohereMeta,
+    EmbeddingChatRequest,
+    EmbeddingCompletionRequest,
     EmbeddingRequest,
     EmbeddingResponse,
     EmbeddingResponseData,
@@ -52,6 +55,16 @@ class ServingEmbedding(PoolingServing):
 
     def init_io_processor(self, *args, **kwargs) -> EmbedIOProcessor:
         return EmbedIOProcessor(*args, **kwargs)
+
+    def update_request_attributes(self, ctx: PoolingServeContext):
+        if isinstance(ctx.request, (EmbeddingCompletionRequest, EmbeddingChatRequest)):
+            ctx.request_attributes.update(
+                **{
+                    SpanAttributes.GEN_AI_POOLING_EMBED_ENCODING_FORMAT: ctx.request.encoding_format,
+                    SpanAttributes.GEN_AI_POOLING_EMBED_DTYPE: ctx.request.embed_dtype,
+                    SpanAttributes.GEN_AI_POOLING_EMBED_ENDIANNESS: ctx.request.endianness,
+                }
+            )
 
     def _build_response(
         self,
