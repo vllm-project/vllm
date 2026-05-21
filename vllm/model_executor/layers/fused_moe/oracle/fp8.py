@@ -421,6 +421,7 @@ def select_fp8_moe_backend(
 
 def convert_to_fp8_moe_kernel_format(
     fp8_backend: Fp8MoeBackend,
+    # TODO(bnell): replace layer with weight_block_size
     layer: torch.nn.Module,
     w13: torch.Tensor,
     w2: torch.Tensor,

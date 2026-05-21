@@ -894,14 +894,25 @@ def fp8_w8a16_moe_quant_config(
     Construct a quant config for 16-bit float activations and fp8 weights.
     """
     group_shape = GroupShape(*block_shape) if block_shape is not None else None
+    fp8_dtype = current_platform.fp8_dtype()
     return FusedMoEQuantConfig(
         _a1=FusedMoEQuantDesc(),
         _a2=FusedMoEQuantDesc(),
         _w1=FusedMoEQuantDesc(
-            current_platform.fp8_dtype(), group_shape, w1_scale, w1_bias, None
+            fp8_dtype,
+            group_shape,
+            w1_scale,
+            None,
+            None,
+            w1_bias,
         ),
         _w2=FusedMoEQuantDesc(
-            current_platform.fp8_dtype(), group_shape, w2_scale, w2_bias, None
+            fp8_dtype,
+            group_shape,
+            w2_scale,
+            None,
+            None,
+            w2_bias,
         ),
     )
 
@@ -922,8 +933,8 @@ def int8_w8a16_moe_quant_config(
     return FusedMoEQuantConfig(
         _a1=FusedMoEQuantDesc(shape=group_shape),
         _a2=FusedMoEQuantDesc(shape=group_shape),
-        _w1=FusedMoEQuantDesc(torch.int8, group_shape, w1_scale, w1_bias, w1_zp),
-        _w2=FusedMoEQuantDesc(torch.int8, group_shape, w2_scale, w2_bias, w2_zp),
+        _w1=FusedMoEQuantDesc(torch.int8, group_shape, w1_scale, None, w1_zp, w1_bias),
+        _w2=FusedMoEQuantDesc(torch.int8, group_shape, w2_scale, None, w2_zp, w2_bias),
     )
 
 
