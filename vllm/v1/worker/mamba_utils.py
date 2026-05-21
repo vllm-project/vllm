@@ -14,6 +14,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     get_temporal_copy_spec,
 )
 from vllm.triton_utils import tl, triton
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
@@ -776,15 +777,16 @@ def postprocess_mamba_align_gpu(
     assert ctx.num_draft_tokens_buf is not None
 
     if not ctx.is_initialized:
-        ctx.initialize_from_forward_context(
-            kv_cache_config,
-            forward_context,
-            mamba_state_copy_funcs,
-            [
-                input_batch.block_table[gid].get_device_tensor(num_reqs)
-                for gid in ctx.mamba_group_ids
-            ],
-        )
+        with gpu_sync_allowed():
+            ctx.initialize_from_forward_context(
+                kv_cache_config,
+                forward_context,
+                mamba_state_copy_funcs,
+                [
+                    input_batch.block_table[gid].get_device_tensor(num_reqs)
+                    for gid in ctx.mamba_group_ids
+                ],
+            )
 
     ctx.run_fused_postprocess(
         num_reqs=num_reqs,

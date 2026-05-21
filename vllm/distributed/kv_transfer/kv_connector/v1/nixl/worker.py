@@ -1570,14 +1570,16 @@ class NixlConnectorWorker:
 
         local_block_ids = meta.local_physical_block_ids
         # TODO (NickLucche) D2H<>H2D ops could benefit from coalescing io across groups
-        for group_block_ids in local_block_ids:
-            self.copy_blocks(
-                self.host_xfer_buffers,
-                self.device_kv_caches,
-                group_block_ids,
-                group_block_ids,
-                "h2d",
-            )
+        # The h2d block copies below are intentionally synchronous.
+        with gpu_sync_allowed():
+            for group_block_ids in local_block_ids:
+                self.copy_blocks(
+                    self.host_xfer_buffers,
+                    self.device_kv_caches,
+                    group_block_ids,
+                    group_block_ids,
+                    "h2d",
+                )
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "synced recved kv of request[%s] to device kv buffer,"
