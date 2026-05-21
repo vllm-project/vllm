@@ -255,7 +255,7 @@ def silu_mul_quant_fp8_packed_triton(
     if output_q is None:
         output_q = torch.empty((M, N_2), dtype=fp8_dtype, device=input.device)
 
-    output_scale_packed = torch.zeros(
+    output_scale_packed = torch.empty(
         (num_packed_groups, tma_aligned_M),
         dtype=torch.int32,
         device=input.device,
