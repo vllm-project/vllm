@@ -13,6 +13,7 @@ from tests.utils import requires_spawn_multiprocessing
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.sample.logits_processor import (
     LOGITSPROCS_GROUP,
     AdapterLogitsProcessor,
@@ -89,14 +90,13 @@ class DummyLogitsProcessor(LogitsProcessor):
         if not self.req_info:
             return logits
 
-        # Save target values before modification. Build on pinned CPU then
-        # non-blocking upload to avoid a synchronous H2D copy.
-        cols = torch.tensor(
-            list(self.req_info.values()), dtype=torch.long, pin_memory=True
-        ).to(logits.device, non_blocking=True)
-        rows = torch.tensor(
-            list(self.req_info.keys()), dtype=torch.long, pin_memory=True
-        ).to(logits.device, non_blocking=True)
+        # Save target values before modification.
+        cols = async_tensor_h2d(
+            list(self.req_info.values()), dtype=torch.long, device=logits.device
+        )
+        rows = async_tensor_h2d(
+            list(self.req_info.keys()), dtype=torch.long, device=logits.device
+        )
         values_to_keep = logits[rows, cols].clone()
 
         # Mask all but target tokens. Use an on-device fill tensor so the

@@ -18,6 +18,7 @@ from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFunc
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -71,14 +72,11 @@ def get_fake_sample_fn() -> SamplerOutput:
             first_token_id_index = num_computed_tokens + 1
         if spec_decode_metadata is None:
             return SamplerOutput(
-                # Build on pinned CPU + non_blocking H2D rather than
-                # `torch.tensor(..., device=DEVICE_TYPE)` which would force
-                # a synchronous copy and trip the sync check.
-                sampled_token_ids=torch.tensor(
+                sampled_token_ids=async_tensor_h2d(
                     [[prompt_token_ids[first_token_id_index]]],
-                    pin_memory=True,
                     dtype=torch.int32,
-                ).to(DEVICE_TYPE, non_blocking=True),
+                    device=DEVICE_TYPE,
+                ),
                 logprobs_tensors=None,
             )
         accepted_tokens = prompt_token_ids[
@@ -87,11 +85,11 @@ def get_fake_sample_fn() -> SamplerOutput:
         ]
         sampled_token_ids = accepted_tokens
         return SamplerOutput(
-            sampled_token_ids=torch.tensor(
+            sampled_token_ids=async_tensor_h2d(
                 [sampled_token_ids],
-                pin_memory=True,
                 dtype=torch.int32,
-            ).to(DEVICE_TYPE, non_blocking=True),
+                device=DEVICE_TYPE,
+            ),
             logprobs_tensors=None,
         )
 
@@ -129,30 +127,29 @@ def get_fake_propose_draft_token_ids_fn():
             ]
         ]
 
-        # Build on pinned CPU + non-blocking upload to avoid synchronous H2D.
-        next_token_ids = torch.tensor(
+        next_token_ids = async_tensor_h2d(
             prompt_token_ids[
                 first_token_id_index - 1 : first_token_id_index
                 - 1
                 + num_accepted_tokens
             ],
             dtype=torch.int32,
-            pin_memory=True,
-        ).to(DEVICE_TYPE, non_blocking=True)
+            device=DEVICE_TYPE,
+        )
 
-        valid_sampled_tokens_count = torch.tensor(
+        valid_sampled_tokens_count = async_tensor_h2d(
             [num_accepted_tokens],
             dtype=torch.int32,
-            pin_memory=True,
-        ).to(DEVICE_TYPE, non_blocking=True)
+            device=DEVICE_TYPE,
+        )
 
         self._copy_valid_sampled_token_count(next_token_ids, valid_sampled_tokens_count)
 
-        return torch.tensor(
+        return async_tensor_h2d(
             proposed_draft_token_ids,
             dtype=torch.int32,
-            pin_memory=True,
-        ).to(DEVICE_TYPE, non_blocking=True)
+            device=DEVICE_TYPE,
+        )
 
     return fake_propose_draft_token_ids_fn
 
