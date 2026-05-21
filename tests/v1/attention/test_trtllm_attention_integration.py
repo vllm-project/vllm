@@ -97,12 +97,12 @@ def _create_hnc_kv_cache(
     num_blocks,
     common_attn_metadata,
 ):
-    """Create and populate a KV cache with HNC-compatible strides.
+    """Create and populate a KV cache with interleaved K+V layout.
 
     The returned tensor has logical shape
-    (num_blocks, 2, block_size, num_kv_heads, head_size) but is physically
-    laid out as (num_blocks, 2, num_kv_heads, block_size, head_size) so that
-    ``kv_cache.permute(0, 1, 3, 2, 4)`` yields a contiguous HNC view.
+    ``(num_blocks, num_kv_heads, block_size, 2 * head_size)`` matching the
+    standardized ``[B, H, N, C]`` layout where C = 2 * head_size with K and
+    V concatenated along the last dimension.
     """
     seq_lens = common_attn_metadata.seq_lens.cpu()
     query_lens = (
@@ -113,26 +113,34 @@ def _create_hnc_kv_cache(
     slot_mapping = common_attn_metadata.slot_mapping
     batch_size = len(k_contexts)
 
-    # Build cache with K/V outermost for flat indexing, then convert to
-    # HNC format (same approach as test_attention_backends.py).
-    kv_cache_raw = torch.zeros(
-        2,
+    kv_cache = torch.zeros(
         num_blocks,
-        block_size,
         num_kv_heads,
-        head_size,
+        block_size,
+        2 * head_size,
         dtype=dtype,
         device=device,
     )
-    kv_cache_flat = kv_cache_raw.view(2, -1, num_kv_heads, head_size)
 
     start_block_idx = 1
     for i in range(batch_size):
         k_ctx, v_ctx = k_contexts[i], v_contexts[i]
-        start = start_block_idx * block_size
-        end = start + k_ctx.shape[0]
-        kv_cache_flat[0, start:end] = k_ctx
-        kv_cache_flat[1, start:end] = v_ctx
+        ctx_len = k_ctx.shape[0]
+        n_ctx_blocks = cdiv(ctx_len, block_size)
+        padded = n_ctx_blocks * block_size
+        k_blocked = (
+            torch.nn.functional.pad(k_ctx, (0, 0, 0, 0, 0, padded - ctx_len))
+            .reshape(n_ctx_blocks, block_size, num_kv_heads, head_size)
+            .transpose(1, 2)
+        )
+        v_blocked = (
+            torch.nn.functional.pad(v_ctx, (0, 0, 0, 0, 0, padded - ctx_len))
+            .reshape(n_ctx_blocks, block_size, num_kv_heads, head_size)
+            .transpose(1, 2)
+        )
+        blks = slice(start_block_idx, start_block_idx + n_ctx_blocks)
+        kv_cache[blks, :, :, :head_size] = k_blocked
+        kv_cache[blks, :, :, head_size:] = v_blocked
         start_block_idx += cdiv(int(seq_lens[i]), block_size)
 
     blocks_end = start_block_idx
@@ -141,7 +149,7 @@ def _create_hnc_kv_cache(
     perm = torch.randperm(blocks_end - 1) + 1
     inv_perm = torch.zeros(blocks_end, dtype=torch.long, device=device)
     inv_perm[1:] = torch.argsort(perm) + 1
-    kv_cache_raw[:, 1:blocks_end] = kv_cache_raw[:, perm]
+    kv_cache[1:blocks_end] = kv_cache[perm]
 
     # Build block table.
     start_block_idx = 1
@@ -164,9 +172,6 @@ def _create_hnc_kv_cache(
             i, block_indices
         ] * block_size + intra_block_offsets.to(device)
 
-    # Transpose to FlashInfer logical shape then make HNC-strided.
-    kv_cache = kv_cache_raw.transpose(0, 1)
-    kv_cache = kv_cache.transpose(2, 3).contiguous().transpose(2, 3)
     return kv_cache
 
 
@@ -182,42 +187,14 @@ def _create_nvfp4_hnd_kv_cache(
     common_attn_metadata,
     kv_scale_val,
 ):
-    """Create an nvfp4 KV cache by quantizing bf16 context via
-    reshape_and_cache_flash, using the same block-table layout as
-    _create_hnc_kv_cache.
+    """Create an nvfp4 KV cache with interleaved K+V layout.
 
-    The returned tensor is dtype ``uint8`` with shape
-    ``(num_blocks, 2, block_size, num_kv_heads, full_dim)`` in logical
-    (NHC) order, but physically permuted to HNC layout via stride order
-    ``(0, 1, 3, 2, 4)`` (i.e. ``num_kv_heads`` before ``block_size``).
-
-    The last dimension ``full_dim = head_size // 2 + head_size // 16``
-    packs two regions contiguously:
-      - **FP4 data** (``head_size // 2`` bytes): pairs of E2M1 values,
-        two per byte.
-      - **FP8 block scales** (``head_size // 16`` bytes): one E4M3
-        scale per 16-element block.
-
-    Dimension 1 indexes K (``[:, 0]``) and V (``[:, 1]``).
-
-    Args:
-        k_contexts: List of key context tensors, one per sequence.
-        v_contexts: List of value context tensors, one per sequence.
-        block_size: Number of tokens per cache block.
-        num_kv_heads: Number of key/value heads.
-        head_size: Head dimension (must be divisible by 16).
-        dtype: Source data type for the bf16 intermediate cache.
-        device: Target device.
-        num_blocks: Total number of blocks to allocate.
-        common_attn_metadata: Metadata containing block tables and
-            sequence lengths.
-        kv_scale_val: Scalar float used as both k_scale and v_scale
-            during quantization.
-
-    Returns:
-        ``torch.Tensor``: The nvfp4 kv_cache tensor (uint8, HNC-strided).
+    The returned tensor is dtype ``uint8`` with logical shape
+    ``(num_blocks, num_kv_heads, block_size, 2 * full_dim)`` matching the
+    standardized ``[B, H, N, C]`` layout where
+    ``full_dim = head_size // 2 + head_size // 16`` packs FP4 data and
+    FP8 block scales per head.
     """
-    # First create a bf16 HNC cache so block tables are populated.
     bf16_cache = _create_hnc_kv_cache(
         k_contexts,
         v_contexts,
@@ -230,18 +207,15 @@ def _create_nvfp4_hnd_kv_cache(
         common_attn_metadata,
     )
 
-    # Allocate nvfp4 cache: same shape but with full_dim (data + scale).
     full_dim = nvfp4_kv_cache_full_dim(head_size)
-    hnd_order = (0, 1, 3, 2, 4)
     nvfp4_cache = torch.zeros(
-        (num_blocks, 2, num_kv_heads, block_size, full_dim),
+        (num_blocks, num_kv_heads, block_size, 2 * full_dim),
         dtype=torch.uint8,
         device=device,
-    ).permute(*hnd_order)
+    )
+    k_cache = nvfp4_cache[:, :, :, :full_dim]
+    v_cache = nvfp4_cache[:, :, :, full_dim:]
 
-    # Flatten bf16 context into tokens and quantize via reshape_and_cache_flash.
-    # bf16_cache is (num_blocks, 2, block_size, num_kv_heads, head_size) logical
-    # with HNC physical strides.
     block_table = common_attn_metadata.block_table_tensor
     seq_lens = common_attn_metadata.seq_lens.cpu()
     query_lens = (
@@ -254,22 +228,29 @@ def _create_nvfp4_hnd_kv_cache(
         ctx_len = int(seq_lens[i]) - int(query_lens[i])
         if ctx_len == 0:
             continue
-        # Gather context tokens from the bf16 cache using block table.
         n_ctx_blocks = (ctx_len + block_size - 1) // block_size
         blocks = block_table[i, :n_ctx_blocks]
-        # bf16_cache[:, kv_idx] is (num_blocks, block_size, num_kv_heads, head_size)
-        k_ctx = bf16_cache[blocks, 0].reshape(-1, num_kv_heads, head_size)[:ctx_len]
-        v_ctx = bf16_cache[blocks, 1].reshape(-1, num_kv_heads, head_size)[:ctx_len]
-        # Build slot mapping for these context tokens.
+        # bf16_cache is (B, H, N, 2*head_size); extract K and V from last dim.
+        k_ctx = (
+            bf16_cache[blocks, :, :, :head_size]
+            .transpose(1, 2)
+            .reshape(-1, num_kv_heads, head_size)[:ctx_len]
+        )
+        v_ctx = (
+            bf16_cache[blocks, :, :, head_size:]
+            .transpose(1, 2)
+            .reshape(-1, num_kv_heads, head_size)[:ctx_len]
+        )
         token_offsets = torch.arange(ctx_len, device=device)
         block_indices = token_offsets // block_size
         intra_offsets = token_offsets % block_size
         slots = block_table[i, block_indices] * block_size + intra_offsets
+        # reshape_and_cache_flash expects (B, N, H, D) cache views
         torch.ops._C_cache_ops.reshape_and_cache_flash(
             k_ctx,
             v_ctx,
-            nvfp4_cache[:, 0],
-            nvfp4_cache[:, 1],
+            k_cache.transpose(1, 2),
+            v_cache.transpose(1, 2),
             slots,
             "nvfp4",
             kv_scale_t,
