@@ -104,6 +104,19 @@ class ProfilerConfig:
     Defaults to 0 (no wait period).
     """
 
+    repeat_iterations: int = Field(default=1, ge=1)
+    """Number of times to repeat the schedule cycle
+    (wait + warmup + active) for PyTorch profiler schedule.
+    When > 1, the profiler samples N short windows interspersed throughout
+    the run, each producing its own trace file. Useful for long benchmarks
+    where you want periodic snapshots of a forward step rather than one
+    long continuous trace.
+    Defaults to 1 (single capture window). Requires schedule-based profiling
+    (warmup_iterations > 0 OR wait_iterations > 0).
+    Should not be combined with max_iterations > 0: max_iterations counts
+    cumulative active steps and will prematurely stop later cycles.
+    """
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -129,6 +142,22 @@ class ProfilerConfig:
             logger.warning_once(
                 "Using 'torch' profiler with delay_iterations or max_iterations "
                 "while ignore_frontend is False may result in high overhead."
+            )
+
+        if self.repeat_iterations > 1 and self.max_iterations > 0:
+            logger.warning_once(
+                "repeat_iterations > 1 with max_iterations > 0 will cause later "
+                "schedule cycles to be cut short, because max_iterations counts "
+                "cumulative active steps across cycles. Set max_iterations=0 "
+                "(the default) when using repeat_iterations > 1."
+            )
+        if self.repeat_iterations > 1 and (
+            self.warmup_iterations == 0 and self.wait_iterations == 0
+        ):
+            logger.warning_once(
+                "repeat_iterations > 1 has no effect without schedule-based "
+                "profiling. Set warmup_iterations > 0 or wait_iterations > 0 "
+                "to enable the profiler schedule."
             )
 
         profiler_dir = self.torch_profiler_dir

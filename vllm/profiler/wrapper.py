@@ -205,14 +205,16 @@ class TorchProfilerWrapper(WorkerProfiler):
                 wait=profiler_config.wait_iterations,
                 warmup=profiler_config.warmup_iterations,
                 active=profiler_config.active_iterations,
-                repeat=1,
+                repeat=profiler_config.repeat_iterations,
             )
             if local_rank in (None, 0):
                 logger.info_once(
-                    "Profiler schedule configured: wait=%d, warmup=%d, active=%d",
+                    "Profiler schedule configured: "
+                    "wait=%d, warmup=%d, active=%d, repeat=%d",
                     profiler_config.wait_iterations,
                     profiler_config.warmup_iterations,
                     profiler_config.active_iterations,
+                    profiler_config.repeat_iterations,
                 )
 
         self.profiler = torch.profiler.profile(
