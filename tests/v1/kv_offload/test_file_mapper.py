@@ -6,7 +6,6 @@ from unittest.mock import MagicMock
 
 from vllm.v1.kv_offload.base import (
     OffloadingSpec,
-    get_offload_block_hash,
     make_offload_key,
 )
 from vllm.v1.kv_offload.file_mapper import FileMapper
@@ -38,21 +37,37 @@ _MOCK_OFFLOADING_SPEC.kv_cache_config = _MOCK_KV_CACHE_CONFIG
 # ---------------------------------------------------------------------------
 
 
-def make_mapper(**kwargs) -> FileMapper:
-    defaults = dict(
-        root_dir="/tmp/cache",
-        model_name="test-model",
-        hash_block_size=16,
-        gpu_blocks_per_file=1,
-        tp_size=1,
-        pp_size=1,
-        pcp_size=1,
-        dcp_size=1,
-        rank=0,
-        dtype="float16",
+def make_mapper_from_offloading_spec(**kwargs) -> FileMapper:
+    """Helper to create FileMapper with customizable mock config."""
+    # Create a copy of the mock config to avoid modifying the global one
+    mock_vllm_config = MagicMock()
+    mock_vllm_config.model_config.model = kwargs.get("model_name", "test-model")
+    mock_vllm_config.cache_config.block_size = kwargs.get("hash_block_size", 16)
+    mock_vllm_config.cache_config.cache_dtype = (
+        f"torch.{kwargs.get('dtype', 'float16')}"
     )
-    defaults.update(kwargs)
-    return FileMapper(**defaults)
+    mock_vllm_config.parallel_config.tensor_parallel_size = kwargs.get("tp_size", 1)
+    mock_vllm_config.parallel_config.pipeline_parallel_size = kwargs.get("pp_size", 1)
+    mock_vllm_config.parallel_config.prefill_context_parallel_size = kwargs.get(
+        "pcp_size", 1
+    )
+    mock_vllm_config.parallel_config.decode_context_parallel_size = kwargs.get(
+        "dcp_size", 1
+    )
+    mock_vllm_config.parallel_config.rank = kwargs.get("rank", 0)
+
+    mock_kv_cache_config = MagicMock()
+    mock_kv_cache_config.kv_cache_groups = []
+
+    mock_offloading_spec = MagicMock(spec=OffloadingSpec)
+    mock_offloading_spec.vllm_config = mock_vllm_config
+    mock_offloading_spec.kv_cache_config = mock_kv_cache_config
+
+    return FileMapper.from_offloading_spec(
+        root_dir=kwargs.get("root_dir", "/tmp/cache"),
+        offloading_spec=mock_offloading_spec,
+        gpu_blocks_per_file=kwargs.get("gpu_blocks_per_file", 1),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -73,45 +88,39 @@ def test_get_file_name_full_structure():
     rank = 3
     group_idx = 2
     block_hash = bytes(range(8))  # deterministic, non-zero bytes
-    fm = make_mapper(rank=rank)
+    fm = make_mapper_from_offloading_spec(rank=rank)
     key = make_offload_key(block_hash, group_idx)
     path = fm.get_file_name(key)
 
-    hash_hex = get_offload_block_hash(key).hex()
     expected_path = (
-        f"{fm.base_path}_r{rank}/{hash_hex[:3]}/"
-        f"{hash_hex[3:5]}_g{group_idx}/{hash_hex}.bin"
+        "/tmp/cache/test-model_588656ebcc66_r3/000/10_g2/0001020304050607.bin"
     )
     assert path == expected_path
 
 
 def test_get_run_config_fields():
-    fm = make_mapper(
+    fm = make_mapper_from_offloading_spec(
         model_name="my-model",
         dtype="bfloat16",
         tp_size=2,
         gpu_blocks_per_file=8,
     )
     cfg = fm.get_run_config()
-    assert cfg["model_name"] == "my-model"
-    assert cfg["dtype"] == "bfloat16"
-    assert cfg["tp_size"] == 2
-    assert cfg["gpu_blocks_per_file"] == 8
+    assert cfg == {
+        "model_name": "my-model",
+        "hash_block_size": 16,
+        "gpu_blocks_per_file": 8,
+        "tp_size": 2,
+        "pp_size": 1,
+        "pcp_size": 1,
+        "dcp_size": 1,
+        "dtype": "bfloat16",
+        "kv_cache_groups": [],
+        "inference_engine": "vllm",
+    }
 
 
 def test_get_config_file_path():
-    fm = make_mapper()
+    fm = make_mapper_from_offloading_spec()
     config_path = fm.get_config_file_path()
-    assert config_path.endswith("/config.json")
-    assert config_path.startswith(fm.base_path)
-
-
-def test_from_offloading_spec(tmp_path):
-    fm = FileMapper.from_offloading_spec(
-        root_dir=str(tmp_path),
-        offloading_spec=_MOCK_OFFLOADING_SPEC,
-        gpu_blocks_per_file=1,
-    )
-    assert fm.base_path.startswith(str(tmp_path))
-    key = make_offload_key(b"\x01" * 8, 0)
-    assert fm.get_file_name(key).endswith(".bin")
+    assert config_path == f"{fm.base_path}/config.json"
