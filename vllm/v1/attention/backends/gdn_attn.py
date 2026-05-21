@@ -94,7 +94,7 @@ def _is_libs_cu13_install_intact() -> bool:
 
 def _resolve_gdn_prefill_backend(
     backend: str, head_k_dim: int | None
-) -> Literal["flashinfer", "triton", "cutedsl"]:
+) -> Literal["triton", "flashinfer", "cutedsl"]:
     """Resolve GDN prefill backend.
 
     FlashInfer's GDN prefill kernel is chosen when:
@@ -224,7 +224,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         )
         backend = str(backend_cfg).strip().lower()
         head_k_dim = kv_cache_spec.shapes[1][-1]
-        self.gdn_prefill_backend = _resolve_gdn_prefill_backend(backend, head_k_dim)
+        self.gdn_prefill_backend: Literal["triton", "flashinfer", "cutedsl"] = (
+            _resolve_gdn_prefill_backend(backend, head_k_dim)
+        )
 
         if self.speculative_config:
             assert self.speculative_config.num_speculative_tokens is not None
