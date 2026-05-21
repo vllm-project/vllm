@@ -156,6 +156,23 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     def supports_eplb(self) -> bool:
         return False
 
+    def after_eplb_rearrangement(
+        self,
+        layer: "RoutedExperts",  # type: ignore[name-defined] # noqa: F821
+    ) -> None:
+        """Refresh any quant-method state that depends on the per-expert
+        ordering after EPLB has rearranged the registered Parameters.
+
+        EPLB moves registered expert Parameters in-place via P2P, but
+        quant methods often hold *derived* per-expert tensors (e.g. the
+        reciprocal of a global scale, with activation scales fused in)
+        that are separate tensors with their own storage. Those won't
+        be touched by the rearrangement. Override this to re-derive
+        them in place so kernel references stay in sync. Default no-op
+        for methods with no such derived state.
+        """
+        return
+
     @property
     def method_name(self) -> str:
         return self.__class__.__name__

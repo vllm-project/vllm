@@ -842,6 +842,7 @@ class EplbState:
                         eplb_model_state,
                         new_physical_to_logical_map=new_physical_to_logical_map,
                     )
+                    _run_after_eplb_rearrangement_hooks(eplb_model_state.model)
 
                 if is_main_rank:
                     assert start_event is not None
@@ -1280,7 +1281,19 @@ def _move_to_workspace(
 
     if result.layer_idx == model_state.model.num_moe_layers - 1:
         model_state.rebalanced = False
+        _run_after_eplb_rearrangement_hooks(model_state.model)
 
     # Reset pending_result before unblocking the async worker
     model_state.pending_result = None
     result.consumed_event.record()
+
+
+def _run_after_eplb_rearrangement_hooks(model: MixtureOfExperts) -> None:
+    """Invoke quant_method.after_eplb_rearrangement on every MoE layer.
+
+    Lets quant methods refresh derived per-expert state (e.g. fused
+    activation x weight scales for NVFP4) that EPLB's Parameter
+    rearrangement won't touch on its own.
+    """
+    for moe_layer in model.moe_layers:
+        moe_layer.quant_method.after_eplb_rearrangement(moe_layer)
