@@ -46,8 +46,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     _NIXL_SUPPORTED_DEVICE,
-    get_representative_spec,
-    get_representative_spec_type,
     zmq_ctx,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
@@ -75,7 +73,7 @@ from vllm.v1.worker.utils import select_common_block_size
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 
 logger = init_logger(__name__)
 
@@ -89,16 +87,14 @@ class ReadSpec:
     remote_block_ids: BlockIds
 
 
-def _is_attention_spec(spec_type: type) -> bool:
-    return issubclass(spec_type, AttentionSpec)
-
-
-def _is_ssm_spec(spec_type: type) -> bool:
-    return issubclass(spec_type, MambaSpec)
-
-
 class NixlConnectorWorker:
     """Implementation of Worker side methods"""
+
+    def _get_representative_spec(self, idx: int) -> "KVCacheSpec":
+        spec = self.kv_cache_config.kv_cache_groups[idx].kv_cache_spec
+        if isinstance(spec, UniformTypeKVCacheSpecs):
+            return next(iter(spec.kv_cache_specs.values()))
+        return spec
 
     def _compute_desc_ids(
         self,
@@ -135,12 +131,13 @@ class NixlConnectorWorker:
         all_descs: list[np.ndarray] = []
         for i, group in enumerate(block_ids):
             group_arr = np.asarray(group)
-            if _is_attention_spec(self._group_spec_types[i]):
+            spec = self._get_representative_spec(i)
+            if isinstance(spec, AttentionSpec):
                 fa_region_ids = np.arange(num_fa_regions)[:, None]
                 all_descs.append(
                     (fa_region_ids * num_blocks + group_arr[None, :]).flatten()
                 )
-            elif _is_ssm_spec(self._group_spec_types[i]):
+            elif isinstance(spec, MambaSpec):
                 # NOTE (NickLucche) SSM and Attention block regions can
                 # be exchanged arbitrarily by manager.  Therefore, descs
                 # are laid out as:
@@ -157,9 +154,7 @@ class NixlConnectorWorker:
                     ).flatten()
                 )
             else:
-                raise ValueError(
-                    f"Unknown spec type {self._group_spec_types[i]} at index {i}"
-                )
+                raise ValueError(f"Unknown spec type {type(spec)} at index {i}")
 
         return np.concatenate(all_descs)
 
@@ -178,13 +173,19 @@ class NixlConnectorWorker:
         assert self.transfer_topo is not None
 
         fa_idx = next(
-            i for i, t in enumerate(self._group_spec_types) if _is_attention_spec(t)
+            i
+            for i, _ in enumerate(self.kv_cache_config.kv_cache_groups)
+            if isinstance(self._get_representative_spec(i), AttentionSpec)
         )
         fa_slices = self.tp_mappings[engine_id][fa_idx]
         fa_num_splits = len(fa_slices)
 
         ssm_idx = next(
-            (i for i, t in enumerate(self._group_spec_types) if _is_ssm_spec(t)),
+            (
+                i
+                for i, _ in enumerate(self.kv_cache_config.kv_cache_groups)
+                if isinstance(self._get_representative_spec(i), MambaSpec)
+            ),
             None,
         )
         ssm_num_splits = (
@@ -195,7 +196,7 @@ class NixlConnectorWorker:
 
         # Map each FA-slice's global head start to its slot index.
         # Non-FA ranks sharing the same head (GQA dedup) get the same slot.
-        fa_spec = self._group_specs[fa_idx]
+        fa_spec = self._get_representative_spec(fa_idx)
         assert isinstance(fa_spec, AttentionSpec)
         head_to_slot: dict[int, int] = {
             slc.read_range.start: slot_idx
@@ -463,16 +464,6 @@ class NixlConnectorWorker:
 
         self._physical_blocks_per_logical_kv_block = 1
         self._sync_block_size_with_kernel()
-
-        # Unwrap UniformTypeKVCacheSpecs to get the representative spec type
-        self._group_spec_types = tuple(
-            get_representative_spec_type(g.kv_cache_spec)
-            for g in self.kv_cache_config.kv_cache_groups
-        )
-        self._group_specs = [
-            get_representative_spec(g.kv_cache_spec)
-            for g in self.kv_cache_config.kv_cache_groups
-        ]
 
         # Per-engine TP mappings. Generated during handshake.
         # tp_mappings[engine_id][group_idx] = {rank: TPTransferSlice, ...}
@@ -1174,12 +1165,14 @@ class NixlConnectorWorker:
         """Build remote FA descriptors for all layers."""
         assert self.transfer_topo is not None
         fa_group_idx = next(
-            i for i, t in enumerate(self._group_spec_types) if _is_attention_spec(t)
+            i
+            for i, _ in enumerate(self.kv_cache_config.kv_cache_groups)
+            if isinstance(self._get_representative_spec(i), AttentionSpec)
         )
         fa_slices = self.tp_mappings[engine_id][fa_group_idx]
         num_attn_reads = len(fa_slices)
 
-        fa_spec = self._group_specs[fa_group_idx]
+        fa_spec = self._get_representative_spec(fa_group_idx)
         assert isinstance(fa_spec, AttentionSpec)
 
         # Head offset into remote rank's tensor (in head units).
@@ -1208,22 +1201,33 @@ class NixlConnectorWorker:
             page_size = nixl_agent_meta.block_lens[i]
             for block_id in range(nixl_agent_meta.num_blocks):
                 block_offset = block_id * page_size
-                # For each block, grab the kv heads chunk belonging to current local
-                # tp rank of size local_block_len.
-                addr = base_addr + block_offset + rank_offset
-                result.append((addr, local_block_len, nixl_agent_meta.device_id))
+                # For each block, grab the kv heads chunk belonging to current
+                # local tp rank of size local_block_len.
+                result.append(
+                    (
+                        base_addr + block_offset + rank_offset,
+                        local_block_len,
+                        nixl_agent_meta.device_id,
+                    )
+                )
 
             if self.transfer_topo.virtually_split_kv_in_blocks:
                 # With FlashInfer index V separately to allow head splitting.
-                second_split = self.get_backend_aware_kv_block_len(
-                    layer_idx=i, first_split=False, mamba_view=False
+                second_split = (
+                    self.get_backend_aware_kv_block_len(
+                        layer_idx=i, first_split=False, mamba_view=False
+                    )
+                    // num_attn_reads
                 )
-                second_split = second_split // num_attn_reads
                 for block_id in range(nixl_agent_meta.num_blocks):
                     block_offset = block_id * page_size
-                    addr = base_addr + block_offset + rank_offset
                     # Hop over the first split of remote page, K, to read V.
-                    v_addr = addr + nixl_agent_meta.block_lens[i] // 2
+                    v_addr = (
+                        base_addr
+                        + block_offset
+                        + rank_offset
+                        + nixl_agent_meta.block_lens[i] // 2
+                    )
                     result.append((v_addr, second_split, nixl_agent_meta.device_id))
         return result
 
@@ -1347,18 +1351,17 @@ class NixlConnectorWorker:
         logger.info("Transfer plan: %s", transfer_topo.describe(engine_id))
 
         self.tp_mappings[engine_id] = tuple(
-            spec.get_tp_transfer_slices(
+            self._get_representative_spec(i).get_tp_transfer_slices(
                 transfer_topo.tp_rank,
                 transfer_topo.tp_size,
                 remote_tp_size,
                 self.model_config.get_total_num_kv_heads(),
             )
-            for spec in self._group_specs
+            for i, _ in enumerate(self.kv_cache_config.kv_cache_groups)
         )
-        all_ranks: set[int] = set()
-        for group_map in self.tp_mappings[engine_id]:
-            all_ranks.update(group_map.keys())
-        self.source_ranks[engine_id] = tuple(sorted(all_ranks))
+        self.source_ranks[engine_id] = tuple(
+            sorted({r for group_map in self.tp_mappings[engine_id] for r in group_map})
+        )
 
         remote_agent_name = self.nixl_wrapper.add_remote_agent(
             nixl_agent_meta.agent_metadata
@@ -2386,7 +2389,7 @@ class NixlConnectorWorker:
             for i, remote_group in enumerate(remote_block_ids):
                 num_local_blocks = len(local_block_ids[i])
                 num_remote_blocks = len(remote_group)
-                if _is_ssm_spec(self._group_spec_types[i]):
+                if isinstance(self._get_representative_spec(i), MambaSpec):
                     assert num_local_blocks == num_remote_blocks
                 else:
                     max_padding = max(

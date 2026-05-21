@@ -267,7 +267,6 @@ class AttentionSpec(KVCacheSpec):
     num_kv_heads: int
     head_size: int
     dtype: torch.dtype
-    total_num_kv_heads: int | None = None
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE
     page_size_padded: int | None = None
 
@@ -322,11 +321,7 @@ class AttentionSpec(KVCacheSpec):
         Returns rank -> TPTransferSlice mapping. Logic mirrors the old
         compute_tp_mapping attention-rank selection on main.
         """
-        assert self.total_num_kv_heads is not None, (
-            "total_num_kv_heads must be set for TP mapping. "
-            "Pass it when constructing the spec via get_kv_cache_spec()."
-        )
-        total = self.total_num_kv_heads
+        total = total_num_kv_heads
 
         def _shard_for_rank(rank: int, tp_size: int) -> ShardRange:
             s = rank * total // tp_size
@@ -448,7 +443,6 @@ class FullAttentionSpec(AttentionSpec):
         merged_spec = cls(
             block_size=specs[0].block_size,
             num_kv_heads=specs[0].num_kv_heads,
-            total_num_kv_heads=specs[0].total_num_kv_heads,
             head_size=specs[0].head_size,
             head_size_v=specs[0].head_size_v,
             dtype=specs[0].dtype,
@@ -607,7 +601,6 @@ class MLAAttentionSpec(FullAttentionSpec):
         return cls(
             block_size=specs[0].block_size,
             num_kv_heads=specs[0].num_kv_heads,
-            total_num_kv_heads=specs[0].total_num_kv_heads,
             head_size=specs[0].head_size,
             dtype=specs[0].dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
@@ -796,7 +789,6 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
         return cls(
             block_size=specs[0].block_size,
             num_kv_heads=specs[0].num_kv_heads,
-            total_num_kv_heads=specs[0].total_num_kv_heads,
             head_size=specs[0].head_size,
             dtype=specs[0].dtype,
             page_size_padded=specs[0].page_size_padded,
@@ -924,7 +916,6 @@ class SinkFullAttentionSpec(FullAttentionSpec):
         merged_spec = cls(
             block_size=specs[0].block_size,
             num_kv_heads=specs[0].num_kv_heads,
-            total_num_kv_heads=specs[0].total_num_kv_heads,
             head_size=specs[0].head_size,
             head_size_v=specs[0].head_size_v,
             sink_len=specs[0].sink_len,
