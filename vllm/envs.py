@@ -8,6 +8,7 @@ import os
 import sys
 import tempfile
 import uuid
+import warnings
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -341,6 +342,27 @@ def use_mega_aot_artifact():
     )
 
     return os.environ.get("VLLM_USE_MEGA_AOT_ARTIFACT", default_value) == "1"
+
+
+def deprecated_env(
+    env_name: str,
+    removal_version: str,
+    replacement: str,
+    getter: Callable[[], Any],
+) -> Callable[[], Any]:
+    """Wrap an env-var getter to emit a FutureWarning when the var is set."""
+
+    def _read() -> Any:
+        if env_name in os.environ:
+            warnings.warn(
+                f"{env_name} is deprecated and will be removed in "
+                f"{removal_version}. {replacement}",
+                FutureWarning,
+                stacklevel=2,
+            )
+        return getter()
+
+    return _read
 
 
 def env_with_choices(
@@ -1302,8 +1324,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.environ.get("VLLM_MARLIN_USE_ATOMIC_ADD", "0") == "1"
     ),
     # Whether to use marlin kernel in mxfp4 quantization method
-    "VLLM_MXFP4_USE_MARLIN": lambda: maybe_convert_bool(
-        os.environ.get("VLLM_MXFP4_USE_MARLIN", None)
+    # Deprecated: use --moe-backend marlin (MoE) or --linear-backend marlin
+    # (linear) instead.
+    "VLLM_MXFP4_USE_MARLIN": deprecated_env(
+        "VLLM_MXFP4_USE_MARLIN",
+        "v0.23",
+        "Use --moe-backend marlin or --linear-backend marlin.",
+        lambda: maybe_convert_bool(os.environ.get("VLLM_MXFP4_USE_MARLIN", None)),
     ),
     # The activation dtype for marlin kernel
     "VLLM_MARLIN_INPUT_DTYPE": env_with_choices(
@@ -1398,16 +1425,29 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER", "1"))
     ),
     # Allow use of FlashInfer BF16 MoE kernels for fused moe ops.
-    "VLLM_USE_FLASHINFER_MOE_FP16": lambda: bool(
-        int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP16", "0"))
+    # Deprecated: use --moe-backend to select a kernel explicitly.
+    "VLLM_USE_FLASHINFER_MOE_FP16": deprecated_env(
+        "VLLM_USE_FLASHINFER_MOE_FP16",
+        "v0.23",
+        "Use --moe-backend (e.g. flashinfer_trtllm, flashinfer_cutlass).",
+        lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP16", "0"))),
     ),
     # Allow use of FlashInfer FP8 MoE kernels for fused moe ops.
-    "VLLM_USE_FLASHINFER_MOE_FP8": lambda: bool(
-        int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP8", "0"))
+    # Deprecated: use --moe-backend to select a kernel explicitly.
+    "VLLM_USE_FLASHINFER_MOE_FP8": deprecated_env(
+        "VLLM_USE_FLASHINFER_MOE_FP8",
+        "v0.23",
+        "Use --moe-backend (e.g. flashinfer_trtllm, flashinfer_cutlass).",
+        lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP8", "0"))),
     ),
     # Allow use of FlashInfer NVFP4 MoE kernels for fused moe ops.
-    "VLLM_USE_FLASHINFER_MOE_FP4": lambda: bool(
-        int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP4", "0"))
+    # Deprecated: use --moe-backend to select a kernel explicitly.
+    "VLLM_USE_FLASHINFER_MOE_FP4": deprecated_env(
+        "VLLM_USE_FLASHINFER_MOE_FP4",
+        "v0.23",
+        "Use --moe-backend (e.g. flashinfer_trtllm, flashinfer_cutlass, "
+        "flashinfer_cutedsl).",
+        lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP4", "0"))),
     ),
     # Allow use of FlashInfer MxInt4 MoE kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_INT4": lambda: bool(
@@ -1415,20 +1455,36 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # If set to 1, use the FlashInfer
     # MXFP8 (activation) x MXFP4 (weight) MoE backend.
-    "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8": lambda: bool(
-        int(os.getenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8", "0"))
+    # Deprecated: use --moe-backend flashinfer_trtllm combined with
+    # --quantization_config.moe.activation mxfp8.
+    "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8": deprecated_env(
+        "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8",
+        "v0.23",
+        "Use --moe-backend flashinfer_trtllm with "
+        "--quantization_config.moe.activation mxfp8.",
+        lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8", "0"))),
     ),
     # If set to 1, use the FlashInfer CUTLASS backend for
     # MXFP8 (activation) x MXFP4 (weight) MoE.
-    # This is separate from the TRTLLMGEN path controlled by
-    # VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8.
-    "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS": lambda: bool(
-        int(os.getenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS", "0"))
+    # Deprecated: use --moe-backend flashinfer_cutlass combined with
+    # --quantization_config.moe.activation mxfp8.
+    "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS": deprecated_env(
+        "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS",
+        "v0.23",
+        "Use --moe-backend flashinfer_cutlass with "
+        "--quantization_config.moe.activation mxfp8.",
+        lambda: bool(
+            int(os.getenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS", "0"))
+        ),
     ),
     # If set to 1, use the FlashInfer
     # BF16 (activation) x MXFP4 (weight) MoE backend.
-    "VLLM_USE_FLASHINFER_MOE_MXFP4_BF16": lambda: bool(
-        int(os.getenv("VLLM_USE_FLASHINFER_MOE_MXFP4_BF16", "0"))
+    # Deprecated: use --moe-backend to select a kernel explicitly.
+    "VLLM_USE_FLASHINFER_MOE_MXFP4_BF16": deprecated_env(
+        "VLLM_USE_FLASHINFER_MOE_MXFP4_BF16",
+        "v0.23",
+        "Use --moe-backend (e.g. flashinfer_trtllm, flashinfer_cutlass).",
+        lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_MXFP4_BF16", "0"))),
     ),
     # Control the cache sized used by the xgrammar compiler. The default
     # of 512 MB should be enough for roughly 1000 JSON schemas.
@@ -1488,10 +1544,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     #     Uses CUTLASS kernels optimized for high-throughput batch inference.
     # - "latency":
     #     Uses TensorRT-LLM kernels optimized for low-latency inference.
-    "VLLM_FLASHINFER_MOE_BACKEND": env_with_choices(
+    # Deprecated: pass --moe-backend flashinfer_{trtllm,cutlass,cutedsl} directly.
+    "VLLM_FLASHINFER_MOE_BACKEND": deprecated_env(
         "VLLM_FLASHINFER_MOE_BACKEND",
-        "latency",
-        ["throughput", "latency", "masked_gemm"],
+        "v0.23",
+        "Use --moe-backend flashinfer_trtllm, flashinfer_cutlass, or "
+        "flashinfer_cutedsl.",
+        env_with_choices(
+            "VLLM_FLASHINFER_MOE_BACKEND",
+            "latency",
+            ["throughput", "latency", "masked_gemm"],
+        ),
     ),
     # Override the directory for the FlashInfer autotune config cache.
     "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR": lambda: os.getenv(
@@ -1573,8 +1636,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Controls whether or not emulations are used for NVFP4
     # generations on machines < 100 for compressed-tensors
     # models
-    "VLLM_USE_NVFP4_CT_EMULATIONS": lambda: bool(
-        int(os.getenv("VLLM_USE_NVFP4_CT_EMULATIONS", "0"))
+    # Deprecated: use --linear-backend emulation instead.
+    "VLLM_USE_NVFP4_CT_EMULATIONS": deprecated_env(
+        "VLLM_USE_NVFP4_CT_EMULATIONS",
+        "v0.23",
+        "Use --linear-backend emulation.",
+        lambda: bool(int(os.getenv("VLLM_USE_NVFP4_CT_EMULATIONS", "0"))),
     ),
     # Controls the read mode for the Mori-IO connector
     "VLLM_MORIIO_CONNECTOR_READ_MODE": lambda: (
@@ -1609,18 +1676,24 @@ environment_variables: dict[str, Callable[[], Any]] = {
     #     This is only meant for research purposes to run on devices where NVFP4
     #     GEMM kernels are not available.
     # - <none>: automatically pick an available backend
-    "VLLM_NVFP4_GEMM_BACKEND": env_with_choices(
+    # Deprecated: use --linear-backend instead.
+    "VLLM_NVFP4_GEMM_BACKEND": deprecated_env(
         "VLLM_NVFP4_GEMM_BACKEND",
-        None,
-        [
-            "flashinfer-b12x",
-            "flashinfer-cudnn",
-            "flashinfer-trtllm",
-            "flashinfer-cutlass",
-            "cutlass",
-            "marlin",
-            "emulation",
-        ],
+        "v0.23",
+        "Use --linear-backend.",
+        env_with_choices(
+            "VLLM_NVFP4_GEMM_BACKEND",
+            None,
+            [
+                "flashinfer-b12x",
+                "flashinfer-cudnn",
+                "flashinfer-trtllm",
+                "flashinfer-cutlass",
+                "cutlass",
+                "marlin",
+                "emulation",
+            ],
+        ),
     ),
     # Controls garbage collection during CUDA graph capture.
     # If set to 0 (default), enables GC freezing to speed up capture time.
@@ -1771,7 +1844,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # NCCL header path
     "VLLM_NCCL_INCLUDE_PATH": lambda: os.environ.get("VLLM_NCCL_INCLUDE_PATH", None),
     # Flag to enable FBGemm kernels on model execution
-    "VLLM_USE_FBGEMM": lambda: bool(int(os.getenv("VLLM_USE_FBGEMM", "0"))),
+    # Deprecated: use --linear-backend fbgemm instead.
+    "VLLM_USE_FBGEMM": deprecated_env(
+        "VLLM_USE_FBGEMM",
+        "v0.23",
+        "Use --linear-backend fbgemm.",
+        lambda: bool(int(os.getenv("VLLM_USE_FBGEMM", "0"))),
+    ),
     # GC debug config
     # - VLLM_GC_DEBUG=0: disable GC debugger
     # - VLLM_GC_DEBUG=1: enable GC debugger with gc.collect elpased times
