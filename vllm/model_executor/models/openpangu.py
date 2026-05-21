@@ -96,6 +96,11 @@ from vllm.config import get_current_vllm_config
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
+from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
+    causal_conv1d_fn,
+    causal_conv1d_update,
+)
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.flash_attn_diffkv import FlashAttentionDiffKVBackend
 from vllm.v1.kv_cache_interface import DSAAttentionSpec, MomeSpec
@@ -223,9 +228,14 @@ class MomeAttention(MambaBase, CustomOp):
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MomeSpec:
         num_total_tokens = self.kernel_size - 1 + self.num_spec_tokens
+        state_shapes = self.get_state_shape()
+        if is_conv_state_dim_first():
+            shapes = tuple((*s, num_total_tokens) for s in state_shapes)
+        else:
+            shapes = tuple((num_total_tokens, *s) for s in state_shapes)
         return MomeSpec(
             block_size=vllm_config.cache_config.block_size,
-            shapes=tuple((num_total_tokens, *s) for s in self.get_state_shape()),
+            shapes=shapes,
             dtypes=self.get_state_dtype(),
             mamba_type=self.mamba_type,
             kernel_size=self.kernel_size,
@@ -239,112 +249,21 @@ class MomeAttention(MambaBase, CustomOp):
 
     def forward(self, hidden_states: torch.Tensor,
                 state_indice: int) -> torch.Tensor:
-        output = torch.ones_like(hidden_states)
-        torch.ops.vllm.mome_attention(hidden_states, 
-                                            self.qa_conv.weight,
-                                            self.compresskv_conv.weight,
-                                            self.o_conv.weight,
-                                            self.q_lora_rank,
-                                            self.kv_lora_rank,
-                                            self.o_dim,
-                                            self.kernel_size,
-                                            state_indice,
-                                            self.prefix,
-                                            output)
+        output = torch.empty_like(hidden_states)
+        torch.ops.vllm.mome_attention_fused_op(
+            hidden_states,
+            self.qa_conv.weight,
+            self.compresskv_conv.weight,
+            self.o_conv.weight,
+            self.q_lora_rank,
+            self.kv_lora_rank,
+            self.o_dim,
+            self.kernel_size,
+            state_indice,
+            self.prefix,
+            output,
+        )
         return output
-
-    # def _forward_impl(self, hidden_states: torch.Tensor,
-    #                   state_indice: int) -> torch.Tensor:
-    #     # print(f"[DEBUG] MoME forward, state_indice: {state_indice}, hidden_states.shape: {hidden_states.shape}, hidden_states.sum(): {hidden_states.sum()}")
-    #     # if "model.layers.0" in self.prefix:
-    #     #     print(f"[DEBUG] before first layer MoME forward, state_indice: {state_indice}, hidden_states.shape: {hidden_states.shape}, hidden_states.float().sum(): {hidden_states.float().sum()}")
-    #     forward_context = get_forward_context()
-    #     if forward_context.attn_metadata is None:
-    #         return hidden_states
-    #     mome_metadata = forward_context.attn_metadata[self.prefix]
-    #     self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-
-    #     def _get_request_state_indices(state_indices: torch.Tensor) -> torch.Tensor:
-    #         # MOME only needs one persistent state slot per request.
-    #         # When prefix caching is globally enabled, vLLM may pass the full
-    #         # block table here; we use the first block as the request state.
-    #         if state_indices.ndim > 1:
-    #             return state_indices[:, 0]
-    #         return state_indices
-
-    #     if state_indice == 0:
-    #         conv_weight = self.qa_conv.weight
-    #         cache = self_kv_cache[0]
-    #         hidden_size = self.q_lora_rank
-    #     elif state_indice == 1:
-    #         conv_weight = self.compresskv_conv.weight
-    #         cache = self_kv_cache[1]
-    #         hidden_size = self.kv_lora_rank
-    #     else:
-    #         conv_weight = self.o_conv.weight
-    #         cache = self_kv_cache[2]
-    #         hidden_size = self.o_dim
-
-    #     conv_weight = conv_weight.to(hidden_states.dtype)
-    #     output_chunks = []
-
-    #     num_decode_tokens = mome_metadata.num_decode_tokens
-    #     num_decodes = mome_metadata.num_decodes
-    #     if num_decode_tokens > 0:
-    #         decode_output = hidden_states.new_zeros(
-    #             (num_decode_tokens, hidden_size))
-    #         decode_hidden_states = hidden_states[:num_decodes]
-    #         decode_state_indices = _get_request_state_indices(
-    #             mome_metadata.state_indices_tensor[:num_decodes])
-    #         if num_decodes > 0:
-    #             prev_cache = cache[decode_state_indices, :self.kernel_size - 1].to(
-    #                 hidden_states.dtype)
-    #             conv_input = torch.cat(
-    #                 [prev_cache, decode_hidden_states.unsqueeze(1)], dim=1)
-    #             conv_output = torch.nn.functional.conv1d(
-    #                 conv_input.permute(0, 2, 1),
-    #                 conv_weight,
-    #                 groups=hidden_size,
-    #             )
-    #             cache[decode_state_indices, :self.kernel_size -
-    #                   1] = conv_input[:, -(self.kernel_size - 1):]
-    #             decode_output[:num_decodes] = conv_output.permute(
-    #                 0, 2, 1).reshape(-1, hidden_size)
-    #         output_chunks.append(decode_output)
-
-    #     if mome_metadata.num_prefills > 0:
-    #         query_start_loc = mome_metadata.query_start_loc_p
-    #         assert query_start_loc is not None
-    #         prefill_hidden_states = hidden_states[num_decode_tokens:num_decode_tokens +
-    #                                               mome_metadata.num_prefill_tokens]
-    #         prefill_state_indices = _get_request_state_indices(
-    #             mome_metadata.state_indices_tensor[
-    #                 num_decode_tokens:num_decode_tokens + mome_metadata.num_prefills])
-    #         conv_output_list = []
-    #         for i in range(mome_metadata.num_prefills):
-    #             s = query_start_loc[i]
-    #             e = query_start_loc[i + 1]
-    #             local_input = prefill_hidden_states[s:e]
-    #             state_idx = prefill_state_indices[i]
-    #             prev_cache = cache[state_idx, :self.kernel_size - 1].to(
-    #                 hidden_states.dtype)
-    #             conv_input = torch.cat([prev_cache, local_input], dim=0)
-    #             conv_output = torch.nn.functional.conv1d(
-    #                 conv_input.transpose(1, 0).unsqueeze(0),
-    #                 conv_weight,
-    #                 groups=hidden_size,
-    #             ).squeeze(0).transpose(1, 0)
-    #             cache[state_idx, :self.kernel_size - 1] = conv_input[
-    #                 -(self.kernel_size - 1):]
-    #             conv_output_list.append(conv_output)
-    #         output_chunks.append(torch.cat(conv_output_list, dim=0))
-
-    #     if len(output_chunks) == 1:
-    #         result = output_chunks[0]
-    #     else:
-    #         result = torch.cat(output_chunks, dim=0)
-    #     # torch.ops.vllm.piecewise_print(result, self.prefix, "inside mome_attn")
-    #     return result
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
         tp_rank = get_tensor_model_parallel_rank()
@@ -358,7 +277,29 @@ class MomeAttention(MambaBase, CustomOp):
         param_data.copy_(loaded_weight)
 
 
-def mome_attention(
+def _select_mome_conv_params(
+    state_indice: int,
+    q_conv_weight: torch.Tensor,
+    compresskv_conv_weight: torch.Tensor,
+    o_conv_weight: torch.Tensor,
+    q_lora_rank: int,
+    kv_lora_rank: int,
+    o_dim: int,
+    kernel_size: int,
+) -> tuple[torch.Tensor, int]:
+    if state_indice == 0:
+        conv_weight = q_conv_weight
+        hidden_size = q_lora_rank
+    elif state_indice == 1:
+        conv_weight = compresskv_conv_weight
+        hidden_size = kv_lora_rank
+    else:
+        conv_weight = o_conv_weight
+        hidden_size = o_dim
+    return conv_weight.view(hidden_size, kernel_size), hidden_size
+
+
+def mome_attention_fused_op(
     hidden_states: torch.Tensor,
     q_conv_weight: torch.Tensor,
     compresskv_conv_weight: torch.Tensor,
@@ -376,92 +317,78 @@ def mome_attention(
     if forward_context.attn_metadata is None:
         output.fill_(0)
         return
+
     mome_metadata = forward_context.attn_metadata[layer_name]
     self_kv_cache = layer.kv_cache
 
     def _get_request_state_indices(state_indices: torch.Tensor) -> torch.Tensor:
-        # MOME only needs one persistent state slot per request.
-        # When prefix caching is globally enabled, vLLM may pass the full
-        # block table here; we use the first block as the request state.
         if state_indices.ndim > 1:
             return state_indices[:, 0]
         return state_indices
 
-    if state_indice == 0:
-        conv_weight = q_conv_weight
-        cache = self_kv_cache[0]
-        hidden_size = q_lora_rank
-    elif state_indice == 1:
-        conv_weight = compresskv_conv_weight
-        cache = self_kv_cache[1]
-        hidden_size = kv_lora_rank
-    else:
-        conv_weight = o_conv_weight
-        cache = self_kv_cache[2]
-        hidden_size = o_dim
-
+    conv_weight, hidden_size = _select_mome_conv_params(
+        state_indice,
+        q_conv_weight,
+        compresskv_conv_weight,
+        o_conv_weight,
+        q_lora_rank,
+        kv_lora_rank,
+        o_dim,
+        kernel_size,
+    )
     conv_weight = conv_weight.to(hidden_states.dtype)
+    conv_state = self_kv_cache[state_indice]
+    if not is_conv_state_dim_first():
+        conv_state = conv_state.transpose(-1, -2)
+
     output_chunks = []
 
     num_decode_tokens = mome_metadata.num_decode_tokens
     num_decodes = mome_metadata.num_decodes
-    if num_decode_tokens > 0:
-        decode_output = hidden_states.new_zeros(
-            (num_decode_tokens, hidden_size))
-        decode_hidden_states = hidden_states[:num_decodes]
+    if num_decodes > 0:
+        decode_hidden_states = hidden_states[:num_decodes].clone()
         decode_state_indices = _get_request_state_indices(
             mome_metadata.state_indices_tensor_d[:num_decodes])
-        if num_decodes > 0:
-            prev_cache = cache[decode_state_indices, :kernel_size - 1].to(
-                hidden_states.dtype)
-            conv_input = torch.cat(
-                [prev_cache, decode_hidden_states.unsqueeze(1)], dim=1)
-            conv_output = torch.nn.functional.conv1d(
-                conv_input.permute(0, 2, 1),
-                conv_weight,
-                groups=hidden_size,
-            )
-            cache[decode_state_indices, :kernel_size -
-                    1] = conv_input[:, -(kernel_size - 1):]
-            decode_output[:num_decodes] = conv_output.permute(
-                0, 2, 1).reshape(-1, hidden_size)
+        decode_output = causal_conv1d_update(
+            decode_hidden_states,
+            conv_state,
+            conv_weight,
+            bias=None,
+            activation=None,
+            conv_state_indices=decode_state_indices,
+        )
         output_chunks.append(decode_output)
 
-    if mome_metadata.num_prefills > 0:
+    num_prefills = mome_metadata.num_prefills
+    if num_prefills > 0:
         query_start_loc = mome_metadata.query_start_loc_p
         assert query_start_loc is not None
-        prefill_hidden_states = hidden_states[num_decode_tokens:num_decode_tokens +
-                                                mome_metadata.num_prefill_tokens]
+        prefill_hidden_states = hidden_states[
+            num_decode_tokens:num_decode_tokens + mome_metadata.num_prefill_tokens]
         prefill_state_indices = _get_request_state_indices(
-            mome_metadata.state_indices_tensor_p[:mome_metadata.num_prefills])
-        conv_output_list = []
-        for i in range(mome_metadata.num_prefills):
-            s = query_start_loc[i]
-            e = query_start_loc[i + 1]
-            local_input = prefill_hidden_states[s:e]
-            state_idx = prefill_state_indices[i]
-            prev_cache = cache[state_idx, :kernel_size - 1].to(
-                hidden_states.dtype)
-            conv_input = torch.cat([prev_cache, local_input], dim=0)
-            conv_output = torch.nn.functional.conv1d(
-                conv_input.transpose(1, 0).unsqueeze(0),
-                conv_weight,
-                groups=hidden_size,
-            ).squeeze(0).transpose(1, 0)
-            cache[state_idx, :kernel_size - 1] = conv_input[
-                -(kernel_size - 1):]
-            conv_output_list.append(conv_output)
-        output_chunks.append(torch.cat(conv_output_list, dim=0))
+            mome_metadata.state_indices_tensor_p[:num_prefills])
+        prefill_output = causal_conv1d_fn(
+            prefill_hidden_states.transpose(0, 1),
+            conv_weight,
+            bias=None,
+            activation=None,
+            conv_states=conv_state,
+            has_initial_state=mome_metadata.has_initial_states_p,
+            cache_indices=prefill_state_indices,
+            query_start_loc=query_start_loc,
+            metadata=mome_metadata,
+            zero_initial_state_output=True,
+        ).transpose(0, 1)
+        output_chunks.append(prefill_output)
 
+    if len(output_chunks) == 0:
+        output.fill_(0)
+        return
     if len(output_chunks) == 1:
         result = output_chunks[0]
     else:
         result = torch.cat(output_chunks, dim=0)
-    # torch.ops.vllm.piecewise_print(result, layer_name, "inside mome_attn")
     output[:result.shape[0]] = result
-    # if "model.layers.0" in layer_name:
-    #     print(f"[DEBUG] {layer_name}, output.shape: {output.shape}, output.float().sum(): {output.float().sum()}, output[:5]: {output.flatten()[:5]}")
-    # return output
 
 
 def mome_attention_fake(
@@ -481,8 +408,8 @@ def mome_attention_fake(
 
 
 direct_register_custom_op(
-    op_name="mome_attention",
-    op_func=mome_attention,
+    op_name="mome_attention_fused_op",
+    op_func=mome_attention_fused_op,
     mutates_args=["output"],
     fake_impl=mome_attention_fake,
 )

@@ -56,6 +56,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     SILU_ACTIVATION: tl.constexpr,
     IS_APC_ENABLED: tl.constexpr,
     HAS_NULL_BLOCK: tl.constexpr,
+    ZERO_INITIAL_STATE_OUTPUT: tl.constexpr,
     NP2_STATELEN: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -454,6 +455,10 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
 
         if SILU_ACTIVATION:
             acc = acc / (1 + tl.exp(-acc))
+        if ZERO_INITIAL_STATE_OUTPUT:
+            if chunk_offset == 0:
+                zero_warmup = (load_init_state == 0) & (idx_token < state_len)
+                acc = tl.where(zero_warmup, 0.0, acc)
         mask_1d = (idx_token < segment_len) & (
             idx_feats < dim
         )  # token-index  # feature-index
@@ -484,6 +489,7 @@ def causal_conv1d_fn(
     block_size_to_align=0,
     metadata=None,
     validate_data=False,
+    zero_initial_state_output: bool = False,
 ):
     """support varlen + continuous batching when x is 2D tensor
 
@@ -738,6 +744,7 @@ def causal_conv1d_fn(
         SILU_ACTIVATION=activation in ["silu", "swish"],
         IS_APC_ENABLED=block_idx_last_scheduled_token is not None,
         HAS_NULL_BLOCK=null_block_id is not None,
+        ZERO_INITIAL_STATE_OUTPUT=zero_initial_state_output,
         NP2_STATELEN=np2_statelen,
         # launch_cooperative_grid=True
         BLOCK_M=BLOCK_M,
