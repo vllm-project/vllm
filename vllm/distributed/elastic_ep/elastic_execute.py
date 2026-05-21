@@ -566,3 +566,45 @@ class ElasticEPScalingExecutor:
     def prepare_new_worker(self) -> None:
         with set_current_vllm_config(self.worker.vllm_config):
             prepare_communication_buffer_for_model(self.worker.model_runner.get_model())
+
+    def rewarm_workspace(self) -> None:
+        # Must run on every DP sibling in lockstep: _dummy_run calls
+        # coordinate_batch_across_dp whenever data_parallel_size > 1
+        # (gpu_model_runner.py:3663), which deadlocks if any rank skips it.
+
+        # Save and clear block tables so profile_run/compile_or_warm_up_model
+        # don't write dummy slot mappings into real KV-cache blocks (mirrors
+        # switch_and_prepare's pattern).
+        multi_block_table = self.worker.model_runner.input_batch.block_table
+        saved_block_tables: list[tuple[torch.Tensor, torch.Tensor]] = []
+        for bt in multi_block_table.block_tables:
+            saved_block_tables.append(
+                (bt.block_table.gpu.clone(), bt.block_table.cpu.clone())
+            )
+        multi_block_table.clear()
+
+        # _ensure_workspace_size allocates a fresh tensor on grow, leaving
+        # captured CUDA graphs with stale data pointers; drop graphs before
+        # re-warm so captures realign with the resized buffer.
+        self._release_cuda_graphs()
+        unlock_workspace()
+
+        # Grow the MoE workspace at max_num_tokens.
+        # compile_or_warm_up_model alone only exercises cudagraph-capture
+        # sizes (≤64 tokens for this test) and leaves the workspace at
+        # ~10-14 MB; the post-all-to-all per-rank token count under real
+        # post-reshuffle routing needs hundreds of MB. Use _dummy_run
+        # directly (rather than profile_run) with skip_eplb=True so dummy
+        # routing doesn't pollute the just-rebalanced EPLB stats — same
+        # convention compile_or_warm_up_model itself uses.
+        runner = self.worker.model_runner
+        runner._dummy_run(runner.max_num_tokens, is_profile=True, skip_eplb=True)
+        self.worker.compile_or_warm_up_model()
+
+        lock_workspace()
+
+        for bt, (saved_gpu, saved_cpu) in zip(
+            multi_block_table.block_tables, saved_block_tables
+        ):
+            bt.block_table.gpu.copy_(saved_gpu)
+            bt.block_table.cpu.copy_(saved_cpu)

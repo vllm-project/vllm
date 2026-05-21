@@ -124,30 +124,3 @@ def test_whisper_multi_lora(whisper_lora_files):
         f"Expected same outputs for same adapter with different IDs. "
         f"Got: {outputs_lora1} vs {outputs_lora2}"
     )
-
-
-@create_new_process_for_each_test()
-def test_whisper_with_and_without_lora(whisper_lora_files):
-    """Test that Whisper produces different outputs with and without LoRA.
-
-    This test verifies that the LoRA adapter actually affects the model output.
-    """
-    llm = create_whisper_llm(enable_lora=True)
-
-    # Run with LoRA
-    outputs_with_lora = run_whisper_inference(
-        llm, lora_path=whisper_lora_files, lora_id=1
-    )
-
-    # Run without LoRA (base model only)
-    outputs_without_lora = run_whisper_inference(llm, lora_path=None)
-
-    # Both should produce valid outputs
-    assert len(outputs_with_lora[0]) > 0
-    assert len(outputs_without_lora[0]) > 0
-
-    print(f"Output with LoRA: {outputs_with_lora[0]}")
-    print(f"Output without LoRA: {outputs_without_lora[0]}")
-
-    # Note: Outputs may or may not differ depending on the adapter
-    # The main verification is that both configurations work

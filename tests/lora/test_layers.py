@@ -57,7 +57,11 @@ TOLERANCES = {
 }
 
 pytestmark = pytest.mark.skipif(
-    not (current_platform.is_cuda_alike() or current_platform.is_cpu()),
+    not (
+        current_platform.is_cuda_alike()
+        or current_platform.is_cpu()
+        or current_platform.is_xpu()
+    ),
     reason="Backend not supported",
 )
 
@@ -67,7 +71,7 @@ DEVICES = (
         f"{DEVICE_TYPE}:{i}"
         for i in range(1 if torch.accelerator.device_count() == 1 else 2)
     ]
-    if current_platform.is_cuda_alike()
+    if (current_platform.is_cuda_alike() or current_platform.is_xpu())
     else ["cpu"]
 )
 
@@ -96,7 +100,7 @@ def skip_cuda_with_stage_false(request):
     On cuda-like platforms, we use the same kernels for prefill and decode
     stage, and 'stage' is generally ignored, so we only need to test once.
     """
-    if current_platform.is_cuda_alike():
+    if current_platform.is_cuda_alike() or current_platform.is_xpu():
         try:
             if hasattr(request.node, "callspec") and hasattr(
                 request.node.callspec, "params"
@@ -249,6 +253,10 @@ def check_punica_wrapper(punica_wrapper) -> bool:
         from vllm.lora.punica_wrapper.punica_cpu import PunicaWrapperCPU
 
         return type(punica_wrapper) is PunicaWrapperCPU
+    elif current_platform.is_xpu():
+        from vllm.lora.punica_wrapper.punica_xpu import PunicaWrapperXPU
+
+        return type(punica_wrapper) is PunicaWrapperXPU
     else:
         return False
 
@@ -264,7 +272,7 @@ def test_embeddings(
     # For multi-GPU testing of Triton kernel, we must explicitly set the CUDA
     # device, see: https://github.com/triton-lang/triton/issues/2925
     # Same below.
-    if current_platform.is_cuda_alike():
+    if current_platform.is_cuda_alike() or current_platform.is_xpu():
         torch.accelerator.set_device_index(device)
 
     torch.set_default_device(device)
@@ -363,7 +371,7 @@ def test_embeddings(
 def test_lm_head_logits_processor(
     default_vllm_config, dist_init, num_loras, device, vocab_size, stage
 ) -> None:
-    if current_platform.is_cuda_alike():
+    if current_platform.is_cuda_alike() or current_platform.is_xpu():
         torch.accelerator.set_device_index(device)
 
     torch.set_default_device(device)
@@ -480,7 +488,7 @@ def test_lm_head_logits_processor_invalid_vocab_size(
     default_vllm_config, dist_init, vocab_size, device
 ) -> None:
     """Test that LogitsProcessorWithLoRA raises ValueError for invalid vocab sizes."""
-    if current_platform.is_cuda_alike():
+    if current_platform.is_cuda_alike() or current_platform.is_xpu():
         torch.accelerator.set_device_index(device)
 
     torch.set_default_device(device)
@@ -509,7 +517,7 @@ def test_linear_replicated(
     device,
     stage,
 ) -> None:
-    if current_platform.is_cuda_alike():
+    if current_platform.is_cuda_alike() or current_platform.is_xpu():
         torch.accelerator.set_device_index(device)
 
     max_loras = 8
@@ -618,7 +626,7 @@ def test_linear_replicated(
 def test_linear_parallel(
     default_vllm_config, dist_init, num_loras, orientation, fully_shard, device, stage
 ) -> None:
-    if current_platform.is_cuda_alike():
+    if current_platform.is_cuda_alike() or current_platform.is_xpu():
         torch.accelerator.set_device_index(device)
 
     max_loras = 8
@@ -751,7 +759,7 @@ def test_linear_parallel(
 def test_column_parallel_packed(
     default_vllm_config, dist_init, num_loras, repeats, fully_shard, device, stage
 ) -> None:
-    if current_platform.is_cuda_alike():
+    if current_platform.is_cuda_alike() or current_platform.is_xpu():
         torch.accelerator.set_device_index(device)
 
     max_loras = 8
@@ -913,7 +921,7 @@ def test_column_parallel_packed(
 def test_merged_column_parallel_variable_slice(
     default_vllm_config, dist_init, num_loras, num_slices, device, stage
 ) -> None:
-    if current_platform.is_cuda_alike():
+    if current_platform.is_cuda_alike() or current_platform.is_xpu():
         torch.accelerator.set_device_index(device)
 
     max_loras = 8
@@ -1600,11 +1608,15 @@ def test_get_and_maybe_dequant_weights_accepts_lora_wrappers(dist_init, wrapper_
 def test_deepseek_fused_qkv_a_proj_lora_preserves_base_forward(
     default_vllm_config, dist_init, device, stage, fully_sharded
 ):
-    if current_platform.is_cuda_alike():
+    if current_platform.is_cuda_alike() or current_platform.is_xpu():
         torch.accelerator.set_device_index(device)
 
     torch.set_default_device(device)
-    dtype = torch.float16 if current_platform.is_cuda_alike() else torch.float32
+    dtype = (
+        torch.float16
+        if (current_platform.is_cuda_alike() or current_platform.is_xpu())
+        else torch.float32
+    )
     max_loras = 8
     lora_config = LoRAConfig(
         max_loras=max_loras,
@@ -1683,11 +1695,15 @@ def test_deepseek_fused_qkv_a_proj_lora_preserves_base_forward(
 def test_replicated_lora_preserves_base_forward_for_subclasses(
     default_vllm_config, dist_init, device, stage
 ):
-    if current_platform.is_cuda_alike():
+    if current_platform.is_cuda_alike() or current_platform.is_xpu():
         torch.accelerator.set_device_index(device)
 
     torch.set_default_device(device)
-    dtype = torch.float16 if current_platform.is_cuda_alike() else torch.float32
+    dtype = (
+        torch.float16
+        if current_platform.is_cuda_alike() or current_platform.is_xpu()
+        else torch.float32
+    )
     max_loras = 8
     lora_config = LoRAConfig(max_loras=max_loras, max_lora_rank=8, lora_dtype=dtype)
     punica_wrapper = get_punica_wrapper(8192, 256, device, lora_config=lora_config)
