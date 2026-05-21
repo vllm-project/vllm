@@ -42,6 +42,21 @@ def _make_scheduler_output(*, scheduled_spec_tokens: list[int] | None):
     )
 
 
+def _make_preemption_scheduler_output():
+    return SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids={"req-0"},
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=[],
+            new_block_ids=[],
+            num_computed_tokens=[],
+        ),
+        num_scheduled_tokens={},
+        scheduled_spec_decode_tokens={},
+    )
+
+
 def _add_unfinished_request(
     scheduler: MooncakeStoreScheduler,
     *,
@@ -109,3 +124,19 @@ def test_cached_request_without_spec_decode_keeps_current_step_save_overlap():
     tracker = scheduler._request_trackers["req-0"]
     assert tracker.token_len == 48
     assert tracker.num_saved_tokens == 48
+
+
+def test_request_finished_after_preemption_without_tracker_is_noop():
+    scheduler = _make_bare_scheduler()
+    _add_unfinished_request(
+        scheduler,
+        token_ids=list(range(44)),
+        block_hashes=[b"h0", b"h1"],
+        prefill_end_tokens=48,
+    )
+
+    scheduler.build_connector_meta(_make_preemption_scheduler_output())
+
+    assert "req-0" not in scheduler._request_trackers
+    request = SimpleNamespace(request_id="req-0")
+    assert scheduler.request_finished(request, ([0, 1],)) == (False, None)
