@@ -474,3 +474,8 @@ def has_fbgemm_gpu() -> bool:
 def has_cutedsl() -> bool:
     """Whether the optional `cutelass` package is available."""
     return _has_module("cutlass")
+
+
+def has_humming() -> bool:
+    """Whether the optional `humming` package is available."""
+    return _has_module("humming")

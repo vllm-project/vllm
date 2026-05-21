@@ -39,6 +39,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import current_platform
+from vllm.utils.import_utils import has_humming
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
@@ -138,6 +139,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
+        # TBD
         return True
 
     def supports_expert_map(self) -> bool:
@@ -146,7 +148,11 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
     @staticmethod
     def _supports_current_device() -> bool:
         platform = current_platform
-        return platform.is_cuda() and platform.has_device_capability((7, 5))
+        return (
+            has_humming()
+            and platform.is_cuda()
+            and platform.has_device_capability((7, 5))
+        )
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
@@ -170,6 +176,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        # Why?
         return not (
             moe_parallel_config.use_fi_nvl_two_sided_kernels
             or moe_parallel_config.use_fi_nvl_one_sided_kernels

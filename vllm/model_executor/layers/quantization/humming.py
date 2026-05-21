@@ -18,6 +18,12 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
+from vllm.model_executor.layers.fused_moe.oracle.humming import (
+    make_humming_moe_kernel,
+    # convert_to_humming_moe_kernel_format,
+    make_humming_moe_quant_config,
+    select_humming_moe_backend,
+)
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
@@ -44,8 +50,9 @@ from vllm.model_executor.parameter import (
 )
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.utils.import_utils import has_humming
 
-if current_platform.is_cuda():
+if has_humming() and current_platform.is_cuda():
     from humming.dtypes import DataType
     from humming.layer import HummingMethod
     from humming.schema import (
@@ -56,12 +63,6 @@ if current_platform.is_cuda():
     )
     from humming.utils.weight import quantize_weight
 
-    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
-        BatchedHummingGroupedExperts,
-        HummingGroupedExperts,
-        HummingIndexedExperts,
-        get_humming_moe_gemm_type,
-    )
 
 if TYPE_CHECKING:
     from humming.schema import (
@@ -626,11 +627,18 @@ class HummingMoEMethod(FusedMoEMethodBase):
     ) -> None:
         super().__init__(moe)
         self.quant_config = quant_config
-        self.moe = moe
         self.weight_schema = quant_config.weight_schema
         self.input_schema = quant_config.input_schema
         self.force_weight_schema = quant_config.force_weight_schema
         self.force_input_schema = quant_config.force_input_schema
+
+        # Select Humming MoE backend
+        self.backend, self.experts_cls = select_humming_moe_backend(
+            config=self.moe,
+            # TBD
+            weight_key=None,
+            activation_key=None,
+        )
 
     def prepare_weight_loader(self, layer, weight_loader):
         def new_weight_loader(
@@ -698,7 +706,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
 
     def create_weights(
         self,
-        layer: torch.nn.Module,
+        layer: RoutedExperts,
         num_experts: int,
         hidden_size: int,
         intermediate_size_per_partition: int,
@@ -755,17 +763,17 @@ class HummingMoEMethod(FusedMoEMethodBase):
         locks = torch.zeros(1024, dtype=torch.int32)
         layer.register_buffer("locks", locks)
 
-    def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
-        from vllm.model_executor.layers.quantization.utils.humming_utils import (
-            get_humming_moe_quant_config,
+    def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
+        return make_humming_moe_quant_config(
+            self.backend,
+            layer,
         )
-
-        return get_humming_moe_quant_config(layer)
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         if getattr(self, "processed", False):
             return
         self.processed = True
+
         layer.weight_schemas = {}
         layer.input_schemas = {}
         for sublayer_name, configs in layer.sublayer_configs.items():
@@ -863,36 +871,17 @@ class HummingMoEMethod(FusedMoEMethodBase):
             # preprocess weight for inference
             HummingMethod.transform_humming_layer(layer, sublayer_name=sublayer_name)
 
-        # use moe modular
-        experts: HummingIndexedExperts | HummingGroupedExperts
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.moe_quant_config is not None
-        if get_humming_moe_gemm_type() == "indexed":
-            experts = HummingIndexedExperts(layer, self.moe, self.moe_quant_config)
-        else:
-            experts = HummingGroupedExperts(layer, self.moe, self.moe_quant_config)
-        self.experts = experts
-
-    def select_gemm_impl(
-        self,
-        prepare_finalize,
-        layer: torch.nn.Module,
-    ):
-        from vllm.model_executor.layers.fused_moe import modular_kernel as mk
-
-        activation_format = prepare_finalize.activation_format
-        assert self.moe_quant_config is not None
-        if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
-            return BatchedHummingGroupedExperts(
-                layer=layer,
-                moe_config=self.moe,
-                quant_config=self.moe_quant_config,
-                max_num_tokens=prepare_finalize.max_num_tokens_per_rank(),
-                num_dispatchers=prepare_finalize.num_dispatchers(),
-            )
-        elif get_humming_moe_gemm_type() == "indexed":
-            return HummingIndexedExperts(layer, self.moe, self.moe_quant_config)
-        else:
-            return HummingGroupedExperts(layer, self.moe, self.moe_quant_config)
+        assert self.experts_cls is not None
+        self.moe_kernel = make_humming_moe_kernel(
+            self.moe_quant_config,
+            self.moe,
+            self.experts_cls,
+            self.backend,
+            layer=layer,
+            routing_tables=layer._expert_routing_tables(),
+        )
 
     def apply(
         self,
@@ -902,8 +891,8 @@ class HummingMoEMethod(FusedMoEMethodBase):
         topk_ids: torch.Tensor,
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        workspace1, workspace2, output = self.experts.make_workspaces(
+    ) -> torch.Tensor:
+        workspace1, workspace2, output = self.moe_kernel.make_workspaces(
             M=topk_ids.size(0),
             topk=topk_ids.size(1),
             activation=layer.activation,
@@ -911,7 +900,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
 
         assert workspace1.data_ptr() == output.data_ptr()
 
-        self.experts.main_apply(
+        self.moe_kernel.main_apply(
             hidden_states=x,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
