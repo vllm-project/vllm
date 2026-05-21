@@ -217,7 +217,7 @@ class ServingEmbedding(PoolingServing):
     ) -> Mapping[str, str]:
         if isinstance(ctx.request, (EmbeddingCompletionRequest, EmbeddingChatRequest)):
             return {
-                SpanAttributes.GEN_AI_POOLING_EMBED_ENCODING_FORMAT: ctx.request.encoding_format, # noqa E501
+                SpanAttributes.GEN_AI_POOLING_EMBED_ENCODING_FORMAT: ctx.request.encoding_format,  # noqa E501
                 SpanAttributes.GEN_AI_POOLING_EMBED_DTYPE: ctx.request.embed_dtype,
                 SpanAttributes.GEN_AI_POOLING_EMBED_ENDIANNESS: ctx.request.endianness,
             }
