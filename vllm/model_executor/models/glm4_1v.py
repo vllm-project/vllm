@@ -1744,7 +1744,19 @@ class Glm4vForConditionalGeneration(
         return "video"
 
     def get_max_frames_per_video(self) -> int:
-        return 1
+        mm_registry = MULTIMODAL_REGISTRY
+        info = mm_registry.get_processing_info(self.model_config)
+        max_frames_per_video = info.get_num_frames_with_most_features(
+            seq_len=self.model_config.max_model_len,
+            mm_counts={"video": self.multimodal_config.get_limit_per_prompt("video")},
+        )
+
+        image_longest = info.get_image_processor().size["longest_edge"]
+        video_longest = info.get_video_processor().size["longest_edge"]
+        max_frames_from_info = video_longest // image_longest
+
+        max_frames_per_video = max(max_frames_per_video, max_frames_from_info, 16)
+        return max_frames_per_video
 
     def get_encoder_cudagraph_budget_range(
         self,
@@ -1857,7 +1869,7 @@ class Glm4vForConditionalGeneration(
         )
 
         spatial_merge_size = self.visual.spatial_merge_size
-        per_mm_item_output = (token_budget + max_batch_size - 1) // max_batch_size
+        per_mm_item_output = token_budget // max_batch_size
 
         frames_per_item = max_frames_per_batch // max_batch_size
         if frames_per_item > 1:
