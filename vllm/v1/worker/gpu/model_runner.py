@@ -37,6 +37,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.lora.layers import LoRAMapping
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
@@ -392,19 +393,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 ) + spec.num_speculative_blocks
             max_num_blocks_per_group.append(max_num_blocks)
 
+        (self.attn_backends, self.attn_groups, attn_cg_support, kernel_block_sizes) = (
+            init_attn_backend(self.kv_cache_config, self.vllm_config, self.device)
+        )
+
         self.block_tables = BlockTables(
             block_sizes=block_sizes,
             max_num_reqs=self.max_num_reqs,
             max_num_batched_tokens=self.max_num_tokens,
             max_num_blocks_per_group=max_num_blocks_per_group,
             device=self.device,
+            kernel_block_sizes=kernel_block_sizes,
             cp_size=self.dcp_size,
             cp_rank=self.dcp_rank,
             cp_interleave=self.cp_interleave,
-        )
-
-        self.attn_backends, self.attn_groups, attn_cg_support = init_attn_backend(
-            self.kv_cache_config, self.vllm_config, self.device
         )
         initialize_mamba_ssu_backend(
             self.vllm_config.mamba_config, self.kv_cache_config
@@ -443,6 +445,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.attn_backends,
             self.device,
             self.cache_config.cache_dtype,
+            kernel_block_sizes,
         )
         self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
 
@@ -1082,7 +1085,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
                 block_tables = None
                 slot_mappings = None
-            # FIXME(woosuk): Fix warmup for LoRA.
+            if self.lora_config:
+                # program a no-LoRA mapping here so kernels early-exit instead of
+                # reading uninitialized metadata during dummy runs.
+                # FIXME: Replace this with LoRA warmup:
+                # https://github.com/vllm-project/vllm/pull/35536
+                assert hasattr(self, "lora_manager")
+                self.lora_manager._adapter_manager.set_adapter_mapping(
+                    LoRAMapping(
+                        index_mapping=(0,) * input_batch.num_tokens_after_padding,
+                        prompt_mapping=(0,) * input_batch.num_reqs,
+                        is_prefill=True,
+                    )
+                )
 
         attn_metadata = None
         slot_mappings_by_layer = None
