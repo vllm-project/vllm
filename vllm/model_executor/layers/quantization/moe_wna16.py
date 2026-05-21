@@ -397,21 +397,21 @@ class MoeWNA16Method(FusedMoEMethodBase):
             layer=layer,
             quant_config=self.quant_config,
             input_dtype=None,
-            w13=layer.w13_weight_packed,
-            w2=layer.w2_weight_packed,
-            w13_scale=layer.w13_weight_scale,
-            w2_scale=layer.w2_weight_scale,
-            w13_g_idx=layer.w13_weight_g_idx,
-            w2_g_idx=layer.w2_weight_g_idx,
+            w13=layer.w13_qweight,
+            w2=layer.w2_qweight,
+            w13_scale=layer.w13_scales,
+            w2_scale=layer.w2_scales,
+            w13_g_idx=layer.w13_g_idx,
+            w2_g_idx=layer.w2_g_idx,
             w13_qzeros=layer.w13_qzeros if has_zp else None,
             w2_qzeros=layer.w2_qzeros if has_zp else None,
         )
 
         # Replace common parameters
-        replace_parameter(layer, "w13_weight_packed", w13_qweight)
-        replace_parameter(layer, "w2_weight_packed", w2_qweight)
-        replace_parameter(layer, "w13_weight_scale", w13_scales)
-        replace_parameter(layer, "w2_weight_scale", w2_scales)
+        replace_parameter(layer, "w13_qweight", w13_qweight)
+        replace_parameter(layer, "w2_qweight", w2_qweight)
+        replace_parameter(layer, "w13_scales", w13_scales)
+        replace_parameter(layer, "w2_scales", w2_scales)
 
         if has_zp:
             assert w13_qzeros is not None and w2_qzeros is not None
@@ -420,8 +420,8 @@ class MoeWNA16Method(FusedMoEMethodBase):
 
         # Marlin-specific parameters (not needed for Flashinfer)
         if self.wna16_backend != WNA16MoEBackend.FLASHINFER:
-            replace_parameter(layer, "w13_weight_g_idx", w13_g_idx_processed)
-            replace_parameter(layer, "w2_weight_g_idx", w2_g_idx_processed)
+            replace_parameter(layer, "w13_g_idx", w13_g_idx_processed)
+            replace_parameter(layer, "w2_g_idx", w2_g_idx_processed)
             replace_parameter(layer, "w13_g_idx_sort_indices", w13_g_idx_sort_indices)
             replace_parameter(layer, "w2_g_idx_sort_indices", w2_g_idx_sort_indices)
 

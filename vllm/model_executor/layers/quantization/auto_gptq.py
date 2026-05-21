@@ -707,8 +707,8 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
         replace_or_register("w2_input_global_scale", w2_input_global_scale)
         replace_or_register("w13_bias", w13_bias)
         replace_or_register("w2_bias", w2_bias)
-        replace_or_register("w13_zp", w13_qzeros)
-        replace_or_register("w2_zp", w2_qzeros)
+        replace_or_register("w13_qzeros", w13_qzeros)
+        replace_or_register("w2_qzeros", w2_qzeros)
 
         self._setup_kernel(layer)
 
