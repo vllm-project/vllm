@@ -5,6 +5,7 @@ import atexit
 import functools
 import inspect
 import os
+import threading
 import time
 import traceback
 from collections.abc import Mapping
@@ -326,6 +327,8 @@ def maybe_start_span(tracer: Tracer | None, *args, **kwargs):
 
         attributes = kwargs.pop("attributes", {})
         attributes[SpanAttributes.GEN_AI_PROCESS_ID] = str(os.getpid())
+        attributes[SpanAttributes.GEN_AI_THREADING_ID] = str(threading.get_ident())
+
         span = tracer.start_span(
             *args, start_time=start_time, attributes=attributes, **kwargs
         )
@@ -345,6 +348,8 @@ async def maybe_start_span_async(tracer: Tracer | None, *args, **kwargs):
 
         attributes = kwargs.pop("attributes", {})
         attributes[SpanAttributes.GEN_AI_PROCESS_ID] = str(os.getpid())
+        attributes[SpanAttributes.GEN_AI_THREADING_ID] = str(threading.get_ident())
+
         span = tracer.start_span(
             *args, start_time=start_time, attributes=attributes, **kwargs
         )

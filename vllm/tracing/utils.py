@@ -55,6 +55,7 @@ class SpanAttributes:
     GEN_AI_POOLING_EMBED_ENDIANNESS = "gen_ai.pooling.embed.endianness"
 
     GEN_AI_PROCESS_ID = "vllm.process_id"
+    GEN_AI_THREADING_ID = "vllm.threading_id"
 
 
 class LoadingSpanAttributes:
