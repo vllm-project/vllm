@@ -84,7 +84,9 @@ async def stream_openai_response(
     print()  # Final newline after stream ends
 
 
-def stream_api_response(audio_path: str, model: str, openai_api_base: str):
+def stream_api_response(
+    audio_path: str, model: str, openai_api_base: str, hotwords: str = None
+):
     """
     Perform streaming transcription using raw HTTP requests to the vLLM API server.
     """
@@ -103,6 +105,8 @@ def stream_api_response(audio_path: str, model: str, openai_api_base: str):
             "language": "en",
             "response_format": "json",
         }
+        if hotwords is not None:
+            data["hotwords"] = hotwords
 
         print("\ntranscription result [stream]:", end=" ")
         response = requests.post(
@@ -167,6 +171,7 @@ def main(args):
             args.audio_path if args.audio_path else winning_call,
             model,
             openai_api_base,
+            hotwords=args.hotwords,
         )
 
 
