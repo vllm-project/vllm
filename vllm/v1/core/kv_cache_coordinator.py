@@ -4,7 +4,6 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from math import lcm
 
-from vllm.config import VllmConfig
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
