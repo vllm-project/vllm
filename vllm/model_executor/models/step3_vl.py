@@ -741,6 +741,12 @@ class Step3VLForConditionalGeneration(
             self.config.vision_config.patch_size,
             self.config.understand_projector_stride,
         )
+
+        # NOTE: 504 is the hard coded size for each patch after processing
+        # by the vision model, which is determined by the current architecture
+        # of the vision model and may need to be updated if the architecture changes.
+        # The number of tokens for each patch is calculated based on this
+        # size and the patch size.
         patch_output_tokens = self._compute_spatial_tokens(
             504,
             self.config.vision_config.patch_size,
