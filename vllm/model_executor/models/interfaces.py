@@ -1626,9 +1626,9 @@ class SupportsEncoderCudaGraph(Protocol):
         mm_kwargs: dict[str, Any],
         buffers: dict[str, torch.Tensor],
     ) -> torch.Tensor:
-        """Run the encoder forward pass with precomputed metadata buffers.
+        """Run the encoder forward pass with precomputed buffers.
 
-        Used during CUDA graph capture and replay.
+        Used during both CUDA graph capture and replay.
         """
         ...
 
@@ -1636,9 +1636,9 @@ class SupportsEncoderCudaGraph(Protocol):
         self,
         mm_kwargs: dict[str, Any],
     ) -> torch.Tensor:
-        """Run the encoder forward pass without precomputed metadata.
+        """Run the encoder forward pass without precomputed buffers.
 
-        Used as eager fallback when inputs exceed all captured budgets.
+        Used as eager fallback when inputs exceed all budgets.
         """
         ...
 
