@@ -241,6 +241,7 @@ class FlashInferSSUBackend(MambaSSUBackend):
         old_cumAdt: torch.Tensor | None = None,
         cache_buf_idx: torch.Tensor | None = None,
         prev_num_accepted_tokens: torch.Tensor | None = None,
+        state_scales: torch.Tensor | None = None,
     ) -> None:
         rand_seed = (
             torch.randint(0, 2**32, (1,), dtype=torch.int64, device=state.device)
@@ -260,7 +261,8 @@ class FlashInferSSUBackend(MambaSSUBackend):
             num_accepted_tokens is None
             and all(arg is not None for arg in checkpointing_args)
             and self._checkpointing_state_indices(state_batch_indices) is not None
-            and state.dtype in (torch.float16, torch.bfloat16, torch.float32)
+            and state.dtype
+            in (torch.float16, torch.bfloat16, torch.float32, torch.float8_e4m3)
         )
         if can_checkpoint:
             assert old_x is not None
@@ -273,10 +275,7 @@ class FlashInferSSUBackend(MambaSSUBackend):
             assert state_indices is not None
             kernel_state_indices = state_indices
             dst_indices = self._checkpointing_state_indices(dst_state_batch_indices)
-            if (
-                dst_indices is not None
-                and dst_indices.numel() == state_indices.numel()
-            ):
+            if dst_indices is not None and dst_indices.numel() == state_indices.numel():
                 self._copy_checkpointing_slots(
                     (
                         state,
@@ -308,9 +307,7 @@ class FlashInferSSUBackend(MambaSSUBackend):
                     max_seqlen,
                 )
             )
-            kernel_max_seqlen = (
-                ckpt_max_seqlen if ckpt_cu_seqlens is not None else None
-            )
+            kernel_max_seqlen = ckpt_max_seqlen if ckpt_cu_seqlens is not None else None
             if ckpt_cu_seqlens is None and kernel_state_indices.numel() > 1:
                 for start in range(kernel_state_indices.numel()):
                     end = start + 1
@@ -387,6 +384,7 @@ class FlashInferSSUBackend(MambaSSUBackend):
                 or 10,
                 cu_seqlens=ckpt_cu_seqlens,
                 max_seqlen=kernel_max_seqlen,
+                state_scale=state_scales,
             )
             self._update_checkpointing_trackers(
                 cache_buf_idx,
@@ -582,9 +580,7 @@ class FlashInferSSUBackend(MambaSSUBackend):
         n_slots = src_indices.numel()
         for tensor in tensors:
             slot_size = tensor[0].numel()
-            _copy_checkpointing_slots_kernel[
-                (n_slots, triton.cdiv(slot_size, block))
-            ](
+            _copy_checkpointing_slots_kernel[(n_slots, triton.cdiv(slot_size, block))](
                 tensor,
                 src_indices,
                 dst_indices,
@@ -671,6 +667,7 @@ def selective_state_update(
     old_cumAdt: torch.Tensor | None = None,
     cache_buf_idx: torch.Tensor | None = None,
     prev_num_accepted_tokens: torch.Tensor | None = None,
+    state_scales: torch.Tensor | None = None,
 ) -> None:
     """Unified dispatch for Mamba selective state update.
 
@@ -701,4 +698,5 @@ def selective_state_update(
         old_cumAdt=old_cumAdt,
         cache_buf_idx=cache_buf_idx,
         prev_num_accepted_tokens=prev_num_accepted_tokens,
+        state_scales=state_scales,
     )

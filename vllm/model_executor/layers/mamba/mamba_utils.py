@@ -82,6 +82,7 @@ class MambaStateDtypeCalculator:
         return (
             conv_state_dtype,
             temporal_state_dtype,
+            torch.float32,
             torch.bfloat16,
             torch.bfloat16,
             torch.float32,
@@ -195,6 +196,7 @@ class MambaStateShapeCalculator:
         # - they are typically small
         #   e.g., (h_heads, head_dim, state_size) = (128, 64, 128)
         temporal_state_shape = (divide(num_heads, tp_world_size), head_dim, state_size)
+        temporal_state_scales_shape = (divide(num_heads, tp_world_size), head_dim, 1)
         nheads = divide(num_heads, tp_world_size)
         ngroups = max(1, divide(n_groups, tp_world_size))
         old_x_shape = (checkpoint_interval, nheads, head_dim)
@@ -206,6 +208,7 @@ class MambaStateShapeCalculator:
         return (
             conv_state_shape,
             temporal_state_shape,
+            temporal_state_scales_shape,
             old_x_shape,
             old_B_shape,
             old_dt_shape,
@@ -399,6 +402,7 @@ class MambaStateCopyFuncCalculator:
         return (
             get_conv_copy_spec,
             get_temporal_copy_spec,
+            get_temporal_copy_spec,
             get_stable_temporal_copy_spec,
             get_stable_temporal_copy_spec,
             get_stable_temporal_copy_spec,
@@ -438,3 +442,36 @@ class MambaStateCopyFuncCalculator:
             get_conv_copy_spec,
             get_temporal_copy_spec,
         )
+
+
+# Dtypes that require block-scale quantization for the SSM state cache.
+QUANTIZED_SSM_STATE_DTYPES: tuple[torch.dtype, ...] = (
+    torch.int8,
+    torch.int16,
+    torch.float8_e4m3fn,
+)
+
+
+def quantize_scaled(
+    state: torch.Tensor, dtype: torch.dtype
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize state tensor with dynamic per-head-dim block scales.
+
+    Args:
+        state: fp32 tensor of shape (..., nheads, head_dim, dstate).
+        dtype: target quantized dtype
+
+    Returns:
+        (state_q, decode_scale) where:
+          state_q      has the requested dtype, same shape as state.
+          decode_scale is fp32, shape (..., nheads, head_dim) — the factor to
+                       multiply by when dequantizing (i.e. 1 / encode_scale).
+    """
+    quant_max = (
+        torch.finfo(dtype).max if dtype.is_floating_point else torch.iinfo(dtype).max
+    )
+    amax = torch.amax(torch.abs(state), dim=-1, keepdim=True)
+    encode_scale = torch.where(amax == 0.0, torch.ones_like(amax), quant_max / amax)
+    state_q = (state * encode_scale).to(dtype)
+    decode_scale = torch.squeeze(torch.reciprocal(encode_scale), dim=-1)
+    return state_q, decode_scale

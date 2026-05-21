@@ -1003,9 +1003,7 @@ class GPUModelRunner(
             self.vllm_config.mamba_config.backend == MambaBackendEnum.FLASHINFER
             and len(copy_funcs) == 8
         ):
-            return (
-                MambaStateCopyFuncCalculator.mamba2_checkpointing_state_copy_func()
-            )
+            return MambaStateCopyFuncCalculator.mamba2_checkpointing_state_copy_func()
         return copy_funcs
 
     def _get_mamba_copy_bufs(self) -> mamba_utils.MambaCopyBuffers:

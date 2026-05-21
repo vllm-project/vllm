@@ -242,12 +242,8 @@ def test_checkpointing_ssu_stp_outputs_match_old_flashinfer(
     ngroups = 1
     max_window = 1
 
-    old_backend = _make_backend(
-        enable_stochastic_rounding=enable_stochastic_rounding
-    )
-    new_backend = _make_backend(
-        enable_stochastic_rounding=enable_stochastic_rounding
-    )
+    old_backend = _make_backend(enable_stochastic_rounding=enable_stochastic_rounding)
+    new_backend = _make_backend(enable_stochastic_rounding=enable_stochastic_rounding)
 
     initial_state = 0.1 * torch.randn(
         cache_size,
