@@ -84,6 +84,10 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         self.token_mapping_meta.prepare_tensors(self.token_lora_indices)
         self.prompt_mapping_meta.prepare_tensors(self.sampler_indices)
 
+    def prepare_for_cudagraph_capture(self) -> None:
+        self.token_mapping_meta.prepare_for_cudagraph_capture()
+        self.prompt_mapping_meta.prepare_for_cudagraph_capture()
+
     def _get_token_lora_indices(self, x: torch.Tensor) -> torch.IntTensor:
         return torch.narrow(self._token_lora_indices, 0, 0, x.size(0))
 

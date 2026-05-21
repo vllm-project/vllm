@@ -106,6 +106,26 @@ class LoRAKernelMeta:
         self.no_lora_flag_cpu.fill_(False)
         self.num_active_loras_cpu.fill_(0)
 
+    def prepare_for_cudagraph_capture(self) -> None:
+        """Program metadata so the LoRA kernel is launched (and captured into
+        the cudagraph) but every CTA early-exits at runtime.
+
+        The Python wrapper around lora_shrink/expand short-circuits when
+        `no_lora_flag_cpu` is True and would skip the kernel launch entirely
+        -- meaning cudagraph capture would omit the kernels and inference
+        replay would silently apply no LoRA delta. Setting `no_lora_flag_cpu
+        = False` keeps the launch in place; `num_active_loras_cpu = 1` gives
+        the kernel one work item; `active_lora_ids` stays all -1 from
+        `_reset()`, which triggers the per-CTA `if lora_id == -1: return`
+        early-exit inside the kernel itself (lora_shrink_op.py:74,
+        lora_expand_op.py:67). At real inference, `set_active_loras`
+        overwrites `active_lora_ids[0]` with the real adapter slot and the
+        captured kernels do real work.
+        """
+        self._reset()
+        self.no_lora_flag_cpu[0] = False
+        self.num_active_loras_cpu[0] = 1
+
     def prepare_tensors(self, token_lora_mapping: torch.Tensor) -> None:
         """
         Prepare kernel metadata tensors for the current forward pass.

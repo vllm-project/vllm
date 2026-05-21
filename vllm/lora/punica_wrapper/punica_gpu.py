@@ -87,6 +87,10 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         self.token_mapping_meta.prepare_tensors(self.token_lora_indices)
         self.prompt_mapping_meta.prepare_tensors(self.sampler_indices)
 
+    def prepare_for_cudagraph_capture(self) -> None:
+        self.token_mapping_meta.prepare_for_cudagraph_capture()
+        self.prompt_mapping_meta.prepare_for_cudagraph_capture()
+
     def add_shrink(
         self,
         y: torch.Tensor,

@@ -37,7 +37,6 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
-from vllm.lora.layers import LoRAMapping
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
@@ -1086,18 +1085,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 block_tables = None
                 slot_mappings = None
             if self.lora_config:
-                # program a no-LoRA mapping here so kernels early-exit instead of
-                # reading uninitialized metadata during dummy runs.
-                # FIXME: Replace this with LoRA warmup:
-                # https://github.com/vllm-project/vllm/pull/35536
-                assert hasattr(self, "lora_manager")
-                self.lora_manager._adapter_manager.set_adapter_mapping(
-                    LoRAMapping(
-                        index_mapping=(0,) * input_batch.num_tokens_after_padding,
-                        prompt_mapping=(0,) * input_batch.num_reqs,
-                        is_prefill=True,
-                    )
-                )
+                # Prime every punica wrapper (language, plus tower/connector
+                # for MM models) so the LoRA Triton kernels get captured into
+                # the cudagraph but no-op at capture time. Without this the
+                # Python short-circuit inside lora_shrink/expand omits the
+                # kernels from the captured graph and inference replay
+                # silently skips the LoRA delta.
+                self._ensure_lora_enabled()
+                mapping = self.lora_manager._adapter_manager.punica_wrapper_mapping
+                for pw in mapping.values():
+                    pw.prepare_for_cudagraph_capture()
 
         attn_metadata = None
         slot_mappings_by_layer = None

@@ -298,6 +298,12 @@ class PunicaWrapperBase(PunicaWrapperABC):
         else:
             self.is_prefill = False
 
+    def prepare_for_cudagraph_capture(self) -> None:
+        """Prime kernel metadata for cudagraph capture without an active
+        adapter. Default is a no-op; subclasses that own per-kernel metadata
+        objects override to keep their LoRA kernels in the captured graph.
+        """
+
     @abstractmethod
     def add_shrink(
         self,
