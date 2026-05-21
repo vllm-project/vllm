@@ -153,6 +153,20 @@ class SharedOffloadRegion:
         self._views.append(worker_layer_view)
         return worker_layer_view
 
+    def create_kv_memoryview(self) -> memoryview:
+        """Return a zero-copy memoryview over the entire KV buffer.
+
+        Shape: (num_blocks, row_stride_bytes). Secondary tiers address
+        block *b* as ``view[b]``.
+        """
+        kv_tensor = self._base.view(self.num_blocks, self._row_stride)
+        np_arr = kv_tensor.numpy()
+        assert np_arr.ctypes.data == self._base.data_ptr(), (
+            "view()/numpy() created a copy instead of sharing the mmap buffer; "
+            "secondary tiers require zero-copy access to primary KV data"
+        )
+        return memoryview(np_arr)
+
     def cleanup(self) -> None:
         if self.is_pinned and self._base is not None:
             base_ptr = self._base.data_ptr()

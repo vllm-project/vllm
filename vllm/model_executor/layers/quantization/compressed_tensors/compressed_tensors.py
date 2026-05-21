@@ -5,11 +5,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import torch
-from compressed_tensors.config import (
-    CompressionFormat,
-    SparsityCompressionConfig,
-    SparsityStructure,
-)
+from compressed_tensors.config import CompressionFormat, SparsityCompressionConfig
 from compressed_tensors.quantization import (
     QuantizationArgs,
     QuantizationStrategy,
@@ -23,7 +19,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -39,13 +35,12 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     WNA16_SUPPORTED_BITS,
-    CompressedTensors24,
     CompressedTensorsScheme,
     CompressedTensorsW4A4Fp4,
+    CompressedTensorsW4A4Mxfp4,
     CompressedTensorsW4A8Fp8,
     CompressedTensorsW4A8Int,
     CompressedTensorsW4A16Fp4,
-    CompressedTensorsW4A16Mxfp4,
     CompressedTensorsW8A8Fp8,
     CompressedTensorsW8A8Int8,
     CompressedTensorsW8A8Mxfp8,
@@ -82,8 +77,6 @@ class CompressedTensorsConfig(QuantizationConfig):
         target_scheme_map: dict[str, Any],
         ignore: list[str],
         quant_format: str,
-        sparsity_scheme_map: dict[str, SparsityCompressionConfig],
-        sparsity_ignore_list: list[str],
         kv_cache_scheme: dict[str, Any] | None = None,
         config: dict[str, Any] | None = None,
         transform_config: dict[str, Any] | None = None,
@@ -96,8 +89,6 @@ class CompressedTensorsConfig(QuantizationConfig):
         # Map from [target -> scheme]
         self.target_scheme_map = target_scheme_map
         self.kv_cache_scheme = kv_cache_scheme
-        self.sparsity_scheme_map = sparsity_scheme_map
-        self.sparsity_ignore_list = sparsity_ignore_list
         self.config = config
         self.total_num_heads = total_num_heads
         self.total_num_kv_heads = total_num_kv_heads
@@ -148,8 +139,6 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         self.target_scheme_map = _apply_dict(self.target_scheme_map)
         self.ignore = _apply_list(self.ignore)
-        self.sparsity_scheme_map = _apply_dict(self.sparsity_scheme_map)
-        self.sparsity_ignore_list = _apply_list(self.sparsity_ignore_list)
         if self.kv_cache_scheme is not None:
             self.kv_cache_scheme = _apply_dict(self.kv_cache_scheme)
 
@@ -191,7 +180,7 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         if isinstance(layer, Attention):
             return CompressedTensorsKVCacheMethod(self)
-        if isinstance(layer, FusedMoE):
+        if isinstance(layer, RoutedExperts):
             return CompressedTensorsMoEMethod.get_moe_method(
                 self, layer, layer_name=prefix
             )
@@ -202,7 +191,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         Helper function to update target_scheme_map
         since linear layers get fused into FusedMoE
         targeting 'Linear' needs to also match
-        FusedMoE modules.
+        RoutedExperts modules.
         """
         if (
             "Linear" not in self.target_scheme_map
@@ -234,16 +223,14 @@ class CompressedTensorsConfig(QuantizationConfig):
         ignore: list[str] = cast(list[str], config.get("ignore", []))
         quant_format = cast(str, config.get("format"))
         target_scheme_map = cls._quantization_scheme_map_from_config(config=config)
-        sparsity_scheme_map, sparsity_ignore_list = cls._parse_sparsity_config(
-            config=config
-        )
+
+        # Check for deprecated sparsity config
+        cls._parse_sparsity_config(config=config)
 
         return cls(
             target_scheme_map=target_scheme_map,
             ignore=ignore,
             quant_format=quant_format,
-            sparsity_scheme_map=sparsity_scheme_map,
-            sparsity_ignore_list=sparsity_ignore_list,
             config=config,
             transform_config=config.get("transform_config"),
             kv_cache_scheme=config.get("kv_cache_scheme"),
@@ -270,6 +257,14 @@ class CompressedTensorsConfig(QuantizationConfig):
             target: sparsity_config for target in sparsity_config.targets or list()
         }
         sparsity_ignore_list = sparsity_config.ignore or list()
+
+        # Raise DeprecationError if non-empty sparse_scheme_map is detected
+        if sparse_scheme_map:
+            raise DeprecationWarning(
+                "Sparsity support has been removed from compressed-tensors. "
+                "Please use a model without sparsity configuration."
+            )
+
         return sparse_scheme_map, sparsity_ignore_list
 
     @classmethod
@@ -625,7 +620,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             return CompressedTensorsW4A16Fp4()
 
         if self._is_mxfp4(weight_quant):
-            return CompressedTensorsW4A16Mxfp4()
+            return CompressedTensorsW4A4Mxfp4()
 
         if self._is_mxfp8(weight_quant):
             return CompressedTensorsW8A8Mxfp8()
@@ -740,41 +735,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             input_quant = scheme_dict.get("input_activations")
             format = scheme_dict.get("format")
 
-        # Find the sparsity scheme of the layer
-        # assume that fused layers inherit first component's sparsity scheme
-        sparsity_targets = self.sparsity_scheme_map.keys() - set(
-            self.sparsity_ignore_list
-        )
-        sparsity_scheme: SparsityCompressionConfig | None = None
-        matched_target = find_matched_target(
-            layer_name=layer_name,
-            module=layer,
-            targets=sparsity_targets,
-            fused_mapping=self.packed_modules_mapping,
-        )
-        if matched_target is not None:
-            sparsity_scheme = self.sparsity_scheme_map[matched_target]
-
-        if self.supports_cutlass_24(
-            weight_quant=weight_quant,
-            input_quant=input_quant,
-            sparsity_scheme=sparsity_scheme,
-        ):
-            # Have a valid sparsity scheme
-            # Validate layer is supported by Cutlass 2:4 Kernel
-            model_compression_config = (
-                None
-                if sparsity_scheme is None or sparsity_scheme.format == "dense"
-                else self.config
-            )
-
-            scheme = CompressedTensors24(
-                quantized=weight_quant is not None or input_quant is not None,
-                weight_quant=weight_quant,
-                input_quant=input_quant,
-                model_compression_config=model_compression_config,
-            )
-        elif weight_quant is None:
+        if weight_quant is None:
             # Falling back to UnquantizedLinearMethod
             return None
 
@@ -837,72 +798,6 @@ class CompressedTensorsConfig(QuantizationConfig):
             ):
                 return True
         return False
-
-    @staticmethod
-    def supports_cutlass_24(
-        weight_quant: QuantizationArgs | None,
-        input_quant: QuantizationArgs | None,
-        sparsity_scheme: SparsityCompressionConfig | None = None,
-    ) -> bool:
-        """
-        Check if the layer is supported by the Cutlass 2:4 Kernel
-        Conditions:
-            - Overarching condition: Sparsity Structure is 2:4
-            - Unquantized cases are supported
-            - Weight only quantization is not-supported
-            - Supported weight quantization strategies are TENSOR and CHANNEL
-            - Supported input quantization strategies are TENSOR and TOKEN
-            - Only 8 bit quantization is supported
-
-        :return: True if the layer is supported by the Cutlass 2:4 Kernel
-            False otherwise
-        """
-        if sparsity_scheme is None:
-            return False
-
-        is_valid_sparsity_structure: bool = (
-            sparsity_scheme.sparsity_structure == SparsityStructure.TWO_FOUR.value
-        )
-
-        valid_compressors = {
-            CompressionFormat.dense.value,
-            CompressionFormat.sparse_24_bitmask.value,
-        }
-
-        is_valid_sparsity = (
-            is_valid_sparsity_structure and sparsity_scheme.format in valid_compressors
-        )
-
-        if not is_valid_sparsity:
-            return False
-
-        # Unquantized cases are supported
-        if weight_quant is None and input_quant is None:
-            return True
-
-        # Weight only quantization is not-supported
-        if weight_quant is not None and input_quant is None:
-            return False
-
-        supported_weight_quant_strategies = [
-            QuantizationStrategy.TENSOR.value,
-            QuantizationStrategy.CHANNEL.value,
-        ]
-
-        assert weight_quant is not None
-        assert input_quant is not None
-        if weight_quant.strategy not in supported_weight_quant_strategies:
-            return False
-
-        supported_input_quant_strategies = [
-            QuantizationStrategy.TENSOR.value,
-            QuantizationStrategy.TOKEN.value,
-        ]
-
-        if input_quant.strategy not in supported_input_quant_strategies:
-            return False
-
-        return weight_quant.num_bits == input_quant.num_bits == 8
 
 
 class CompressedTensorsLinearMethod(LinearMethodBase):

@@ -41,14 +41,6 @@ from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     OpenAIBaseModel,
 )
-from vllm.entrypoints.openai.speech_to_text.protocol import (
-    TranscriptionRequest,
-    TranscriptionResponse,
-    TranscriptionResponseVerbose,
-    TranslationRequest,
-    TranslationResponse,
-    TranslationResponseVerbose,
-)
 from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingRequest,
     EmbeddingResponse,
@@ -58,6 +50,16 @@ from vllm.entrypoints.pooling.scoring.protocol import (
     RerankResponse,
     ScoreRequest,
     ScoreResponse,
+)
+from vllm.entrypoints.speech_to_text.transcription.protocol import (
+    TranscriptionRequest,
+    TranscriptionResponse,
+    TranscriptionResponseVerbose,
+)
+from vllm.entrypoints.speech_to_text.translation.protocol import (
+    TranslationRequest,
+    TranslationResponse,
+    TranslationResponseVerbose,
 )
 from vllm.entrypoints.utils import create_error_response
 from vllm.exceptions import VLLMValidationError
