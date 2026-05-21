@@ -82,6 +82,13 @@ SPEC_DECODE_CONFIGS = [
         2,
         id="eagle-mla-deepseek",
     ),
+    pytest.param(
+        "Qwen/Qwen3.5-0.8B-Base",
+        "Qwen/Qwen3.5-0.8B-Base",
+        "mtp",
+        1,
+        id="mtp-qwen3_5-hybrid",
+    ),
 ]
 
 
@@ -104,6 +111,14 @@ def test_no_sync_with_spec_decode(
     from vllm import LLM, SamplingParams
     from vllm.distributed import cleanup_dist_env_and_memory
 
+    # Qwen3.5 is a VLM; without this, profile_run runs the ViT warmup
+    # and peaks well above the 18GB MIG slice used by one of the CI lanes.
+    # This test only exercises text generation, so the vision tower is
+    # never needed.
+    extra_kwargs: dict = {}
+    if "Qwen3.5" in model:
+        extra_kwargs["limit_mm_per_prompt"] = {"image": 0, "video": 0}
+
     llm = LLM(
         model=model,
         max_model_len=256,
@@ -114,6 +129,7 @@ def test_no_sync_with_spec_decode(
         },
         enforce_eager=True,
         async_scheduling=True,
+        **extra_kwargs,
     )
 
     # Assert async scheduling is actually active before running inference.

@@ -294,9 +294,9 @@ def move_to_buffer(
             recver_pos = remainder_start + sender_pos
             if recver_pos < len(ranks_to_recv):
                 recv_ranks.append(ranks_to_recv[recver_pos])
+            expert_tensors = [w[src] for w in expert_weights]
             for dst in recv_ranks:
-                for w in expert_weights:
-                    communicator.add_send(w[src], dst)
+                communicator.add_send(expert_tensors, dst, expert_id=int(expert))
 
     # 3. Post recvs
     if recv_count > 0:
@@ -325,11 +325,14 @@ def move_to_buffer(
                 src = ranks_to_send[recver_pos // num_dst_per_sender]
             else:
                 src = ranks_to_send[recver_pos - remainder_start]
-            for b in expert_weights_buffers:
-                communicator.add_recv(b[dst], src)
+            communicator.add_recv(
+                [b[dst] for b in expert_weights_buffers],
+                src,
+                expert_id=int(expert),
+            )
 
     # 4. Execute the P2P operations. The real communication happens here.
-    communicator.execute()
+    communicator.execute(old_indices=old_indices)
     # wait for the communication to finish
     return TransferMetadata(
         is_unchanged=is_unchanged,
