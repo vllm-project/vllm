@@ -209,35 +209,43 @@ used to profile a section of code.
     The `vllm.utils.profiling` helpers are deprecated and will be removed in
     `v0.21`. Please use Python's `cProfile` module directly instead.
 
-### Example usage - decorator
+### Example usage - function call
 
-The first helper is a Python decorator that can be used to profile a function.
-If a filename is specified, the profile will be saved to that file. If no filename is
-specified, profile data will be printed to stdout.
+If a filename is specified, the profile will be saved to that file. If no
+filename is specified, profile data can be printed to stdout.
 
 ```python
-from vllm.utils.profiling import cprofile
+import cProfile
 
-@cprofile("expensive_function.prof")
+
 def expensive_function():
     # some expensive code
     pass
+
+
+profiler = cProfile.Profile()
+profiler.runcall(expensive_function)
+profiler.dump_stats("expensive_function.prof")
 ```
 
-### Example Usage - context manager
-
-The second helper is a context manager that can be used to profile a block of
-code. Similar to the decorator, the filename is optional.
+### Example usage - context manager style
 
 ```python
-from vllm.utils.profiling import cprofile_context
+import cProfile
+
 
 def another_function():
     # more expensive code
     pass
 
-with cprofile_context("another_function.prof"):
+
+profiler = cProfile.Profile()
+profiler.enable()
+try:
     another_function()
+finally:
+    profiler.disable()
+    profiler.dump_stats("another_function.prof")
 ```
 
 ### Analyzing Profile Results
