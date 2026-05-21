@@ -391,6 +391,24 @@ class ChatCompletionRequest(OpenAIBaseModel):
         description="KVTransfer parameters used for disaggregated serving.",
     )
 
+    retention_directives: list[dict[str, Any]] | None = Field(
+        default=None,
+        description=(
+            "Retention directives for priority-based KV-cache eviction. "
+            "Each directive: {start: int, end: int|null, "
+            "priority: int (0-100), duration: float|null}."
+        ),
+    )
+
+    retention_scope: str | None = Field(
+        default=None,
+        description=(
+            "Opaque scope identifier for retention ownership. "
+            "Only the scope that set a block's priority can downgrade "
+            "or clear it. Typically a session or workflow ID."
+        ),
+    )
+
     vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
         default=None,
         description=(
@@ -588,6 +606,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if self.kv_transfer_params:
             # Pass in kv_transfer_params via extra_args
             extra_args["kv_transfer_params"] = self.kv_transfer_params
+        if self.retention_directives is not None:
+            extra_args["retention_directives"] = self.retention_directives
+        if self.retention_scope is not None:
+            extra_args["retention_scope"] = self.retention_scope
         return SamplingParams.from_optional(
             n=self.n,
             presence_penalty=self.presence_penalty,
@@ -620,6 +642,36 @@ class ChatCompletionRequest(OpenAIBaseModel):
             skip_clone=True,  # Created fresh per request, safe to skip clone
             repetition_detection=self.repetition_detection,
         )
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_retention_directives_monotonic(cls, data):
+        directives = data.get("retention_directives")
+        if not directives:
+            return data
+
+        # Sort by token start position; ties broken by original order.
+        sorted_directives = sorted(
+            enumerate(directives),
+            key=lambda pair: (pair[1].get("start", 0), pair[0]),
+        )
+        prev_priority = None
+        prev_start = None
+        for _, directive in sorted_directives:
+            priority = directive.get("priority", 0)
+            start = directive.get("start", 0)
+            if prev_priority is not None and priority > prev_priority:
+                raise VLLMValidationError(
+                    "`retention_directives` priorities must be non-increasing "
+                    "across token positions (prefix-cache constraint): "
+                    f"directive at start={start} has priority={priority} > "
+                    f"earlier directive at start={prev_start} with "
+                    f"priority={prev_priority}.",
+                    parameter="retention_directives",
+                )
+            prev_priority = priority
+            prev_start = start
+        return data
 
     @model_validator(mode="before")
     @classmethod
