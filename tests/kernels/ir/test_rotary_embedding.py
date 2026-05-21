@@ -235,7 +235,6 @@ class TestRotaryEmbedding:
     reason="aiter only available on ROCm",
 )
 def test_aiter_rejects_partial_rotary_dim():
-    """aiter Triton kernel hardcodes rotary_dim=head_size; partial rotary must fail."""
     from vllm.kernels.aiter_ops import AITER_TRITON_ROTARY_SUPPORTED
 
     if not AITER_TRITON_ROTARY_SUPPORTED:

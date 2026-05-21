@@ -343,7 +343,9 @@ class XPUPlatform(Platform):
         using_inductor = cc.backend == "inductor" and cc.mode != CompilationMode.NONE
         default = ["native"] if using_inductor else ["xpu_kernels", "native"]
 
-        return IrOpPriorityConfig.with_default(default)
+        return IrOpPriorityConfig.with_default(
+            default, rotary_embedding_query_only=["native"]
+        )
 
     @classmethod
     def device_count(cls) -> int:

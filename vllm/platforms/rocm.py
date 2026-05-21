@@ -971,6 +971,7 @@ class RocmPlatform(Platform):
             rms_norm=rms_norm,
             fused_add_rms_norm=rms_norm,
             rotary_embedding=rotary_embedding,
+            rotary_embedding_query_only=["native"],
         )
 
     @classmethod
