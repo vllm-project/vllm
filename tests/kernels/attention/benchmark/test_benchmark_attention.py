@@ -416,6 +416,7 @@ def print_last_n_lines(filepath: str, n: int = 20) -> None:
         ("qwen3_8b_awq", ["gfx1151"]),
         ("qwen3_8b_w4a16", ["gfx1151"]),
         ("qwen3_omni_30b_a3b", ["gfx1151"]),
+        ("qwen3.5_35b_a3b_w4a16", ["gfx1151"]),
         ("smollm2_1.7b", ["gfx1151"]),
     ],
 )

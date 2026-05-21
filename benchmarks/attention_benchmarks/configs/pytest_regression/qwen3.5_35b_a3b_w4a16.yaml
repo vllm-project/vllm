@@ -1,0 +1,20 @@
+# Config for Qwen3.5-35B-A3B-W4A16-llmcompressor multimodal workload
+# Based on prefill kernel shapes from model runs with 640x480 image + 100 text tokens
+model:
+  num_layers: 1
+  num_q_heads: 16
+  num_kv_heads: 2
+  head_dim: 256
+  block_size: 16
+
+batch_specs:
+  - "q413"
+  - "q413s541" # prefill + 128 output tokens
+
+backends:
+  - TRITON_ATTN
+
+device: "cuda:0"
+repeats: 20
+warmup_iters: 10
+profile_memory: false
