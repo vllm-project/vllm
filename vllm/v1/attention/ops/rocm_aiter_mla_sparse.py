@@ -28,9 +28,11 @@ else:
 # Decode is called ~num_layers times per forward; allocating a fresh
 # [heads, B*next_n, max_model_len] (or [B*next_n, max_model_len]) tensor each
 # time fragments the caching allocator on long-context, large-batch runs.
-# The buffer is keyed by (device, shape) and refilled with -inf between calls.
-# Prefill has the analogous VLLM_SPARSE_INDEXER_MAX_LOGITS_MB / chunking from
-# PR #36178; this is the decode-side mirror.
+# rows is rounded up to the next power of two before keying so continuous
+# batching collapses into O(log2(max_num_seqs * next_n)) entries per
+# (heads, cols) bucket. The lock guards the dict plus the -inf refill; one
+# forward per rank is assumed (vLLM v1 single-threaded forward), a multi-
+# threaded caller must allocate its own buffer.
 _decode_ws_lock = Lock()
 _decode_ws_3d: dict[tuple[torch.device, int, int, int], torch.Tensor] = {}
 _decode_ws_2d: dict[tuple[torch.device, int, int], torch.Tensor] = {}
@@ -40,40 +42,44 @@ def _decode_budget_bytes() -> int:
     return int(envs.VLLM_SPARSE_INDEXER_DECODE_MAX_MB) * 1024 * 1024
 
 
+def _next_pow2_rows(rows: int) -> int:
+    return 1 << (rows - 1).bit_length() if rows > 0 else 0
+
+
 def _decode_workspace_3d(
     device: torch.device, heads: int, rows: int, cols: int
 ) -> torch.Tensor:
-    key = (device, heads, rows, cols)
+    alloc_rows = _next_pow2_rows(rows)
+    key = (device, heads, alloc_rows, cols)
     with _decode_ws_lock:
         ws = _decode_ws_3d.get(key)
         if ws is None:
-            ws = torch.full(
-                (heads, rows, cols),
-                float("-inf"),
+            ws = torch.empty(
+                (heads, alloc_rows, cols),
                 device=device,
                 dtype=torch.float32,
             )
             _decode_ws_3d[key] = ws
-        else:
-            ws.fill_(float("-inf"))
+        # ws[:, :rows, :] is non-contiguous and stage1 rejects that; the
+        # kernel only writes into [:, :rows, :] anyway so return the full ws.
+        ws[:, :rows, :].fill_(float("-inf"))
         return ws
 
 
 def _decode_workspace_2d(device: torch.device, rows: int, cols: int) -> torch.Tensor:
-    key = (device, rows, cols)
+    alloc_rows = _next_pow2_rows(rows)
+    key = (device, alloc_rows, cols)
     with _decode_ws_lock:
         ws = _decode_ws_2d.get(key)
         if ws is None:
-            ws = torch.full(
-                (rows, cols),
-                float("-inf"),
+            ws = torch.empty(
+                (alloc_rows, cols),
                 device=device,
                 dtype=torch.float32,
             )
             _decode_ws_2d[key] = ws
-        else:
-            ws.fill_(float("-inf"))
-        return ws
+        ws[:rows].fill_(float("-inf"))
+        return ws[:rows]
 
 
 @triton.jit
@@ -512,13 +518,14 @@ def rocm_fp8_paged_mqa_logits(
                 max_model_len,
                 ChunkQ=heads,
             )
-            return out_qk.sum(dim=0)
+            return out_qk.sum(dim=0)[:rows]
 
         chunk_b = max(1, budget // (heads * next_n * cols * 4))
         out_logits_full = _decode_workspace_2d(device, rows, cols)
         for b0 in range(0, batch_size, chunk_b):
             b1 = min(batch_size, b0 + chunk_b)
-            chunk_qk = _decode_workspace_3d(device, heads, (b1 - b0) * next_n, cols)
+            chunk_rows = (b1 - b0) * next_n
+            chunk_qk = _decode_workspace_3d(device, heads, chunk_rows, cols)
             deepgemm_fp8_paged_mqa_logits_stage1(
                 q_fp8[b0:b1].contiguous(),
                 kv_cache_fp8,
@@ -529,7 +536,9 @@ def rocm_fp8_paged_mqa_logits(
                 max_model_len,
                 ChunkQ=heads,
             )
-            out_logits_full[b0 * next_n : b1 * next_n].copy_(chunk_qk.sum(dim=0))
+            out_logits_full[b0 * next_n : b1 * next_n].copy_(
+                chunk_qk.sum(dim=0)[:chunk_rows]
+            )
         return out_logits_full
     else:
         return fp8_paged_mqa_logits_torch(

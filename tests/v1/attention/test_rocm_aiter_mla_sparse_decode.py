@@ -121,3 +121,36 @@ def test_decode_chunked_matches_full(monkeypatch):
         "chunked decode logits diverged from full-batch call: "
         f"max |delta| = {(full - chunked).abs().max().item()}"
     )
+
+
+def test_decode_workspace_rounding():
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as ops
+
+    device = torch.device("cuda")
+    ops._decode_ws_2d.clear()
+    ops._decode_ws_3d.clear()
+
+    # 5 and 7 both round up to alloc_rows=8 so they share one cache entry.
+    ws_a = ops._decode_workspace_2d(device, rows=5, cols=128)
+    ws_b = ops._decode_workspace_2d(device, rows=7, cols=128)
+
+    assert len(ops._decode_ws_2d) == 1
+    (key2d,) = ops._decode_ws_2d.keys()
+    assert key2d == (device, 8, 128)
+    assert ws_a.shape == (5, 128)
+    assert ws_b.shape == (7, 128)
+    assert ws_a.is_contiguous() and ws_b.is_contiguous()
+    neg_inf = torch.tensor(float("-inf"), device=device)
+    assert torch.all(ws_a == neg_inf)
+    assert torch.all(ws_b == neg_inf)
+
+    ws3_a = ops._decode_workspace_3d(device, heads=4, rows=5, cols=128)
+    ws3_b = ops._decode_workspace_3d(device, heads=4, rows=7, cols=128)
+
+    assert len(ops._decode_ws_3d) == 1
+    (key3d,) = ops._decode_ws_3d.keys()
+    assert key3d == (device, 4, 8, 128)
+    assert ws3_a.shape == (4, 8, 128)
+    assert ws3_b.shape == (4, 8, 128)
+    assert torch.all(ws3_a[:, :5, :] == neg_inf)
+    assert torch.all(ws3_b[:, :7, :] == neg_inf)
