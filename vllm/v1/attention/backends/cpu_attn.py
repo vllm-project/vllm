@@ -274,6 +274,30 @@ class CPUAttentionBackendImpl(AttentionImpl):
                 "heads in the layer"
             )
 
+    def _get_contiguous_kv_caches(
+        self, kv_cache: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return persistent contiguous K/V buffers backed by *kv_cache*.
+
+        The CPU C++ ops (column-major key write + vectorised attention read)
+        require separate contiguous ``[B, H, N, head_size]`` tensors.  The
+        unified interleaved layout ``[B, H, N, 2*head_size]`` produces
+        non-contiguous views after ``split(head_size, dim=-1)``, so we
+        maintain per-layer contiguous mirrors that are lazily allocated on
+        the first call.
+        """
+        buf = getattr(self, "_contig_kv_buf", None)
+        kv_shape = (*kv_cache.shape[:-1], self.head_size)
+        if buf is None or buf[0].shape != kv_shape:
+            key_buf = torch.zeros(
+                kv_shape, dtype=kv_cache.dtype, device=kv_cache.device
+            )
+            val_buf = torch.zeros(
+                kv_shape, dtype=kv_cache.dtype, device=kv_cache.device
+            )
+            self._contig_kv_buf = (key_buf, val_buf)
+        return self._contig_kv_buf
+
     def forward(
         self,
         layer: AttentionLayer,
@@ -292,8 +316,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
             query: shape = [num_tokens, num_heads, head_size]
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
-            kv_cache: shape =
-                [2, num_blocks, num_kv_heads, block_size, head_size]
+            kv_cache: shape = [num_blocks, num_kv_heads, block_size, 2*head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -322,7 +345,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
                 self.attn_type,
             )
 
-        key_cache, value_cache = kv_cache.split(self.head_size, dim=-1)
+        key_cache, value_cache = self._get_contiguous_kv_caches(kv_cache)
 
         # key and value may be None in the case of cross attention. They are
         # calculated once based on the output from the encoder and then cached
@@ -343,6 +366,14 @@ class CPUAttentionBackendImpl(AttentionImpl):
                 v_scale=layer._v_scale_float,
                 kv_cache_dtype=self.kv_cache_dtype,
             )
+            block_size = kv_cache.size(2)
+            modified_blocks = (attn_metadata.slot_mapping // block_size).unique()
+            kv_cache[modified_blocks, :, :, : self.head_size] = key_cache[
+                modified_blocks
+            ]
+            kv_cache[modified_blocks, :, :, self.head_size :] = value_cache[
+                modified_blocks
+            ]
 
         if attn_metadata.use_sdpa_prefill:
             assert self.sinks is None, "Attention sink is unsupported in SDPA prefill"

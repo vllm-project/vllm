@@ -1455,6 +1455,23 @@ class FlashInferImpl(AttentionImpl):
         # FlashInfer accepts non-contiguous K/V tensors through its tuple API.
         kv_cache_tuple = kv_cache_permute.split(self.head_size, dim=-1)
 
+        # TRTLLM kernels may lack compiled variants for certain qkvLayout /
+        # block-size / head-dim combinations.  NHD (qkvLayout 0/1) has the
+        # broadest coverage, so we always present NHD data to TRTLLM.
+        # TRTLLM also requires contiguous paged KV tensors; the split()
+        # views above are non-contiguous when K+V are interleaved.
+        flashinfer_layout = get_flashinfer_layout_string()
+        if flashinfer_layout == "HND":
+            trtllm_kv_cache = tuple(
+                t.transpose(1, 2).contiguous() for t in kv_cache_tuple
+            )
+            trtllm_kv_layout = "NHD"
+        else:
+            trtllm_kv_cache = tuple(
+                t.contiguous() if not t.is_contiguous() else t for t in kv_cache_tuple
+            )
+            trtllm_kv_layout = flashinfer_layout
+
         if attn_metadata.use_cascade:
             # Cascade attention (rare case).
             assert attn_metadata.cascade_wrapper is not None
@@ -1589,6 +1606,7 @@ class FlashInferImpl(AttentionImpl):
                     out = self._nvfp4_fp8_out[:num_prefill_tokens]
 
                 prefill_kv_block_scales = None
+                prefill_kv_layout = trtllm_kv_layout
                 if self.is_kvcache_nvfp4:
                     # NVFP4 trtllm-gen kernel requires FP8 query.
                     assert attn_metadata.q_data_type == FP8_DTYPE, (
@@ -1599,6 +1617,7 @@ class FlashInferImpl(AttentionImpl):
                     mock_kv_cache = nvfp4_kv_data
                     mock_block_table = block_tables_prefill
                     prefill_kv_block_scales = nvfp4_kv_block_scales
+                    prefill_kv_layout = flashinfer_layout
                 elif (
                     attn_metadata.q_data_type != FP8_DTYPE
                     and self.kv_cache_dtype.startswith("fp8")
@@ -1618,8 +1637,10 @@ class FlashInferImpl(AttentionImpl):
                         layer._v_scale,
                         attn_metadata.q_data_type,
                     )
+                    if trtllm_kv_layout == "NHD":
+                        mock_kv_cache = mock_kv_cache.transpose(2, 3)
                 else:
-                    mock_kv_cache = kv_cache_tuple
+                    mock_kv_cache = trtllm_kv_cache
                     mock_block_table = block_tables_prefill
 
                 trtllm_batch_context_with_kv_cache(
@@ -1640,6 +1661,7 @@ class FlashInferImpl(AttentionImpl):
                     o_sf_scale=self.o_sf_scale,
                     out=out,
                     kv_cache_sf=prefill_kv_block_scales,
+                    kv_layout=prefill_kv_layout,
                 )
 
                 if needs_fp8_out:
@@ -1751,11 +1773,16 @@ class FlashInferImpl(AttentionImpl):
                 else:
                     q_len_per_req = num_decode_tokens // attn_metadata.num_decodes
 
+                if self.is_kvcache_nvfp4:
+                    decode_kv_data = nvfp4_kv_data
+                    decode_kv_layout = flashinfer_layout
+                else:
+                    decode_kv_data = trtllm_kv_cache
+                    decode_kv_layout = trtllm_kv_layout
+
                 trtllm_batch_decode_with_kv_cache(
                     query=decode_query,
-                    kv_cache=(
-                        nvfp4_kv_data if self.is_kvcache_nvfp4 else kv_cache_tuple
-                    ),
+                    kv_cache=decode_kv_data,
                     workspace_buffer=workspace_buffer,
                     block_tables=block_tables_decode,
                     seq_lens=seq_lens_decode,
@@ -1770,6 +1797,7 @@ class FlashInferImpl(AttentionImpl):
                     kv_cache_sf=(
                         nvfp4_kv_block_scales if self.is_kvcache_nvfp4 else None
                     ),
+                    kv_layout=decode_kv_layout,
                 )
 
                 if needs_fp8_out:

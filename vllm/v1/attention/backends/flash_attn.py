@@ -699,6 +699,10 @@ class FlashAttentionImpl(AttentionImpl):
         # which FlashAttention expects, then split K/V on the content dim.
         kv_cache = kv_cache.transpose(1, 2)
         key_cache, value_cache = kv_cache.split(self.head_size, dim=-1)
+        if self.vllm_flash_attn_version == 2:
+            # FA2 paged-attention kernels assume contiguous pages.
+            key_cache = key_cache.contiguous()
+            value_cache = value_cache.contiguous()
         # Fix degenerate strides on size-1 dims (e.g. num_kv_heads=1 with TP).
         # FA3/4 on H100+ uses TMA, which requires ≥16-byte stride alignment.
         # See vllm.utils.torch_utils.canonicalize_singleton_dim_strides.

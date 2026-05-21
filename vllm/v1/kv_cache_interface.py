@@ -610,9 +610,18 @@ class MLAAttentionSpec(FullAttentionSpec):
 
 @dataclass(frozen=True, kw_only=True)
 class HiddenStateCacheSpec(MLAAttentionSpec):
-    """Marker for hidden-state cache layers used by extract_hidden_states."""
+    """Marker for hidden-state cache layers used by extract_hidden_states.
 
-    pass
+    Unlike standard MLA (which packs all heads into a single latent),
+    hidden-state caches have ``num_kv_heads`` independent heads — one per
+    extracted hidden layer.  Override the MLA default of ``num_heads=1``
+    so that the 4-D cache shape ``(B, H, N, C)`` reflects the true head
+    count.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        self._init_derived(num_heads=self.num_kv_heads)
 
 
 @dataclass(frozen=True, kw_only=True)

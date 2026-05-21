@@ -116,6 +116,7 @@ from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.nvtx_pytorch_hooks import PytHooks
 from vllm.utils.platform_utils import is_pin_memory_available, num_compute_units
 from vllm.utils.torch_utils import (
+    get_dtype_size,
     is_quantized_kv_cache,
     kv_cache_dtype_str_to_dtype,
 )
@@ -6895,7 +6896,28 @@ class GPUModelRunner(
                     continue
                 raw_tensor = kv_cache_raw_tensors[layer_name]
                 num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
-                if isinstance(kv_cache_spec, AttentionSpec):
+                if isinstance(kv_cache_spec, MambaSpec):
+                    state_tensors = []
+                    storage_offset_bytes = 0
+                    for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
+                        dtype_size = get_dtype_size(dtype)
+                        num_element_per_page = (
+                            kv_cache_spec.page_size_bytes // dtype_size
+                        )
+                        target_shape = (num_blocks, *shape)
+                        stride = torch.empty(target_shape).stride()
+                        target_stride = (num_element_per_page, *stride[1:])
+                        assert storage_offset_bytes % dtype_size == 0
+                        tensor = torch.as_strided(
+                            raw_tensor.view(dtype),
+                            size=target_shape,
+                            stride=target_stride,
+                            storage_offset=storage_offset_bytes // dtype_size,
+                        )
+                        state_tensors.append(tensor)
+                        storage_offset_bytes += stride[0] * dtype_size
+                    kv_caches[layer_name] = state_tensors
+                elif isinstance(kv_cache_spec, AttentionSpec):
                     num_blocks_per_kv_block = (
                         kv_cache_spec.block_size // kernel_block_size
                     )
@@ -6906,22 +6928,25 @@ class GPUModelRunner(
                         shape_block_size = kv_cache_spec.storage_block_size
                     else:
                         shape_block_size = kernel_block_size
-                else:
-                    kernel_num_blocks = num_blocks
-                    shape_block_size = None
 
-                views = reshape_kv_cache(
-                    raw_tensor,
-                    kv_cache_spec,
-                    kernel_num_blocks,
-                    num_layer_slots=1,
-                    layout=layout,
-                    block_size=shape_block_size,
-                )
-                kv_tensor = views[0]
-                if isinstance(kv_cache_spec, (MLAAttentionSpec, SlidingWindowMLASpec)):
-                    kv_tensor = kv_tensor.squeeze(1)
-                kv_caches[layer_name] = kv_tensor
+                    views = reshape_kv_cache(
+                        raw_tensor,
+                        kv_cache_spec,
+                        kernel_num_blocks,
+                        num_layer_slots=1,
+                        layout=layout,
+                        block_size=shape_block_size,
+                    )
+                    kv_tensor = views[0]
+                    if isinstance(
+                        kv_cache_spec, (MLAAttentionSpec, SlidingWindowMLASpec)
+                    ):
+                        kv_tensor = kv_tensor.squeeze(1)
+                    kv_caches[layer_name] = kv_tensor
+                else:
+                    raise NotImplementedError(
+                        f"Unsupported KV cache spec: {type(kv_cache_spec)}"
+                    )
 
         return kv_caches
 
