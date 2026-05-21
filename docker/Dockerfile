@@ -231,6 +231,63 @@ ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0+PTX'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 #################### BUILD BASE IMAGE ####################
 
+#################### RUST BUILD IMAGE ####################
+# Build the Rust frontend (`vllm-rs`) in a dedicated stage so the main wheel
+# build stage doesn't need the rust toolchain, protoc, or the rust source.
+# This stage runs in parallel with csrc-build/extensions-build.
+FROM ${BUILD_BASE_IMAGE} AS rust-build
+ARG BUILD_OS
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install protoc (used by tonic-build/prost-build) and a basic C toolchain
+# (some rust crates compile C in their build.rs scripts).
+RUN if [ "${BUILD_OS}" = "manylinux" ]; then \
+        dnf install -y --setopt=install_weak_deps=False \
+            ca-certificates curl git gcc gcc-c++ make \
+            protobuf-compiler protobuf-devel \
+        && dnf clean all && rm -rf /var/cache/dnf; \
+    else \
+        apt-get update -y \
+        && apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential \
+            protobuf-compiler libprotobuf-dev \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
+
+# Install rustup; the toolchain itself is pinned by rust/rust-toolchain.toml.
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --profile minimal --default-toolchain none
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+WORKDIR /workspace
+
+# Copy only the rust workspace — the binary is the sole artifact we need.
+COPY rust rust
+
+# Fail loudly if the rust submodule was not initialized on the host before
+# `docker build`. Without this check, cargo would emit a confusing error.
+RUN if [ ! -f rust/Cargo.toml ]; then \
+        echo "ERROR: rust/ submodule is not initialized."; \
+        echo "Run 'git submodule update --init --recursive' on the host before building."; \
+        exit 1; \
+    fi
+
+# Cap cargo parallelism to avoid exhausting the CI host's open-file limit
+# (rustc spawns enough concurrent processes to hit RLIMIT_NOFILE otherwise).
+ENV CARGO_BUILD_JOBS=4
+
+# Build the release binary. Cache cargo registry/git and target/, but copy the
+# binary out of the target/ cache mount so it persists into the image layer
+# for later COPY --from=rust-build.
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    --mount=type=cache,target=/workspace/rust/target \
+    cd rust \
+    && cargo build --release --bin vllm-rs --features native-tls-vendored \
+    && cp target/release/vllm-rs /workspace/vllm-rs
+#################### RUST BUILD IMAGE ####################
+
 #################### CSRC BUILD IMAGE ####################
 FROM base AS csrc-build
 ARG TARGETPLATFORM
@@ -435,6 +492,10 @@ WORKDIR /workspace
 COPY --from=csrc-build /workspace/dist /precompiled-wheels
 COPY . .
 
+# Drop the pre-built rust frontend binary into the source tree. setup.py
+# detects it and ships it as-is, skipping the local cargo build.
+COPY --from=rust-build /workspace/vllm-rs vllm/vllm-rs
+
 ARG GIT_REPO_CHECK=0
 RUN --mount=type=bind,source=.git,target=.git \
     if [ "$GIT_REPO_CHECK" != "0" ]; then bash tools/check_repo.sh ; fi
@@ -455,6 +516,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=.git,target=.git \
     if [ "${vllm_target_device}" = "cuda" ]; then \
+        export VLLM_USE_PRECOMPILED=1; \
         export VLLM_PRECOMPILED_WHEEL_LOCATION=$(ls /precompiled-wheels/*.whl); \
     fi && \
     python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
