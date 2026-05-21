@@ -363,36 +363,17 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                     if target_param_name is not None
                     else None
                 )
-                if target_param is not None:
-                    if not self._param_accepts_bnb_4bit_packed(target_param):
-                        raise ValueError(
-                            "Pre-quantized BNB 4bit weight "
-                            f"{mapped_weight_name} targets parameter "
-                            f"{target_param_name}, but the target parameter was "
-                            "not initialized as a vLLM BNB 4-bit packed "
-                            "parameter. This usually means the module did not "
-                            "receive quant_config or its nn.Linear layers were "
-                            "not replaced with vLLM linear layers."
-                        )
-                    logger.debug(
-                        "Keeping pre-quantized BNB 4bit weight %s packed. "
-                        "target_parameter=%s, has_target=True, packed_shape=%s, "
-                        "packed_dtype=%s",
-                        mapped_weight_name,
-                        target_param_name,
-                        tuple(weight_tensor.shape),
-                        weight_tensor.dtype,
-                    )
-                else:
-                    logger.debug(
-                        "Keeping pre-quantized BNB 4bit weight %s packed. "
-                        "target_parameter=%s, has_target=%s, packed_shape=%s, "
-                        "packed_dtype=%s",
-                        mapped_weight_name,
-                        target_param_name,
-                        target_param is not None,
-                        tuple(weight_tensor.shape),
-                        weight_tensor.dtype,
+                if target_param is not None and not self._param_accepts_bnb_4bit_packed(
+                    target_param
+                ):
+                    raise ValueError(
+                        "Pre-quantized BNB 4bit weight "
+                        f"{mapped_weight_name} targets parameter "
+                        f"{target_param_name}, but the target parameter was "
+                        "not initialized as a vLLM BNB 4-bit packed "
+                        "parameter. This usually means the module did not "
+                        "receive quant_config or its nn.Linear layers were "
+                        "not replaced with vLLM linear layers."
                     )
                 quant_state_dict[mapped_weight_name] = quant_state
                 yield org_weight_name, weight_tensor
@@ -634,12 +615,6 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         self.is_pool_model = is_pooling_model(model)
         self.modules_mapping = ParamMapping(get_packed_modules_mapping(model))
         self.param_dict = dict(model.named_parameters())
-        logger.debug(
-            "Initialized BitsAndBytes loader state with %d model parameters "
-            "and %d packed module mapping entries.",
-            len(self.param_dict),
-            len(self.modules_mapping.inverse_packed_mapping),
-        )
 
         if is_moe_model(model):
             self.expert_params_mapping = get_moe_expert_mapping(model)
