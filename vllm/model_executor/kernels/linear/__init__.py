@@ -13,7 +13,6 @@ or kernel implementation, add it to this __init__.py to maintain
 import stability.
 """
 
-import warnings
 from typing import TypeVar
 
 import torch
@@ -851,31 +850,12 @@ def init_nvfp4_linear_kernel() -> NvFp4LinearKernel:
         force_kernel = EmulationNvFp4LinearKernel
     elif linear_backend == "auto":
         # Deprecated env-var overrides — only honoured when --linear-backend
-        # is "auto". Will be removed in v0.21; users should migrate to
-        # --linear-backend.
+        # is "auto". Deprecation warnings are emitted from vllm/envs.py.
         if envs.VLLM_USE_FBGEMM:
-            warnings.warn(
-                "VLLM_USE_FBGEMM is deprecated and will be removed in "
-                "v0.21. Use --linear-backend fbgemm instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
             force_kernel = FbgemmNvFp4LinearKernel
         elif envs.VLLM_USE_NVFP4_CT_EMULATIONS:
-            warnings.warn(
-                "VLLM_USE_NVFP4_CT_EMULATIONS is deprecated and will be "
-                "removed in v0.21. Use --linear-backend emulation instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
             force_kernel = EmulationNvFp4LinearKernel
         elif envs.VLLM_NVFP4_GEMM_BACKEND is not None:
-            warnings.warn(
-                "VLLM_NVFP4_GEMM_BACKEND is deprecated and will be "
-                "removed in v0.21. Use --linear-backend instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
             backend_name = envs.VLLM_NVFP4_GEMM_BACKEND
             force_kernel = _NVFP4_BACKEND_TO_KERNEL.get(backend_name)
             if force_kernel is None:
