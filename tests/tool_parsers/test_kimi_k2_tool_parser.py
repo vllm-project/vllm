@@ -148,8 +148,8 @@ class TestExtractToolCalls:
             # id format: "something:digit"
             assert tc.id.split(":")[-1].isdigit()
 
-    def test_invalid_json_still_extracted(self, parser):
-        """Tool calls with invalid JSON are still returned (arguments as-is)."""
+    def test_invalid_json_skipped(self, parser):
+        """Tool calls with invalid JSON are skipped; valid ones kept."""
         model_output = (
             "Help. "
             + SECTION_BEGIN
@@ -158,9 +158,9 @@ class TestExtractToolCalls:
             + SECTION_END
         )
         content, tool_calls = run_tool_extraction(parser, model_output, streaming=False)
-        assert len(tool_calls) == 2
-        assert tool_calls[0].function.name == "bad"
-        assert tool_calls[1].function.name == "good"
+        assert len(tool_calls) == 1
+        assert tool_calls[0].function.name == "good"
+        assert json.loads(tool_calls[0].function.arguments) == {"city": "Shanghai"}
 
     def test_invalid_funcall_id_skipped(self, parser):
         """Tool calls with malformed id (no colon+digit) are skipped."""

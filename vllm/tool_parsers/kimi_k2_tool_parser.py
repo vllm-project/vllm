@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from collections.abc import Sequence
 
 import regex as re
@@ -96,6 +97,15 @@ class KimiK2ToolParser(ToolParser):
                     function_id, function_args = match
                     # function_id: functions.get_weather:0 or get_weather:0
                     function_name = function_id.split(":")[0].split(".")[-1]
+                    try:
+                        json.loads(function_args)
+                    except (json.JSONDecodeError, TypeError):
+                        logger.warning(
+                            "Skipping tool call '%s' with invalid JSON: %s",
+                            function_name,
+                            function_args,
+                        )
+                        continue
                     tool_calls.append(
                         ToolCall(
                             id=function_id,
