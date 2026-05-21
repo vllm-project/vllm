@@ -19,7 +19,6 @@ from typing import Any, Literal
 
 import numpy as np
 import regex as re
-import requests
 import torch
 import torch.nn.functional as F
 from PIL import Image
