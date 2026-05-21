@@ -912,19 +912,10 @@ def enable_batch_invariant_mode():
     _batch_invariant_MODE = True
     _batch_invariant_LIB = torch.library.Library("aten", "IMPL")
 
-    if current_platform.is_device_capability_family(80):
-        # SM80 (Ampere) cannot rely on cuBLASLt-only determinism; install the
-        # triton persistent matmul overrides for mm/addmm/matmul/linear.
-        _batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, "CUDA")
-        _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, "CUDA")
-        _batch_invariant_LIB.impl("aten::matmul", matmul_batch_invariant, "CUDA")
-        _batch_invariant_LIB.impl("aten::linear", linear_batch_invariant, "CUDA")
-    else:
-        # Hopper (SM90) and Blackwell (SM100): the only source of batch
-        # variance is split-k, which we disable via the cuBLAS workspace
-        # config.
-        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
-        os.environ["CUBLASLT_WORKSPACE_SIZE"] = "1"
+    _batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, "CUDA")
+    _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, "CUDA")
+    _batch_invariant_LIB.impl("aten::matmul", matmul_batch_invariant, "CUDA")
+    _batch_invariant_LIB.impl("aten::linear", linear_batch_invariant, "CUDA")
 
     # Triton bmm/persistent-matmul kernels read this for the FP16 N-tile size;
     # set unconditionally because bmm is overridden on all CUDA platforms.
@@ -955,13 +946,10 @@ def enable_batch_invariant_mode():
     torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = (
         reduced_precision_val
     )
-    torch.backends.cuda.preferred_blas_library(backend="cublaslt")
 
 
 def override_envs_for_invariance():
     os.environ["VLLM_ALLREDUCE_USE_SYMM_MEM"] = "0"
-
-    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
     # NCCL determinism settings
     os.environ["NCCL_LAUNCH_MODE"] = "GROUP"
