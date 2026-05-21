@@ -301,10 +301,52 @@ jobs:
         env:
           VLLM_ASCEND_HUST_REPO: ${{ github.workspace }}/vllm-ascend-hust
         run: |
-          source "${VLLM_ASCEND_HUST_REPO}/scripts/hust_ascend_manager_helper.sh"
-          source "${VLLM_ASCEND_HUST_REPO}/scripts/use_single_ascend_env.sh"
           PRECHECK_DIR="${GITHUB_WORKSPACE}/.benchmarks/ci/preinstall-preflight"
           mkdir -p "$PRECHECK_DIR"
+
+          normalize_visible_devices() {
+            local raw_value="${1:-}"
+            local device
+            local -a devices=()
+
+            IFS=',' read -r -a raw_devices <<< "${raw_value}"
+            for device in "${raw_devices[@]}"; do
+              device="${device//[[:space:]]/}"
+              if [[ -n "${device}" ]]; then
+                devices+=("${device}")
+              fi
+            done
+
+            if [[ "${#devices[@]}" -eq 0 ]]; then
+              return 1
+            fi
+
+            local normalized_devices
+            normalized_devices="$(IFS=','; echo "${devices[*]}")"
+            printf '%s\n' "${normalized_devices}"
+          }
+
+          log_ascend_visibility() {
+            local stage="$1"
+            echo "[ascend-visibility][${stage}] ASCEND_VISIBLE_DEVICES=${ASCEND_VISIBLE_DEVICES:-<unset>}"
+            echo "[ascend-visibility][${stage}] ASCEND_RT_VISIBLE_DEVICES=${ASCEND_RT_VISIBLE_DEVICES:-<unset>}"
+          }
+
+          log_ascend_visibility before-sanitize
+          resolved_visible_devices="$(normalize_visible_devices "${ASCEND_VISIBLE_DEVICES:-}" 2>/dev/null || true)"
+          resolved_rt_visible_devices="$(normalize_visible_devices "${ASCEND_RT_VISIBLE_DEVICES:-}" 2>/dev/null || true)"
+          if [[ -z "${resolved_rt_visible_devices}" && -n "${ASCEND_RT_VISIBLE_DEVICES+x}" ]]; then
+            unset ASCEND_RT_VISIBLE_DEVICES
+            echo "[ascend-visibility] Unset empty ASCEND_RT_VISIBLE_DEVICES before preinstall preflight"
+          fi
+
+          source "${VLLM_ASCEND_HUST_REPO}/scripts/hust_ascend_manager_helper.sh"
+          source "${VLLM_ASCEND_HUST_REPO}/scripts/use_single_ascend_env.sh"
+          log_ascend_visibility after-source
+          {
+            echo "ASCEND_VISIBLE_DEVICES=${ASCEND_VISIBLE_DEVICES:-<unset>}"
+            echo "ASCEND_RT_VISIBLE_DEVICES=${ASCEND_RT_VISIBLE_DEVICES:-<unset>}"
+          } > "$PRECHECK_DIR/visible-devices.txt"
 
           max_attempts=2
           attempt=1
@@ -351,10 +393,52 @@ jobs:
         env:
           VLLM_ASCEND_HUST_REPO: ${{ github.workspace }}/vllm-ascend-hust
         run: |
-          source "${VLLM_ASCEND_HUST_REPO}/scripts/hust_ascend_manager_helper.sh"
-          source "${VLLM_ASCEND_HUST_REPO}/scripts/use_single_ascend_env.sh"
           PRECHECK_DIR="${GITHUB_WORKSPACE}/.benchmarks/ci/prebenchmark-preflight"
           mkdir -p "$PRECHECK_DIR"
+
+          normalize_visible_devices() {
+            local raw_value="${1:-}"
+            local device
+            local -a devices=()
+
+            IFS=',' read -r -a raw_devices <<< "${raw_value}"
+            for device in "${raw_devices[@]}"; do
+              device="${device//[[:space:]]/}"
+              if [[ -n "${device}" ]]; then
+                devices+=("${device}")
+              fi
+            done
+
+            if [[ "${#devices[@]}" -eq 0 ]]; then
+              return 1
+            fi
+
+            local normalized_devices
+            normalized_devices="$(IFS=','; echo "${devices[*]}")"
+            printf '%s\n' "${normalized_devices}"
+          }
+
+          log_ascend_visibility() {
+            local stage="$1"
+            echo "[ascend-visibility][${stage}] ASCEND_VISIBLE_DEVICES=${ASCEND_VISIBLE_DEVICES:-<unset>}"
+            echo "[ascend-visibility][${stage}] ASCEND_RT_VISIBLE_DEVICES=${ASCEND_RT_VISIBLE_DEVICES:-<unset>}"
+          }
+
+          log_ascend_visibility before-sanitize
+          resolved_rt_visible_devices="$(normalize_visible_devices "${ASCEND_RT_VISIBLE_DEVICES:-}" 2>/dev/null || true)"
+          if [[ -z "${resolved_rt_visible_devices}" && -n "${ASCEND_RT_VISIBLE_DEVICES+x}" ]]; then
+            unset ASCEND_RT_VISIBLE_DEVICES
+            echo "[ascend-visibility] Unset empty ASCEND_RT_VISIBLE_DEVICES before prebenchmark preflight"
+          fi
+
+          source "${VLLM_ASCEND_HUST_REPO}/scripts/hust_ascend_manager_helper.sh"
+          source "${VLLM_ASCEND_HUST_REPO}/scripts/use_single_ascend_env.sh"
+          log_ascend_visibility after-source
+          {
+            echo "ASCEND_VISIBLE_DEVICES=${ASCEND_VISIBLE_DEVICES:-<unset>}"
+            echo "ASCEND_RT_VISIBLE_DEVICES=${ASCEND_RT_VISIBLE_DEVICES:-<unset>}"
+          } > "$PRECHECK_DIR/visible-devices.txt"
+
           hust_ascend_manager_run runtime check \
             --repo "$GITHUB_WORKSPACE" \
             --python "$PYTHON_BIN" \
