@@ -213,7 +213,6 @@ if TYPE_CHECKING:
     VLLM_MORIIO_QP_PER_TRANSFER: int = 1
     VLLM_MORIIO_POST_BATCH_SIZE: int = -1
     VLLM_MORIIO_NUM_WORKERS: int = 1
-    VLLM_MORIIO_BACKEND: str = "rdma"
     VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT: int = 480
     VLLM_ENABLE_CUDAGRAPH_GC: bool = False
     VLLM_LOOPBACK_IP: str = ""
@@ -1518,14 +1517,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Controls the number of workers for Mori operations for the Mori-IO connector
     "VLLM_MORIIO_NUM_WORKERS": lambda: int(os.getenv("VLLM_MORIIO_NUM_WORKERS", "1")),
-    # Controls the MoRIIO transfer backend ("rdma" or "xgmi"). Use "xgmi" for
-    # single-node intra-GPU transfers via Infinity Fabric without RDMA NICs.
-    "VLLM_MORIIO_BACKEND": env_with_choices(
-        "VLLM_MORIIO_BACKEND",
-        "rdma",
-        ["rdma", "xgmi"],
-        case_sensitive=False,
-    ),
     # Timeout (in seconds) for MooncakeConnector in PD disaggregated setup.
     "VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT": lambda: int(
         os.getenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "480")

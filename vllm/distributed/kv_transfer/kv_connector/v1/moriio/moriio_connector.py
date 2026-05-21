@@ -15,7 +15,6 @@ import numpy as np
 import torch
 import zmq
 
-from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -698,7 +697,7 @@ class MoRIIOConnectorWorker:
         self.moriio_wrapper.set_moriio_engine(self.moriio_engine)
         backend = (
             BackendType.XGMI
-            if envs.VLLM_MORIIO_BACKEND.lower() == "xgmi"
+            if self.moriio_config.backend == "xgmi"
             else BackendType.RDMA
         )
         self.moriio_wrapper.set_backend_type(backend)
