@@ -858,6 +858,7 @@ async def test_serving_chat_truncate_prompt_tokens_max_token_accounting():
         await serving_chat.create_chat_completion(req)
     assert mock_engine.generate.call_args.args[1].max_tokens == 93
 
+
 @pytest.mark.asyncio
 async def test_serving_chat_truncation_side_controls_prompt_truncation():
     model_config = MockModelConfig()
@@ -1154,6 +1155,7 @@ async def test_serving_chat_data_parallel_rank_extraction():
     assert "data_parallel_rank" in mock_engine.generate.call_args.kwargs
     assert mock_engine.generate.call_args.kwargs["data_parallel_rank"] is None
 
+
 async def _render_chat_prompt_token_ids(
     serving_chat: OpenAIServingChat,
     messages: list[dict[str, str]],
@@ -1183,7 +1185,6 @@ async def _render_chat_prompt_token_ids(
     ).token_ids
     assert prompt_token_ids is not None
     return prompt_token_ids
-
 
 
 class TestServingChatWithHarmony:
