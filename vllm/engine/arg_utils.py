@@ -2452,11 +2452,15 @@ class EngineArgs:
         try:
             from vllm.multimodal import MULTIMODAL_REGISTRY
 
+            # get_processing_info returns the model's multimodal processing
+            # metadata (supported modalities, token limits) without loading
+            # model weights or generating dummy data.
             info = MULTIMODAL_REGISTRY.get_processing_info(model_config)
-            # mm_counts=1 per modality: get_mm_max_tokens_per_item returns the
-            # per-item token ceiling for memory planning. We need the worst-case
-            # single-item budget since prefix-LM models cannot chunk MM input.
             mm_counts = {modality: 1 for modality in info.supported_mm_limits}
+            # get_mm_max_tokens_per_item returns pre-computed per-item token
+            # ceilings for models that override it (e.g., Gemma4), or None
+            # for models that rely on dummy-input profiling. When None is
+            # returned we bail out — no dummy generation is triggered here.
             max_tokens = info.get_mm_max_tokens_per_item(
                 seq_len=model_config.max_model_len,
                 mm_counts=mm_counts,
