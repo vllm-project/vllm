@@ -148,11 +148,13 @@ def get_num_attention_heads_from_layers(
     Returns ``None`` when no matching Attention layer is found.
     """
     attn_layers = get_layers_from_vllm_config(
-        vllm_config, AttentionLayerBase, layer_names
+        vllm_config,
+        AttentionLayerBase,  # type: ignore[type-abstract]
+        layer_names,
     )
     if not attn_layers:
         return None
-    heads = {layer.num_heads for layer in attn_layers.values()}
+    heads = {layer.num_heads for layer in attn_layers.values()}  # type: ignore[attr-defined]
     assert len(heads) == 1, (
         f"All layers in one attention group must share num_heads; "
         f"got {heads} for {layer_names}."
