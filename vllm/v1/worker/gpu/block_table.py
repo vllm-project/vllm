@@ -5,7 +5,6 @@ from collections.abc import Iterable
 import torch
 
 from vllm.triton_utils import tl, triton
-from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
 
@@ -16,16 +15,17 @@ class BlockTables:
         block_sizes: list[int],
         max_num_reqs: int,
         max_num_batched_tokens: int,
-        max_model_len: int,
+        max_num_blocks_per_group: list[int],
         device: torch.device,
+        kernel_block_sizes: list[int],
         cp_size: int = 1,
         cp_rank: int = 0,
         cp_interleave: int = 1,
     ):
         self.block_sizes = block_sizes
+        self.kernel_block_sizes = kernel_block_sizes
         self.max_num_reqs = max_num_reqs
         self.max_num_batched_tokens = max_num_batched_tokens
-        self.max_model_len = max_model_len
         self.device = device
 
         self.cp_size = cp_size
@@ -33,19 +33,16 @@ class BlockTables:
         self.cp_interleave = cp_interleave
 
         self.num_kv_cache_groups = len(self.block_sizes)
+        assert len(max_num_blocks_per_group) == self.num_kv_cache_groups
+
+        self.blocks_per_kv_block = [
+            bs // kbs for bs, kbs in zip(block_sizes, kernel_block_sizes)
+        ]
+
         # num_kv_cache_groups x [max_num_reqs, max_num_blocks]
         self.block_tables: list[StagedWriteTensor] = []
         for i in range(self.num_kv_cache_groups):
-            block_size = self.block_sizes[i]
-            # When using DCP, each request's KV cache is sharded among different ranks.
-            # As a result, one block on the current rank covers `block_size * cp_size`
-            # tokens in the full, global (unsharded) sequence.
-            max_num_blocks = cdiv(self.max_model_len, block_size * self.cp_size)
-            # Align to a multiple of (128 / block_size) as required
-            # by some attention backends such as TRTLLM (#39324)
-            if block_size <= 128:
-                alignment = 128 // block_size
-                max_num_blocks = cdiv(max_num_blocks, alignment) * alignment
+            max_num_blocks = max_num_blocks_per_group[i] * self.blocks_per_kv_block[i]
             block_table = StagedWriteTensor(
                 (self.max_num_reqs, max_num_blocks),
                 dtype=torch.int32,
@@ -94,7 +91,7 @@ class BlockTables:
             device=self.device,
         )
         self.block_sizes_tensor = torch.tensor(
-            self.block_sizes, dtype=torch.int32, device=self.device
+            self.kernel_block_sizes, dtype=torch.int32, device=self.device
         )
         self.input_block_table_ptrs = self._make_ptr_tensor(self.input_block_tables)
 
@@ -107,6 +104,9 @@ class BlockTables:
         for i in range(self.num_kv_cache_groups):
             start = self.num_blocks.np[i, req_index] if not overwrite else 0
             block_ids = new_block_ids[i]
+            bpk = self.blocks_per_kv_block[i]
+            if bpk > 1:
+                block_ids = [b * bpk + k for b in block_ids for k in range(bpk)]
             self.block_tables[i].stage_write(req_index, start, block_ids)
             self.num_blocks.np[i, req_index] = start + len(block_ids)
 
