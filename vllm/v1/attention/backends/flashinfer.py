@@ -1455,21 +1455,12 @@ class FlashInferImpl(AttentionImpl):
         # FlashInfer accepts non-contiguous K/V tensors through its tuple API.
         kv_cache_tuple = kv_cache_permute.split(self.head_size, dim=-1)
 
-        # TRTLLM kernels may lack compiled variants for certain qkvLayout /
-        # block-size / head-dim combinations.  NHD (qkvLayout 0/1) has the
-        # broadest coverage, so we always present NHD data to TRTLLM.
-        # TRTLLM also requires contiguous paged KV tensors; the split()
-        # views above are non-contiguous when K+V are interleaved.
         flashinfer_layout = get_flashinfer_layout_string()
         if flashinfer_layout == "HND":
-            trtllm_kv_cache = tuple(
-                t.transpose(1, 2).contiguous() for t in kv_cache_tuple
-            )
+            trtllm_kv_cache = tuple(t.transpose(1, 2) for t in kv_cache_tuple)
             trtllm_kv_layout = "NHD"
         else:
-            trtllm_kv_cache = tuple(
-                t.contiguous() if not t.is_contiguous() else t for t in kv_cache_tuple
-            )
+            trtllm_kv_cache = kv_cache_tuple
             trtllm_kv_layout = flashinfer_layout
 
         if attn_metadata.use_cascade:
