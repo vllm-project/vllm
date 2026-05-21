@@ -638,13 +638,6 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         assert swa_metadata is not None
 
         swa_kv_cache = self.swa_cache_layer.kv_cache
-        q_fp8 = None
-        if swa_kv_cache.dtype == torch.float8_e4m3fn:
-            q_fp8 = torch.empty(
-                (q.shape[0], self.n_local_heads, q.shape[-1]),
-                dtype=torch.float8_e4m3fn,
-                device=q.device,
-            )
 
         # Horizontally fused:
         #   Q side:  q_head_norm (per-head RMSNorm, no weight) + GPT-J RoPE
@@ -663,8 +656,27 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
                 self.eps,
                 swa_metadata.block_size,
             )
-        else:
-            assert q_fp8 is not None
+            return None
+
+        if swa_kv_cache.dtype == torch.bfloat16:
+            torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
+                q,
+                kv,
+                swa_kv_cache,
+                swa_metadata.slot_mapping,
+                positions.to(torch.int64),
+                self.rotary_emb.cos_sin_cache,
+                self.eps,
+                swa_metadata.block_size,
+            )
+            return None
+
+        if swa_kv_cache.dtype == torch.float8_e4m3fn:
+            q_fp8 = torch.empty(
+                (q.shape[0], self.n_local_heads, q.shape[-1]),
+                dtype=torch.float8_e4m3fn,
+                device=q.device,
+            )
             torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
                 q,
                 kv,
@@ -678,7 +690,9 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
                 self.eps,
                 swa_metadata.block_size,
             )
-        return q_fp8
+            return q_fp8
+
+        raise AssertionError(f"Unsupported SWA KV cache dtype {swa_kv_cache.dtype}")
 
 
 def deepseek_v4_attention(

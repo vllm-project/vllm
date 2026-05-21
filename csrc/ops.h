@@ -112,6 +112,11 @@ void fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
     torch::Tensor const& fp8_scale, torch::Tensor const& q_fp8_scale_inv,
     double eps, int64_t cache_block_size);
 
+void fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
+    torch::Tensor& q, torch::Tensor const& kv, torch::Tensor& k_cache,
+    torch::Tensor const& slot_mapping, torch::Tensor const& position_ids,
+    torch::Tensor const& cos_sin_cache, double eps, int64_t cache_block_size);
+
 void apply_repetition_penalties_(torch::Tensor& logits,
                                  const torch::Tensor& prompt_mask,
                                  const torch::Tensor& output_mask,
