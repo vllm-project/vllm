@@ -8,6 +8,7 @@ import vllm.envs as envs
 from vllm.config.model import LogprobsMode
 from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.ops.topk_topp_sampler import (
+    apply_top_k_top_p,
     flashinfer_sample,
     flashinfer_sampler_supported,
 )
@@ -173,8 +174,6 @@ class Sampler:
         # Apply min_p in place.
         self.sampling_states.apply_min_p(logits, expanded_idx_mapping, idx_mapping_np)
 
-        # When FlashInfer will perform top-k/top-p sampling, leave the logits
-        # unmasked so it can use them directly.
         if skip_top_k_top_p:
             return logits
 
@@ -193,25 +192,6 @@ class Sampler:
         expanded_local_pos: torch.Tensor,
         return_logprobs: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # FlashInfer only handles the sample step, has no greedy mode, and
-        # can't honor per-request seeds -- fall back to gumbel otherwise.
-        # Also fall back when this step needs to return post-top-k/top-p
-        # logprobs to a request, since FlashInfer doesn't expose those.
-        top_k: torch.Tensor | None = None
-        top_p: torch.Tensor | None = None
-        use_flashinfer = self.use_flashinfer
-        if use_flashinfer:
-            top_k, top_p = self.sampling_states.get_top_k_top_p(
-                expanded_idx_mapping, idx_mapping_np
-            )
-            if (
-                (top_k is None and top_p is None)
-                or (return_logprobs and self.logprobs_mode == "processed_logprobs")
-                or self.sampling_states.any_greedy(idx_mapping_np)
-                or self.sampling_states.any_explicit_seed(idx_mapping_np)
-            ):
-                use_flashinfer = False
-
         processed_logits = self.apply_sampling_params(
             logits,
             expanded_idx_mapping,
@@ -219,13 +199,26 @@ class Sampler:
             pos,
             input_ids,
             expanded_local_pos,
-            skip_top_k_top_p=use_flashinfer,
+            skip_top_k_top_p=True,
+        )
+        top_k, top_p = self.sampling_states.get_top_k_top_p(
+            expanded_idx_mapping, idx_mapping_np
+        )
+        use_flashinfer = self.use_flashinfer and not (
+            # Don't use FI sampler if no requests use top_k/top_p, if there are
+            # any greedy requests or per-request seeds, or if post-processed
+            # logprobs need to be returned for any requests.
+            (top_k is None and top_p is None)
+            or (return_logprobs and self.logprobs_mode == "processed_logprobs")
+            or self.sampling_states.any_greedy(idx_mapping_np)
+            or self.sampling_states.any_explicit_seed(idx_mapping_np)
         )
 
         # Sample the next token.
         if use_flashinfer:
             sampled = flashinfer_sample(processed_logits, top_k, top_p).to(torch.int64)
         else:
+            apply_top_k_top_p(logits, top_k, top_p)
             sampled = gumbel_sample(
                 processed_logits,
                 expanded_idx_mapping,
