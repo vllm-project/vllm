@@ -21,7 +21,6 @@ import torch
 
 from vllm.v1.attention.ops.deepseek_v4_ops import (
     dequantize_and_gather_k_cache,
-    qnorm_rope_and_insert_full_k_cache,
     quantize_and_insert_k_cache,
 )
 
@@ -129,6 +128,34 @@ pytestmark = pytest.mark.skipif(
 def _call_fused(q, kv, k_cache, slot_mapping, positions, cos_sin_cache, eps, bs):
     torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
         q, kv, k_cache, slot_mapping, positions, cos_sin_cache, eps, bs
+    )
+
+
+def _call_full_cache_fp8_fused(
+    q,
+    kv,
+    q_fp8,
+    k_cache,
+    slot_mapping,
+    positions,
+    cos_sin_cache,
+    fp8_scale,
+    q_fp8_scale_inv,
+    eps,
+    bs,
+):
+    torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
+        q,
+        kv,
+        q_fp8,
+        k_cache,
+        slot_mapping,
+        positions.long(),
+        cos_sin_cache,
+        fp8_scale,
+        q_fp8_scale_inv,
+        eps,
+        bs,
     )
 
 
@@ -447,18 +474,18 @@ def test_full_cache_per_tensor_fp8_matches_reference(
         q_fp8_scale_inv,
     )
 
-    qnorm_rope_and_insert_full_k_cache(
+    _call_full_cache_fp8_fused(
         q.clone(),
         kv,
+        q_fp8_fused,
         k_cache_fused,
         slot_mapping,
         positions,
         cos_sin_cache,
+        fp8_scale,
+        q_fp8_scale_inv,
         eps,
         block_size,
-        fp8_scale,
-        q_fp8=q_fp8_fused,
-        q_fp8_scale_inv=q_fp8_scale_inv,
     )
 
     torch.testing.assert_close(

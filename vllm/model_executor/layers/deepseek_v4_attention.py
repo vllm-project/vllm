@@ -28,7 +28,6 @@ from vllm.v1.attention.ops.deepseek_v4_ops import (
     fused_indexer_q_rope_quant,
     fused_inv_rope_fp8_quant,
     fused_q_kv_rmsnorm,
-    qnorm_rope_and_insert_full_k_cache,
 )
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import rocm_inv_rope_einsum
 
@@ -665,18 +664,19 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
                 swa_metadata.block_size,
             )
         else:
-            qnorm_rope_and_insert_full_k_cache(
+            assert q_fp8 is not None
+            torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
                 q,
                 kv,
+                q_fp8,
                 swa_kv_cache,
                 swa_metadata.slot_mapping,
-                positions,
+                positions.to(torch.int64),
                 self.rotary_emb.cos_sin_cache,
+                self.mla_attn._flashinfer_fp8_kv_scale,
+                self.mla_attn._flashinfer_fp8_q_scale_inv,
                 self.eps,
                 swa_metadata.block_size,
-                self.mla_attn._flashinfer_fp8_kv_scale,
-                q_fp8=q_fp8,
-                q_fp8_scale_inv=self.mla_attn._flashinfer_fp8_q_scale_inv,
             )
         return q_fp8
 
