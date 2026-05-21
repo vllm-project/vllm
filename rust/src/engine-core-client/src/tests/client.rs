@@ -2123,7 +2123,10 @@ fn spawn_mock_utility_engine(
     engine_id: Vec<u8>,
     expected_method: &'static str,
     result: bool,
-) -> (tokio::sync::oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
+) -> (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+) {
     spawn_mock_engine_task(handshake_address, engine_id, move |dealer, push| {
         Box::pin(async move {
             let utility = recv_engine_message(dealer).await;
