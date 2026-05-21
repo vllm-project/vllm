@@ -251,6 +251,9 @@ class PassConfig:
 
             import vllm.envs as envs
 
+            # Default to disabled
+            self.enable_qk_norm_rope_fusion = False
+
             fusion_explicitly_disabled = os.getenv(
                 "VLLM_ENABLE_QKNORM_ROPE_FUSION", ""
             ).lower() in ("0", "false")
@@ -263,8 +266,6 @@ class PassConfig:
             ):
                 self.enable_qk_norm_rope_fusion = True
                 logger.info_once("QK-Norm+RoPE fusion enabled", scope="global")
-            else:
-                self.enable_qk_norm_rope_fusion = False
 
         if not self.eliminate_noops:
             if self.fuse_norm_quant or self.fuse_act_quant:
