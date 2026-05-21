@@ -104,7 +104,6 @@ __global__ __launch_bounds__(128, 1) void fp32_router_gemm_kernel(
   }
 
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  asm volatile("griddepcontrol.launch_dependents;");
   asm volatile("griddepcontrol.wait;");
 #endif
 
@@ -149,6 +148,11 @@ __global__ __launch_bounds__(128, 1) void fp32_router_gemm_kernel(
       out[m * kNumExperts + n_idx] = final_sum;
     }
   }
+
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  __syncthreads();
+  asm volatile("griddepcontrol.launch_dependents;");
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -166,7 +170,7 @@ void invokeFp32RouterGemm(float* output, InputT const* mat_a,
   config.stream = stream;
   cudaLaunchAttribute attrs[1];
   attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
-  attrs[0].val.programmaticStreamSerializationAllowed = 1;
+  attrs[0].val.programmaticStreamSerializationAllowed = getEnvEnablePDL();
   config.numAttrs = 1;
   config.attrs = attrs;
   cudaLaunchKernelEx(&config,

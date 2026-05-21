@@ -59,6 +59,7 @@ def create_fused_moe_router(
     zero_expert_type: str | None = None,
     num_logical_experts: int | None = None,
     hash_indices_table: torch.Tensor | None = None,
+    enable_pdl: bool = False,
 ) -> FusedMoERouter:
     """
     Factory function to create the appropriate FusedMoERouter subclass based on
@@ -158,6 +159,7 @@ def create_fused_moe_router(
             e_score_correction_bias=e_score_correction_bias,
             num_fused_shared_experts=num_fused_shared_experts,
             indices_type_getter=indices_type_getter,
+            enable_pdl=enable_pdl,
         )
         if (
             grouped_topk_router.routing_method_type != RoutingMethodType.Unspecified
@@ -195,6 +197,7 @@ def create_fused_moe_router(
             indices_type_getter=indices_type_getter,
             scoring_func=scoring_func,
             hash_indices_table=hash_indices_table,
+            enable_pdl=enable_pdl,
         )
 
     if (
@@ -219,4 +222,5 @@ def create_fused_moe_router(
         renormalize=renormalize,
         scoring_func=scoring_func,
         indices_type_getter=indices_type_getter,
+        enable_pdl=enable_pdl,
     )

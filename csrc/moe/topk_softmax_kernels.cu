@@ -321,7 +321,6 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
 
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
     if constexpr (ENABLE_PDL) {
-        asm volatile("griddepcontrol.launch_dependents;");
         asm volatile("griddepcontrol.wait;");
     }
 #endif
@@ -585,6 +584,12 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
             }
         }
     }
+
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+    if constexpr (ENABLE_PDL) {
+        asm volatile("griddepcontrol.launch_dependents;");
+    }
+#endif
 
 }
 

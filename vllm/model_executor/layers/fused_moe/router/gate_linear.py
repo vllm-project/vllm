@@ -123,7 +123,10 @@ class GateLinear(ReplicatedLinear):
         # Tier 2: fp32 specialized kernel (H=3072, E=256, M<=32)
         # Dispatch is wrapped in a custom op so that torch.compile/CUDA-graph
         # capture does not freeze the runtime num_tokens branch.
-        if self.allow_fp32_router_gemm:
+        if self.allow_fp32_router_gemm and x.dtype in (
+            torch.float32,
+            torch.bfloat16,
+        ):
             output = torch.ops.vllm.fp32_router_gemm_dispatch(x, self.weight)
             return output, None
 
@@ -147,10 +150,12 @@ _FP32_ROUTER_GEMM_MAX_TOKENS = GateLinear.FP32_MAX_TOKENS
 def fp32_router_gemm_dispatch_impl(
     x: torch.Tensor, weight: torch.Tensor
 ) -> torch.Tensor:
+    import vllm._custom_ops as ops
+
     if x.shape[0] <= _FP32_ROUTER_GEMM_MAX_TOKENS:
         return ops.fp32_router_gemm(x, weight)
     else:
-        return torch.nn.functional.linear(x.float(), weight)
+        return torch.mm(x.float(), weight.T)
 
 
 def fp32_router_gemm_dispatch_fake(

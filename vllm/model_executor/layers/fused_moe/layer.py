@@ -98,6 +98,8 @@ class FusedMoE(PluggableLayer):
                                       output. It is applied to the experts output
                                       instead of the topk_weights when this feature is
                                       not supported by the router (or the experts).
+        enable_router_pdl: Whether fused top-k routing kernels should join a
+                           Programmatic Dependent Launch chain.
     """
 
     # --8<-- [end:fused_moe]
@@ -142,6 +144,7 @@ class FusedMoE(PluggableLayer):
         apply_routed_scale_to_output: bool = False,
         zero_expert_type: str | None = None,
         hash_indices_table: torch.Tensor | None = None,
+        enable_router_pdl: bool = False,
     ):
         super().__init__()
 
@@ -312,6 +315,7 @@ class FusedMoE(PluggableLayer):
             zero_expert_type=zero_expert_type,
             num_logical_experts=self.logical_num_experts,
             hash_indices_table=self.hash_indices_table,
+            enable_pdl=enable_router_pdl,
         )
         self.routing_method_type: RoutingMethodType = self.router.routing_method_type
 

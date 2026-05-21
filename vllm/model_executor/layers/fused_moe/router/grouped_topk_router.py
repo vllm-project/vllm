@@ -260,6 +260,7 @@ class GroupedTopKRouter(BaseRouter):
         num_fused_shared_experts: int = 0,
         eplb_state: EplbLayerState | None = None,
         indices_type_getter: Callable[[], torch.dtype | None] | None = None,
+        enable_pdl: bool = False,
     ):
         super().__init__(
             top_k=top_k,
@@ -274,6 +275,7 @@ class GroupedTopKRouter(BaseRouter):
         self.routed_scaling_factor = routed_scaling_factor
         self.e_score_correction_bias = e_score_correction_bias
         self.num_fused_shared_experts = num_fused_shared_experts
+        self.enable_pdl = enable_pdl
 
     @property
     def routing_method_type(self) -> RoutingMethodType:
@@ -312,6 +314,7 @@ class GroupedTopKRouter(BaseRouter):
                     e_score_correction_bias=self.e_score_correction_bias.data,
                     topk=self.top_k,
                     renormalize=self.renormalize,
+                    enable_pdl=self.enable_pdl,
                 )
                 if self.routed_scaling_factor != 1.0:
                     topk_weights *= self.routed_scaling_factor
@@ -322,6 +325,7 @@ class GroupedTopKRouter(BaseRouter):
                     topk=self.top_k,
                     renormalize=self.renormalize,
                     indices_type=indices_type,
+                    enable_pdl=self.enable_pdl,
                 )
             return topk_weights, topk_ids
 
