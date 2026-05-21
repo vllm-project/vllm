@@ -207,7 +207,12 @@ class DynamicInt8LMHeadMethod(QuantizeMethodBase):
         # Keep original weights for fallback and embedding
         self._w_orig = weight.contiguous()
 
-        spec = get_current_vllm_config().model_config.dynamic_lm_head_quantization
+        vllm_config = get_current_vllm_config()
+        spec = (
+            vllm_config.model_config.dynamic_lm_head_quantization
+            if vllm_config.model_config
+            else None
+        )
         group_size = _resolve_group_size(spec)
         sim_mode = _use_simulation_fallback()
         self._group_size = group_size
