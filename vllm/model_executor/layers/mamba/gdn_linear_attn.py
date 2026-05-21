@@ -290,6 +290,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         vllm_config: VllmConfig,
         prefix: str = "",
         gqa_interleaved_layout=False,
+        create_in_proj_qkvzba: bool = False,
     ) -> None:
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -346,25 +347,54 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         # projection of the input hidden states
         # Qwen3-Next and Qwen3.5 has a different qkv_proj layout,
         # we need to create qkvz_proj adaptively here.
-        # When create_in_proj_qkvz is False (e.g. LoRA enabled in Qwen3.5),
-        # in_proj_qkv and in_proj_z are created separately instead.
-        self.in_proj_qkvz = self.create_qkvz_proj(
-            hidden_size=self.hidden_size,
-            key_dim=self.key_dim,
-            value_dim=self.value_dim,
-            quant_config=quant_config,
-            prefix=f"{prefix}.in_proj_qkvz",
-        )
+        # When create_in_proj_qkvzba is True (Qwen3.5 only, opt-in via
+        # VLLM_GDN_FUSE_QKVZBA=1), all 4 projections (qkv|z|b|a) are fused
+        # into a single MergedColumnParallelLinear, collapsing the 2 GEMMs
+        # (qkvz + ba) into 1.
+        if create_in_proj_qkvzba:
+            assert not gqa_interleaved_layout, (
+                "create_in_proj_qkvzba is only supported with "
+                "gqa_interleaved_layout=False (Qwen3.5)."
+            )
+            # Single fused weight of shape [N_total, hidden_size] where
+            # N_total = key_dim*2 + value_dim*2 + num_v_heads*2 = 12352.
+            # Output_sizes split q/k/v/z/b/a so TP sharding aligns on
+            # head-dim boundaries (mirrors the existing qkvz proj layout).
+            # Loaded from 4 checkpoint shards: in_proj_qkv (covers shards
+            # 0..2 = q,k,v), in_proj_z (shard 3), in_proj_b (shard 4),
+            # in_proj_a (shard 5). Declared in stacked_params_mapping.
+            self.in_proj_qkvzba = MergedColumnParallelLinear(
+                input_size=self.hidden_size,
+                output_sizes=[
+                    self.key_dim,        # q  (shard 0)
+                    self.key_dim,        # k  (shard 1)
+                    self.value_dim,      # v  (shard 2)
+                    self.value_dim,      # z  (shard 3)
+                    self.num_v_heads,    # b  (shard 4)
+                    self.num_v_heads,    # a  (shard 5)
+                ],
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.in_proj_qkvzba",
+            )
+        else:
+            self.in_proj_qkvz = self.create_qkvz_proj(
+                hidden_size=self.hidden_size,
+                key_dim=self.key_dim,
+                value_dim=self.value_dim,
+                quant_config=quant_config,
+                prefix=f"{prefix}.in_proj_qkvz",
+            )
 
-        # ba_proj doesn't support blockwise fp8 quantization.
-        # Qwen3-Next and Qwen3.5 have different in_proj_ba checkpoint
-        # layouts, so we use a factory method to create the projection.
-        self.in_proj_ba = self.create_ba_proj(
-            hidden_size=self.hidden_size,
-            num_v_heads=self.num_v_heads,
-            quant_config=quant_config,
-            prefix=f"{prefix}.in_proj_ba",
-        )
+            # ba_proj doesn't support blockwise fp8 quantization.
+            # Qwen3-Next and Qwen3.5 have different in_proj_ba checkpoint
+            # layouts, so we use a factory method to create the projection.
+            self.in_proj_ba = self.create_ba_proj(
+                hidden_size=self.hidden_size,
+                num_v_heads=self.num_v_heads,
+                quant_config=quant_config,
+                prefix=f"{prefix}.in_proj_ba",
+            )
 
         query_key_settings = (self.key_dim, 0, False)
         value_settings = (self.value_dim, 0, False)
@@ -715,6 +745,10 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
     ):
         """ROCm forward using AITER Triton fused projection+attention when
         available, otherwise falling back to the generic CUDA path."""
+        if hasattr(self, "in_proj_qkvzba"):
+            # Fall back to the generic CUDA path on ROCm when fully-fused.
+            self.forward_cuda(hidden_states, output)
+            return
         if GDN_AITER_TRITON_AVAILABLE:
             num_tokens = hidden_states.size(0)
             projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
@@ -760,27 +794,43 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
-        mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
-        ba, _ = self.in_proj_ba(hidden_states)
-
-        if self.gqa_interleaved_layout:
-            # Qwen3-Next: unpack the interleaved GQA layout
-            query, key, value, z, b, a = self.fix_query_key_value_ordering(
-                mixed_qkvz, ba
-            )
-            query, key, value = map(
-                lambda x: rearrange(x, "l p d -> l (p d)"), (query, key, value)
-            )
-            mixed_qkv = torch.cat((query, key, value), dim=-1)
-        else:
-            # Qwen3.5: weights are already in [q, k, v, z] and [b, a] order
+        if hasattr(self, "in_proj_qkvzba"):
+            # Fully-fused path (opt-in via VLLM_GDN_FUSE_QKVZBA=1):
+            # 1 GEMM produces [q | k | v | z | b | a] in one shot, then
+            # split into the same shapes the downstream code expects.
+            qkvzba, _ = self.in_proj_qkvzba(hidden_states)
             qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
             z_size = self.value_dim // self.tp_size
-            mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
-            z = z.reshape(z.size(0), -1, self.head_v_dim)
-            b, a = ba.chunk(2, dim=-1)
+            n_v = self.num_v_heads // self.tp_size
+            mixed_qkv, z_flat, b, a = qkvzba.split(
+                [qkv_size, z_size, n_v, n_v], dim=-1
+            )
+            z = z_flat.reshape(z_flat.size(0), -1, self.head_v_dim)
             b = b.contiguous()
             a = a.contiguous()
+        else:
+            mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
+            ba, _ = self.in_proj_ba(hidden_states)
+
+            if self.gqa_interleaved_layout:
+                # Qwen3-Next: unpack the interleaved GQA layout
+                query, key, value, z, b, a = self.fix_query_key_value_ordering(
+                    mixed_qkvz, ba
+                )
+                query, key, value = map(
+                    lambda x: rearrange(x, "l p d -> l (p d)"),
+                    (query, key, value),
+                )
+                mixed_qkv = torch.cat((query, key, value), dim=-1)
+            else:
+                # Qwen3.5: weights are already in [q, k, v, z] and [b, a] order
+                qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
+                z_size = self.value_dim // self.tp_size
+                mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
+                z = z.reshape(z.size(0), -1, self.head_v_dim)
+                b, a = ba.chunk(2, dim=-1)
+                b = b.contiguous()
+                a = a.contiguous()
 
         # ============================================================
         # Part 2: Core Attention (Custom Op)
@@ -818,6 +868,9 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         2. Core attention (custom op)
         3. Output projection
         """
+        assert not hasattr(self, "in_proj_qkvzba"), (
+            "VLLM_GDN_FUSE_QKVZBA isn't supported on XPU."
+        )
         num_tokens = hidden_states.size(0)
 
         # ============================================================
@@ -862,6 +915,9 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         output: torch.Tensor,
     ):
         assert not hasattr(self, "in_proj_qkv"), "lora isn't supported on CPU."
+        assert not hasattr(self, "in_proj_qkvzba"), (
+            "VLLM_GDN_FUSE_QKVZBA isn't supported on CPU."
+        )
 
         mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
         ba, _ = self.in_proj_ba(hidden_states)
