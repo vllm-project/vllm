@@ -47,7 +47,9 @@ from vllm.entrypoints.openai.responses.serving import (
     extract_tool_types,
 )
 from vllm.entrypoints.openai.responses.streaming_events import (
+    SimpleStreamingEventProcessor,
     StreamingState,
+    _StateType,
 )
 from vllm.inputs import tokens_input
 from vllm.outputs import CompletionOutput, RequestOutput
@@ -202,6 +204,92 @@ def test_response_created_event_uses_public_json_schema_alias() -> None:
     assert event.response.text is not None
     assert event.response.text.format is not None
     assert event.response.text.format.model_dump(by_alias=True)["schema"] == schema
+
+
+def test_simple_streaming_omits_preamble_message_before_tool_call() -> None:
+    processor = SimpleStreamingEventProcessor()
+    preamble = "I'll inspect the file first."
+    completion = CompletionOutput
+
+    content_delta = DeltaMessage(content=preamble)
+    target_state, tool_call = processor.resolve_target_state(content_delta)
+    content_events = processor.open(target_state, tool_call)
+    content_events.extend(
+        processor.emit_delta(
+            content_delta,
+            completion(
+                index=0,
+                text=preamble,
+                token_ids=[],
+                cumulative_logprob=None,
+                logprobs=None,
+            ),
+        )
+    )
+    tool_delta = DeltaMessage(
+        tool_calls=[
+            DeltaToolCall(
+                index=0,
+                function=DeltaFunctionCall(
+                    name="exec_command",
+                    arguments='{"cmd": "ls"}',
+                ),
+            )
+        ]
+    )
+
+    target_state, tool_call = processor.resolve_target_state(tool_delta)
+    assert target_state == _StateType.TOOL_CALL
+    tool_events = processor.close_current(
+        include_message_content=target_state != _StateType.TOOL_CALL
+    )
+    tool_events.extend(processor.open(target_state, tool_call))
+    tool_events.extend(
+        processor.emit_delta(
+            tool_delta,
+            completion(
+                index=0,
+                text="",
+                token_ids=[],
+                cumulative_logprob=None,
+                logprobs=None,
+            ),
+        )
+    )
+    message_done = next(
+        event
+        for event in tool_events
+        if (
+            event.type == "response.output_item.done"
+            and event.item.type == "message"
+        )
+    )
+    function_added = next(
+        event
+        for event in tool_events
+        if (
+            event.type == "response.output_item.added"
+            and event.item.type == "function_call"
+        )
+    )
+
+    assert [
+        event.delta
+        for event in content_events
+        if event.type == "response.output_text.delta"
+    ] == [preamble]
+    assert [
+        event.text
+        for event in tool_events
+        if event.type == "response.output_text.done"
+    ] == [""]
+    assert message_done.item.content == []
+    assert function_added.item.name == "exec_command"
+    assert [
+        event.delta
+        for event in tool_events
+        if event.type == "response.function_call_arguments.delta"
+    ] == ['{"cmd": "ls"}']
 
 
 class TestInitializeToolSessions:

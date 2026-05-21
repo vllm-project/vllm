@@ -1419,7 +1419,8 @@ class OpenAIServingResponses(OpenAIServing):
                 continue
 
             if processor.needs_transition(target_state, tool_call):
-                for event in processor.close_current():
+                include_message_content = target_state != _StateType.TOOL_CALL
+                for event in processor.close_current(include_message_content):
                     yield _increment_sequence_number_and_return(event)
                 for event in processor.open(target_state, tool_call):
                     yield _increment_sequence_number_and_return(event)
@@ -1456,7 +1457,10 @@ class OpenAIServingResponses(OpenAIServing):
                 if len(ctx.parser.messages) > 0:
                     previous_item = ctx.parser.messages[-1]
                     for event in emit_previous_item_done_events(
-                        previous_item, state, ctx.function_tool_names
+                        previous_item,
+                        state,
+                        ctx.function_tool_names,
+                        ctx.parser.current_recipient,
                     ):
                         yield _increment_sequence_number_and_return(event)
                 state.reset_for_new_item()

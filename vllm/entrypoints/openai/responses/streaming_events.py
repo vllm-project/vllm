@@ -376,11 +376,13 @@ def emit_code_interpreter_delta_events(
 def emit_text_output_done_events(
     text: str,
     state: StreamingState,
+    include_message_content: bool = True,
 ) -> list[StreamingResponsesResponse]:
     """Emit events when a final text output item completes."""
+    output_text = text if include_message_content else ""
     text_content = ResponseOutputText(
         type="output_text",
-        text=text,
+        text=output_text,
         annotations=[],
     )
     events: list[StreamingResponsesResponse] = []
@@ -390,7 +392,7 @@ def emit_text_output_done_events(
             sequence_number=-1,
             output_index=state.current_output_index,
             content_index=state.current_content_index,
-            text=text,
+            text=output_text,
             logprobs=[],
             item_id=state.current_item_id,
         )
@@ -414,7 +416,7 @@ def emit_text_output_done_events(
                 id=state.current_item_id,
                 type="message",
                 role="assistant",
-                content=[text_content],
+                content=[text_content] if output_text else [],
                 status="completed",
             ),
         )
@@ -598,6 +600,7 @@ def emit_previous_item_done_events(
     previous_item: HarmonyMessage,
     state: StreamingState,
     function_tool_names: frozenset[str] | None = None,
+    next_recipient: str | None = None,
 ) -> list[StreamingResponsesResponse]:
     """Emit done events for the previous item when expecting a new start.
 
@@ -622,8 +625,17 @@ def emit_previous_item_done_events(
         return emit_reasoning_done_events(text, state)
     elif previous_item.channel in ("commentary", "final"):
         # Preambles (commentary with no recipient) and final messages
-        # are both user-visible text.
-        return emit_text_output_done_events(text, state)
+        # are both user-visible text. The conversation text is purpusefully
+        # omitted when it immediately precedes a tool call.
+        include_content = not is_function_recipient(
+            next_recipient,
+            function_tool_names,
+        )
+        return emit_text_output_done_events(
+            text,
+            state,
+            include_message_content=include_content,
+        )
     return []
 
 
@@ -894,10 +906,12 @@ def emit_simple_content_delta(
 
 def emit_simple_content_done(
     state: SimpleStreamingState,
+    include_message_content: bool = True,
 ) -> list[StreamingResponsesResponse]:
+    output_text = state.accumulated_text if include_message_content else ""
     part = ResponseOutputText(
         type="output_text",
-        text=state.accumulated_text,
+        text=output_text,
         annotations=[],
     )
     events: list[StreamingResponsesResponse] = [
@@ -906,7 +920,7 @@ def emit_simple_content_done(
             sequence_number=-1,
             output_index=state.output_index,
             content_index=state.content_index,
-            text=state.accumulated_text,
+            text=output_text,
             logprobs=[],
             item_id=state.current_item_id,
         ),
@@ -926,7 +940,7 @@ def emit_simple_content_done(
                 id=state.current_item_id,
                 type="message",
                 role="assistant",
-                content=[part] if state.accumulated_text else [],
+                content=[part] if output_text else [],
                 status="completed",
                 summary=[],
             ),
@@ -1195,8 +1209,16 @@ class SimpleStreamingEventProcessor:
             and self.state.tool_call_index != tool_call.index
         )
 
-    def close_current(self) -> list[StreamingResponsesResponse]:
+    def close_current(
+        self,
+        include_message_content: bool = True,
+    ) -> list[StreamingResponsesResponse]:
         """Close the current state and emit its 'done' event sequence."""
+        if self.state.current_state == _StateType.CONTENT:
+            return emit_simple_content_done(
+                self.state,
+                include_message_content=include_message_content,
+            )
         handlers = self._STATE_HANDLERS.get(self.state.current_state)
         if handlers is None:
             return []
