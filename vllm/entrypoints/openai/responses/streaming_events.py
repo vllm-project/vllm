@@ -625,7 +625,7 @@ def emit_previous_item_done_events(
         return emit_reasoning_done_events(text, state)
     elif previous_item.channel in ("commentary", "final"):
         # Preambles (commentary with no recipient) and final messages
-        # are both user-visible text. The conversation text is purpusefully
+        # are both user-visible text. The conversation text is purposefully
         # omitted when it immediately precedes a tool call.
         include_content = not is_function_recipient(
             next_recipient,
