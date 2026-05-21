@@ -36,6 +36,8 @@ from utils import (
 
 from vllm import LLM, SamplingParams
 from vllm.model_executor.layers.batch_invariant import (
+    _register_common_overrides,
+    _register_matmul_overrides,
     bmm_batch_invariant,
     log_softmax,
     matmul_persistent,
@@ -177,22 +179,6 @@ def test_matmul_persistent_batch_invariance(K, N, dtype):
             f"Batch invariance violated at batch_size={bs}, pos={pos}: "
             f"max_diff={(ref[0] - result[pos]).abs().max().item():.6e}"
         )
-
-
-@skip_unsupported_xpu
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_mm_batch_invariant_via_dispatch(dtype):
-    """mm_batch_invariant (aten::mm override) delegates to matmul_persistent."""
-    device = torch.device(DEVICE_TYPE)
-    torch.manual_seed(42)
-
-    a = torch.randn(64, 1024, dtype=dtype, device=device)
-    b = torch.randn(1024, 512, dtype=dtype, device=device)
-
-    via_mm = mm_batch_invariant(a, b)
-    via_persistent = matmul_persistent(a, b)
-
-    assert torch.equal(via_mm, via_persistent)
 
 
 # ---------------------------------------------------------------------------
@@ -398,20 +384,27 @@ def test_rms_norm_batch_invariance_xpu(dtype):
 @pytest.fixture
 def xpu_batch_invariant_lib():
     """Register XPU dispatch overrides and clean up after the test."""
-    from vllm.model_executor.layers.batch_invariant import (
-        _log_softmax_batch_invariant,
-    )
-
     lib = torch.library.Library("aten", "IMPL")
-    lib.impl(
-        "aten::_log_softmax", _log_softmax_batch_invariant, "XPU", allow_override=True
-    )
-    lib.impl("aten::softmax", softmax_batch_invariant, "XPU", allow_override=True)
-    lib.impl("aten::_softmax", softmax_batch_invariant, "XPU", allow_override=True)
-    lib.impl("aten::mean.dim", mean_batch_invariant, "XPU", allow_override=True)
-    lib.impl("aten::bmm", bmm_batch_invariant, "XPU", allow_override=True)
+    _register_matmul_overrides(lib, "XPU")
+    _register_common_overrides(lib, "XPU")
     yield lib
     del lib
+
+
+@skip_unsupported_xpu
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_override_mm(xpu_batch_invariant_lib, dtype):
+    """torch.mm routes to mm_batch_invariant after XPU override."""
+    device = torch.device(DEVICE_TYPE)
+    torch.manual_seed(42)
+
+    a = torch.randn(64, 1024, dtype=dtype, device=device)
+    b = torch.randn(1024, 512, dtype=dtype, device=device)
+
+    via_torch = torch.mm(a, b)
+    via_direct = mm_batch_invariant(a, b)
+
+    assert torch.equal(via_torch, via_direct)
 
 
 @skip_unsupported_xpu
