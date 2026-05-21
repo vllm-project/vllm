@@ -7,11 +7,13 @@ Verifies correctness (vs torch reference) and the batch-invariance property
 (result for one item is bitwise identical regardless of other items in the
 batch) for the ops registered with the "XPU" dispatch key:
   - aten::mm (via matmul_persistent Triton kernel)
-  - aten::addmm / aten::matmul / aten::linear
   - aten::bmm
   - aten::_log_softmax
   - aten::softmax / aten::_softmax
   - aten::mean.dim
+
+Note: aten::addmm, aten::matmul, and aten::linear all delegate to the same
+matmul_persistent kernel tested via aten::mm.
 
 Also tests the Triton rms_norm kernel (called directly, not via aten dispatch),
 verifies that registering the XPU overrides correctly routes standard torch ops
@@ -49,7 +51,7 @@ DEVICE_TYPE = current_platform.device_type
 
 
 # ---------------------------------------------------------------------------
-# BMM tests
+# BMM tests — bmm_kernel Triton kernel
 # ---------------------------------------------------------------------------
 
 
@@ -103,7 +105,7 @@ def test_bmm_batch_invariance(dtype):
 
 
 # ---------------------------------------------------------------------------
-# Matmul (mm) tests — matmul_persistent Triton kernel
+# Matmul (mm) tests — matmul_kernel_persistent Triton kernel
 # ---------------------------------------------------------------------------
 
 
@@ -194,7 +196,7 @@ def test_mm_batch_invariant_via_dispatch(dtype):
 
 
 # ---------------------------------------------------------------------------
-# Log-softmax tests
+# Log-softmax tests — _log_softmax_kernel Triton kernel
 # ---------------------------------------------------------------------------
 
 
@@ -233,7 +235,7 @@ def test_log_softmax_batch_invariance(dtype):
 
 
 # ---------------------------------------------------------------------------
-# Softmax tests
+# Softmax tests — pure PyTorch (exp/sum, no Triton kernel)
 # ---------------------------------------------------------------------------
 
 
@@ -272,7 +274,7 @@ def test_softmax_batch_invariance(dtype):
 
 
 # ---------------------------------------------------------------------------
-# Mean reduction tests
+# Mean reduction tests — mean_kernel Triton kernel
 # ---------------------------------------------------------------------------
 
 
@@ -338,7 +340,7 @@ def test_mean_multi_dim_batch_invariance(dtype):
 
 
 # ---------------------------------------------------------------------------
-# RMS norm tests (also works on XPU per our testing)
+# RMS norm tests — _rms_norm_kernel Triton kernel
 # ---------------------------------------------------------------------------
 
 
@@ -508,50 +510,54 @@ def test_e2e_logprobs_bs1_vs_bsN():
         attention_config={"backend": "TRITON_ATTN"},
     )
 
-    prompts = [_random_prompt(10, 50) for _ in range(16)]
+    try:
+        prompts = [_random_prompt(10, 50) for _ in range(16)]
 
-    sp = SamplingParams(
-        temperature=0.0,
-        max_tokens=8,
-        logprobs=5,
-    )
-
-    # BS=1 runs
-    bs1_logprobs = []
-    bs1_tokens = []
-    for p in prompts:
-        outs = llm.generate([p], sp, use_tqdm=False)
-        step_logprobs, token_ids = _extract_step_logprobs(outs[0])
-        if step_logprobs is None:
-            pytest.skip("Logprobs not available on this configuration.")
-        bs1_logprobs.append(step_logprobs)
-        bs1_tokens.append(token_ids)
-
-    # BS=N run
-    outs_batched = llm.generate(prompts, sp, use_tqdm=False)
-    bsN_logprobs = []
-    bsN_tokens = []
-    for o in outs_batched:
-        step_logprobs, token_ids = _extract_step_logprobs(o)
-        if step_logprobs is None:
-            pytest.skip("Logprobs not available on this configuration.")
-        bsN_logprobs.append(step_logprobs)
-        bsN_tokens.append(token_ids)
-
-    # Compare
-    failed = []
-    for i, (lp1, lpN, t1, tN) in enumerate(
-        zip(bs1_logprobs, bsN_logprobs, bs1_tokens, bsN_tokens)
-    ):
-        if t1 != tN:
-            failed.append(f"Prompt {i}: different tokens bs1={t1} bsN={tN}")
-            continue
-        if not torch.equal(lp1, lpN):
-            max_diff = torch.abs(lp1 - lpN).max().item()
-            failed.append(f"Prompt {i}: logprob mismatch (max_diff={max_diff:.6e})")
-
-    if failed:
-        pytest.fail(
-            f"BS=1 vs BS=N logprob mismatch in {len(failed)}/{len(prompts)} "
-            f"prompts:\n" + "\n".join(failed[:5])
+        sp = SamplingParams(
+            temperature=0.0,
+            max_tokens=8,
+            logprobs=5,
         )
+
+        # BS=1 runs
+        bs1_logprobs = []
+        bs1_tokens = []
+        for p in prompts:
+            outs = llm.generate([p], sp, use_tqdm=False)
+            step_logprobs, token_ids = _extract_step_logprobs(outs[0])
+            if step_logprobs is None:
+                pytest.skip("Logprobs not available on this configuration.")
+            bs1_logprobs.append(step_logprobs)
+            bs1_tokens.append(token_ids)
+
+        # BS=N run
+        outs_batched = llm.generate(prompts, sp, use_tqdm=False)
+        bsN_logprobs = []
+        bsN_tokens = []
+        for o in outs_batched:
+            step_logprobs, token_ids = _extract_step_logprobs(o)
+            if step_logprobs is None:
+                pytest.skip("Logprobs not available on this configuration.")
+            bsN_logprobs.append(step_logprobs)
+            bsN_tokens.append(token_ids)
+
+        # Compare
+        failed = []
+        for i, (lp1, lpN, t1, tN) in enumerate(
+            zip(bs1_logprobs, bsN_logprobs, bs1_tokens, bsN_tokens)
+        ):
+            if t1 != tN:
+                failed.append(f"Prompt {i}: different tokens bs1={t1} bsN={tN}")
+                continue
+            if not torch.equal(lp1, lpN):
+                max_diff = torch.abs(lp1 - lpN).max().item()
+                failed.append(f"Prompt {i}: logprob mismatch (max_diff={max_diff:.6e})")
+
+        if failed:
+            pytest.fail(
+                f"BS=1 vs BS=N logprob mismatch in {len(failed)}/{len(prompts)} "
+                f"prompts:\n" + "\n".join(failed[:5])
+            )
+
+    finally:
+        llm.shutdown()
