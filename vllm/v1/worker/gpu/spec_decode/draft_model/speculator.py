@@ -32,49 +32,24 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 logger = init_logger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Step-0 input preparation kernel
-# ---------------------------------------------------------------------------
-# Design principles:
-#   - Per-request grid (like Eagle V2): one Triton program per request, inner
-#     loop over token blocks within the request.
-#   - Expanded buffer semantics (like V1 draft_model path): the output buffer
-#     is src_tokens + num_reqs slots — 1 extra slot per request for the
-#     correction token (last_sampled).  This handles num_rejected == 0
-#     correctly without corrupting adjacent requests.
-#   - Directly writes input_buffers.query_start_loc and input_buffers.seq_lens
-#     for step-0 attention metadata (like Eagle V2 does for its own buffers),
-#     so no separate Python tensor arithmetic is needed.
-#   - Directly writes last_token_indices (correction-token flat indices).
-#   - Handles CUDA-graph padding: last request writes sentinel values beyond
-#     num_reqs (like Eagle V2's kernel).
-#   - Deliberately omits all Eagle/V1 cruft: no shift_input_ids, no
-#     parallel_drafting_token, no hidden_state_mapping, no is_masked_mask.
-
-
 @triton.jit
 def _prepare_draft_model_step0_kernel(
-    # ---- Target model outputs (read-only) ----
     target_input_ids_ptr,  # [src_tokens] int32
     target_positions_ptr,  # [src_tokens] int64
-    last_sampled_ptr,  # [max_num_reqs] int32, indexed via idx_mapping
-    idx_mapping_ptr,  # [num_reqs]    int32
-    # ---- Expanded output buffers (write) ----
+    last_sampled_ptr,  # [max_num_reqs] int32
+    idx_mapping_ptr,  # [num_reqs] int32
     out_input_ids_ptr,  # [src_tokens + num_reqs] int32
     out_positions_ptr,  # [src_tokens + num_reqs] int64
     out_is_rejected_ptr,  # [src_tokens + num_reqs] bool
-    # ---- Metadata outputs (write) ----
     last_token_indices_ptr,  # [max_num_reqs] int64
-    out_query_start_loc_ptr,  # [max_num_reqs + 1] int32  (expanded)
-    out_seq_lens_ptr,  # [max_num_reqs]     int32  (seq_len + 1)
-    # ---- Input metadata (read-only) ----
+    out_query_start_loc_ptr,  # [max_num_reqs + 1] int32
+    out_seq_lens_ptr,  # [max_num_reqs] int32
     query_start_loc_ptr,  # [num_reqs + 1] int32
-    seq_lens_ptr,  # [num_reqs]     int32
-    num_rejected_ptr,  # [num_reqs]     int32
-    # ---- Scalar sizing ----
-    src_tokens,  # int32: total target-model input tokens
-    max_num_reqs,  # int32: pre-allocated buffer capacity
-    max_model_len,  # int32: for clamping seq_len + 1
+    seq_lens_ptr,  # [num_reqs] int32
+    num_rejected_ptr,  # [num_reqs] int32
+    src_tokens,
+    max_num_reqs,
+    max_model_len,
     BLOCK_SIZE: tl.constexpr,
 ):
     """
@@ -98,26 +73,13 @@ def _prepare_draft_model_step0_kernel(
     seq_len = tl.load(seq_lens_ptr + req_idx)
     num_rejected = tl.load(num_rejected_ptr + req_idx)
 
-    # Accepted token count (valid tokens to copy verbatim from target input).
     num_valid = q_next - q_start - num_rejected
-
-    # Correction token for this request (indexed by req_state_idx).
     correction_token = tl.load(last_sampled_ptr + req_state_idx).to(tl.int32)
-
-    # Position of the correction token = first position of the request + num_valid.
     start_pos = tl.load(target_positions_ptr + q_start)
     correction_pos = start_pos + num_valid
-
-    # Output start in the expanded buffer.
-    # Each request i contributes one extra slot → out_start[i] = q_start + i.
     out_start = q_start + req_idx
-
-    # Total output slots = num_valid + 1 (correction) + num_rejected (masked).
     total_out = q_next - q_start + 1
 
-    # ------------------------------------------------------------------ #
-    # Main loop: copy tokens / positions / rejection mask in blocks.
-    # ------------------------------------------------------------------ #
     for i in range(0, total_out, BLOCK_SIZE):
         j = i + tl.arange(0, BLOCK_SIZE)
         in_bounds = j < total_out
@@ -126,17 +88,11 @@ def _prepare_draft_model_step0_kernel(
         is_correction = j == num_valid
         is_rejected = (j > num_valid) & in_bounds
 
-        # Source index (clamped to prevent out-of-bounds; mask guards loads).
         src_idx = tl.minimum(q_start + j, src_tokens - 1)
-
         token_ids = tl.load(target_input_ids_ptr + src_idx, mask=is_valid, other=0)
         positions = tl.load(target_positions_ptr + src_idx, mask=is_valid, other=0)
-
-        # Inject correction token into its dedicated slot.
         token_ids = tl.where(is_correction, correction_token, token_ids)
         positions = tl.where(is_correction, correction_pos, positions)
-
-        # Zero-fill rejected slots; is_rejected_mask suppresses KV writes.
         token_ids = tl.where(is_rejected, 0, token_ids)
         positions = tl.where(is_rejected, 0, positions)
 
@@ -145,34 +101,18 @@ def _prepare_draft_model_step0_kernel(
         tl.store(out_positions_ptr + out_idx, positions, mask=in_bounds)
         tl.store(out_is_rejected_ptr + out_idx, is_rejected, mask=in_bounds)
 
-    # ------------------------------------------------------------------ #
-    # Write per-request metadata.
-    # ------------------------------------------------------------------ #
-    # Flat index of the correction token in the expanded buffer.
     tl.store(last_token_indices_ptr + req_idx, out_start + num_valid)
-
-    # Expanded query_start_loc[i] = original[i] + i.
     tl.store(out_query_start_loc_ptr + req_idx, out_start)
-
-    # Step-0 seq_lens = target_seq_len + 1 (correction token extends context).
     new_seq_len = tl.minimum(seq_len + 1, max_model_len)
     tl.store(out_seq_lens_ptr + req_idx, new_seq_len)
 
-    # ------------------------------------------------------------------ #
-    # Last request: write the final query_start_loc entry + CUDA-graph pad.
-    # ------------------------------------------------------------------ #
     if req_idx == num_reqs - 1:
-        # out_start + total_out = src_tokens + num_reqs.
         total_expanded = out_start + total_out
         tl.store(out_query_start_loc_ptr + num_reqs, total_expanded)
-
-        # Pad query_start_loc beyond num_reqs for CUDA-graph capture.
         for i in range(num_reqs + 1, max_num_reqs + 1, BLOCK_SIZE):
             block = i + tl.arange(0, BLOCK_SIZE)
             mask = block <= max_num_reqs
             tl.store(out_query_start_loc_ptr + block, total_expanded, mask=mask)
-
-        # Pad seq_lens and last_token_indices beyond num_reqs.
         for i in range(num_reqs, max_num_reqs, BLOCK_SIZE):
             block = i + tl.arange(0, BLOCK_SIZE)
             mask = block < max_num_reqs
@@ -202,8 +142,6 @@ def prepare_draft_model_step0_inputs(
     """
     num_reqs = input_batch.num_reqs
     src_tokens = input_batch.num_tokens
-
-    # Pick BLOCK_SIZE from CPU numpy — no D2H sync.
     qsl_np = input_batch.query_start_loc_np
     query_lens = qsl_np[1 : num_reqs + 1] - qsl_np[:num_reqs]
     max_total_out = int(query_lens.max()) + 2  # +1 correction, +1 alignment
@@ -239,21 +177,10 @@ def prepare_draft_model_step0_inputs(
 class DraftModelSpeculator:
     """Speculative decoding using a separate smaller draft LM.
 
-    Unlike Eagle, the draft model is fully independent: it does not consume
-    the target model's hidden states.
-
-    Step 0 (prefill-equivalent):
-      _prepare_draft_model_step0_kernel builds an expanded buffer of
-      src_tokens + num_reqs slots per batch: accepted prefix + correction
-      token (last_sampled) + rejected slots (is_rejected_mask = True).
-      The kernel also writes expanded query_start_loc and seq_lens + 1
-      directly into input_buffers and records last_token_indices.
-      Step-0 slot mappings mask rejected positions with PAD_SLOT_ID.
-      draft_tokens[:, 0] is sampled from the correction token's hidden state.
-
-    Steps 1..k-1 (decode):
-      Each step feeds the previous draft token and advances positions /
-      seq_lens by 1.
+    Unlike Eagle, the draft model runs fully independently of the target model.
+    Step 0 builds an expanded buffer (accepted + correction token + rejected
+    slots masked with PAD_SLOT_ID) via a Triton kernel; steps 1..k-1 are
+    single-token decode steps.
     """
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
@@ -280,30 +207,22 @@ class DraftModelSpeculator:
             device=device,
         )
 
-        # [max_num_reqs, num_speculative_steps]
         self.draft_tokens = torch.zeros(
             self.max_num_reqs,
             self.num_speculative_steps,
             dtype=torch.int64,
             device=device,
         )
-        # Flat index of each request's correction token in the expanded buffer.
         self.last_token_indices = torch.zeros(
             self.max_num_reqs, dtype=torch.int64, device=device
         )
-
-        # CPU arange [max_num_reqs+1]: used for (a) building the CPU version of
-        # expanded query_start_loc for build_attn_metadata, and (b) resetting
-        # input_buffers.query_start_loc to decode mode (0, 1, 2, ...).
         self.arange = torch.arange(
             self.max_num_reqs + 1, dtype=torch.int32, device="cpu"
         )
-        # GPU arange: decode-mode query_start_loc reset without host round-trip.
         self.arange_gpu = torch.arange(
             self.max_num_reqs + 1, dtype=torch.int32, device=device
         )
 
-        # Expanded step-0 buffers: src_tokens + num_reqs slots.
         _expanded_max = self.max_num_tokens + self.max_num_reqs
         self.expanded_input_ids = torch.zeros(
             _expanded_max, dtype=torch.int32, device=device
@@ -311,8 +230,6 @@ class DraftModelSpeculator:
         self.expanded_positions = torch.zeros(
             _expanded_max, dtype=torch.int64, device=device
         )
-        # is_rejected_mask[j] = True → slot j holds a stale rejected token;
-        # its KV write is suppressed via PAD_SLOT_ID in the slot mapping.
         self.is_rejected_mask = torch.zeros(
             _expanded_max, dtype=torch.bool, device=device
         )
@@ -515,11 +432,6 @@ class DraftModelSpeculator:
         # ----------------------------------------------------------
         # Step 0 — expanded-buffer prefill
         # ----------------------------------------------------------
-        # _prepare_draft_model_step0_kernel expands the input by 1 slot per
-        # request (for the correction token) and writes directly to
-        # input_buffers.query_start_loc (expanded) and input_buffers.seq_lens
-        # (= target + 1), as well as last_token_indices.
-
         if skip_attn:
             # Dummy/profile path: simple copy without correction-token injection.
             src_tokens = input_batch.num_tokens
@@ -540,7 +452,6 @@ class DraftModelSpeculator:
             assert block_tables is not None
             assert kv_cache_config is not None
 
-            # V2-native kernel: expanded buffer + correction injection.
             total_expanded = prepare_draft_model_step0_inputs(
                 input_buffers=self.input_buffers,
                 input_batch=input_batch,
@@ -554,9 +465,6 @@ class DraftModelSpeculator:
                 max_model_len=self.max_model_len,
             )
 
-            # Slot mappings for the expanded buffer.
-            # input_buffers.query_start_loc now holds the expanded values;
-            # expanded_positions holds positions for all expanded slots.
             step0_slot_mappings = block_tables.compute_slot_mappings(
                 input_batch.idx_mapping,
                 self.input_buffers.query_start_loc[: num_reqs + 1],
@@ -571,15 +479,12 @@ class DraftModelSpeculator:
                 step0_slot_mappings, kv_cache_config
             )
 
-            # CPU query_start_loc for build_attn_metadata (no D2H sync).
-            # input_buffers.seq_lens was written by the kernel (= target + 1).
             qsl_np = input_batch.query_start_loc_np
             query_start_loc_cpu_expanded = (
                 torch.from_numpy(qsl_np[: num_reqs + 1]).int()
                 + self.arange[: num_reqs + 1]
             )
 
-            # max_query_len = max(query_lens) + 1 (correction slot).
             qsl_np_reqs = qsl_np[: num_reqs + 1]
             max_query_len = int((qsl_np_reqs[1:] - qsl_np_reqs[:-1]).max()) + 1
 
@@ -598,7 +503,6 @@ class DraftModelSpeculator:
                 kv_cache_config=kv_cache_config,
             )
 
-            # Step-0 forward with expanded input_ids and positions.
             batch_descriptor = BatchDescriptor(num_tokens=total_expanded)
             with set_forward_context(
                 attn_md_0,
@@ -616,7 +520,6 @@ class DraftModelSpeculator:
             if isinstance(hidden_states, tuple):
                 hidden_states = hidden_states[0]
 
-        # Sample draft_tokens[:, 0] from the correction token's hidden state.
         last_indices = self.last_token_indices[:num_reqs]
         logits = self.model.compute_logits(hidden_states[last_indices])
         self.draft_tokens[:num_reqs, 0] = self._sample_tokens(
@@ -637,7 +540,6 @@ class DraftModelSpeculator:
                 qsl[:num_reqs] + adjusted_lens - 1
             ]
         else:
-            # Correction-token positions live in the expanded buffer.
             last_positions = self.expanded_positions[last_indices]
 
         self.input_buffers.positions[:num_reqs].copy_(last_positions)
@@ -653,7 +555,6 @@ class DraftModelSpeculator:
             )
         )
 
-        # Decode steps: exactly 1 token per request.
         self.input_buffers.query_start_loc[: num_reqs + 1].copy_(
             self.arange_gpu[: num_reqs + 1]
         )
