@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.models.registry import HF_EXAMPLE_MODELS
 from vllm.config import ModelConfig, ParallelConfig, SpeculativeConfig
 from vllm.transformers_utils.model_arch_config_convertor import (
     ModelArchConfigConvertorBase,
@@ -61,6 +62,14 @@ def _load_groundtruth(filename: str) -> dict:
     groundtruth_path = Path(__file__).parent / filename
     with open(groundtruth_path) as f:
         return json.load(f)
+
+
+def _lookup_hf_overrides(model: str) -> dict:
+    """Return registry-declared hf_overrides for a model, {} if absent."""
+    try:
+        return dict(HF_EXAMPLE_MODELS.find_hf_info(model).hf_overrides)
+    except ValueError:
+        return {}
 
 
 def _assert_model_arch_config(
@@ -121,7 +130,9 @@ def test_base_model_arch_config(model: str):
     expected = groundtruth[model]
 
     model_config = ModelConfig(
-        model, trust_remote_code=model in BASE_TRUST_REMOTE_CODE_MODELS
+        model,
+        trust_remote_code=model in BASE_TRUST_REMOTE_CODE_MODELS,
+        hf_overrides=_lookup_hf_overrides(model),
     )
 
     _assert_model_arch_config(model_config, expected)

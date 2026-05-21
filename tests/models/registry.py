@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import pytest
+import torch
 from packaging.version import Version
 from transformers import PretrainedConfig
 from transformers import __version__ as TRANSFORMERS_VERSION
@@ -595,7 +596,13 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
             "(add_prefix_space / prepend_scheme mismatch).",
         },
     ),
-    "Zamba2ForCausalLM": _HfExamplesInfo("Zyphra/Zamba2-7B-instruct"),
+    "Zamba2ForCausalLM": _HfExamplesInfo(
+        "Zyphra/Zamba2-7B-instruct",
+        # Zamba2's config.json has no torch_dtype field, so get_torch_dtype
+        # otherwise falls through to a Hub safetensors-metadata fetch that
+        # rate-limits on shared CI egress.
+        hf_overrides={"dtype": torch.bfloat16},
+    ),
     "MiMoForCausalLM": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL", trust_remote_code=True),
     "MiMoV2FlashForCausalLM": _HfExamplesInfo(
         "XiaomiMiMo/MiMo-V2-Flash", trust_remote_code=True
