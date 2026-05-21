@@ -5,7 +5,8 @@ from collections.abc import Sequence
 from typing import Any
 
 import pytest
-from transformers import AutoModelForSpeechSeq2Seq
+import torch
+from transformers import AutoModelForSpeechSeq2Seq, WhisperConfig
 
 from vllm.assets.audio import AudioAsset
 from vllm.multimodal.audio import AudioResampler
@@ -123,6 +124,48 @@ def check_model_available(model: str) -> None:
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
+
+
+def test_whisper_encoder_batches_list_inputs(monkeypatch):
+    import vllm.model_executor.models.whisper as whisper
+
+    class FakeVllmConfig:
+        def __init__(self, hf_config):
+            self.model_config = type("ModelConfig", (), {"hf_config": hf_config})()
+
+    torch.manual_seed(0)
+    config = WhisperConfig(
+        d_model=16,
+        encoder_attention_heads=2,
+        encoder_layers=0,
+        encoder_ffn_dim=64,
+        num_mel_bins=8,
+        max_source_positions=4,
+    )
+    monkeypatch.setattr(
+        whisper,
+        "make_layers",
+        lambda *args, **kwargs: (0, 0, torch.nn.ModuleList()),
+    )
+    encoder = whisper.WhisperEncoder(vllm_config=FakeVllmConfig(config))
+    features = [
+        torch.randn(config.num_mel_bins, config.max_source_positions * 2)
+        for _ in range(3)
+    ]
+
+    conv1_call_count = 0
+    conv1_forward = encoder.conv1.forward
+
+    def counted_conv1_forward(input_features):
+        nonlocal conv1_call_count
+        conv1_call_count += 1
+        return conv1_forward(input_features)
+
+    monkeypatch.setattr(encoder.conv1, "forward", counted_conv1_forward)
+    list_output = encoder(features)
+
+    assert conv1_call_count == 1
+    torch.testing.assert_close(list_output, encoder(torch.stack(features, dim=0)))
 
 
 @pytest.mark.parametrize("dtype", ["half"])
