@@ -1,12 +1,49 @@
+######################### RUST BUILD IMAGE #########################
+# Build the Rust frontend (`vllm-rs`) in a dedicated stage so the main image
+# doesn't need the rust toolchain or protoc. Runs in parallel with vllm-base.
+FROM ubuntu:22.04 AS rust-build
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update -y \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates curl git build-essential \
+        protobuf-compiler libprotobuf-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install rustup; the toolchain itself is pinned by rust/rust-toolchain.toml.
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --profile minimal --default-toolchain none
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+WORKDIR /workspace
+
+COPY rust rust
+
+# Fail loudly if the rust submodule was not initialized on the host before
+# `docker build`.
+RUN if [ ! -f rust/Cargo.toml ]; then \
+        echo "ERROR: rust/ submodule is not initialized."; \
+        echo "Run 'git submodule update --init --recursive' on the host before building."; \
+        exit 1; \
+    fi
+
+# Cap cargo parallelism to avoid exhausting the CI host's open-file limit
+# (rustc spawns enough concurrent processes to hit RLIMIT_NOFILE otherwise).
+ENV CARGO_BUILD_JOBS=4
+
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    --mount=type=cache,target=/workspace/rust/target \
+    cd rust \
+    && cargo build --release --bin vllm-rs --features native-tls-vendored \
+    && cp target/release/vllm-rs /workspace/vllm-rs
+
 FROM intel/deep-learning-essentials:2025.3.2-0-devel-ubuntu24.04 AS vllm-base
 
 WORKDIR /workspace/
 
 ARG PYTHON_VERSION=3.12
 ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/xpu"
-
-RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null && \
-    echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | tee /etc/apt/sources.list.d/oneAPI.list
 
 RUN apt clean && apt-get update -y && \
     apt-get install -y --no-install-recommends --fix-missing \
@@ -26,8 +63,20 @@ RUN apt clean && apt-get update -y && \
     python3.12-dev \
     python3-pip
 
-RUN apt update && apt upgrade -y && \
-    apt install -y intel-oneapi-compiler-dpcpp-cpp-2025.3
+# Add oneAPI repo, pin oneAPI to 2025.3, then install pinned packages in one layer.
+RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null && \
+    echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | tee /etc/apt/sources.list.d/oneAPI.list && \
+    printf '%s\n' \
+    'Package: intel-oneapi-* intel-deep-learning-essentials* intel-pti*' \
+    'Pin: version 2025.3*' \
+    'Pin-Priority: 1001' \
+    > /etc/apt/preferences.d/oneapi-2025.3.pref && \
+    apt-get update -y && \
+    apt-get install -y --no-install-recommends \
+    intel-oneapi-compiler-dpcpp-cpp-2025.3 \
+    intel-oneapi-mkl-devel-2025.3 \
+    intel-oneapi-dnnl-devel-2025.3 && \
+    rm -rf /var/lib/apt/lists/*
 
 # Install UMD
 RUN mkdir neo && \
@@ -90,6 +139,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 ENV LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/lib/"
 
 COPY . .
+
+# Drop the pre-built rust frontend binary into the source tree. setup.py
+# detects it and ships it as-is, skipping the local cargo build.
+COPY --from=rust-build /workspace/vllm-rs vllm/vllm-rs
+
 ARG GIT_REPO_CHECK=0
 RUN --mount=type=bind,source=.git,target=.git \
     if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh; fi

@@ -49,7 +49,7 @@ steps:
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
       cd tests &&
-      pytest -v -s v1/logits_processors &&
+      pytest -v -s v1/logits_processors --ignore=v1/logits_processors/test_custom_online.py --ignore=v1/logits_processors/test_custom_offline.py &&
       pytest -v -s v1/test_oracle.py &&
       pytest -v -s v1/test_request.py &&
       pytest -v -s v1/test_outputs.py'

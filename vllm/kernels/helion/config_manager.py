@@ -11,25 +11,25 @@ Config File Structure
 Each kernel has a directory: {kernel_name}/
 Inside, each GPU platform has its own JSON file: {kernel_name}/{platform}.json
 
-For example:
-    silu_mul_fp8/
-        nvidia_h100.json    # { "default": {...}, "batch_32_hidden_4096": {...} }
-        nvidia_h200.json    # { "batch_16_hidden_2048": {...} }
+Platform files store config entries as a JSON array::
 
-Each platform file maps config keys to Helion config objects.
-Config keys should be structured strings that encode the relevant
-parameters (e.g., "batch_32_hidden_4096", "seq_512_heads_16", "fp8_batch_64", etc.).
+    [
+        {"key": {}, "config": {...}},
+        {"key": {"intermediate": 2048, "numtokens": 256}, "config": {...}},
+        ...,
+    ]
 
-Classes
--------
-- ConfigSet: In-memory collection of configs for a kernel with lookup/query APIs.
-- ConfigManager: File-level operations for config persistence.
+Config keys are ``CaseKey`` instances mapping parameter names to
+values.  The default config uses ``CaseKey.default()``.
 """
+
+from __future__ import annotations
 
 import json
 from pathlib import Path
 from typing import Any
 
+from vllm.kernels.helion.case_key import CaseKey
 from vllm.logger import init_logger
 from vllm.utils.import_utils import has_helion
 
@@ -45,11 +45,13 @@ logger = init_logger(__name__)
 
 
 class ConfigSet:
-    """In-memory collection of Helion configs with lookup/query capabilities."""
+    """In-memory collection of Helion configs with lookup/query capabilities.
 
-    # Type alias for nested config structure:
-    # platform -> config_key -> helion.Config
-    _ConfigDict = dict[str, dict[str, "helion.Config"]]
+    Configs are stored keyed by ``CaseKey``.  The default config
+    uses ``CaseKey.default()`` as its key.
+    """
+
+    _ConfigDict = dict[str, dict[CaseKey, "helion.Config"]]
 
     def __init__(self, kernel_name: str):
         self._kernel_name = kernel_name
@@ -59,7 +61,7 @@ class ConfigSet:
     def kernel_name(self) -> str:
         return self._kernel_name
 
-    def get_config(self, platform: str, config_key: str) -> helion.Config:
+    def get_config(self, platform: str, config_key: CaseKey) -> helion.Config:
         platform_dict = self._configs.get(platform)
         if platform_dict is None:
             avail_platforms = self.get_platforms()
@@ -82,7 +84,8 @@ class ConfigSet:
             avail_keys = self.get_config_keys(platform)
             raise KeyError(
                 f"Config not found for kernel '{self._kernel_name}': "
-                f"config_key '{config_key}' not found for platform '{platform}'. "
+                f"config_key '{config_key}' not found for "
+                f"platform '{platform}'. "
                 f"Available config_keys: {avail_keys or '(none)'}"
             )
 
@@ -91,25 +94,34 @@ class ConfigSet:
     def get_platforms(self) -> list[str]:
         return sorted(self._configs.keys())
 
-    def get_config_keys(self, platform: str) -> list[str]:
+    def get_config_keys(self, platform: str) -> list[CaseKey]:
         platform_dict = self._configs.get(platform.lower())
         if platform_dict is None:
             return []
-        return sorted(platform_dict.keys())
+        return sorted(platform_dict.keys(), key=str)
 
-    def to_dict(self) -> dict[str, Any]:
-        result: dict[str, Any] = {}
+    def to_config_entries(self) -> dict[str, list[dict[str, Any]]]:
+        """Serialize to config entries format for JSON output."""
+        result: dict[str, list[dict[str, Any]]] = {}
+        for platform, config_dict in self._configs.items():
+            pairs: list[dict[str, Any]] = []
+            for config_key, config in config_dict.items():
+                config_data = json.loads(config.to_json())
+                pairs.append({"key": dict(config_key), "config": config_data})
+            result[platform] = pairs
+        return result
 
-        for platform, config_keys_dict in self._configs.items():
-            result[platform] = {}
-
-            for config_key, config in config_keys_dict.items():
-                result[platform][config_key] = json.loads(config.to_json())
-
+    def to_dict(self) -> dict[str, dict[CaseKey, Any]]:
+        """Return configs as a nested dict (platform -> key -> config)."""
+        result: dict[str, dict[CaseKey, Any]] = {}
+        for platform, config_dict in self._configs.items():
+            result[platform] = {
+                k: json.loads(v.to_json()) for k, v in config_dict.items()
+            }
         return result
 
     @classmethod
-    def from_dict(cls, kernel_name: str, data: dict[str, Any]) -> "ConfigSet":
+    def from_dict(cls, kernel_name: str, data: dict[str, Any]) -> ConfigSet:
         config_set = cls(kernel_name)
         count = 0
 
@@ -117,9 +129,11 @@ class ConfigSet:
             if platform not in config_set._configs:
                 config_set._configs[platform] = {}
 
-            for config_key, config_data in platform_data.items():
-                config = helion.Config(**config_data)
-                config_set._configs[platform][config_key] = config
+            for entry in platform_data:
+                raw_key = entry["key"]
+                key = CaseKey.default() if not raw_key else CaseKey(raw_key)
+                config = helion.Config(**entry["config"])
+                config_set._configs[platform][key] = config
                 count += 1
 
         if count > 0:
@@ -132,7 +146,10 @@ class ConfigSet:
         return config_set
 
     def set_config(
-        self, platform: str, config_key: str, config: "helion.Config"
+        self,
+        platform: str,
+        config_key: CaseKey,
+        config: helion.Config,
     ) -> None:
         platform = platform.lower()
         if platform not in self._configs:
@@ -145,7 +162,7 @@ class ConfigSet:
             config_key,
         )
 
-    def has_config(self, platform: str, config_key: str) -> bool:
+    def has_config(self, platform: str, config_key: CaseKey) -> bool:
         platform = platform.lower()
         platform_dict = self._configs.get(platform)
         if platform_dict is None:
@@ -156,18 +173,18 @@ class ConfigSet:
 class ConfigManager:
     """File-level configuration management for Helion kernels (global singleton)."""
 
-    _instance: "ConfigManager | None" = None
+    _instance: ConfigManager | None = None
     _instance_base_dir: Path | None = None
 
-    def __new__(cls, base_dir: str | Path | None = None) -> "ConfigManager":
+    def __new__(cls, base_dir: str | Path | None = None) -> ConfigManager:
         resolved_base_dir = cls._resolve_base_dir(base_dir)
 
         if cls._instance is not None:
             if cls._instance_base_dir != resolved_base_dir:
                 raise ValueError(
                     f"ConfigManager singleton already exists with base_dir "
-                    f"'{cls._instance_base_dir}', cannot create with different "
-                    f"base_dir '{resolved_base_dir}'"
+                    f"'{cls._instance_base_dir}', cannot create with "
+                    f"different base_dir '{resolved_base_dir}'"
                 )
             return cls._instance
 
@@ -190,7 +207,7 @@ class ConfigManager:
         return (Path(__file__).parent / "configs").resolve()
 
     @classmethod
-    def get_instance(cls) -> "ConfigManager":
+    def get_instance(cls) -> ConfigManager:
         if cls._instance is None:
             raise RuntimeError(
                 "ConfigManager instance has not been created. "
@@ -229,16 +246,16 @@ class ConfigManager:
                 f"Config directory '{self._base_dir}' is not writable: {e}"
             ) from e
 
-    def _load_platform_file(self, kernel_name: str, platform: str) -> dict[str, Any]:
+    def _load_platform_file(self, kernel_name: str, platform: str) -> Any:
         config_path = self.get_config_file_path(kernel_name, platform)
         if not config_path.exists():
-            return {}
+            return []
         try:
             with open(config_path) as f:
                 return json.load(f)
         except (json.JSONDecodeError, OSError) as e:
             logger.error("Failed to load config file %s: %s", config_path, e)
-            return {}
+            return []
 
     def load_config_set(self, kernel_name: str) -> ConfigSet:
         kernel_dir = self.get_kernel_dir(kernel_name)
@@ -253,32 +270,36 @@ class ConfigManager:
                     platform_data = json.load(f)
                 data[platform] = platform_data
             except (json.JSONDecodeError, OSError) as e:
-                logger.error("Failed to load config file %s: %s", platform_file, e)
+                logger.error(
+                    "Failed to load config file %s: %s",
+                    platform_file,
+                    e,
+                )
 
         return ConfigSet.from_dict(kernel_name, data)
 
     def get_platform_configs(
         self, kernel_name: str, platform: str
-    ) -> dict[str, helion.Config]:
+    ) -> dict[CaseKey, helion.Config]:
         platform_data = self._load_platform_file(kernel_name, platform)
         if not platform_data:
             return {}
         config_set = ConfigSet.from_dict(kernel_name, {platform: platform_data})
-        config_keys = config_set.get_config_keys(platform)
         return {
-            config_key: config_set.get_config(platform, config_key)
-            for config_key in config_keys
+            k: config_set.get_config(platform, k)
+            for k in config_set.get_config_keys(platform)
         }
 
     def save_config_set(self, config_set: ConfigSet) -> Path:
         kernel_dir = self.get_kernel_dir(config_set.kernel_name)
         kernel_dir.mkdir(parents=True, exist_ok=True)
 
-        full_data = config_set.to_dict()
-        for platform, platform_data in full_data.items():
+        full_data = config_set.to_config_entries()
+        for platform, pairs in full_data.items():
             platform_path = kernel_dir / f"{platform}.json"
             with open(platform_path, "w") as f:
-                json.dump(platform_data, f, indent=2)
+                json.dump(pairs, f, indent=2)
+                f.write("\n")
             logger.info("Saved config to: %s", platform_path)
 
         return kernel_dir
@@ -287,21 +308,34 @@ class ConfigManager:
         self,
         kernel_name: str,
         platform: str,
-        configs: dict[str, "helion.Config"],
+        configs: dict[CaseKey, helion.Config],
     ) -> Path:
         """Save configs for a kernel/platform, merging with existing."""
-        platform_data = self._load_platform_file(kernel_name, platform)
-        for config_key, config in configs.items():
-            platform_data[config_key] = json.loads(config.to_json())
+        config_set = ConfigSet.from_dict(
+            kernel_name,
+            {platform: self._load_platform_file(kernel_name, platform)},
+        )
+        for key, config in configs.items():
+            config_set.set_config(platform, key, config)
 
+        pairs = config_set.to_config_entries().get(platform, [])
         platform_path = self.get_config_file_path(kernel_name, platform)
         platform_path.parent.mkdir(parents=True, exist_ok=True)
         with open(platform_path, "w") as f:
-            json.dump(platform_data, f, indent=2)
+            json.dump(pairs, f, indent=2)
+            f.write("\n")
 
         logger.info("Saved config to: %s", platform_path)
         return platform_path
 
-    def config_exists(self, kernel_name: str, platform: str, config_key: str) -> bool:
+    def config_exists(
+        self,
+        kernel_name: str,
+        platform: str,
+        config_key: CaseKey,
+    ) -> bool:
         platform_data = self._load_platform_file(kernel_name, platform)
-        return config_key in platform_data
+        if not platform_data:
+            return False
+        target = dict(config_key)
+        return any(entry["key"] == target for entry in platform_data)
