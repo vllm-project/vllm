@@ -390,7 +390,13 @@ class SpecDecodeBaseProposer:
 
     def _greedy_sample(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Greedy-sample draft tokens from hidden states."""
-        if self.use_local_argmax_reduction:
+        has_vocab_remap = (
+            hasattr(self.model, "draft_id_to_target_id")
+            and self.model.draft_id_to_target_id is not None
+        )
+        if self.use_local_argmax_reduction or (
+            has_vocab_remap and hasattr(self.model, "get_top_tokens")
+        ):
             return self.model.get_top_tokens(hidden_states)
         return self.model.compute_logits(hidden_states).argmax(dim=-1)
 
@@ -1425,6 +1431,7 @@ class SpecDecodeBaseProposer:
             if (
                 hasattr(self.model, "draft_id_to_target_id")
                 and self.model.draft_id_to_target_id is not None
+                and not getattr(self.model, "supports_remapped_top_tokens", False)
             ):
                 logger.warning(
                     "use_local_argmax_reduction is enabled but draft model "

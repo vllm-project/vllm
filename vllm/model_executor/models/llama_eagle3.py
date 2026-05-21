@@ -298,6 +298,8 @@ class LlamaModel(nn.Module):
 
 
 class Eagle3LlamaForCausalLM(LlamaForCausalLM):
+    supports_remapped_top_tokens = True
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
@@ -383,6 +385,18 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         )
         logits_new[:, targets] = logits
         return logits_new
+
+    def get_top_tokens(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        """Return target-vocab token ids without densifying remapped logits."""
+        draft_tokens = self.logits_processor.get_top_tokens(self.lm_head, hidden_states)
+        if self.draft_id_to_target_id is None:
+            return draft_tokens
+        return draft_tokens + self.draft_id_to_target_id[draft_tokens].to(
+            draft_tokens.dtype
+        )
 
     def combine_hidden_states(
         self,

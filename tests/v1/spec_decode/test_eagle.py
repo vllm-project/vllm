@@ -25,7 +25,10 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.config.load import LoadConfig
+from vllm.model_executor.models.deepseek_eagle3 import Eagle3DeepseekV2ForCausalLM
 from vllm.model_executor.models.llama import LlamaForCausalLM
+from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.spec_decode.dflash import DFlashProposer
@@ -193,6 +196,53 @@ def test_prepare_next_token_ids():
 
     assert torch.equal(next_token_ids_from_padded, expected_next_token_ids_tensor)
     assert torch.equal(valid_sampled_tokens_count, expected_valid_sampled_tokens_count)
+
+
+@pytest.mark.parametrize(
+    "model_cls",
+    [
+        DFlashQwen3ForCausalLM,
+        Eagle3LlamaForCausalLM,
+        Eagle3DeepseekV2ForCausalLM,
+    ],
+)
+def test_remapped_get_top_tokens_returns_target_ids(model_cls):
+    device = torch.device(DEVICE_TYPE)
+    model = model_cls.__new__(model_cls)
+    torch.nn.Module.__init__(model)
+    model.logits_processor = mock.MagicMock()
+    model.lm_head = mock.MagicMock()
+    model.draft_id_to_target_id = torch.nn.Parameter(
+        torch.tensor([0, 4, 0, 7], dtype=torch.long, device=device),
+        requires_grad=False,
+    )
+    model.logits_processor.get_top_tokens.return_value = torch.tensor(
+        [1, 3], dtype=torch.int64, device=device
+    )
+
+    top_tokens = model.get_top_tokens(torch.randn(2, 8, device=device))
+
+    assert torch.equal(top_tokens, torch.tensor([5, 10], device=device))
+
+
+@pytest.mark.parametrize("method", ["dflash", "eagle3"])
+def test_greedy_sample_uses_get_top_tokens_for_vocab_remap(method):
+    proposer = _create_proposer(method, num_speculative_tokens=2)
+    hidden_states = torch.randn(
+        2, proposer.hidden_size, dtype=proposer.dtype, device=proposer.device
+    )
+    expected = torch.tensor([11, 29], dtype=torch.int64, device=proposer.device)
+
+    proposer.model = mock.MagicMock()
+    proposer.use_local_argmax_reduction = False
+    proposer.model.draft_id_to_target_id = torch.tensor([0], device=proposer.device)
+    proposer.model.get_top_tokens.return_value = expected
+
+    sampled = proposer._greedy_sample(hidden_states)
+
+    proposer.model.get_top_tokens.assert_called_once_with(hidden_states)
+    proposer.model.compute_logits.assert_not_called()
+    assert torch.equal(sampled, expected)
 
 
 def test_prepare_inputs():

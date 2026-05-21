@@ -501,6 +501,8 @@ class DFlashQwen3Model(nn.Module):
 
 
 class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
+    supports_remapped_top_tokens = True
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
@@ -566,6 +568,18 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         )
         logits_new[:, targets] = logits
         return logits_new
+
+    def get_top_tokens(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        draft_tokens = self.logits_processor.get_top_tokens(self.lm_head, hidden_states)
+        if self.draft_id_to_target_id is None:
+            # no remapping, return draft tokens directly
+            return draft_tokens
+        return draft_tokens + self.draft_id_to_target_id[draft_tokens].to(
+            draft_tokens.dtype
+        )
 
     def precompute_and_store_context_kv(
         self,
