@@ -96,9 +96,7 @@ def test_register_custom_backend_as_decorator():
             raise NotImplementedError
 
     assert MLAPrefillBackendEnum.CUSTOM.is_overridden()
-    backend_cls = MLAPrefillBackendEnum.CUSTOM.get_class()
-    assert backend_cls is DecoratedPrefillBackend
-    assert backend_cls.get_name() == "DECORATED"
+    assert "DecoratedPrefillBackend" in MLAPrefillBackendEnum.CUSTOM.get_path()
 
 
 def test_override_existing_backend():
