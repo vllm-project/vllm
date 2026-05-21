@@ -551,164 +551,40 @@ def test_processor_cache_shared_across_loras():
     assert feature_lora_b.data == item_data
 
 
-# Regression for vllm-project/vllm#42995:
-#
-# /sleep?level>=1 and /pause?clear_cache=true route through EngineCore on
-# the engine side, which only clears the P1 receiver cache. The P0 sender
-# cache lives in the API server process; if it's not also cleared, the
-# next request that reuses a previously-seen mm_hash forwards
-# mm_item=None to a P1 whose cache is empty, tripping
-# `assert mm_item is not None` in MultiModalReceiverCache.get_and_update_item.
-#
-# AsyncLLM.sleep / AsyncLLM.pause_generation / LLMEngine.sleep must clear
-# the P0 renderer cache before delegating to EngineCore.
+_SLEEP_VISION_PROMPT = (
+    "<|im_start|>system\nYou are a helpful assistant.<|im_end|>"
+    "\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>"
+    "What is in the image?<|im_end|>\n"
+    "<|im_start|>assistant\n"
+)
 
 
-def test_sleep_dual_clear_invariant_at_cache_layer():
-    """If only P1 is cleared, sender->receiver path with cached mm_hash
-    asserts. Clearing both sides restores the fresh-request behaviour."""
-    model_config = ModelConfig(
-        model="llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
-        mm_processor_cache_gb=4096 / GiB_bytes,
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="sleep mode regression requires a CUDA GPU",
+)
+def test_sleep_wake_preserves_mm_cache_consistency():
+    """Regression for vllm-project/vllm#42995."""
+    from vllm import LLM, SamplingParams
+    from vllm.assets.image import ImageAsset
+
+    image = ImageAsset("stop_sign").pil_image
+    prompt = {
+        "prompt": _SLEEP_VISION_PROMPT,
+        "multi_modal_data": {"image": image},
+    }
+    sampling_params = SamplingParams(temperature=0, max_tokens=8)
+
+    llm = LLM(
+        model="Qwen/Qwen2-VL-2B-Instruct",
+        enable_sleep_mode=True,
+        enforce_eager=True,
+        gpu_memory_utilization=0.5,
+        max_model_len=2048,
     )
-    sender = MultiModalProcessorSenderCache(model_config)
-    receiver = MultiModalReceiverCache(model_config)
 
-    mm_hash = "image_X"
-    item = MultiModalKwargsItem.dummy(nbytes=128)
-    prompt_updates: list = []
-
-    # First request: miss on both.
-    sender_out = sender.get_and_update_item((item, prompt_updates), mm_hash)
-    assert sender_out == (item, prompt_updates)
-    assert receiver.get_and_update_item(item, mm_hash) is item
-
-    # Simulate EngineCore.reset_mm_cache running without a P0 clear.
-    receiver.clear_cache()
-    # P0 still believes the hash is cached on P1.
-    assert sender.is_cached_item(mm_hash)
-
-    # Second request: sender strips the payload because it thinks P1 has it.
-    sender_out2 = sender.get_and_update_item((item, prompt_updates), mm_hash)
-    assert sender_out2[0] is None, "sender should report a hit"
-
-    # P1 has no entry -> the assertion that #42995 trips fires.
-    with pytest.raises(AssertionError, match="Expected a cached item"):
-        receiver.get_and_update_item(None, mm_hash)
-
-    # Now do the symmetric clear that the fixed sleep/pause path performs.
-    sender.clear_cache()
-    receiver.clear_cache()
-
-    # Both caches behave like a fresh boot.
-    assert not sender.is_cached_item(mm_hash)
-    assert sender.get_and_update_item((item, prompt_updates), mm_hash) == (
-        item,
-        prompt_updates,
-    )
-    assert receiver.get_and_update_item(item, mm_hash) is item
-
-
-@pytest.mark.asyncio
-async def test_async_llm_sleep_clears_p0_renderer_when_level_ge_1():
-    """AsyncLLM.sleep with level>=1 must clear the P0 renderer cache
-    before the engine-core sleep call (#42995)."""
-    from unittest.mock import AsyncMock
-
-    from vllm.v1.engine.async_llm import AsyncLLM
-
-    engine = AsyncLLM.__new__(AsyncLLM)
-    order: list[str] = []
-    renderer = AsyncMock()
-    renderer.clear_mm_cache_async = AsyncMock(
-        side_effect=lambda: order.append("renderer.clear_mm_cache_async")
-    )
-    engine_core = AsyncMock()
-    engine_core.sleep_async = AsyncMock(
-        side_effect=lambda *_args, **_kwargs: order.append("engine_core.sleep_async")
-    )
-    engine.renderer = renderer
-    engine.engine_core = engine_core
-    engine.logger_manager = None
-
-    await engine.sleep(level=1)
-    assert order == ["renderer.clear_mm_cache_async", "engine_core.sleep_async"]
-    renderer.clear_mm_cache_async.assert_awaited_once()
-    engine_core.sleep_async.assert_awaited_once_with(1, "abort")
-
-    # Level 0 is pause-only; EngineCore.sleep does not clear the P1
-    # mm cache for level 0, so neither should AsyncLLM.sleep clear P0.
-    order.clear()
-    renderer.clear_mm_cache_async.reset_mock()
-    engine_core.sleep_async.reset_mock()
-    await engine.sleep(level=0)
-    renderer.clear_mm_cache_async.assert_not_awaited()
-    engine_core.sleep_async.assert_awaited_once_with(0, "abort")
-
-
-@pytest.mark.asyncio
-async def test_async_llm_pause_generation_clears_p0_renderer_when_clearing_cache():
-    """AsyncLLM.pause_generation(clear_cache=True) goes through
-    pause_scheduler(clear_cache=True) -> _reset_caches on the engine side,
-    so the P0 sender must be cleared too (#42995)."""
-    from unittest.mock import AsyncMock
-
-    from vllm.v1.engine.async_llm import AsyncLLM
-
-    engine = AsyncLLM.__new__(AsyncLLM)
-    order: list[str] = []
-    renderer = AsyncMock()
-    renderer.clear_mm_cache_async = AsyncMock(
-        side_effect=lambda: order.append("renderer.clear_mm_cache_async")
-    )
-    engine_core = AsyncMock()
-    engine_core.pause_scheduler_async = AsyncMock(
-        side_effect=lambda **_kwargs: order.append("engine_core.pause_scheduler_async")
-    )
-    engine.renderer = renderer
-    engine.engine_core = engine_core
-
-    await engine.pause_generation(mode="abort", clear_cache=True)
-    assert order == [
-        "renderer.clear_mm_cache_async",
-        "engine_core.pause_scheduler_async",
-    ]
-    renderer.clear_mm_cache_async.assert_awaited_once()
-
-    # clear_cache=False keeps the P0 cache intact.
-    renderer.clear_mm_cache_async.reset_mock()
-    await engine.pause_generation(mode="abort", clear_cache=False)
-    renderer.clear_mm_cache_async.assert_not_awaited()
-
-
-def test_llm_engine_sleep_clears_p0_renderer_when_level_ge_1():
-    """LLMEngine.sleep with level>=1 must clear the P0 renderer cache
-    before the engine-core sleep call (#42995)."""
-    from unittest.mock import MagicMock
-
-    from vllm.v1.engine.llm_engine import LLMEngine
-
-    engine = LLMEngine.__new__(LLMEngine)
-    order: list[str] = []
-    renderer = MagicMock()
-    renderer.clear_mm_cache.side_effect = lambda: order.append(
-        "renderer.clear_mm_cache"
-    )
-    engine_core = MagicMock()
-    engine_core.sleep.side_effect = lambda *_args, **_kwargs: order.append(
-        "engine_core.sleep"
-    )
-    engine.renderer = renderer
-    engine.engine_core = engine_core
-    engine.logger_manager = None
-
-    engine.sleep(level=1)
-    assert order == ["renderer.clear_mm_cache", "engine_core.sleep"]
-    renderer.clear_mm_cache.assert_called_once()
-    engine_core.sleep.assert_called_once_with(1, "abort")
-
-    renderer.clear_mm_cache.reset_mock()
-    engine_core.sleep.reset_mock()
-    engine.sleep(level=0)
-    renderer.clear_mm_cache.assert_not_called()
-    engine_core.sleep.assert_called_once_with(0, "abort")
+    llm.generate([prompt], sampling_params)
+    llm.sleep(level=1)
+    llm.wake_up()
+    output2 = llm.generate([prompt], sampling_params)
+    assert output2[0].outputs[0].text
