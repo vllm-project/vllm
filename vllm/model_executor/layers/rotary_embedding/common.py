@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import ctypes
 import math
 from importlib.util import find_spec
 
@@ -299,15 +298,16 @@ class ApplyRotaryEmb(CustomOp):
                 # The failed Triton/HIP kernel leaves a sticky error in the HIP
                 # runtime error slot.  Any subsequent HIP op (including plain
                 # PyTorch tensor arithmetic) will inherit and raise that error.
-                # hipGetLastError() reads and resets the slot so forward_static
+                # cudaGetLastError() reads and resets the slot so forward_static
                 # can execute cleanly.
                 try:
-                    _hip_rt = ctypes.CDLL("libamdhip64.so")
-                    _hip_rt.hipGetLastError.restype = ctypes.c_int
-                    _hip_rt.hipGetLastError.argtypes = []
-                    _hip_rt.hipGetLastError()
-                except OSError:
-                    pass  # not on ROCm; no stale error to clear
+                    from vllm.distributed.device_communicators.cuda_wrapper import (
+                        CudaRTLibrary,
+                    )
+
+                    CudaRTLibrary().cudaGetLastError()
+                except Exception:
+                    pass  # library unavailable; best-effort error drain
                 output = self.forward_static(
                     x, cos, sin, self.is_neox_style, self.enable_fp32_compute
                 )
