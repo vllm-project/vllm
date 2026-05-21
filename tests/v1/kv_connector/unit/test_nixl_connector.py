@@ -1665,7 +1665,10 @@ def test_register_kv_caches(
             ]
             expected_num_entries = 1
 
-            expected_blocks_count = num_blocks * (2 if is_blocks_first else 1)
+            virtually_split = (
+                is_blocks_first and not connector.prefer_cross_layer_blocks
+            )
+            expected_blocks_count = num_blocks * (2 if virtually_split else 1)
 
             kv_caches = {"all-layers": cross_layers_kv_cache}
         else:
