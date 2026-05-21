@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
 from vllm.distributed.kv_events import (
@@ -31,6 +31,18 @@ from vllm.v1.request import Request
 logger = init_logger(__name__)
 
 
+# Threshold (in lookup hits) at which a shared-prefix hash becomes a
+# replication candidate. find_longest_cache_hit fires once per request
+# at scheduling time, so any get_one_block hit beyond the original
+# inserting request is evidence of cross-session sharing. Setting to 1
+# replicates aggressively on the very first re-lookup, which is what
+# the canonical 4-step A.1→A.2→B→A.3 and concurrent BS>=2 patterns
+# need (no other lookup happens between A.2's hit and B's eviction).
+REPLICATION_LOOKUP_THRESHOLD = 1
+
+ReplicationCallback = Callable[[BlockHashWithGroupId, "KVCacheBlock"], bool]
+
+
 class BlockHashToBlockMap:
     """
     Cache of blocks that are used for prefix caching. It caches blocks
@@ -58,6 +70,20 @@ class BlockHashToBlockMap:
         self._cache: dict[
             BlockHashWithGroupId, KVCacheBlock | dict[int, KVCacheBlock]
         ] = {}
+        # Replication tracking (#42948 multi-storage PoC).
+        # `_lookup_counts` records how many lookup hits a shared-prefix
+        # hash has accumulated; `_replicated_hashes` is an idempotency
+        # guard so a hash is only handed to the replication connector
+        # once per single-storage epoch.
+        self._lookup_counts: dict[BlockHashWithGroupId, int] = {}
+        self._replicated_hashes: set[BlockHashWithGroupId] = set()
+        self._replication_callback: ReplicationCallback | None = None
+
+    def set_replication_callback(self, callback: ReplicationCallback | None) -> None:
+        """Register the connector callback invoked when a shared-prefix
+        hash crosses the replication threshold. Passing None disables
+        replication."""
+        self._replication_callback = callback
 
     def get_one_block(self, key: BlockHashWithGroupId) -> KVCacheBlock | None:
         """
@@ -66,10 +92,30 @@ class BlockHashToBlockMap:
         blocks = self._cache.get(key)
         if blocks is not None:
             if isinstance(blocks, KVCacheBlock):
-                return blocks
-            if isinstance(blocks, dict):
-                return next(iter(blocks.values()))
-            self._unexpected_blocks_type(blocks)
+                block = blocks
+            elif isinstance(blocks, dict):
+                block = next(iter(blocks.values()))
+            else:
+                self._unexpected_blocks_type(blocks)
+                return None
+            # Skip the lookup-count bookkeeping entirely once a key is
+            # already replicated — the per-hit work just to re-check the
+            # `key in _replicated_hashes` guard adds up over long shared
+            # prefixes (MLA's full-attention group walks every position).
+            if (
+                self._replication_callback is not None
+                and key not in self._replicated_hashes
+            ):
+                count = self._lookup_counts.get(key, 0) + 1
+                self._lookup_counts[key] = count
+                # Mark only on accepted replication; rejected triggers
+                # (reserve empty, cap hit) stay retry-eligible on the
+                # next lookup hit.
+                if count >= REPLICATION_LOOKUP_THRESHOLD and self._replication_callback(
+                    key, block
+                ):
+                    self._replicated_hashes.add(key)
+            return block
         return None
 
     def insert(self, key: BlockHashWithGroupId, block: KVCacheBlock) -> None:
@@ -105,6 +151,7 @@ class BlockHashToBlockMap:
         # use del blocks[block_id] instead as followup.
         if isinstance(blocks, KVCacheBlock):
             if blocks.block_id == block_id:
+                self._on_key_fully_removed(key)
                 return blocks
             # If the single block ID doesn't match, we should put the
             # block back (it should happen rarely)
@@ -116,12 +163,28 @@ class BlockHashToBlockMap:
             block = blocks.pop(block_id, None)
             if len(blocks) > 0:
                 self._cache[key] = blocks
+                # Dropped below replication degree: allow re-replication.
+                self._replicated_hashes.discard(key)
+            else:
+                self._on_key_fully_removed(key)
             return block
         self._unexpected_blocks_type(blocks)
         return None
 
+    def clear(self) -> None:
+        """Drop all cached blocks and replication bookkeeping. Used by
+        reset_prefix_cache. The replication callback registration is
+        preserved across resets."""
+        self._cache.clear()
+        self._lookup_counts.clear()
+        self._replicated_hashes.clear()
+
     def __len__(self) -> int:
         return len(self._cache)
+
+    def _on_key_fully_removed(self, key: BlockHashWithGroupId) -> None:
+        self._lookup_counts.pop(key, None)
+        self._replicated_hashes.discard(key)
 
     def _unexpected_blocks_type(self, blocks: Any) -> None:
         raise AssertionError(f"Invalid KV cache block type {type(blocks)}")
@@ -469,8 +532,10 @@ class BlockPool:
             )
             return False
 
-        # Remove all hashes so that no new blocks will hit.
-        self.cached_block_hash_to_block = BlockHashToBlockMap()
+        # Remove all hashes so that no new blocks will hit. Use clear()
+        # rather than re-instantiating so the replication callback (if
+        # set by a kv_connector) survives the reset.
+        self.cached_block_hash_to_block.clear()
 
         # Remove all hashes from all blocks.
         for block in self.blocks:
@@ -518,3 +583,30 @@ class BlockPool:
         events = self.kv_event_queue
         self.kv_event_queue = []
         return events
+
+    def register_replication_callback(
+        self, callback: "ReplicationCallback | None"
+    ) -> None:
+        """Register a callback invoked when a shared-prefix hash becomes
+        a replication candidate (see #42948). Intended to be wired up by
+        a kv_connector during bind_gpu_block_pool. Passing None
+        deregisters."""
+        self.cached_block_hash_to_block.set_replication_callback(callback)
+
+    def insert_cached_block(
+        self, key: BlockHashWithGroupId, block: KVCacheBlock
+    ) -> None:
+        """Insert a block into the prefix cache map under `key` and set
+        `block.block_hash`. Used by the replication connector to publish
+        a freshly-replicated block into multi-storage. Does NOT emit a
+        BlockStored event since the replica is a shadow of an existing
+        entry and synthesizing token_ids/parent metadata would mislead
+        downstream observers."""
+        # KVCacheBlock.block_hash setter asserts that the existing hash
+        # is None, so guard the assignment for the (rare) re-insert path
+        # where the block was already published under this key.
+        if block.block_hash is None:
+            block.block_hash = key
+        else:
+            assert block.block_hash == key
+        self.cached_block_hash_to_block.insert(key, block)
