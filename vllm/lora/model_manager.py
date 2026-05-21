@@ -109,6 +109,7 @@ class LoRAModelManager:
         # Dict instead of a set for compatibility with LRUCache.
         self._last_mapping: LoRAMapping | None = None
         is_moe = is_moe_model(self.model)
+        self._is_moe = is_moe
         # Whether the underlying model class declares 3D fused MoE weights.
         self._model_is_3d_moe = is_moe and self.model.is_3d_moe_weight
         # When the engine is started with enable_mixed_moe_lora_format=True
