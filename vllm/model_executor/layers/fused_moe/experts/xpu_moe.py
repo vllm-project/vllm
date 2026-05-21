@@ -50,7 +50,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         self.is_fp8 = False
         self.is_mxfp4 = False
         self.is_mxfp8 = False
-        self.fused_moe_impl = None
+        self.fused_moe_impl: XpuFusedMoe | None = None
 
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -151,6 +151,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
                 is_mxfp4=self.is_mxfp4,
                 is_mxfp8=self.is_mxfp8,
             )
+        assert self.fused_moe_impl is not None
         self.fused_moe_impl.apply(
             output=output,
             hidden_states=hidden_states,
