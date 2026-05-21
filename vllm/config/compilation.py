@@ -247,23 +247,28 @@ class PassConfig:
 
         # Initialize enable_qk_norm_rope_fusion from environment if not explicitly set
         if self.enable_qk_norm_rope_fusion is None:
+            import os
+
             import vllm.envs as envs
 
+            fusion_env_set = os.getenv("VLLM_ENABLE_QKNORM_ROPE_FUSION") is not None
+
+            # If fusion explicitly disabled via env var, respect it
+            if fusion_env_set and not envs.VLLM_ENABLE_QKNORM_ROPE_FUSION:
+                self.enable_qk_norm_rope_fusion = False
             # Auto-enable on ROCm if AITER is enabled or fusion env var is set
-            if current_platform.is_rocm() and (
+            elif current_platform.is_rocm() and (
                 envs.VLLM_ENABLE_QKNORM_ROPE_FUSION or envs.VLLM_ROCM_USE_AITER
             ):
                 self.enable_qk_norm_rope_fusion = True
-                if envs.VLLM_ROCM_USE_AITER and not envs.VLLM_ENABLE_QKNORM_ROPE_FUSION:
+                if envs.VLLM_ROCM_USE_AITER and not fusion_env_set:
                     logger.info_once(
-                        "QK-Norm+RoPE fusion auto-enabled via "
-                        "VLLM_ROCM_USE_AITER (ROCm)",
+                        "QK-Norm+RoPE fusion auto-enabled via AITER",
                         scope="global",
                     )
                 else:
                     logger.info_once(
-                        "QK-Norm+RoPE fusion enabled via "
-                        "VLLM_ENABLE_QKNORM_ROPE_FUSION env var (ROCm)",
+                        "QK-Norm+RoPE fusion enabled",
                         scope="global",
                     )
             else:
@@ -291,17 +296,9 @@ class PassConfig:
                     "RMSNorm + padding fusion might not work"
                 )
         # Enforce ROCm-only restriction for QK-Norm+RoPE fusion
-        if self.enable_qk_norm_rope_fusion:
-            if not current_platform.is_rocm():
-                logger.warning_once(
-                    "QK Norm + RoPE fusion is only supported on AMD/ROCm hardware. "
-                    "The fusion will be disabled."
-                )
-                self.enable_qk_norm_rope_fusion = False
-            else:
-                logger.info_once(
-                    "QK-Norm+RoPE fusion enabled for ROCm hardware", scope="global"
-                )
+        if self.enable_qk_norm_rope_fusion and not current_platform.is_rocm():
+            logger.warning_once("QK-Norm+RoPE fusion requires ROCm. Disabling.")
+            self.enable_qk_norm_rope_fusion = False
         if self.fuse_act_padding and not current_platform.is_rocm():
             logger.warning_once(
                 "Padding fusion enabled but the current platform is not ROCm. "
