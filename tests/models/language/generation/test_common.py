@@ -152,7 +152,11 @@ def test_models(
             "def add(a, b):\n    return a + b\n\ndef sub(a, b):\n    return a - "
         )
 
-    with hf_runner(model) as hf_model:
+    with hf_runner(
+        model,
+        revision=model_info.revision,
+        trust_remote_code=model_info.trust_remote_code,
+    ) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
             example_prompts, max_tokens, num_logprobs
         )

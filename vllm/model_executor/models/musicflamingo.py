@@ -120,9 +120,11 @@ class MusicFlamingoRotaryEmbedding(nn.Module):
     ) -> tuple["torch.Tensor", float]:
         del seq_len
         base = config.rope_parameters["rope_theta"]
-        dim = getattr(config, "head_dim", None) or (
+        partial_rotary_factor = config.rope_parameters.get("partial_rotary_factor", 1.0)
+        head_dim = getattr(config, "head_dim", None) or (
             config.hidden_size // config.num_attention_heads
         )
+        dim = int(head_dim * partial_rotary_factor)
         attention_factor = 1.0
 
         inv_freq = 1.0 / (
@@ -148,21 +150,40 @@ class MusicFlamingoRotaryEmbedding(nn.Module):
         position_angles = torch.repeat_interleave(position_angles, 2, dim=-1)
         return position_angles.to(dtype=inv_freq.dtype)
 
+    def _restore_fp32_rope_buffers(self) -> None:
+        rope_init_fn: Callable = self.compute_default_rope_parameters
+        if self.rope_type != "default":
+            rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
+        inv_freq, self.attention_scaling = rope_init_fn(
+            self.config, self.inv_freq.device
+        )
+
+        self.inv_freq = inv_freq
+        self.original_inv_freq = inv_freq.clone()
+        self.position_angles = self._compute_position_angles(inv_freq)
+
+    def _apply(self, fn):
+        super()._apply(fn)
+        self._restore_fp32_rope_buffers()
+        return self
+
     @torch.no_grad()
     def forward(self, timestamps: Tensor, seq_len: int) -> tuple[Tensor, Tensor]:
-        batch_positions = torch.arange(
-            timestamps.shape[0],
+        window_starts = timestamps[:, 0].to(
             device=self.inv_freq.device,
             dtype=self.inv_freq.dtype,
         )
-        batch_positions = batch_positions / self.max_seq_len_cached
-        batch_freqs = batch_positions.unsqueeze(-1) * self.inv_freq
-        batch_freqs = torch.repeat_interleave(batch_freqs, 2, dim=-1)
+        window_duration = self.config.audio_frame_step * 4 * seq_len
+        window_positions = (
+            torch.round(window_starts / window_duration) / self.max_seq_len_cached
+        )
+        window_freqs = window_positions.unsqueeze(-1) * self.inv_freq
+        window_freqs = torch.repeat_interleave(window_freqs, 2, dim=-1)
 
-        batch_freqs = batch_freqs[:, None, :]
+        window_freqs = window_freqs[:, None, :]
         time_freqs = self.position_angles[:seq_len][None, :, :]
-        batch_freqs, time_freqs = broadcast_tensors(batch_freqs, time_freqs)
-        freqs = torch.cat((batch_freqs, time_freqs), dim=-1)
+        window_freqs, time_freqs = broadcast_tensors(window_freqs, time_freqs)
+        freqs = torch.cat((window_freqs, time_freqs), dim=-1)
         angle = (-timestamps * 2 * pi).to(freqs)
         freqs = freqs * angle.unsqueeze(-1)
         return freqs.cos(), freqs.sin()
@@ -205,6 +226,7 @@ class MusicFlamingoProcessingInfo(AudioFlamingo3ProcessingInfo):
         feature_extractor = self.get_feature_extractor()
         return MusicFlamingoMultiModalDataParser(
             target_sr=feature_extractor.sampling_rate,
+            audio_resample_method="soxr",
             expected_hidden_size=self._get_expected_hidden_size(),
         )
 
@@ -268,69 +290,6 @@ class MusicFlamingoMultiModalDataParser(AudioFlamingo3MultiModalDataParser):
 
 
 class MusicFlamingoMultiModalProcessor(AudioFlamingo3MultiModalProcessor):
-    def _expand_audio_tokens(
-        self,
-        prompt: str,
-        processor: Any,
-        feature_attention_mask: torch.Tensor,
-        chunk_counts: list[int],
-    ) -> str:
-        audio_token = processor.audio_token
-        expanded_prompt = prompt
-
-        for item_idx in range(len(chunk_counts)):
-            audio_token_length = _count_audio_tokens_from_mask(
-                feature_attention_mask,
-                chunk_counts,
-                item_idx,
-            )
-            replacement = (
-                processor.audio_bos_token
-                + audio_token * audio_token_length
-                + processor.audio_eos_token
-            )
-            expanded_prompt = expanded_prompt.replace(audio_token, replacement, 1)
-
-        return expanded_prompt
-
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: dict[str, object],
-        mm_kwargs: Mapping[str, Any],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
-        )
-
-        audio_data = mm_data.get("audio")
-        if audio_data is None:
-            return outputs
-
-        audio_list = audio_data if isinstance(audio_data, list) else [audio_data]
-        if len(audio_list) == 0:
-            return outputs
-
-        processor = self.info.get_hf_processor(**mm_kwargs)
-        feature_extractor = processor.feature_extractor
-        sampling_rate = feature_extractor.sampling_rate
-        chunk_length = feature_extractor.chunk_length
-        window_size = int(sampling_rate * chunk_length)
-        max_windows = int(processor.max_audio_len // chunk_length)
-
-        chunk_counts = []
-        for audio in audio_list:
-            n_samples = len(audio) if isinstance(audio, list) else audio.shape[0]
-            n_win = max(1, (n_samples + window_size - 1) // window_size)
-            chunk_counts.append(min(n_win, max_windows))
-        outputs["chunk_counts"] = torch.tensor(chunk_counts, dtype=torch.long)
-
-        return outputs
-
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,

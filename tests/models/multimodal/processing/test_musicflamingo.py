@@ -48,25 +48,19 @@ class MockMusicFlamingoProcessor:
         self.audio_eos_token_id = 12347
         self.max_audio_len = 1200
         self.feature_extractor = MockFeatureExtractor()
-        self.tokenizer = self._tokenize
 
-    def _tokenize(self, text, **kwargs):
-        return {"input_ids": torch.tensor([[1, 2, 3]], dtype=torch.long)}
+    def __call__(self, text=None, audio=None, **kwargs):
+        return {
+            "input_ids": torch.tensor([[1, 2, 3]], dtype=torch.long),
+            "input_features": torch.zeros((3, 80, 3000)),
+            "input_features_mask": torch.ones((3, 3000), dtype=torch.long),
+        }
 
 
 class MockFeatureExtractor:
     def __init__(self):
         self.sampling_rate = 16000
         self.chunk_length = 30
-        self.hop_length = 160
-
-    def __call__(self, audios, **kwargs):
-        return {
-            "input_features": torch.zeros((len(audios), 80, 3000)),
-            "attention_mask": torch.ones(
-                (len(audios), 30 * self.sampling_rate), dtype=torch.long
-            ),
-        }
 
 
 @pytest.fixture
@@ -76,6 +70,9 @@ def mock_ctx():
     ctx = MagicMock()
     ctx.get_hf_config.return_value = config
     ctx.get_hf_processor.return_value = MockMusicFlamingoProcessor()
+    ctx.call_hf_processor.side_effect = lambda processor, data, kwargs: processor(
+        **data, **kwargs
+    )
     ctx.model_config.hf_config = config
     return ctx
 

@@ -839,7 +839,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "MusicFlamingoForConditionalGeneration": _HfExamplesInfo(
         "nvidia/music-flamingo-2601-hf",
-        min_transformers_version="5.3.0",
+        min_transformers_version="5.5.0",
         transformers_version_reason={
             "vllm": "Needs https://github.com/huggingface/transformers/pull/43538"
         },
