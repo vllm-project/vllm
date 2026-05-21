@@ -401,12 +401,7 @@ def apply_top_k_only(logits: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
     return logits.masked_fill_(logits < top_k_mask, -float("inf"))
 
 
-def _apply_top_k_only_cpu(
-    logits: torch.Tensor, k: torch.Tensor, k_max: int
-) -> torch.Tensor:
-    V = logits.shape[1]
-    if k_max >= V:
-        return logits
+def _apply_top_k_only_cpu(logits: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
     if not _HAS_CPU_SAMPLING_OPS:
         return apply_top_k_only(logits, k)
     out = logits.contiguous().clone()
@@ -423,15 +418,11 @@ def apply_top_k_top_p_cpu(
     if p is None and k is None:
         return logits
 
-    V = logits.shape[1]
-    # Evaluate k_max once; avoids two .item() syncs in the joint path.
-    k_max = int(k.max().item()) if k is not None else V
-
     if p is None:
         assert k is not None
-        return _apply_top_k_only_cpu(logits, k, k_max)
+        return _apply_top_k_only_cpu(logits, k)
 
-    k_disabled = k is None or k_max >= V
+    k_disabled = k is None
 
     if k_disabled:
         if _HAS_CPU_SAMPLING_OPS:
@@ -440,7 +431,7 @@ def apply_top_k_top_p_cpu(
             return out
         return apply_top_k_top_p_pytorch(logits, None, p, allow_cpu_sync=True)
 
-    # Joint k+p path (k is not None, k_max < V).
+    # Joint k+p path.
     assert k is not None
     if _HAS_CPU_SAMPLING_OPS:
         out = logits.contiguous().clone()
@@ -448,7 +439,7 @@ def apply_top_k_top_p_cpu(
         return out
 
     # Fallback: sequential top-k then top-p.
-    logits = _apply_top_k_only_cpu(logits, k, k_max)
+    logits = _apply_top_k_only_cpu(logits, k)
     return apply_top_k_top_p_pytorch(logits, None, p, allow_cpu_sync=True)
 
 
