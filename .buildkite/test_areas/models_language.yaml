@@ -34,7 +34,6 @@ steps:
     torch_nightly: {}
 
 - label: Language Models Tests (Hybrid) %N
-  device: h200_35gb
   key: language-models-tests-hybrid
   timeout_in_minutes: 75
   source_file_dependencies:
