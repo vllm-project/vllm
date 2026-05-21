@@ -617,7 +617,9 @@ class MoRIIOConnectorWorker:
 
         assert vllm_config.kv_transfer_config is not None
         self.moriio_config = MoRIIOConfig.from_vllm_config(vllm_config)
-        self.mode = get_moriio_mode(vllm_config.kv_transfer_config)
+        self.mode = (
+            MoRIIOMode.READ if self.moriio_config.read_mode else MoRIIOMode.WRITE
+        )
 
         logger.info("Initializing MoRIIO worker %s", engine_id)
 

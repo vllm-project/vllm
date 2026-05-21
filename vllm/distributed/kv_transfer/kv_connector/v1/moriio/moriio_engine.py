@@ -15,7 +15,7 @@ from vllm.utils.network_utils import (
 )
 
 if TYPE_CHECKING:
-    pass
+    from mori.io import BackendType
 
 from queue import Empty, Queue
 
@@ -375,11 +375,11 @@ class MoRIIOWrapper:
 
     def set_backend_type(
         self,
-        backend_type,
+        backend_type: "BackendType",
         qp_per_transfer: int = 1,
         post_batch_size: int = -1,
         num_workers: int = 1,
-    ):
+    ) -> None:
         assert self.moriio_engine is not None, "MoRIIO engine must be set first"
         rdma_cfg = RdmaBackendConfig(
             qp_per_transfer,

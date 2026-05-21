@@ -13,7 +13,7 @@ import regex as re
 import torch
 import zmq
 
-from vllm.config import VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
 )
@@ -162,10 +162,10 @@ class TransferError(MoRIIOError):
     pass
 
 
-def get_moriio_mode(kv_transfer_config) -> MoRIIOMode:
-    read_mode = bool(
-        kv_transfer_config.kv_connector_extra_config.get("read_mode", False)
-    )
+def get_moriio_mode(kv_transfer_config: KVTransferConfig) -> MoRIIOMode:
+    read_mode = str(
+        kv_transfer_config.kv_connector_extra_config.get("read_mode", "false")
+    ).lower().strip() in ("true", "1")
     logger.debug("MoRIIO Connector read_mode: %s", read_mode)
     if read_mode:
         return MoRIIOMode.READ
@@ -264,7 +264,7 @@ class MoRIIOConfig:
             dp_rank=dp_rank,
             dp_size=dp_size,
             tp_size=tp_size,
-            read_mode=bool(extra_config.get("read_mode", False)),
+            read_mode=get_moriio_mode(kv_transfer_config) == MoRIIOMode.READ,
             qp_per_transfer=int(extra_config.get("qp_per_transfer", 1)),
             post_batch_size=int(extra_config.get("post_batch_size", -1)),
             num_workers=int(extra_config.get("num_workers", 1)),
