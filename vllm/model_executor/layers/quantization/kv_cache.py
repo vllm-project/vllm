@@ -114,6 +114,8 @@ class BaseKVCacheMethod(QuantizeMethodBase):
 
         def _from_checkpoint(param: torch.nn.Parameter) -> float | None:
             """Return the FNUZ-adjusted float scale, or None if absent."""
+            if param.numel() != 1:
+                raise ValueError("Only support per-tensor scaling factor")
             val = param.item()
             if val > 0.0:
                 return val * (2 if current_platform.is_fp8_fnuz() else 1)
