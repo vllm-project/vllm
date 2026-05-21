@@ -1,0 +1,3 @@
+[submodule "rust"]
+	path = rust
+	url = https://github.com/Inferact/vllm-frontend-rs.git
