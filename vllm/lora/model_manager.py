@@ -110,8 +110,7 @@ class LoRAModelManager:
         self._last_mapping: LoRAMapping | None = None
         is_moe = is_moe_model(self.model)
         self._is_moe = is_moe
-        # Whether the underlying model class declares 3D fused MoE weights.
-        self._model_is_3d_moe = is_moe and self.model.is_3d_moe_weight
+
         # When the engine is started with enable_mixed_moe_lora_format=True
         # we force the universal 2D wrapper (FusedMoEWithLoRA) regardless of
         # the model's 3D flag, so 2D and 3D adapters can coexist.
@@ -119,7 +118,9 @@ class LoRAModelManager:
             is_moe and lora_config.enable_mixed_moe_lora_format
         )
         self._is_3d_moe_model = (
-            self._model_is_3d_moe and not self._enable_mixed_moe_lora_format
+            self._is_moe
+            and self.model.is_3d_moe_weight
+            and not self._enable_mixed_moe_lora_format
         )
         self.packed_modules_mapping = process_packed_modules_mapping(
             self.model, force_2d_moe=self._enable_mixed_moe_lora_format
