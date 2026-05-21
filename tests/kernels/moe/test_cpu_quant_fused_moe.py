@@ -499,8 +499,8 @@ def test_mxfp4_cpu_fused_moe_bias_swiglu(M, N, K, E, topk, seed):
     )
 
     torch.testing.assert_close(ref_out.bfloat16(), out, atol=1e-2, rtol=1e-2)
-    
-    
+
+
 # ===========================================================================
 # INT8 W8A8 per-channel MoE
 # ===========================================================================
@@ -612,9 +612,13 @@ def test_int8_w8a8_cpu_fused_moe(M, N, K, E, topk, seed, is_vnni, inplace):
         ops.CPUQuantMethod.INT8_W8A8,
         w1_s,
         w2_s,
-        None,
-        None,
-        None,
+        None,  # w1_zero
+        None,  # w2_zero
+        None,  # block_size
+        None,  # w1_bias
+        None,  # w2_bias
+        None,  # alpha
+        None,  # limit
         is_vnni,
     )
     torch.testing.assert_close(

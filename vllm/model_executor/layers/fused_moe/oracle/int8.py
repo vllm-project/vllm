@@ -190,6 +190,24 @@ def make_int8_moe_quant_config(
     )
 
 
+def convert_to_int8_moe_kernel_format(
+    int8_backend: Int8MoeBackend,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Convert INT8 MoE weights to backend-specific kernel format."""
+    if int8_backend == Int8MoeBackend.CPU:
+        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+            prepare_int8_moe_layer_for_cpu,
+        )
+
+        w13, w2 = prepare_int8_moe_layer_for_cpu(w13, w2)
+    elif int8_backend != Int8MoeBackend.TRITON:
+        raise ValueError(f"Unsupported Int8 MoE backend: {int8_backend.value}")
+
+    return w13, w2
+
+
 def make_int8_moe_kernel(
     moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,

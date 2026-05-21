@@ -26,7 +26,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 
-
 # ===========================================================================
 # FP8 W8A16 block-scaled fused MoE
 # ===========================================================================
@@ -188,7 +187,7 @@ class CPUExpertsFp8(mk.FusedMoEExpertsMonolithic):
 # MXFP4 W4A16 fused MoE
 # ===========================================================================
 
-  
+
 def prepare_mxfp4_moe_layer_for_cpu(
     w13: torch.Tensor,
     w2: torch.Tensor,
@@ -340,7 +339,7 @@ class CPUExpertsMxfp4(mk.FusedMoEExpertsMonolithic):
             True,  # is_vnni
         )
 
- 
+
 # ===========================================================================
 # INT8 W8A8 per-channel MoE
 # ===========================================================================
@@ -351,14 +350,8 @@ def prepare_int8_moe_layer_for_cpu(
     w2: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """VNNI-prepack INT8 MoE weights for CPU kernel."""
-    num_experts = w13.size(0)
-    packed_w13_list = []
-    packed_w2_list = []
-    for i in range(num_experts):
-        packed_w13_list.append(torch.ops._C.convert_weight_packed(w13[i]))
-        packed_w2_list.append(torch.ops._C.convert_weight_packed(w2[i]))
-    packed_w13 = torch.stack(packed_w13_list)
-    packed_w2 = torch.stack(packed_w2_list)
+    packed_w13 = torch.ops._C.convert_weight_packed(w13)
+    packed_w2 = torch.ops._C.convert_weight_packed(w2)
     return packed_w13, packed_w2
 
 
@@ -495,5 +488,9 @@ class CPUExpertsInt8(mk.FusedMoEExpertsMonolithic):
             None,  # w1_zero
             None,  # w2_zero
             None,  # block_size (per-channel, no block)
+            None,  # w1_bias
+            None,  # w2_bias
+            None,  # alpha
+            None,  # limit
             True,  # is_vnni
         )
