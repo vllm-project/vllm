@@ -150,6 +150,13 @@ class DeepseekV4MLA(nn.Module):
 
         self.kv_norm = kv_norm
         self.wo_a = wo_a
+        # Cache wo_a quant state at init so torch.compile doesn't try to
+        # trace hasattr() on an attribute that may or may not exist.
+        # See vLLM #43304: MTP draft models may have BF16 wo_a (no scale).
+        self._wo_a_is_unquantized = (
+            not hasattr(wo_a, 'weight_scale_inv')
+            and not hasattr(wo_a, 'weight_scale')
+        )
 
         self._wo_a_act_quant = QuantFP8(
             static=False,
@@ -260,7 +267,12 @@ class DeepseekV4MLA(nn.Module):
         o = o_padded[:, : self.n_local_heads, :]
 
         # Keep ROCm on the BF16 reference wo_a path util kernel ready.
-        if current_platform.is_rocm():
+        # Also use the BF16 reference path when wo_a is unquantized — this
+        # is the case for MTP draft models on artifacts that exclude the
+        # MTP block from calibration (see vLLM #43304 + llm-compressor
+        # #2745). The rocm_inv_rope_einsum helper already handles both the
+        # quantized and BF16 wo_a cases via its own hasattr check.
+        if current_platform.is_rocm() or self._wo_a_is_unquantized:
             z = rocm_inv_rope_einsum(
                 self.rotary_emb,
                 o,
@@ -285,7 +297,7 @@ class DeepseekV4MLA(nn.Module):
         )
 
         wo_a_fp8 = self.wo_a.weight
-        wo_a_scale = self.wo_a.weight_scale_inv
+        wo_a_scale = getattr(self.wo_a, "weight_scale_inv", None) or self.wo_a.weight_scale
 
         z = torch.empty(
             (num_tokens, self.n_local_groups, self.o_lora_rank),
@@ -804,3 +816,4 @@ class DeepseekV4Indexer(nn.Module):
             self.aux_stream,
         )
         return self.indexer_op(hidden_states, q_quant, k, weights)
+
