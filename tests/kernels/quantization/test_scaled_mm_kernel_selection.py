@@ -157,7 +157,9 @@ def test_xpu_block_kernel_uses_triton_as_fallback(platform_mock):
             "is_supported",
             return_value=(False, "xpu unavailable"),
         ),
-        patch.object(TritonFp8BlockScaledMMKernel, "is_supported", return_value=(True, None)),
+        patch.object(
+            TritonFp8BlockScaledMMKernel, "is_supported", return_value=(True, None)
+        ),
     ):
         kernel = init_fp8_linear_kernel(
             activation_quant_key=kFp8Dynamic128Sym,

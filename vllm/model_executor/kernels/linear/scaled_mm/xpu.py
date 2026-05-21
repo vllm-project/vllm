@@ -96,8 +96,9 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
 
     def process_weights_after_loading(self, layer: torch.nn.Module):
         super().process_weights_after_loading(layer)
-        scale_attr = "weight_scale_inv" if hasattr(layer, "weight_scale_inv") \
-            else "weight_scale"
+        scale_attr = (
+            "weight_scale_inv" if hasattr(layer, "weight_scale_inv") else "weight_scale"
+        )
         scale = getattr(layer, scale_attr)
         replace_parameter(layer, scale_attr, scale.data.t().contiguous())
 
