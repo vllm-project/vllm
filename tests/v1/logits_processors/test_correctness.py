@@ -1092,7 +1092,7 @@ def test_thinking_budget_holder_spec_mode_tensor_layout():
         False,
     )
     assert h.in_spec_mode
-    assert h.mask.shape[0] == 8 * (2 + 1)
+    assert h._mask_capacity == 8 * (2 + 1)
 
 
 def test_thinking_budget_holder_empty_end_tokens_disables_row():

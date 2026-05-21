@@ -358,7 +358,9 @@ class ModelCudaGraphManager(CudaGraphManager):
                 batch_descriptor = None
                 if cg_mode == CUDAGraphMode.PIECEWISE:
                     assert attn_metadata is None
-                    batch_descriptor = BatchDescriptor(num_tokens=num_tokens)
+                    batch_descriptor = BatchDescriptor(
+                        num_tokens=num_tokens, has_lora=has_lora
+                    )
                 with set_forward_context(
                     attn_metadata,
                     self.vllm_config,
