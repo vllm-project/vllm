@@ -206,7 +206,16 @@ def test_cutlass_fp8_gemm_padded(
 
     baseline = baseline_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
 
+    # process_weights_after_loading pad b to 16
+    pad_k = (16 - k % 16) % 16
+    pad_n = (16 - n % 16) % 16
+    if pad_k > 0 or pad_n > 0:
+        b = torch.nn.functional.pad(b.t().contiguous(), (0, pad_k, 0, pad_n)).t()
+        if pad_n > 0 and scale_b.numel() > 1:
+            scale_b = torch.nn.functional.pad(scale_b, (0, pad_n), value=1.0)
+
     kernel = object.__new__(CutlassFP8ScaledMMLinearKernel)
+    kernel.logical_output_size = n
     out = kernel.apply_scaled_mm(
         A=a,
         B=b,

@@ -18,6 +18,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.model_executor.utils import set_weight_attrs
 
 from .BlockScaledMMLinearKernel import Fp8BlockScaledMMLinearKernel
 from .ScaledMMLinearKernel import (
@@ -183,6 +184,16 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         pad_spec = [0] * (2 * x.dim())
         pad_spec[-(2 * dim + 1)] = pad_size
         return torch.nn.functional.pad(x, pad_spec, value=value)
+    
+    @staticmethod
+    def padded_weight_loader(
+        param: torch.Tensor, loaded_weight: torch.Tensor
+    ) -> None:
+        if loaded_weight.shape != param.shape:
+            slices = tuple(slice(0, s) for s in loaded_weight.shape)
+            param.data[slices].copy_(loaded_weight)
+        else:
+            param.data.copy_(loaded_weight.view(param.shape))
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         weight_name, weight_scale_name, _, _ = self.layer_param_names
@@ -202,6 +213,12 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             (0, pad_k, 0, pad_n),
         ).t()
         replace_parameter(layer, weight_name, padded_weight.data)
+        set_weight_attrs(
+            getattr(layer, weight_name),
+            {
+                "weight_loader": self.padded_weight_loader,
+            },
+        )
 
         weight_scale = getattr(layer, weight_scale_name, None)
         if weight_scale is not None and pad_n > 0 and weight_scale.numel() > 1:
@@ -210,6 +227,12 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
                 flat_scale, dim=0, alignment=16, value=1.0
             ).view(-1, *weight_scale.shape[1:])
             replace_parameter(layer, weight_scale_name, padded_scale.data)
+            set_weight_attrs(
+                getattr(layer, weight_name),
+                {
+                    "weight_loader": self.padded_weight_loader,
+                },
+            )
 
     def apply_scaled_mm(
         self,
