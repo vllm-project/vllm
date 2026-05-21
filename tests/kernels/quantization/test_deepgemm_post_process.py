@@ -91,3 +91,61 @@ class TestDeepgemmPostProcess:
         assert result_wq.shape == (g, r, d)
         assert result_ws.ndim == 3
         assert result_ws.shape[0] == g
+
+
+class TestDeepgemmPostProcessIntegration:
+    """Integration tests for empty rank handling."""
+
+    def test_empty_bmm_tensor_can_be_replaced(self):
+        """Test that empty 3D tensors can be used with replace_parameter.
+
+        This simulates the flow in DeepGemmFp8BlockScaledMMKernel.
+        """
+        wq = torch.randn(128, 256, dtype=torch.float8_e4m3fn)
+        ws = torch.randn(1, 2, dtype=torch.float32)
+        block_shape = (128, 128)
+
+        # Simulate empty rank
+        result_wq, result_ws = deepgemm_post_process_fp8_weight_block(
+            wq=wq,
+            ws=ws,
+            quant_block_shape=block_shape,
+            use_e8m0=False,
+            is_bmm=True,
+            bmm_batch_size=0,
+        )
+
+        # Verify the tensors can be used as layer parameters
+        # They should be contiguous and have the right ndim
+        assert result_wq.is_contiguous()
+        assert result_ws.is_contiguous()
+        assert result_wq.ndim == 3
+        assert result_ws.ndim == 3
+        assert result_wq.shape[0] == 0
+        assert result_ws.shape[0] == 0
+
+    @pytest.mark.skipif(
+        not torch.cuda.is_available(), reason="CUDA not available"
+    )
+    def test_empty_bmm_tensor_on_cuda(self):
+        """Test empty 3D tensors are correctly created on CUDA device."""
+        device = torch.device("cuda")
+        wq = torch.randn(128, 256, dtype=torch.float8_e4m3fn, device=device)
+        ws = torch.randn(1, 2, dtype=torch.float32, device=device)
+        block_shape = (128, 128)
+
+        result_wq, result_ws = deepgemm_post_process_fp8_weight_block(
+            wq=wq,
+            ws=ws,
+            quant_block_shape=block_shape,
+            use_e8m0=False,
+            is_bmm=True,
+            bmm_batch_size=0,
+        )
+
+        assert result_wq.device.type == "cuda"
+        assert result_ws.device.type == "cuda"
+        assert result_wq.shape[0] == 0
+        assert result_ws.shape[0] == 0
+        assert result_wq.ndim == 3
+        assert result_ws.ndim == 3
