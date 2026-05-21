@@ -76,6 +76,51 @@ def test_chat_forwards_mm_processor_kwargs() -> None:
     )
 
 
+def test_enqueue_chat_forwards_mm_processor_kwargs() -> None:
+    llm = _make_mock_llm()
+    mm_processor_kwargs = {"do_pan_and_scan": True}
+    sampling_params = SamplingParams(max_tokens=1)
+    messages = [{"role": "user", "content": "hello"}]
+
+    llm._add_chat_requests = Mock(return_value=["req-0"])
+
+    request_ids = llm.enqueue_chat(
+        messages,
+        sampling_params=sampling_params,
+        use_tqdm=False,
+        mm_processor_kwargs=mm_processor_kwargs,
+    )
+
+    assert request_ids == ["req-0"]
+    assert llm._add_chat_requests.call_args.kwargs["mm_processor_kwargs"] == (
+        mm_processor_kwargs
+    )
+
+
+def test_run_chat_forwards_mm_processor_kwargs() -> None:
+    llm = _make_mock_llm()
+    mm_processor_kwargs = {"num_crops": 8}
+    sampling_params = SamplingParams(max_tokens=1)
+    messages = [{"role": "user", "content": "hello"}]
+    sentinel_output = ["done"]
+
+    llm._add_chat_requests = Mock()
+    llm._run_engine = Mock(return_value=sentinel_output)
+
+    outputs = llm._run_chat(
+        messages=messages,
+        params=sampling_params,
+        output_type=object,
+        use_tqdm=False,
+        mm_processor_kwargs=mm_processor_kwargs,
+    )
+
+    assert outputs == sentinel_output
+    assert llm._add_chat_requests.call_args.kwargs["mm_processor_kwargs"] == (
+        mm_processor_kwargs
+    )
+
+
 def test_run_completion_forwards_mm_processor_kwargs() -> None:
     llm = _make_mock_llm()
     mm_processor_kwargs = {"min_pixels": 4 * 28 * 28}
