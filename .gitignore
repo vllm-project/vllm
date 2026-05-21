@@ -239,10 +239,10 @@ ep_kernels_workspace/
 !vllm/benchmarks/lib/
 !.buildkite/scripts/lib/
 
-# Generated gRPC protobuf files (compiled at build time from vllm_engine.proto)
-vllm/grpc/vllm_engine_pb2.py
-vllm/grpc/vllm_engine_pb2_grpc.py
-vllm/grpc/vllm_engine_pb2.pyi
-
-# Ignore generated cpu headers 
+# Ignore generated cpu headers
 csrc/cpu/cpu_attn_dispatch_generated.h
+
+# Generated gRPC render protobuf files (compiled at build time from vllm_render.proto)
+vllm/entrypoints/grpc/vllm_render_pb2.py
+vllm/entrypoints/grpc/vllm_render_pb2_grpc.py
+vllm/entrypoints/grpc/vllm_render_pb2.pyi
