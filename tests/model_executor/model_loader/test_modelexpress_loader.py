@@ -45,7 +45,7 @@ def _install_fake_modelexpress(monkeypatch):
         monkeypatch.setitem(sys.modules, name, ModuleType(name))
 
     module = ModuleType("modelexpress.engines.vllm.loader")
-    setattr(module, "MxModelLoader", FakeModelexpressLoader)
+    module.__dict__["MxModelLoader"] = FakeModelexpressLoader
     monkeypatch.setitem(sys.modules, module.__name__, module)
 
 
