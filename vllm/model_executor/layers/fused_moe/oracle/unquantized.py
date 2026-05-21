@@ -18,6 +18,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
+from vllm.model_executor.layers.fused_moe.oracle.base import MoEKernelOracle
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
     convert_moe_weights_to_flashinfer_trtllm_block_layout,
@@ -363,3 +364,67 @@ def make_unquantized_moe_kernel(
     )
 
     return kernel
+
+
+# ---------------------------------------------------------------------------
+# Class-based view (first PR of the #37753 series; see oracle/base.py).
+# Methods delegate to the module-level functions above so behaviour is
+# bit-identical with pre-class code.
+# ---------------------------------------------------------------------------
+
+
+class UnquantizedMoEKernelOracle(MoEKernelOracle[UnquantizedMoeBackend]):
+    """Class-based view of the unquantized MoE kernel oracle.
+
+    Each method delegates to its module-level counterpart so that
+    instantiating and calling this class is bit-identical to calling
+    the standalone functions. Follow-up PRs may move logic from the
+    module-level functions into these methods.
+    """
+
+    def backend_enum_cls(self) -> type[UnquantizedMoeBackend]:
+        return UnquantizedMoeBackend
+
+    def get_priority_backends(
+        self, moe_config: FusedMoEConfig
+    ) -> list[UnquantizedMoeBackend]:
+        return _get_priority_backends(moe_config)
+
+    def backend_to_kernel_cls(
+        self, backend: UnquantizedMoeBackend
+    ) -> type[mk.FusedMoEExperts]:
+        return backend_to_kernel_cls(backend)
+
+    def map_backend(self, runner_backend: MoEBackend) -> UnquantizedMoeBackend:
+        return map_unquantized_backend(runner_backend)
+
+    def select_backend(
+        self, moe_config: FusedMoEConfig
+    ) -> tuple[UnquantizedMoeBackend, type[mk.FusedMoEExperts] | None]:
+        return select_unquantized_moe_backend(moe_config)
+
+    def convert_to_kernel_format(
+        self,
+        backend: UnquantizedMoeBackend,
+        layer: Module,
+        w13_weight: torch.Tensor,
+        w2_weight: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return convert_to_unquantized_kernel_format(
+            backend, layer, w13_weight, w2_weight
+        )
+
+    def make_kernel(
+        self,
+        quant_config: FusedMoEQuantConfig,
+        moe_config: FusedMoEConfig,
+        backend: UnquantizedMoeBackend,
+        experts_cls: type[mk.FusedMoEExperts],
+        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    ) -> mk.FusedMoEKernel:
+        return make_unquantized_moe_kernel(
+            quant_config, moe_config, backend, experts_cls, routing_tables
+        )
+
+    # `make_quant_config` inherits the base-class default, which raises
+    # NotImplementedError: unquantized MoE has no quant config to build.
