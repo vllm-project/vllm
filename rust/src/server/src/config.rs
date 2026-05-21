@@ -25,7 +25,7 @@ pub enum CoordinatorMode {
     /// Do not run a coordinator at all.
     None,
     /// Run the Rust in-process coordinator for managed `serve` deployments, if
-    /// there are mutliple engines and the model is MoE.
+    /// there are multiple engines and the model is MoE.
     MaybeInProc,
     /// Connect to an external coordinator owned by another process.
     External { address: String },

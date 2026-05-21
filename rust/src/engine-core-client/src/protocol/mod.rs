@@ -35,14 +35,14 @@ fn is_false(v: &bool) -> bool {
     !v
 }
 
-mod classfied_outputs;
+mod classified_outputs;
 pub mod dtype;
 pub mod handshake;
 pub mod logprobs;
 pub mod multimodal;
 pub mod stats;
 pub mod tensor;
-pub use classfied_outputs::{
+pub use classified_outputs::{
     ClassifiedEngineCoreOutputs, DpControlMessage, RequestBatchOutputs, UtilityCallOutput,
 };
 pub use dtype::ModelDtype;

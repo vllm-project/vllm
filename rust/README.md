@@ -6,7 +6,7 @@
 
 The project is organized as a Cargo workspace with several crates, layered bottom-up:
 
-```
+```text
 ┌─────────────────────────────────┐
 │  vllm-cmd / vllm-rs             │  CLI entrypoint:
 │                                 │  Python vLLM frontend subprocess

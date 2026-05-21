@@ -1,4 +1,6 @@
 #!/usr/bin/env -S uv run
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
