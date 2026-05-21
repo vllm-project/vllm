@@ -112,6 +112,39 @@ def get_auto_numa_nodes() -> list[int] | None:
     return numa_nodes
 
 
+_PCT_CPU_MODEL_SUBSTRING = "6776P"
+_PCT_HIGHEST_PERF_SIGNAL = 46
+_PCT_HIGHEST_PERF_PATH = "/sys/devices/system/cpu/cpu0/acpi_cppc/highest_perf"
+_PROC_CPUINFO_PATH = "/proc/cpuinfo"
+
+
+@cache
+def _is_xeon_6776p_with_pct() -> bool:
+    """Detect Xeon 6776P (DGX B300) with Priority Core Turbo enabled.
+
+    Gates: ``/proc/cpuinfo`` ``model name`` contains ``6776P`` and
+    ``/sys/devices/system/cpu/cpu0/acpi_cppc/highest_perf`` reads ``46``.
+    """
+    try:
+        with open(_PROC_CPUINFO_PATH) as f:
+            has_model = any(
+                line.lstrip().lower().startswith("model name")
+                and _PCT_CPU_MODEL_SUBSTRING in line
+                for line in f
+            )
+    except OSError:
+        return False
+    if not has_model:
+        return False
+
+    try:
+        with open(_PCT_HIGHEST_PERF_PATH) as f:
+            highest_perf = int(f.read().strip())
+    except (OSError, ValueError):
+        return False
+    return highest_perf == _PCT_HIGHEST_PERF_SIGNAL
+
+
 def _get_gpu_index(
     parallel_config, local_rank: int, dp_local_rank: int | None = None
 ) -> int:
@@ -156,18 +189,156 @@ def _get_numa_node(parallel_config, gpu_index: int) -> int:
     return numa_nodes[gpu_index]
 
 
-def _get_cpu_binding(parallel_config, gpu_index: int) -> str | None:
+def _maybe_get_pct_cpu_binding(numa_nodes: list[int]) -> str | None:
+    """Return the union of PCT priority cores across ``numa_nodes`` (or None).
+
+    PCT (Priority Core Turbo) lets a subset of cores boost above the rest;
+    we want workers and the EngineCore on those cores. Linux kernel does not
+    expose PCT membership yet, so we only handle the DGX B300 case (Xeon
+    6776P), where priority cores are ``cpu_id % 16 in (0, 1)`` intersected
+    with each node's ``cpulist``.
+    """
+    if not _is_xeon_6776p_with_pct():
+        return None
+
+    from vllm.utils.cpu_resource_utils import parse_id_list
+
+    union_cpus: set[int] = set()
+    for numa_node in numa_nodes:
+        cpulist_path = Path(f"/sys/devices/system/node/node{numa_node}/cpulist")
+        try:
+            cpulist_raw = cpulist_path.read_text().strip()
+        except OSError:
+            continue
+        if not cpulist_raw:
+            continue
+        try:
+            node_cpus = parse_id_list(cpulist_raw)
+        except ValueError:
+            continue
+
+        priority = [cpu for cpu in node_cpus if cpu % 16 in (0, 1)]
+        if not priority:
+            continue
+        union_cpus.update(priority)
+        logger.info(
+            "Detected Xeon 6776P with PCT (highest_perf=%d); NUMA node %d "
+            "priority cores: %s",
+            _PCT_HIGHEST_PERF_SIGNAL,
+            numa_node,
+            ",".join(str(c) for c in priority),
+        )
+
+    if not union_cpus:
+        return None
+    return ",".join(str(c) for c in sorted(union_cpus))
+
+
+def _get_cpu_binding(
+    parallel_config, gpu_index: int, numa_nodes: list[int]
+) -> str | None:
+    """Return the CPU list a process should be pinned to (or None)."""
     cpu_bindings = parallel_config.numa_bind_cpus
     if cpu_bindings is None:
-        return None
+        return _maybe_get_pct_cpu_binding(numa_nodes)
 
     if gpu_index >= len(cpu_bindings):
         raise ValueError(
             f"GPU index {gpu_index} exceeds numa_bind_cpus size "
             f"{len(cpu_bindings)}. Ensure the binding lists cover every visible GPU."
         )
-
     return cpu_bindings[gpu_index]
+
+
+def _get_numactl_worker_args(
+    parallel_config, local_rank: int, dp_local_rank: int | None, process_kind: str
+) -> str:
+    """Compute the numactl args for a single TP/PP worker subprocess."""
+    gpu_index = _get_gpu_index(parallel_config, local_rank, dp_local_rank)
+    numa_node = _get_numa_node(parallel_config, gpu_index)
+    cpu_binding = _get_cpu_binding(parallel_config, gpu_index, [numa_node])
+
+    if cpu_binding is not None:
+        logger.info(
+            "Binding %s subprocess (local_rank=%s, gpu_index=%s) to CPUs %s and NUMA node %s",  # noqa: E501
+            process_kind,
+            local_rank,
+            gpu_index,
+            cpu_binding,
+            numa_node,
+        )
+        return f"--physcpubind={cpu_binding} --membind={numa_node}"
+
+    logger.info(
+        "Binding %s subprocess (local_rank=%s, gpu_index=%s) to NUMA node %s",
+        process_kind,
+        local_rank,
+        gpu_index,
+        numa_node,
+    )
+    return f"--cpunodebind={numa_node} --membind={numa_node}"
+
+
+def _get_enginecore_numa_nodes(
+    parallel_config, dp_local_rank: int | None = None
+) -> list[int]:
+    """Return the sorted, unique NUMA nodes of the EngineCore's DP shard."""
+    numa_nodes = parallel_config.numa_bind_nodes
+    if numa_nodes is None:
+        # Trigger auto-detection (it caches into parallel_config).
+        _get_numa_node(parallel_config, 0)
+        numa_nodes = parallel_config.numa_bind_nodes
+
+    if (
+        parallel_config.distributed_executor_backend not in ("ray", "external_launcher")
+        and parallel_config.data_parallel_backend != "ray"
+        and parallel_config.nnodes_within_dp == 1
+    ):
+        if dp_local_rank is None:
+            dp_local_rank = parallel_config.data_parallel_rank_local
+            if dp_local_rank is None:
+                dp_local_rank = parallel_config.data_parallel_index
+
+        tp_pp_world_size = (
+            parallel_config.pipeline_parallel_size
+            * parallel_config.tensor_parallel_size
+        )
+        shard_start = dp_local_rank * tp_pp_world_size
+        shard_end = min(shard_start + tp_pp_world_size, len(numa_nodes))
+        shard_indices: range | tuple[int, ...] = range(shard_start, shard_end)
+    else:
+        shard_indices = range(len(numa_nodes))
+
+    if not shard_indices:
+        return [numa_nodes[0]]
+    return sorted({numa_nodes[i] for i in shard_indices})
+
+
+def _get_numactl_enginecore_args(
+    parallel_config, local_rank: int, dp_local_rank: int | None
+) -> str:
+    """Compute the numactl args for an EngineCore subprocess."""
+    shard_nodes = _get_enginecore_numa_nodes(parallel_config, dp_local_rank)
+    gpu_index = _get_gpu_index(parallel_config, local_rank, dp_local_rank)
+    cpu_binding = _get_cpu_binding(parallel_config, gpu_index, shard_nodes)
+    membind_arg = ",".join(str(n) for n in shard_nodes)
+
+    if cpu_binding is not None:
+        logger.info(
+            "Binding EngineCore subprocess (local_rank=%s) to CPUs %s "
+            "and NUMA nodes %s",
+            local_rank,
+            cpu_binding,
+            membind_arg,
+        )
+        return f"--physcpubind={cpu_binding} --membind={membind_arg}"
+
+    logger.info(
+        "Binding EngineCore subprocess (local_rank=%s) to NUMA nodes %s",
+        local_rank,
+        membind_arg,
+    )
+    return f"--cpunodebind={membind_arg} --membind={membind_arg}"
 
 
 def _get_numactl_args(
@@ -180,31 +351,11 @@ def _get_numactl_args(
     if not parallel_config.numa_bind:
         return None
 
-    gpu_index = _get_gpu_index(parallel_config, local_rank, dp_local_rank)
-    numa_node = _get_numa_node(parallel_config, gpu_index)
-    cpu_binding = _get_cpu_binding(parallel_config, gpu_index)
-
-    if cpu_binding is not None:
-        bind_arg = f"--physcpubind={cpu_binding}"
-        logger.info(
-            "Binding %s subprocess (local_rank=%s, gpu_index=%s) to CPUs %s and NUMA node %s",  # noqa: E501
-            process_kind,
-            local_rank,
-            gpu_index,
-            cpu_binding,
-            numa_node,
-        )
-    else:
-        bind_arg = f"--cpunodebind={numa_node}"
-        logger.info(
-            "Binding %s subprocess (local_rank=%s, gpu_index=%s) to NUMA node %s",
-            process_kind,
-            local_rank,
-            gpu_index,
-            numa_node,
-        )
-
-    return f"{bind_arg} --membind={numa_node}"
+    if process_kind == "EngineCore":
+        return _get_numactl_enginecore_args(parallel_config, local_rank, dp_local_rank)
+    return _get_numactl_worker_args(
+        parallel_config, local_rank, dp_local_rank, process_kind
+    )
 
 
 def _log_numactl_show(label: str) -> bool:
