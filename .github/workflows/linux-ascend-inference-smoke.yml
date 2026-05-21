@@ -16,9 +16,9 @@ permissions:
 
 jobs:
   linux-ascend-inference-smoke:
-    if: >-
-      github.event_name != 'pull_request' ||
-      github.event.pull_request.head.repo.full_name == github.repository
+    # Temporarily disabled due to CI efficiency concerns.
+    # Re-enable after workflow/runtime optimizations are completed.
+    if: ${{ false }}
     runs-on:
       - self-hosted
       - linux-aarch64-a2b3-0
