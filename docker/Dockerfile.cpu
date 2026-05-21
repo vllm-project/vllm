@@ -27,6 +27,9 @@ WORKDIR /workspace
 ARG PYTHON_VERSION=3.12
 ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu"
 
+ARG max_jobs=32
+ENV MAX_JOBS=${max_jobs}
+
 # Install minimal dependencies and uv
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -128,9 +131,6 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
 
 ######################### BUILD IMAGE #########################
 FROM base AS vllm-build
-
-ARG max_jobs=32
-ENV MAX_JOBS=${max_jobs}
 
 ARG GIT_REPO_CHECK=0
 # Support for cross-compilation with x86 ISA including AVX2 and AVX512: docker build --build-arg VLLM_CPU_X86="true" ...
