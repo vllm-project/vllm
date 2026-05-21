@@ -115,7 +115,7 @@ def find_matched_target(
     module: Module,
     targets: Iterable[str],
     fused_mapping: Mapping[str, list[str]] = MappingProxyType({}),
-) -> str:
+) -> str | None:
     """
     Helper function to look up which "target" in the compressed-tensors
     config that a layer corresponds to.
@@ -149,12 +149,6 @@ def find_matched_target(
         or _find_first_match(module.__class__.__name__, targets, True)
         or _match_fused_layer(layer_name, targets, fused_mapping)
     )
-
-    if matched_target is None:
-        raise ValueError(
-            f"Unable to find matching target for {layer_name} in the "
-            "compressed-tensors config."
-        )
 
     return matched_target
 

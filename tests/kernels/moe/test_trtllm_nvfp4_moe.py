@@ -111,7 +111,7 @@ def test_trtllm_fp4_moe_no_graph(
             # The TRT-LLM FP4 MoE kernel rejects swizzled (padded) activation
             # scales — its numel-based vec_size check requires numel == M*K/16.
             # Match what oracle/nvfp4.py does for this backend.
-            is_nvfp4_scale_swizzled=False,
+            is_scale_swizzled=False,
         )
 
         score = torch.randn((m, e), device="cuda", dtype=dtype)
