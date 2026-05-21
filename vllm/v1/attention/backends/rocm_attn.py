@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with PagedAttention and Triton prefix prefill."""
 
-import math
 from dataclasses import dataclass
 from typing import ClassVar
 
@@ -304,11 +303,6 @@ class RocmAttentionImpl(AttentionImpl):
                 f"num_heads: {num_heads}."
             )
 
-        self._cached_k_scale_val: float | None = None
-        self._cached_k_scale_cpu: torch.Tensor | None = None
-        self._cached_v_scale_val: float | None = None
-        self._cached_v_scale_cpu: torch.Tensor | None = None
-
     def _forward_encoder_attention(
         self,
         query: torch.Tensor,
@@ -554,23 +548,6 @@ class RocmAttentionImpl(AttentionImpl):
         block_size = key_cache.shape[1]
         x = 16 // key_cache.element_size()
 
-        # Use CPU scalar tensors for scales so the C++ kernel's .item()
-        # call doesn't trigger a device-to-host sync during CUDA graph capture.
-        k_scale_val = layer._k_scale_float
-        v_scale_val = layer._v_scale_float
-        if self._cached_k_scale_val is None or (
-            self._cached_k_scale_val != k_scale_val
-            and not (math.isnan(self._cached_k_scale_val) and math.isnan(k_scale_val))
-        ):
-            self._cached_k_scale_cpu = torch.tensor(k_scale_val, dtype=torch.float32)
-            self._cached_k_scale_val = k_scale_val
-        if self._cached_v_scale_val is None or (
-            self._cached_v_scale_val != v_scale_val
-            and not (math.isnan(self._cached_v_scale_val) and math.isnan(v_scale_val))
-        ):
-            self._cached_v_scale_cpu = torch.tensor(v_scale_val, dtype=torch.float32)
-            self._cached_v_scale_val = v_scale_val
-
         rocm_aiter_ops.fused_qk_norm_rope_and_cache(
             qkv=qkv,
             q_weight=q_weight,
@@ -587,8 +564,8 @@ class RocmAttentionImpl(AttentionImpl):
             k_cache=key_cache,
             v_cache=value_cache,
             slot_mapping=layer_slot_mapping,
-            k_scale=self._cached_k_scale_cpu,
-            v_scale=self._cached_v_scale_cpu,
+            k_scale=layer._k_scale_cpu,
+            v_scale=layer._v_scale_cpu,
             k_out=k_out,
             v_out=None,
             return_kv=True,
