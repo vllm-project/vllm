@@ -482,7 +482,9 @@ def convert_to_fp8_moe_kernel_format(
             prepare_fp8_moe_layer_for_xpu,
         )
 
-        w13, w2 = prepare_fp8_moe_layer_for_xpu(w13, w2)
+        w13, w13_scale, w2, w2_scale = prepare_fp8_moe_layer_for_xpu(
+            w13, w13_scale, w2, w2_scale
+        )
     elif fp8_backend == Fp8MoeBackend.CPU:
         from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
             prepare_fp8_moe_layer_for_cpu,
