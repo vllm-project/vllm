@@ -138,11 +138,12 @@ def test_read_blocks_for_req_expands_remote_ids(
     """
     from unittest.mock import MagicMock
 
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
-        NixlConnectorMetadata,
-    )
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
         TPMapping,
+    )
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlConnectorMetadata,
     )
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
@@ -182,7 +183,7 @@ def test_read_blocks_for_req_expands_remote_ids(
 
     mock_plan = MagicMock(spec=TPMapping)
     mock_plan.all_source_ranks = ()
-    mock_plan.slices_per_group = ()
+    mock_plan.tp_mappings = ()
     worker.tp_mappings = {remote_engine_id: mock_plan}
 
     metadata = NixlConnectorMetadata()

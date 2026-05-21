@@ -568,7 +568,6 @@ class Attention(nn.Module, AttentionLayerBase):
         block_size = vllm_config.cache_config.block_size
         # Should not be called for enc-dec or encoder-only attention.
         assert self.attn_type == AttentionType.DECODER
-        total_num_kv_heads = vllm_config.model_config.get_total_num_kv_heads()
         quant_mode = get_kv_quant_mode(self.kv_cache_dtype)
         if self.sliding_window is not None:
             assert not vllm_config.model_config.use_mla, (
@@ -577,7 +576,6 @@ class Attention(nn.Module, AttentionLayerBase):
             return SlidingWindowSpec(
                 block_size=block_size,
                 num_kv_heads=self.num_kv_heads,
-                total_num_kv_heads=total_num_kv_heads,
                 head_size=self.head_size,
                 head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,
@@ -596,7 +594,6 @@ class Attention(nn.Module, AttentionLayerBase):
             return TQFullAttentionSpec(
                 block_size=block_size,
                 num_kv_heads=self.num_kv_heads,
-                total_num_kv_heads=total_num_kv_heads,
                 head_size=self.head_size,
                 head_size_v=self.head_size,
                 dtype=self.kv_cache_torch_dtype,
@@ -606,7 +603,6 @@ class Attention(nn.Module, AttentionLayerBase):
             return FullAttentionSpec(
                 block_size=block_size,
                 num_kv_heads=self.num_kv_heads,
-                total_num_kv_heads=total_num_kv_heads,
                 head_size=self.head_size,
                 head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,

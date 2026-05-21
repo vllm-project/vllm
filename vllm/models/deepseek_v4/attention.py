@@ -605,7 +605,6 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         return MLAAttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
-            total_num_kv_heads=vllm_config.model_config.get_total_num_kv_heads(),
             head_size=self.head_dim,
             dtype=torch.uint8,
             compress_ratio=self.compress_ratio,
@@ -651,7 +650,6 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
         return MLAAttentionSpec(
             block_size=self.cache_config.block_size,
             num_kv_heads=1,
-            total_num_kv_heads=vllm_config.model_config.get_total_num_kv_heads(),
             head_size=self.head_dim,
             dtype=self.dtype,
             compress_ratio=self.compress_ratio,

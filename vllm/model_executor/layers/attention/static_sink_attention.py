@@ -221,7 +221,6 @@ class StaticSinkAttention(Attention, CustomOp):
         return SinkFullAttentionSpec(
             block_size=self.block_size,
             num_kv_heads=self.num_kv_heads,
-            total_num_kv_heads=vllm_config.model_config.get_total_num_kv_heads(),
             head_size=self.head_size,
             head_size_v=self.head_size_v,
             sink_len=self.sink_len,
