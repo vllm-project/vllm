@@ -2080,18 +2080,20 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             # When FP8 weights are used without FP8 prefill, kv_b_proj expects
             # model dtype input and will quantize internally.
             # For quantized layers (AWQ/GPTQ) that lack a .weight attribute,
-            # use params_dtype which is the expected input dtype.
-            _kv_b_proj_w_dtype = (
-                self.kv_b_proj.weight.dtype
-                if hasattr(self.kv_b_proj, "weight")
-                else self.kv_b_proj.params_dtype
-            )
+            # use scales.dtype which holds the params_dtype (model precision).
+            # params_dtype attribute may not exist on all quantized layers.
+            if hasattr(self.kv_b_proj, "weight"):
+                _kv_b_proj_w_dtype = self.kv_b_proj.weight.dtype
+            elif hasattr(self.kv_b_proj, "scales"):
+                _kv_b_proj_w_dtype = self.kv_b_proj.scales.dtype
+            else:
+                _kv_b_proj_w_dtype = self.kv_b_proj.params_dtype
             # For NVFP4, weights are packed uint8 — keep input in model dtype
             # since the NVFP4 linear layer quantizes internally.
             if (
                 use_fp8_prefill or _kv_b_proj_w_dtype != current_platform.fp8_dtype()
             ) and _kv_b_proj_w_dtype != torch.uint8:
-                kv_c_normed = kv_c_normed.to(self.kv_b_proj.weight.dtype)
+                kv_c_normed = kv_c_normed.to(_kv_b_proj_w_dtype)
 
             k_pe = workspace[:toks][..., self.kv_lora_rank :].unsqueeze(1)
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
