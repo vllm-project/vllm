@@ -421,7 +421,6 @@ class Fp8LinearMethod(LinearMethodBase):
             if self.act_q_static:
                 assert input_scale is not None
                 input_scale = input_scale.max()
-
             weight = weight.t()
 
             # Update layer with new values.
