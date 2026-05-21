@@ -87,6 +87,8 @@ class PoolingServeContext(Generic[PoolingRequestT]):
     entrypoint_tracer: Tracer | None = None
     request_span_context: Any | None = None
     entrypoint_span_links: Any | None = None
+    # time_ns() - monotonic_ns()
+    time_offset: int = 0
     # timestamp time_ns
     arrival_time: int = 0
     preprocessing_finished: int = 0

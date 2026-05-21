@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
+import time
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Mapping
 from concurrent.futures import Executor
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from time import time_ns
 from typing import ClassVar
 
 import torch
@@ -83,7 +83,6 @@ class PoolingServingBase(ABC):
 
         # Observability
         self.is_tracing_enabled = is_tracing_enabled
-
         if self.is_tracing_enabled:
             from opentelemetry.trace.propagation.tracecontext import (
                 TraceContextTextMapPropagator,
@@ -98,7 +97,6 @@ class PoolingServingBase(ABC):
 
             self.propagator = TraceContextTextMapPropagator()
 
-            # service.name -> otel.scope.name
             self.trace_provider = init_otel_trace_provider(
                 otlp_endpoint, extra_attributes={"service.name": "vllm"}
             )
@@ -170,7 +168,8 @@ class PoolingServingBase(ABC):
             request_span.record_exception(e)
             raise e
         finally:
-            end_time = time_ns()
+            end_st = time.monotonic_ns()
+            end_time = ctx.time_offset + end_st
             request_span.end(end_time)
 
     async def __call__(
@@ -178,27 +177,38 @@ class PoolingServingBase(ABC):
         request: AnyPoolingRequest,
         raw_request: Request | None = None,
     ) -> Response:
-        arrival_time = time_ns()
+        arrival_time = time.time_ns()
+        time_offset = 0
+
+        if self.is_tracing_enabled:
+            arrival_ts = time.monotonic_ns()
+            time_offset = arrival_time - arrival_ts
 
         io_processor = self.get_io_processor(request)
         ctx = await self._init_ctx(io_processor, request, raw_request)
-        ctx.arrival_time = arrival_time
+
+        if self.is_tracing_enabled:
+            ctx.arrival_time = arrival_time
+            ctx.time_offset = time_offset
 
         async with self.maybe_tracing(ctx, raw_request):
             await self._preprocessing_async(io_processor, ctx)
 
             if self.is_tracing_enabled:
-                ctx.preprocessing_finished = time_ns()
+                preprocessing_finished_ts = time.monotonic_ns()
+                ctx.preprocessing_finished = time_offset + preprocessing_finished_ts
 
             await self._engine_call(ctx)
 
             if self.is_tracing_enabled:
-                ctx.engine_call_finished = time_ns()
+                engine_call_ts = time.monotonic_ns()
+                ctx.engine_call_finished = time_offset + engine_call_ts
 
             response = await self._postprocessing_async(io_processor, ctx)
 
             if self.is_tracing_enabled:
-                ctx.postprocessing_finished = time_ns()
+                postprocessing_finished_ts = time.monotonic_ns()
+                ctx.postprocessing_finished = time_offset + postprocessing_finished_ts
 
             return response
 

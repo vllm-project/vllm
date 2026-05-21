@@ -5,10 +5,10 @@ import atexit
 import functools
 import inspect
 import os
+import time
 import traceback
 from collections.abc import Mapping
 from contextlib import asynccontextmanager, contextmanager
-from time import time_ns
 from typing import Any
 
 from vllm.logger import init_logger
@@ -286,11 +286,7 @@ def init_otel_trace_provider(
     # Store the endpoint in environment so child processes can inherit it
     os.environ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] = otlp_traces_endpoint
 
-    resource_attrs = {"vllm.process_id": str(os.getpid())}
-    if extra_attributes:
-        resource_attrs.update(extra_attributes)
-    resource = Resource.create(resource_attrs)
-
+    resource = Resource.create()
     trace_provider = TracerProvider(resource=resource)
     span_exporter = get_span_exporter(otlp_traces_endpoint)
     trace_provider.add_span_processor(BatchSpanProcessor(span_exporter))
@@ -321,10 +317,13 @@ def maybe_start_span(tracer: Tracer | None, *args, **kwargs):
     if tracer is None:
         yield None
     else:
-        start_time = time_ns()
+        start_time = time.time_ns()
+        start_ts = time.monotonic_ns()
+
         span = tracer.start_span(*args, start_time=start_time, **kwargs)
         yield span
-        end_time = time_ns()
+        end_ts = time.monotonic_ns()
+        end_time = start_time - start_ts + end_ts
         span.end(end_time)
 
 
@@ -333,8 +332,15 @@ async def maybe_start_span_async(tracer: Tracer | None, *args, **kwargs):
     if tracer is None:
         yield None
     else:
-        start_time = time_ns()
-        span = tracer.start_span(*args, start_time=start_time, **kwargs)
+        start_time = time.time_ns()
+        start_ts = time.monotonic_ns()
+
+        attributes = kwargs.get("attributes", {})
+        attributes["vllm.process_id"] = str(os.getpid())
+        span = tracer.start_span(
+            *args, start_time=start_time, attributes=attributes, **kwargs
+        )
         yield span
-        end_time = time_ns()
+        end_ts = time.monotonic_ns()
+        end_time = start_time - start_ts + end_ts
         span.end(end_time)
