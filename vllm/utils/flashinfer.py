@@ -454,7 +454,7 @@ def use_trtllm_attention(
 
 
 if has_flashinfer():
-    from vllm.utils.torch_utils import direct_register_custom_op
+    from vllm.utils.torch_utils import current_stream, direct_register_custom_op
 
     def _flashinfer_concat_mla_k(
         k: torch.Tensor,
@@ -550,6 +550,314 @@ if has_flashinfer():
         use_nvfp4: bool = True,
     ) -> torch.Tensor:
         return torch.empty(A.shape[0], B.shape[1], dtype=dtype, device=A.device)
+
+    _fp4_rs_streams: dict[int, Any] = {}
+
+    def _cuda_module() -> Any:
+        return vars(torch)["cuda"]
+
+    def _get_fp4_rs_stream(device: torch.device) -> Any:
+        device_index = device.index
+        if device_index is None:
+            device_index = torch.accelerator.current_device_index()
+        if device_index not in _fp4_rs_streams:
+            _fp4_rs_streams[device_index] = _cuda_module().Stream(device=device_index)
+        return _fp4_rs_streams[device_index]
+
+    def _align_bytes(size: int, alignment: int = 256) -> int:
+        return ((size + alignment - 1) // alignment) * alignment
+
+    def _storage_offset(byte_offset: int, dtype: torch.dtype) -> int:
+        return byte_offset // torch.empty((), dtype=dtype).element_size()
+
+    def _fp4_rs_stripe_sizes(chunk_m: int) -> list[int]:
+        if chunk_m < 8192:
+            return [chunk_m]
+        # Keep the first stripe 128-row aligned and let the second stripe carry
+        # any tail rows. This lets us probe non-128 chunk sizes without changing
+        # the FlashInfer FP4 GEMM scale-offset API.
+        first = (chunk_m // 2 // 128) * 128
+        if first == 0 or first == chunk_m:
+            return [chunk_m]
+        return [first, chunk_m - first]
+
+    def _flashinfer_fp4_mm_out(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        *,
+        scale_a: torch.Tensor,
+        scale_b: torch.Tensor,
+        alpha: torch.Tensor,
+        out: torch.Tensor,
+        out_dtype: torch.dtype,
+        use_8x4_sf_layout: bool,
+        backend: str,
+    ) -> None:
+        from flashinfer import mm_fp4 as flashinfer_mm_fp4_
+
+        res = flashinfer_mm_fp4_(
+            A,
+            B,
+            scale_a,
+            scale_b,
+            alpha,
+            out_dtype,
+            block_size=16,
+            use_8x4_sf_layout=use_8x4_sf_layout,
+            use_nvfp4=True,
+            backend=backend,
+            out=out,
+        )
+        assert res is out or res.data_ptr() == out.data_ptr()
+
+    def fused_flashinfer_fp4_matmul_reduce_scatter_fake(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        A_scale: torch.Tensor,
+        B_scale: torch.Tensor,
+        alpha: torch.Tensor,
+        reduce_op: str,
+        scatter_dim: int,
+        world_size: int,
+        vllm_group_name: str,
+        c10d_group_name: str,
+        out_dtype: torch.dtype | None = None,
+        use_8x4_sf_layout: bool = False,
+        backend: str = "cutlass",
+    ) -> torch.Tensor:
+        del A_scale, B_scale, alpha, reduce_op, vllm_group_name, c10d_group_name
+        del use_8x4_sf_layout, backend
+        result_shape = list(A.shape)
+        result_shape[scatter_dim] //= world_size
+        result_shape[-1] = B.shape[1]
+        return torch.empty(
+            result_shape, dtype=out_dtype or torch.bfloat16, device=A.device
+        )
+
+    def _get_vllm_device_communicator(vllm_group_name: str) -> Any:
+        from vllm.distributed.parallel_state import get_group_by_name
+
+        group = get_group_by_name(vllm_group_name)
+        device_communicator = group.device_communicator
+        if device_communicator is None:
+            raise RuntimeError("FP4 GEMM reduce-scatter requires a device communicator")
+        return device_communicator
+
+    def _fp4_rs_workspace_buffers(
+        c10d_group_name: str,
+        *,
+        world_size: int,
+        max_stripe_m: int,
+        k_fp4: int,
+        n: int,
+        A_dtype: torch.dtype,
+        A_scale_shape: torch.Size,
+        A_scale_dtype: torch.dtype,
+        out_dtype: torch.dtype,
+    ) -> tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]]:
+        from torch.distributed._symmetric_memory import get_symm_mem_workspace
+
+        a_shape = (world_size * max_stripe_m, k_fp4)
+        scale_shape = (world_size * max_stripe_m, A_scale_shape[1])
+        partial_shape = (world_size * max_stripe_m, n)
+
+        a_nbytes = torch.empty((), dtype=A_dtype).element_size()
+        a_nbytes *= a_shape[0] * a_shape[1]
+        scale_nbytes = torch.empty((), dtype=A_scale_dtype).element_size()
+        scale_nbytes *= scale_shape[0] * scale_shape[1]
+        partial_nbytes = torch.empty((), dtype=out_dtype).element_size()
+        partial_nbytes *= partial_shape[0] * partial_shape[1]
+
+        offsets: list[tuple[int, torch.Size | tuple[int, ...], torch.dtype]] = []
+        offset = 0
+        for _ in range(2):
+            offset = _align_bytes(offset)
+            offsets.append((offset, a_shape, A_dtype))
+            offset += a_nbytes
+            offset = _align_bytes(offset)
+            offsets.append((offset, scale_shape, A_scale_dtype))
+            offset += scale_nbytes
+            offset = _align_bytes(offset)
+            offsets.append((offset, partial_shape, out_dtype))
+            offset += partial_nbytes
+
+        workspace = get_symm_mem_workspace(c10d_group_name, _align_bytes(offset))
+        rank = workspace.rank
+        buffers = [
+            workspace.get_buffer(
+                rank,
+                shape,
+                dtype,
+                _storage_offset(byte_offset, dtype),
+            )
+            for byte_offset, shape, dtype in offsets
+        ]
+        a_workspaces = [buffers[0], buffers[3]]
+        scale_workspaces = [buffers[1], buffers[4]]
+        partial_workspaces = [buffers[2], buffers[5]]
+        return a_workspaces, scale_workspaces, partial_workspaces
+
+    def _run_fp4_full_gemm_nccl_rs(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        A_scale: torch.Tensor,
+        B_scale: torch.Tensor,
+        alpha: torch.Tensor,
+        *,
+        device_communicator: Any,
+        c10d_group_name: str,
+        world_size: int,
+        out_dtype: torch.dtype,
+        use_8x4_sf_layout: bool,
+        backend: str,
+    ) -> torch.Tensor:
+        from torch.distributed._symmetric_memory import get_symm_mem_workspace
+
+        partial_nbytes = (
+            A.shape[0] * B.shape[1] * torch.empty((), dtype=out_dtype).element_size()
+        )
+        workspace = get_symm_mem_workspace(
+            c10d_group_name, _align_bytes(partial_nbytes)
+        )
+        partial = workspace.get_buffer(
+            workspace.rank,
+            (A.shape[0], B.shape[1]),
+            out_dtype,
+        )
+        _flashinfer_fp4_mm_out(
+            A,
+            B,
+            scale_a=A_scale,
+            scale_b=B_scale,
+            alpha=alpha,
+            out=partial,
+            out_dtype=out_dtype,
+            use_8x4_sf_layout=use_8x4_sf_layout,
+            backend=backend,
+        )
+        out = torch.empty(
+            (A.shape[0] // world_size, B.shape[1]), dtype=out_dtype, device=A.device
+        )
+        device_communicator.reduce_scatter_out(out, partial)
+        return out
+
+    def fused_flashinfer_fp4_matmul_reduce_scatter(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        A_scale: torch.Tensor,
+        B_scale: torch.Tensor,
+        alpha: torch.Tensor,
+        reduce_op: str,
+        scatter_dim: int,
+        world_size: int,
+        vllm_group_name: str,
+        c10d_group_name: str,
+        out_dtype: torch.dtype | None = None,
+        use_8x4_sf_layout: bool = False,
+        backend: str = "cutlass",
+    ) -> torch.Tensor:
+        if reduce_op != "sum" or scatter_dim != 0:
+            raise RuntimeError(
+                "FP4 GEMM reduce-scatter currently supports sum on dim 0"
+            )
+        if A.shape[0] % world_size != 0:
+            raise RuntimeError("FP4 GEMM reduce-scatter requires equal NCCL chunks")
+
+        out_dtype = out_dtype or torch.bfloat16
+        device_communicator = _get_vllm_device_communicator(vllm_group_name)
+        chunk_m = A.shape[0] // world_size
+        n = B.shape[1]
+
+        overlap_enabled = os.getenv("VLLM_NVFP4_RS_OVERLAP", "1") != "0"
+        can_overlap = (
+            overlap_enabled
+            and backend in ("cutlass", "cudnn")
+            and not use_8x4_sf_layout
+            and A.is_contiguous()
+            and A_scale.ndim == 2
+            and A_scale.shape[0] >= A.shape[0]
+        )
+        stripe_ms = _fp4_rs_stripe_sizes(chunk_m) if can_overlap else [chunk_m]
+        if len(stripe_ms) == 1:
+            return _run_fp4_full_gemm_nccl_rs(
+                A,
+                B,
+                A_scale,
+                B_scale,
+                alpha,
+                device_communicator=device_communicator,
+                c10d_group_name=c10d_group_name,
+                world_size=world_size,
+                out_dtype=out_dtype,
+                use_8x4_sf_layout=use_8x4_sf_layout,
+                backend=backend,
+            )
+
+        a_workspaces, scale_workspaces, partial_workspaces = _fp4_rs_workspace_buffers(
+            c10d_group_name,
+            world_size=world_size,
+            max_stripe_m=max(stripe_ms),
+            k_fp4=A.shape[1],
+            n=n,
+            A_dtype=A.dtype,
+            A_scale_shape=A_scale.shape,
+            A_scale_dtype=A_scale.dtype,
+            out_dtype=out_dtype,
+        )
+        out = torch.empty((chunk_m, n), dtype=out_dtype, device=A.device)
+
+        producer_stream = current_stream()
+        comm_stream = _get_fp4_rs_stream(A.device)
+        producer_events = [_cuda_module().Event() for _ in range(2)]
+        comm_events = [_cuda_module().Event() for _ in range(2)]
+
+        stripe_start = 0
+        for stripe_idx, stripe_m in enumerate(stripe_ms):
+            slot = stripe_idx % 2
+            if stripe_idx >= 2:
+                producer_stream.wait_event(comm_events[slot])
+
+            a_workspace = a_workspaces[slot][: world_size * stripe_m]
+            scale_workspace = scale_workspaces[slot][: world_size * stripe_m]
+            partial_workspace = partial_workspaces[slot][: world_size * stripe_m]
+            for rank in range(world_size):
+                src_start = rank * chunk_m + stripe_start
+                src_stop = src_start + stripe_m
+                dst_start = rank * stripe_m
+                dst_stop = dst_start + stripe_m
+                a_workspace[dst_start:dst_stop].copy_(A[src_start:src_stop])
+                scale_workspace[dst_start:dst_stop].copy_(A_scale[src_start:src_stop])
+
+            _flashinfer_fp4_mm_out(
+                a_workspace,
+                B,
+                scale_a=scale_workspace,
+                scale_b=B_scale,
+                alpha=alpha,
+                out=partial_workspace,
+                out_dtype=out_dtype,
+                use_8x4_sf_layout=use_8x4_sf_layout,
+                backend=backend,
+            )
+            producer_events[slot].record(producer_stream)
+
+            with _cuda_module().stream(comm_stream):
+                comm_stream.wait_event(producer_events[slot])
+                out_slice = out[stripe_start : stripe_start + stripe_m]
+                device_communicator.reduce_scatter_out(
+                    out_slice, partial_workspace, stream=comm_stream
+                )
+                comm_events[slot].record(comm_stream)
+            stripe_start += stripe_m
+
+        producer_stream.wait_stream(comm_stream)
+        return out
+
+    direct_register_custom_op(
+        op_name="fused_flashinfer_fp4_matmul_reduce_scatter",
+        op_func=fused_flashinfer_fp4_matmul_reduce_scatter,
+        fake_impl=fused_flashinfer_fp4_matmul_reduce_scatter_fake,
+    )
 
     @torch.library.custom_op(
         "vllm::flashinfer_mxfp4_quantize",

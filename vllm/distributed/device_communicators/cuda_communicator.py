@@ -322,6 +322,16 @@ class CudaCommunicator(DeviceCommunicatorBase):
         # Reshape before returning
         return output.movedim(0, dim).contiguous()
 
+    def reduce_scatter_out(
+        self,
+        output: torch.Tensor,
+        input_: torch.Tensor,
+        stream: object | None = None,
+    ) -> None:
+        pynccl_comm = self.pynccl_comm
+        assert pynccl_comm is not None
+        pynccl_comm.reduce_scatter(output, input_, stream=stream)
+
     def reduce_scatterv(
         self, input_: torch.Tensor, dim: int = -1, sizes: list[int] | None = None
     ):
