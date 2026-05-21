@@ -196,6 +196,46 @@ def test_tokenizer_space_marker(parser: ToolParser) -> None:
     )
 
 
+def test_collapsed_function_and_param_tags(parser: ToolParser) -> None:
+    request = make_request(make_tools_weather())
+    text = (
+        '<functionname="get_weather">'
+        '<paramname="city">上海</param>'
+        '<paramname="date">2024-06-27</param>'
+        "</function>\n"
+    )
+    out = parser.extract_tool_calls(text, request)
+    assert out.tools_called
+    assert_tool_calls(
+        out.tool_calls,
+        [make_tool_call("get_weather", {
+            "city": "上海",
+            "date": "2024-06-27",
+        })],
+    )
+
+
+def test_collapsed_param_tags_with_tokenizer_space_function(
+    parser: ToolParser,
+) -> None:
+    request = make_request(make_tools_weather())
+    text = (
+        '<function\u0120name="get_weather">'
+        '<paramname="city">上海</param>'
+        '<paramname="date">2024-06-27</param>'
+        "</function>\n"
+    )
+    out = parser.extract_tool_calls(text, request)
+    assert out.tools_called
+    assert_tool_calls(
+        out.tool_calls,
+        [make_tool_call("get_weather", {
+            "city": "上海",
+            "date": "2024-06-27",
+        })],
+    )
+
+
 def test_extract_tool_calls_streaming_partial_chunks(parser: ToolParser) -> None:
     request = make_request(make_tools_weather())
     chunks = [
@@ -236,6 +276,61 @@ def test_extract_tool_calls_streaming_tokenizer_space_marker(
     assert json.loads(reconstructor.tool_calls[0].function.arguments) == {
         "city": "上海",
         "date": "2024-06-27",
+    }
+
+
+def test_extract_tool_calls_streaming_collapsed_tags_weather(
+    parser: ToolParser,
+) -> None:
+    request = make_request(make_tools_weather())
+    text = (
+        '<functionname="get_weather">'
+        '<paramname="city">上海</param>'
+        '<paramname="date">2024-06-27</param>'
+        "</function>\n"
+    )
+    random.seed(2)
+    reconstructor = run_tool_extraction_streaming(
+        parser,
+        _random_chunks(text, 1, 4),
+        request,
+    )
+    assert len(reconstructor.tool_calls) == 1
+    assert reconstructor.tool_calls[0].function.name == "get_weather"
+    assert json.loads(reconstructor.tool_calls[0].function.arguments) == {
+        "city": "上海",
+        "date": "2024-06-27",
+    }
+
+
+def test_collapsed_tags_current_weather(parser: ToolParser) -> None:
+    request = make_request([
+        _tool(
+            "get_current_weather",
+            {
+                "type": "object",
+                "properties": {
+                    "city": {"type": "string"},
+                    "state": {"type": "string"},
+                    "unit": {"type": "string"},
+                },
+                "required": ["city", "state", "unit"],
+            },
+        )
+    ])
+    text = (
+        '<functionname="get_current_weather">'
+        '<paramname="city">Dallas</param>'
+        '<paramname="state">TX</param>'
+        '<paramname="unit">fahrenheit</param>'
+        "</function>"
+    )
+    out = parser.extract_tool_calls(text, request)
+    assert out.tools_called
+    assert json.loads(out.tool_calls[0].function.arguments) == {
+        "city": "Dallas",
+        "state": "TX",
+        "unit": "fahrenheit",
     }
 
 

@@ -54,9 +54,19 @@ _TOKENIZER_SPACE = "\u0120"
 
 
 def _normalize_model_output(text: str) -> str:
-    if _TOKENIZER_SPACE not in text:
+    if (
+        _TOKENIZER_SPACE not in text
+        and "<functionname=" not in text
+        and "<paramname=" not in text
+    ):
         return text
-    return text.replace(_TOKENIZER_SPACE, " ")
+
+    normalized = text.replace(_TOKENIZER_SPACE, " ")
+    # Some model outputs collapse tag names and attributes, e.g.
+    # <functionname="foo"> or <paramname="bar">.
+    normalized = normalized.replace("<functionname=", "<function name=")
+    normalized = normalized.replace("<paramname=", "<param name=")
+    return normalized
 
 
 def _streaming_args_snapshot(args_json: str, *, is_complete: bool) -> str:
