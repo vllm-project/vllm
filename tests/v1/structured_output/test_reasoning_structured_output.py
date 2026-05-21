@@ -10,6 +10,7 @@ import pytest
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
+from vllm.v1.structured_output.backend_types import StructuredOutputOptions
 
 
 class MockReasoner:
@@ -213,6 +214,32 @@ class TestReasoningStructuredOutput:
             is True
         )
         assert result is False
+
+    def test_should_advance_reasoning_just_ended_with_spec_decode_structural_tag(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """When reasoning ends this step, advance immediately for structural
+        tags with speculative decoding."""
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = False
+        structured_req.structured_output_key = (
+            StructuredOutputOptions.STRUCTURAL_TAG,
+            "{}",
+        )
+        reasoner = MockReasoner(tokenizer=Mock())
+        reasoner.is_reasoning_end_streaming.return_value = True
+        structured_req.reasoner = reasoner
+
+        manager_with_reasoner.vllm_config.speculative_config = Mock()
+
+        result = manager_with_reasoner.should_advance(
+            mock_request_with_structured_output
+        )
+
+        assert structured_req.reasoning_ended is True
+        assert result is True
 
     def test_should_advance_reasoning_already_ended(
         self,
