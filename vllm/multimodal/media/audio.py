@@ -69,7 +69,12 @@ def load_audio_pyav(
             stream = container.streams.audio[0]
             stream.thread_type = "AUTO"
             native_sr = stream.rate
-            sr = sr or native_sr
+            # Coerce to int: the `sr` type hint allows float, but
+            # av.AudioResampler(rate=...) expects an int (a float can raise
+            # TypeError on some PyAV versions). Doing it here also keeps the
+            # returned sample rate an int, consistent with
+            # load_audio_soundfile.
+            sr = int(round(sr or native_sr))
 
             chunks: list[npt.NDArray] = []
             # Always decode through an AudioResampler set to float planar
