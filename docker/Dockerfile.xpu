@@ -6,9 +6,11 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update -y \
     && apt-get install -y --no-install-recommends \
-        ca-certificates curl git build-essential \
-        protobuf-compiler libprotobuf-dev \
+        ca-certificates curl git build-essential unzip \
     && rm -rf /var/lib/apt/lists/*
+
+COPY tools/install_protoc.sh /tmp/install_protoc.sh
+RUN /tmp/install_protoc.sh && rm /tmp/install_protoc.sh
 
 # Install rustup; the toolchain itself is pinned by rust/rust-toolchain.toml.
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \

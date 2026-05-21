@@ -130,10 +130,12 @@ RUN if [ ! -f ${COMMON_WORKDIR}/vllm/rust/Cargo.toml ]; then \
         exit 1; \
     fi
 
-# protoc is used by tonic-build/prost-build.
 RUN apt-get update -q -y && apt-get install -q -y --no-install-recommends \
-        protobuf-compiler libprotobuf-dev \
+        ca-certificates curl unzip \
     && rm -rf /var/lib/apt/lists/*
+
+COPY tools/install_protoc.sh /tmp/install_protoc.sh
+RUN /tmp/install_protoc.sh && rm /tmp/install_protoc.sh
 
 # Install rustup; the toolchain itself is pinned by rust/rust-toolchain.toml.
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
