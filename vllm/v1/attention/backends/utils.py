@@ -154,7 +154,7 @@ def get_num_attention_heads_from_layers(
     )
     if not attn_layers:
         return None
-    heads = {layer.num_heads for layer in attn_layers.values()}  # type: ignore[attr-defined]
+    heads = {layer.impl.num_heads for layer in attn_layers.values()}
     assert len(heads) == 1, (
         f"All layers in one attention group must share num_heads; "
         f"got {heads} for {layer_names}."
