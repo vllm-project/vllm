@@ -648,6 +648,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             num_actual_tokens=cm.num_actual_tokens,
             query_start_loc=cm.query_start_loc,
             slot_mapping=slot_mapping,
+            seq_lens=cm.seq_lens,
             block_table=cm.block_table_tensor,
             req_id_per_token=req_id_per_token,
             block_size=self.kv_cache_spec.block_size,
