@@ -82,6 +82,7 @@ if TYPE_CHECKING:
     VLLM_MAIN_CUDA_VERSION: str = "13.0"
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
+    VLLM_TRITON_ATTN_USE_TD: bool | None = None
     MAX_JOBS: str | None = None
     NVCC_THREADS: str | None = None
     VLLM_USE_PRECOMPILED: bool = False
@@ -143,7 +144,8 @@ if TYPE_CHECKING:
     VLLM_DP_RANK_LOCAL: int = -1
     VLLM_DP_SIZE: int = 1
     VLLM_USE_STANDALONE_COMPILE: bool = True
-    VLLM_ENABLE_PREGRAD_PASSES: bool = False
+    VLLM_ENABLE_PREGRAD_PASSES: bool = True
+    VLLM_USE_BREAKABLE_CUDAGRAPH: bool = False
     VLLM_DP_MASTER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
@@ -180,6 +182,7 @@ if TYPE_CHECKING:
     VLLM_FLASHINFER_MOE_BACKEND: Literal["throughput", "latency", "masked_gemm"] = (
         "latency"
     )
+    VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
     VLLM_XGRAMMAR_CACHE_MB: int = 0
@@ -189,6 +192,10 @@ if TYPE_CHECKING:
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5600
     VLLM_MOONCAKE_BOOTSTRAP_PORT: int = 8998
+    VLLM_MOONCAKE_STORE_TIER_LOG: bool = False
+    VLLM_MOONCAKE_DISK_STAGING_USABLE_RATIO: float = 0.9
+    MOONCAKE_PREFERRED_SEGMENT: str | None = None
+    MOONCAKE_REQUESTER_LOCAL_HOSTNAME: str | None = None
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
@@ -202,7 +209,8 @@ if TYPE_CHECKING:
     ] = "NONE"
     VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16: bool = True
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: int | None = None
-    VLLM_NIXL_ABORT_REQUEST_TIMEOUT: int = 480
+    VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_MB: int | None = None
+    VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB: int | None = None
     VLLM_MORIIO_CONNECTOR_READ_MODE: bool = False
     VLLM_MORIIO_QP_PER_TRANSFER: int = 1
     VLLM_MORIIO_POST_BATCH_SIZE: int = -1
@@ -226,6 +234,7 @@ if TYPE_CHECKING:
     VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS: bool = False
     VLLM_SYSTEM_START_DATE: str | None = None
     VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY: bool = False
+    VLLM_ENFORCE_STRICT_TOOL_CALLING: bool = False
     VLLM_CUSTOM_SCOPES_FOR_PROFILING: bool = False
     VLLM_NVTX_SCOPES_FOR_PROFILING: bool = False
     VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES: bool = True
@@ -245,8 +254,9 @@ if TYPE_CHECKING:
     VLLM_DEBUG_WORKSPACE: bool = False
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
+    VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
-    VLLM_USE_V2_MODEL_RUNNER: bool = False
+    VLLM_USE_V2_MODEL_RUNNER: bool | None = None
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
@@ -255,11 +265,16 @@ if TYPE_CHECKING:
     VLLM_LORA_DISABLE_PDL: bool = False
     VLLM_ENABLE_CUDA_COMPATIBILITY: bool = False
     VLLM_CUDA_COMPATIBILITY_PATH: str | None = None
+    VLLM_SKIP_MODEL_NAME_VALIDATION: bool = False
+    """If set, vLLM will skip model name validation in API requests.
+    This allows any model name to be accepted in the 'model' field of requests,
+    making the server model-name agnostic. Useful for proxy/gateway scenarios."""
     VLLM_ELASTIC_EP_SCALE_UP_LAUNCH: bool = False
     VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = True
     VLLM_NIXL_EP_MAX_NUM_RANKS: int = 32
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
+    VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
 
 
@@ -519,6 +534,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable batch-invariant mode: deterministic results regardless of
     # batch composition. Requires NVIDIA GPU with compute capability >= 9.0.
     "VLLM_BATCH_INVARIANT": lambda: bool(int(os.getenv("VLLM_BATCH_INVARIANT", "0"))),
+    # Use tensor descriptors for Q/K/V loads and output stores in the
+    # Triton unified-attention kernel.  Enables HW 2D block reads on
+    # Intel Xe2/Xe3; the non-TD branch is dead-code-eliminated at Triton
+    # compile time so other platforms see no overhead.  Tri-state override:
+    # unset (default) lets the `triton_attn` backend auto-select per
+    # platform (currently auto-enabled on XPU only); ``1`` forces TD on;
+    # ``0`` forces TD off.  Useful for A/B benchmarking the TD path.
+    "VLLM_TRITON_ATTN_USE_TD": lambda: {"1": True, "0": False}.get(
+        os.getenv("VLLM_TRITON_ATTN_USE_TD", "").strip()
+    ),
     # Maximum number of compilation jobs to run in parallel.
     # By default this is the number of CPUs
     "MAX_JOBS": lambda: os.getenv("MAX_JOBS", None),
@@ -615,9 +640,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # The pre-grad passes get run even on cache-hit and negatively impact
     # vllm cold compile times by O(1s)
     # Can remove this after the following issue gets fixed
+    # TODO(luka): maybe_inplace requires this
     # https://github.com/pytorch/pytorch/issues/174502
     "VLLM_ENABLE_PREGRAD_PASSES": lambda: (
-        os.environ.get("VLLM_ENABLE_PREGRAD_PASSES", "0") == "1"
+        os.environ.get("VLLM_ENABLE_PREGRAD_PASSES", "1") == "1"
+    ),
+    # Experimental: breakable cudagraph does not rely on torch.compile
+    "VLLM_USE_BREAKABLE_CUDAGRAPH": lambda: (
+        os.environ.get("VLLM_USE_BREAKABLE_CUDAGRAPH", "0") == "1"
     ),
     # Debug pattern matching inside custom passes.
     # Should be set to the fx.Node name (e.g. 'getitem_34' or 'scaled_mm_3').
@@ -775,9 +805,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # When True and distributed_executor_backend="ray", use RayExecutorV2
     # (MQ-based) instead of RayDistributedExecutor (compiled-graph backend).
-    # TODO (jeffreywang): Enabled by default in vLLM 0.20.0.
     "VLLM_USE_RAY_V2_EXECUTOR_BACKEND": lambda: bool(
-        int(os.getenv("VLLM_USE_RAY_V2_EXECUTOR_BACKEND", "0"))
+        int(os.getenv("VLLM_USE_RAY_V2_EXECUTOR_BACKEND", "1"))
     ),
     # Use dedicated multiprocess context for workers.
     # Both spawn and fork work
@@ -1095,6 +1124,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB": lambda: maybe_convert_int(
         os.environ.get("VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB", None)
     ),
+    # Custom quick allreduce kernel for MI3* cards.
+    # Controls the minimum allowed number of data bytes(MB) required to use
+    # custom quick allreduce communication.
+    # If unset, use the built-in threshold table.
+    "VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_MB": lambda: maybe_convert_int(
+        os.environ.get("VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_MB", None)
+    ),
+    # Controls the minimum tensor size (KB, where 1 KB = 1024 bytes) required
+    # to use the configured QuickReduce codec. Smaller tensors use FP
+    # QuickReduce. This does not affect QuickReduce eligibility.
+    "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB": lambda: maybe_convert_int(
+        os.environ.get("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB", None)
+    ),
     # Divisor for dynamic query scale factor calculation for FP8 KV Cache
     "Q_SCALE_CONSTANT": lambda: int(os.getenv("Q_SCALE_CONSTANT", "200")),
     # Divisor for dynamic key scale factor calculation for FP8 KV Cache
@@ -1225,8 +1267,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # if 1, force use indexed gemm
     # if 0, force use grouped gemm
     # if None, choose better gemm type automatically
-    "VLLM_HUMMING_MOE_GEMM_TYPE": lambda: maybe_convert_bool(
-        os.environ.get("VLLM_HUMMING_MOE_GEMM_TYPE", None)
+    "VLLM_HUMMING_MOE_GEMM_TYPE": lambda: os.environ.get(
+        "VLLM_HUMMING_MOE_GEMM_TYPE", None
     ),
     # Whether to use DeepEPLL kernels for NVFP4 quantization and dispatch method
     # only supported on Blackwell GPUs and with
@@ -1367,6 +1409,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MOONCAKE_BOOTSTRAP_PORT": lambda: int(
         os.getenv("VLLM_MOONCAKE_BOOTSTRAP_PORT", "8998")
     ),
+    # Log per-batch memory/disk tier breakdown on external GETs.
+    "VLLM_MOONCAKE_STORE_TIER_LOG": lambda: (
+        os.getenv("VLLM_MOONCAKE_STORE_TIER_LOG", "False").lower() in ("true", "1")
+    ),
+    # Fraction of the owner's DirectIO staging buffer to fill per GET batch.
+    "VLLM_MOONCAKE_DISK_STAGING_USABLE_RATIO": lambda: float(
+        os.getenv("VLLM_MOONCAKE_DISK_STAGING_USABLE_RATIO", "0.9")
+    ),
+    # Pin this rank to a specific owner segment ("host:port").
+    "MOONCAKE_PREFERRED_SEGMENT": lambda: os.getenv("MOONCAKE_PREFERRED_SEGMENT"),
+    # Override the hostname the rank registers as a Mooncake requester.
+    "MOONCAKE_REQUESTER_LOCAL_HOSTNAME": lambda: os.getenv(
+        "MOONCAKE_REQUESTER_LOCAL_HOSTNAME"
+    ),
     # Flashinfer MoE backend for vLLM's fused Mixture-of-Experts support.
     # Both require compute capability 10.0 or above.
     # Available options:
@@ -1378,6 +1434,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "VLLM_FLASHINFER_MOE_BACKEND",
         "latency",
         ["throughput", "latency", "masked_gemm"],
+    ),
+    # Override the directory for the FlashInfer autotune config cache.
+    "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR": lambda: os.getenv(
+        "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", None
     ),
     # Flashinfer fused allreduce backend.
     "VLLM_FLASHINFER_ALLREDUCE_BACKEND": env_with_choices(
@@ -1458,13 +1518,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_NVFP4_CT_EMULATIONS": lambda: bool(
         int(os.getenv("VLLM_USE_NVFP4_CT_EMULATIONS", "0"))
     ),
-    # Time (in seconds) after which the KV cache on the producer side is
-    # automatically cleared if no READ notification is received from the
-    # consumer. This is only applicable when using NixlConnector in a
-    # disaggregated decode-prefill setup.
-    "VLLM_NIXL_ABORT_REQUEST_TIMEOUT": lambda: int(
-        os.getenv("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", "480")
-    ),
     # Controls the read mode for the Mori-IO connector
     "VLLM_MORIIO_CONNECTOR_READ_MODE": lambda: (
         os.getenv("VLLM_MORIIO_CONNECTOR_READ_MODE", "False").lower() in ("true", "1")
@@ -1502,6 +1555,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "VLLM_NVFP4_GEMM_BACKEND",
         None,
         [
+            "flashinfer-b12x",
             "flashinfer-cudnn",
             "flashinfer-trtllm",
             "flashinfer-cutlass",
@@ -1587,6 +1641,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY": lambda: bool(
         int(os.getenv("VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY", "0"))
     ),
+    # When 1,the model structural tags will be used to enforce the model
+    # output conforming to the model's tool-calling format and schema.
+    # Default 0 (off).
+    "VLLM_ENFORCE_STRICT_TOOL_CALLING": lambda: bool(
+        int(os.getenv("VLLM_ENFORCE_STRICT_TOOL_CALLING", "0"))
+    ),
     # Add optional custom scopes for profiling, disable to avoid overheads
     "VLLM_CUSTOM_SCOPES_FOR_PROFILING": lambda: bool(
         int(os.getenv("VLLM_CUSTOM_SCOPES_FOR_PROFILING", "0"))
@@ -1623,9 +1683,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL": lambda: bool(
         int(os.getenv("VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL", "0"))
     ),
-    # The number of SMs to allocate for communication kernels when running DBO
-    # the rest of the SMs on the device will be allocated to compute
-    "VLLM_DBO_COMM_SMS": lambda: int(os.getenv("VLLM_DBO_COMM_SMS", "20")),
+    # The number of SMs/CUs to allocate for communication kernels when
+    # running DBO; the rest will be allocated to compute.
+    # Default: 20 on CUDA (SMs), 64 on ROCm (CUs).
+    "VLLM_DBO_COMM_SMS": lambda: int(
+        os.getenv(
+            "VLLM_DBO_COMM_SMS",
+            "64"
+            if hasattr(__import__("torch").version, "hip")
+            and __import__("torch").version.hip is not None
+            else "20",
+        )
+    ),
     # Enable max_autotune & coordinate_descent_tuning in inductor_config
     # to compile static shapes passed from compile_sizes in compilation_config
     # If set to 1, enable max_autotune; By default, this is enabled (1)
@@ -1665,6 +1734,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD": lambda: int(
         int(os.getenv("VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD", 256))
     ),
+    # Token-count cutoff for multi-stream overlap of the attention input
+    # GEMM with auxiliary GEMMs (e.g. fused_wqa_wkv overlapped with indexer
+    # weights / kv-score projections in DeepSeek-V4). At or below this many
+    # tokens the FP8 main GEMM has idle SMs to share with the bf16 aux GEMMs
+    # and overlap is a 5-45% win; above it the FP8 GEMM saturates the device
+    # and the cross-stream sync becomes pure overhead. Set to 0 to disable
+    # the multi-stream path entirely. See #PR 41526 for the empirical result
+    # for the default value of 1024 tokens.
+    "VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD": lambda: int(
+        os.getenv("VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD", "1024")
+    ),
     # Format for saving torch.compile cache artifacts
     # - "binary": saves as binary file
     #     Safe for multiple vllm serve processes accessing the same torch compile cache.
@@ -1674,9 +1754,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_COMPILE_CACHE_SAVE_FORMAT": env_with_choices(
         "VLLM_COMPILE_CACHE_SAVE_FORMAT", "binary", ["binary", "unpacked"]
     ),
-    # Flag to enable v2 model runner.
-    "VLLM_USE_V2_MODEL_RUNNER": lambda: bool(
-        int(os.getenv("VLLM_USE_V2_MODEL_RUNNER", "0"))
+    # Flag to control the v2 model runner. If unset, use config defaults.
+    "VLLM_USE_V2_MODEL_RUNNER": lambda: maybe_convert_bool(
+        os.getenv("VLLM_USE_V2_MODEL_RUNNER", None)
     ),
     # Log model inspection after loading.
     # If enabled, logs a transformers-style hierarchical view of the model
@@ -1711,6 +1791,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_CUDA_COMPATIBILITY_PATH": lambda: os.environ.get(
         "VLLM_CUDA_COMPATIBILITY_PATH", None
     ),
+    # Skip model name validation in OpenAI API requests.
+    # When set to 1, any model name will be accepted in the 'model' field
+    # of API requests. This is useful for proxy/gateway scenarios where
+    # the actual model is served but different names may be used in requests.
+    "VLLM_SKIP_MODEL_NAME_VALIDATION": lambda: (
+        os.getenv("VLLM_SKIP_MODEL_NAME_VALIDATION", "0").strip().lower()
+        in ("1", "true")
+    ),
     # Whether it is a scale up launch engine for elastic EP,
     # Should only be set by EngineCoreClient.
     "VLLM_ELASTIC_EP_SCALE_UP_LAUNCH": lambda: bool(
@@ -1735,6 +1823,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_XPU_ENABLE_XPU_GRAPH": lambda: bool(
         int(os.getenv("VLLM_XPU_ENABLE_XPU_GRAPH", "0"))
     ),
+    # whether use xpu specific sample kernel
+    "VLLM_XPU_USE_SAMPLER_KERNEL": lambda: bool(
+        int(os.getenv("VLLM_XPU_USE_SAMPLER_KERNEL", "1"))
+    ),
     # Enable simple KV offload.
     "VLLM_USE_SIMPLE_KV_OFFLOAD": lambda: bool(
         int(os.getenv("VLLM_USE_SIMPLE_KV_OFFLOAD", "0"))
@@ -1743,6 +1835,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LORA_ENABLE_DUAL_STREAM": lambda: bool(
         int(os.getenv("VLLM_LORA_ENABLE_DUAL_STREAM", "0"))
     ),
+    # If set to 1, use Python spinloop extension to poll in a more efficient
+    # way when using the mp backend.
+    "VLLM_USE_SPINLOOP_EXT": lambda: bool(int(os.getenv("VLLM_USE_SPINLOOP_EXT", "0"))),
 }
 
 
@@ -1839,6 +1934,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_SERVER_DEV_MODE",
         "VLLM_DP_MASTER_IP",
         "VLLM_DP_MASTER_PORT",
+        "VLLM_NIXL_SIDE_CHANNEL_HOST",
         "VLLM_RANDOMIZE_DP_DUMMY_INPUTS",
         "VLLM_CI_USE_S3",
         "VLLM_MODEL_REDIRECT_PATH",
@@ -1858,6 +1954,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_LOG_STATS_INTERVAL",
         "VLLM_DEBUG_LOG_API_SERVER_RESPONSE",
         "VLLM_TUNED_CONFIG_FOLDER",
+        "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR",
         "VLLM_ENGINE_ITERATION_TIMEOUT_S",
         "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
         "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
@@ -1886,6 +1983,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_TEST_FORCE_LOAD_FORMAT",
         "VLLM_ENABLE_CUDA_COMPATIBILITY",
         "VLLM_CUDA_COMPATIBILITY_PATH",
+        "VLLM_SKIP_MODEL_NAME_VALIDATION",
         "LOCAL_RANK",
         "CUDA_VISIBLE_DEVICES",
         "NO_COLOR",

@@ -10,7 +10,6 @@ import vllm.envs as envs
 from vllm.distributed import get_dp_group, get_ep_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     has_flashinfer_nvlink_one_sided,
     has_flashinfer_nvlink_two_sided,
@@ -225,11 +224,8 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
             num_rdma_bytes=num_rdma_bytes,
             low_latency_mode=False,
             num_qps_per_rank=num_qps_per_rank,
+            explicitly_destroy=True,
         )
-        if not current_platform.is_rocm():
-            kwargs.update(
-                explicitly_destroy=True,
-            )
         return kwargs
 
     def get_handle(self, kwargs):
@@ -303,13 +299,10 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
             num_rdma_bytes=num_rdma_bytes,
             low_latency_mode=True,
             num_qps_per_rank=num_qps_per_rank,
+            allow_nvlink_for_low_latency_mode=True,
+            allow_mnnvl=envs.VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL,
+            explicitly_destroy=True,
         )
-        if not current_platform.is_rocm():
-            kwargs.update(
-                allow_nvlink_for_low_latency_mode=True,
-                allow_mnnvl=envs.VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL,
-                explicitly_destroy=True,
-            )
         return kwargs
 
     def get_handle(self, kwargs):
@@ -342,6 +335,7 @@ class NixlEPAll2AllManager(All2AllManagerBase):
     _lock = threading.Lock()
 
     def __init__(self, cpu_group, tcp_store_group=None):
+        assert tcp_store_group is not None
         super().__init__(cpu_group, tcp_store_group)
 
         self.max_num_ep_ranks = envs.VLLM_NIXL_EP_MAX_NUM_RANKS
@@ -577,6 +571,10 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
         self.initialized = False
         self.moe_alltoall: MoeAlltoAll | None = None
         self.mapping = None
+        self.workspace_size = 0
+        self.max_num_tokens = 0
+        self.top_k = 0
+        self.num_experts = 0
 
     def initialize(
         self,
@@ -584,10 +582,57 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
         top_k: int,
         num_experts: int,
         hidden_size: int,
+        dispatch_dtype_bytes_per_elem: int = 0,
+        dispatch_scale_bytes_per_token: int = 0,
     ):
-        """Initialize the MoeAlltoAll workspace."""
+        """Initialize (or grow) the MoeAlltoAll workspace."""
+        if dispatch_dtype_bytes_per_elem == 0:
+            hidden_bytes = hidden_size // 2
+        else:
+            hidden_bytes = hidden_size * dispatch_dtype_bytes_per_elem
+        total_dispatch_payload_size_per_token = (
+            hidden_bytes
+            + dispatch_scale_bytes_per_token
+            + top_k * 4  # int32 topks ids
+            + top_k * 4  # float32 topk weights
+        )
+        combine_payload_size_per_token = hidden_size * 2  # bf16 hidden states
+        needed_workspace_size = moe_a2a_get_workspace_size_per_rank(
+            ep_size=self.world_size,
+            max_num_tokens=max_num_tokens,
+            total_dispatch_payload_size_per_token=total_dispatch_payload_size_per_token,
+            combine_payload_size_per_token=combine_payload_size_per_token,
+        )
+        # workspace_size and max_num_tokens are kernel-side max-bounds, so
+        # heterogeneous MoE layers (e.g. NVFP4 base + bf16 MTP head) only
+        # need the shared workspace grown to the union. top_k and num_experts
+        # must match across layers: top_k is a strict-equality assert at
+        # dispatch (FlashInfer csrc/trtllm_moe_alltoall.cu), and num_experts
+        # feeds the expert-to-rank routing math, so any mismatch would crash
+        # or silently corrupt routing. All ranks see the same MoE layers in
+        # the same order with identical shapes, so the skip / rebuild
+        # branches are taken consistently across ranks.
         if self.initialized:
-            return
+            assert top_k == self.top_k, (
+                "FlashInfer one-sided MoeAlltoAll does not support "
+                f"heterogeneous top_k across MoE layers (got {top_k}, "
+                f"was built with {self.top_k})"
+            )
+            assert num_experts == self.num_experts, (
+                "FlashInfer one-sided MoeAlltoAll does not support "
+                f"heterogeneous num_experts across MoE layers (got "
+                f"{num_experts}, was built with {self.num_experts})"
+            )
+            if (
+                needed_workspace_size <= self.workspace_size
+                and max_num_tokens <= self.max_num_tokens
+            ):
+                return
+
+        self.workspace_size = max(self.workspace_size, needed_workspace_size)
+        self.max_num_tokens = max(self.max_num_tokens, max_num_tokens)
+        self.top_k = top_k
+        self.num_experts = num_experts
 
         self.cleanup()
         gpus_per_node = torch.accelerator.device_count()
@@ -614,34 +659,17 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
         ep_config = MnnvlConfig(
             comm_backend=CustomCommunicator(self.cpu_group),
         )
-        total_dispatch_payload_size_per_token = (
-            hidden_size // 2  # nvfp4 hidden states
-            + hidden_size // 16  # fp8 scaling factors
-            + top_k * 4  # int32 topks ids
-            + top_k * 4  # float32 topk weights
-        )
-        combine_payload_size_per_token = hidden_size * 2  # bf16 hidden states
-        self.workspace_size = moe_a2a_get_workspace_size_per_rank(
-            ep_size=self.world_size,
-            max_num_tokens=max_num_tokens,
-            total_dispatch_payload_size_per_token=total_dispatch_payload_size_per_token,
-            combine_payload_size_per_token=combine_payload_size_per_token,
-        )
 
         self.moe_alltoall = MoeAlltoAll(
             mapping=self.mapping,
-            max_num_tokens=max_num_tokens,
-            top_k=top_k,
-            num_experts=num_experts,
+            max_num_tokens=self.max_num_tokens,
+            top_k=self.top_k,
+            num_experts=self.num_experts,
             workspace_size_per_rank=self.workspace_size,
             mnnvl_config=ep_config,
         )
 
         self.gpus_per_node = gpus_per_node
-        self.max_num_tokens = max_num_tokens
-        self.top_k = top_k
-        self.num_experts = num_experts
-        self.hidden_size = hidden_size
         self.initialized = True
 
         logger.info(
@@ -649,7 +677,10 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
             self.rank,
             self.world_size,
         )
-        dist.barrier()
+        # Scope barrier to the EP group: with PP, different EP groups can
+        # rebuild a different number of times if their MoE layers have
+        # different shape sequences, so a world-level barrier would deadlock.
+        dist.barrier(group=self.cpu_group)
 
     def get_handle(self, kwargs):
         return self

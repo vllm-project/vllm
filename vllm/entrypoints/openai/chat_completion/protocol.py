@@ -92,6 +92,16 @@ class ChatCompletionResponseChoice(OpenAIBaseModel):
     # not part of the OpenAI spec but is useful for tracing the tokens
     # in agent scenarios
     token_ids: list[int] | None = None
+    # Per-token expert routing decisions, base64-encoded ``.npy`` bytes
+    # (numpy serialization). Shape after decode:
+    #   (num_tokens - 1, num_layers, num_experts_per_tok)  dtype uint8/uint16
+    # ``num_tokens - 1`` because the last sampled token has not been
+    # forwarded yet and therefore has no routing data.
+    # Decode:
+    #   np.load(io.BytesIO(base64.b64decode(s)))
+    # ``None`` if (a) the request was aborted before any forward pass,
+    # or (b) ``enable_return_routed_experts`` is off server-side.
+    routed_experts: str | None = None
 
 
 class ChatCompletionResponse(OpenAIBaseModel):
@@ -107,6 +117,9 @@ class ChatCompletionResponse(OpenAIBaseModel):
     # vLLM-specific fields that are not in OpenAI spec
     prompt_logprobs: list[dict[int, Logprob] | None] | None = None
     prompt_token_ids: list[int] | None = None
+    # Rendered prompt text from chat templating (only set when
+    # ``return_prompt_text=True`` on the request).
+    prompt_text: str | None = None
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None, description="KVTransfer parameters."
     )
@@ -134,6 +147,9 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
     system_fingerprint: str | None = None
     # not part of the OpenAI spec but for tracing the tokens
     prompt_token_ids: list[int] | None = None
+    # Rendered prompt text from chat templating (only set when
+    # ``return_prompt_text=True`` on the request); only sent on the first chunk.
+    prompt_text: str | None = None
 
 
 class ChatCompletionToolsParam(OpenAIBaseModel):
@@ -346,6 +362,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "only in the first chunk, and token_ids contains the delta tokens "
             "for each chunk. This is useful for debugging or when you "
             "need to map generated text back to input tokens."
+        ),
+    )
+    return_prompt_text: bool | None = Field(
+        default=None,
+        description=(
+            "If true, the response will include ``prompt_text`` containing the "
+            "prompt string produced by chat templating. In streaming mode it "
+            "is sent only on the first chunk. This is useful for inspecting "
+            "exactly what was fed into the model."
         ),
     )
 

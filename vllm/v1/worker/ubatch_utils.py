@@ -214,7 +214,9 @@ def _make_metadata_with_slice(
             seq_lens_cpu_upper_bound[-1] -= tokens_skipped
 
     assert seq_lens_cpu_upper_bound is not None
-    max_seq_len = int(seq_lens_cpu_upper_bound.max())
+    # Preserve the max_seq_len override set during CUDA-graph capture so
+    # the attention backend selects the correct kernel for SWA layers.
+    max_seq_len = max(int(seq_lens_cpu_upper_bound.max()), attn_metadata.max_seq_len)
 
     num_requests = request_slice.stop - request_slice.start
     num_actual_tokens = token_slice.stop - token_slice.start

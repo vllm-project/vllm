@@ -93,9 +93,9 @@ class MoRIIOConnector(KVConnectorBase_V1):
         self,
         vllm_config: VllmConfig,
         role: KVConnectorRole,
-        kv_cache_config: "KVCacheConfig | None" = None,
+        kv_cache_config: "KVCacheConfig",
     ):
-        super().__init__(vllm_config, role)
+        super().__init__(vllm_config, role, kv_cache_config)
         assert vllm_config.kv_transfer_config is not None, (
             "kv_transfer_config must be set for MoRIIOConnector"
         )

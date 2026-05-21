@@ -62,6 +62,19 @@ steps:
   commands:
     - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 2
+  mirror:
+    amd:
+      device: mi300_1
+      source_file_dependencies:
+      - csrc/quantization/
+      - vllm/model_executor/layers/quantization
+      - tests/kernels/quantization
+      - tests/kernels/quantization/test_rocm_skinny_gemms.py
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      - vllm/model_executor/kernels/
+      depends_on:
+      - image-build-amd
 
 - label: Kernels MoE Test %N
   key: kernels-moe-test
@@ -89,13 +102,28 @@ steps:
   commands:
     - pytest -v -s kernels/mamba
 
+- label: Kernels KDA Test
+  timeout_in_minutes: 20
+  device: h200_18gb
+  source_file_dependencies:
+  - vllm/model_executor/layers/fla/ops/kda.py
+  - vllm/model_executor/layers/fla/ops/chunk_delta_h.py
+  - vllm/model_executor/layers/fla/ops/l2norm.py
+  - tests/kernels/test_kda.py
+  commands:
+    - pytest -v -s kernels/test_kda.py
+
 - label: Kernels DeepGEMM Test (H100)
   key: kernels-deepgemm-test-h100
   timeout_in_minutes: 45
   device: h100
   num_devices: 1
   source_file_dependencies:
+  - cmake/external_projects/deepgemm.cmake
   - tools/install_deepgemm.sh
+  - tools/build_deepgemm_C.py
+  - tools/setup_deepgemm_pythons.sh
+  - tools/check_wheel_deepgemm.py
   - vllm/utils/deep_gemm.py
   - vllm/model_executor/layers/fused_moe
   - vllm/model_executor/layers/quantization
@@ -105,6 +133,7 @@ steps:
   - tests/kernels/attention/test_deepgemm_attention.py
   - tests/quantization/test_cutlass_w4a16.py
   commands:
+    - python3 ../tools/check_wheel_deepgemm.py
     - pytest -v -s kernels/quantization/test_block_fp8.py
     - pytest -v -s kernels/moe/test_deepgemm.py
     - pytest -v -s kernels/moe/test_batched_deepgemm.py
@@ -115,7 +144,7 @@ steps:
   key: kernels-b200
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"
-  device: b200
+  device: b200-k8s
   # optional: true
   source_file_dependencies:
   - csrc/quantization/fp4/
@@ -202,7 +231,7 @@ steps:
 - label: Kernels Fp4 MoE Test (B200)
   key: kernels-fp4-moe-test-b200
   timeout_in_minutes: 60
-  device: b200
+  device: b200-k8s
   num_devices: 1
   optional: true
   commands:
@@ -232,7 +261,7 @@ steps:
 - label: Kernels FusedMoE Layer Test (2 B200s)
   key: kernels-fusedmoe-layer-test-2-b200s
   timeout_in_minutes: 90
-  device: b200
+  device: b200-k8s
   num_devices: 2
   source_file_dependencies:
   - csrc/quantization/cutlass_w8a8/moe/

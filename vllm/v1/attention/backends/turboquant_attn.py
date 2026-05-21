@@ -187,6 +187,10 @@ class TurboQuantMetadata(AttentionMetadata):
     is_prefill: bool = False
     num_decodes: int = 0  # number of decode requests (first in batch)
     num_decode_tokens: int = 0  # tokens from decode requests
+    # CPU-resident copies used by the prefill path for per-request iteration
+    # without per-step D2H syncs.
+    query_start_loc_cpu: torch.Tensor | None = None
+    seq_lens_cpu: torch.Tensor | None = None
 
 
 class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
@@ -230,6 +234,8 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
             is_prefill=(cam.max_query_len > 1),
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
+            query_start_loc_cpu=cam.query_start_loc_cpu,
+            seq_lens_cpu=cam.seq_lens_cpu_upper_bound,
         )
 
 
@@ -474,11 +480,21 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             # first-chunk prefills. Using full-batch max_seq_len breaks
             # this because decode requests inflate max_seq_len.
             prefill_seq_lens = attn_metadata.seq_lens[num_decodes:]
-            # Use CPU-side max to avoid GPU→CPU sync from .item()
-            prefill_max_seq = max(attn_metadata.seq_lens[num_decodes:].tolist())
+            # Use the CPU-resident `seq_lens` upper-bound from the metadata
+            # (populated in the builder) to compute the prefill sub-batch
+            # max without a GPU→CPU sync.
+            if attn_metadata.seq_lens_cpu is not None:
+                prefill_max_seq = int(attn_metadata.seq_lens_cpu[num_decodes:].max())
+            else:
+                prefill_max_seq = attn_metadata.max_seq_len
             prefill_qsl = (
                 attn_metadata.query_start_loc[num_decodes:] - num_decode_tokens
             )
+            prefill_qsl_cpu = None
+            if attn_metadata.query_start_loc_cpu is not None:
+                prefill_qsl_cpu = (
+                    attn_metadata.query_start_loc_cpu[num_decodes:] - num_decode_tokens
+                )
             prefill_meta = TurboQuantMetadata(
                 seq_lens=prefill_seq_lens,
                 slot_mapping=attn_metadata.slot_mapping[num_decode_tokens:N],
@@ -488,6 +504,10 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 max_query_len=attn_metadata.max_query_len,
                 max_seq_len=prefill_max_seq,
                 is_prefill=True,
+                query_start_loc_cpu=prefill_qsl_cpu,
+                seq_lens_cpu=attn_metadata.seq_lens_cpu[num_decodes:]
+                if attn_metadata.seq_lens_cpu is not None
+                else None,
             )
             k = key[:N].view(N, self.num_kv_heads, self.head_size)
             v = value[:N].view(N, self.num_kv_heads, self.head_size)
@@ -578,10 +598,16 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
 
         output = torch.zeros(N, Hq, D, device=query.device, dtype=query.dtype)
 
-        # Convert to Python lists once (single CPU-GPU sync) instead of
-        # per-request .item() calls that each force a sync.
-        qsl = query_start_loc.tolist()
-        seq_lens_list = attn_metadata.seq_lens.tolist()
+        # Prefer the CPU-resident copies from the metadata if populated —
+        # otherwise `.tolist()` on GPU tensors forces a synchronizing copy.
+        if attn_metadata.query_start_loc_cpu is not None:
+            qsl = attn_metadata.query_start_loc_cpu.tolist()
+        else:
+            qsl = query_start_loc.tolist()
+        if attn_metadata.seq_lens_cpu is not None:
+            seq_lens_list = attn_metadata.seq_lens_cpu.tolist()
+        else:
+            seq_lens_list = attn_metadata.seq_lens.tolist()
 
         # Pre-allocate cu_seqlens for single-request flash_attn calls
         # to avoid per-request host→device tensor creation.
@@ -612,7 +638,8 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             if q_len == seq_len:
                 # First-chunk prefill: all K/V are in the current batch.
                 if _HAS_FLASH_ATTN:
-                    self._cu_2[1] = q_len
+                    # Assign to slice to avoid gpu/cpu sync.
+                    self._cu_2[1:2] = q_len
                     cu = self._cu_2
                     out = self._flash_attn_varlen(
                         q=q_seq,
@@ -791,8 +818,9 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             if not hasattr(self, "_cu_2_q"):
                 self._cu_2_q = torch.zeros(2, device=device, dtype=torch.int32)
                 self._cu_2_k = torch.zeros(2, device=device, dtype=torch.int32)
-            self._cu_2_q[1] = q_len
-            self._cu_2_k[1] = seq_len
+            # Assigning to slice uses fill_ which avoids cpu/gpu sync.
+            self._cu_2_q[1:2] = q_len
+            self._cu_2_k[1:2] = seq_len
             cu_seqlens_q = self._cu_2_q
             cu_seqlens_k = self._cu_2_k
             return self._flash_attn_varlen(
