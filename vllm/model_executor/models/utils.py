@@ -876,19 +876,3 @@ def get_layer_index(feature_layer_index: int, num_hidden_layers: int) -> int:
     if feature_layer_index < 0:
         return num_hidden_layers + feature_layer_index + 1
     return feature_layer_index
-
-
-def scatter_output_slices(
-    output: torch.Tensor,
-    indices: list[int],
-    per_item_out_tokens: list[int],
-    dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
-    clone: bool = False,
-) -> None:
-    """Slice a concatenated output tensor and scatter into dest by index."""
-    offset = 0
-    for idx in indices:
-        n_tok = per_item_out_tokens[idx]
-        sliced = output[offset : offset + n_tok]
-        dest[idx] = sliced.clone() if clone else sliced
-        offset += n_tok
