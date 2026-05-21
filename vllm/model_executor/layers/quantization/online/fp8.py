@@ -8,7 +8,6 @@ from torch.nn import Module
 
 if TYPE_CHECKING:
     import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-    from vllm.model_executor.layers.fused_moe import FusedMoE
     from vllm.model_executor.layers.fused_moe.config import (
         FusedMoEQuantConfig,
     )
@@ -21,6 +20,7 @@ from vllm.model_executor.kernels.linear import init_fp8_linear_kernel
 from vllm.model_executor.kernels.linear.scaled_mm import (
     CutlassFP8ScaledMMLinearKernel,
 )
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     select_fp8_moe_backend,
 )
@@ -152,6 +152,8 @@ class Fp8PerTensorOnlineLinearMethod(_Fp8OnlineLinearBase):
         # Update layer with new values.
         replace_parameter(layer, "weight", qweight.t().data)
         replace_parameter(layer, "weight_scale", weight_scale.data)
+
+        self.fp8_linear.process_weights_after_loading(layer)
 
         # Prevent duplicate processing (e.g., during weight reload)
         layer._already_called_process_weights_after_loading = True
@@ -314,7 +316,7 @@ class _Fp8OnlineMoEBase(OnlineMoEMethodBase):
 
     def _setup_kernel(
         self,
-        layer: "FusedMoE",
+        layer: RoutedExperts,
         w13: torch.Tensor,
         w2: torch.Tensor,
         w13_scale: torch.Tensor,
@@ -355,7 +357,6 @@ class _Fp8OnlineMoEBase(OnlineMoEMethodBase):
                 fp8_backend=self.fp8_backend,
                 experts_cls=self.experts_cls,
                 routing_tables=layer._expert_routing_tables(),
-                shared_experts=layer.shared_experts,
             )
 
     def get_fused_moe_quant_config(
@@ -377,6 +378,7 @@ class _Fp8OnlineMoEBase(OnlineMoEMethodBase):
             a1_scale=a1_scale,
             a2_scale=a2_scale,
             block_shape=self.weight_block_size,
+            swiglu_limit=getattr(layer, "swiglu_limit", None),
         )
 
         self._maybe_inject_biases(quant_config, layer)

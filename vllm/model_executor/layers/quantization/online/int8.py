@@ -7,11 +7,11 @@ import torch
 from torch.nn import Module
 
 if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe import FusedMoE
     from vllm.model_executor.layers.fused_moe.config import (
         FusedMoEQuantConfig,
     )
 
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.fused_moe.oracle.int8 import (
     make_int8_moe_kernel,
     make_int8_moe_quant_config,
@@ -91,7 +91,7 @@ class Int8OnlineMoEMethod(OnlineMoEMethodBase):
         replace_parameter(layer, "w13_scale", w13_scale)
         replace_parameter(layer, "w2_scale", w2_scale)
 
-    def _setup_kernel(self, layer: "FusedMoE") -> None:
+    def _setup_kernel(self, layer: RoutedExperts) -> None:
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.moe_quant_config is not None
         assert self.experts_cls is not None
@@ -100,7 +100,6 @@ class Int8OnlineMoEMethod(OnlineMoEMethodBase):
             moe_config=self.moe,
             experts_cls=self.experts_cls,
             routing_tables=layer._expert_routing_tables(),
-            shared_experts=layer.shared_experts,
         )
 
     def get_fused_moe_quant_config(
