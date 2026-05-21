@@ -37,6 +37,7 @@ from vllm.config import (
     update_config,
 )
 from vllm.config.cache import CacheConfig
+from vllm.config.mamba import MambaBackendEnum
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
@@ -59,6 +60,10 @@ from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
+)
+from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateCopyFunc,
+    MambaStateCopyFuncCalculator,
 )
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
@@ -992,12 +997,23 @@ class GPUModelRunner(
             with_numpy=numpy,
         )
 
+    def _get_mamba_state_copy_funcs(self) -> tuple[MambaStateCopyFunc, ...]:
+        copy_funcs = self.model.get_mamba_state_copy_func()
+        if (
+            self.vllm_config.mamba_config.backend == MambaBackendEnum.FLASHINFER
+            and len(copy_funcs) == 8
+        ):
+            return (
+                MambaStateCopyFuncCalculator.mamba2_checkpointing_state_copy_func()
+            )
+        return copy_funcs
+
     def _get_mamba_copy_bufs(self) -> mamba_utils.MambaCopyBuffers:
         if self._mamba_copy_bufs is None:
             self._mamba_copy_bufs = mamba_utils.MambaCopyBuffers.create(
                 self.max_num_reqs,
                 self.kv_cache_config,
-                self.model.get_mamba_state_copy_func(),
+                self._get_mamba_state_copy_funcs(),
                 self._make_buffer,
             )
         return self._mamba_copy_bufs
@@ -1524,7 +1540,7 @@ class GPUModelRunner(
                 self.compilation_config.static_forward_context if is_align else None
             ),
             mamba_state_copy_funcs=(
-                self.model.get_mamba_state_copy_func() if is_align else None
+                self._get_mamba_state_copy_funcs() if is_align else None
             ),
             copy_bufs=self._get_mamba_copy_bufs() if is_align else None,
         )
@@ -4106,7 +4122,7 @@ class GPUModelRunner(
                     self.input_batch,
                     self.requests,
                     self.compilation_config.static_forward_context,
-                    self.model.get_mamba_state_copy_func(),
+                    self._get_mamba_state_copy_funcs(),
                     self._get_mamba_copy_bufs(),
                 )
                 # preprocess_mamba resets num_accepted_tokens_cpu to 1

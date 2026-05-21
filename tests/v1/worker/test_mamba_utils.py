@@ -2,6 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from unittest.mock import MagicMock, patch
 
+import torch
+
+from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateCopyFuncCalculator,
+    get_stable_temporal_copy_spec,
+    get_temporal_copy_spec,
+)
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.worker.mamba_utils import preprocess_mamba
 
@@ -67,3 +74,29 @@ def test_resumed_req_ids_cleared_from_mamba_state_idx():
         )
 
     assert mamba_state_idx == {"keep": 99}
+
+
+def test_checkpointing_temporal_copy_uses_stable_slot():
+    state = torch.arange(10 * 2, dtype=torch.float32).view(10, 2)
+    block_ids = [3, 4, 5, 6]
+
+    old_fi_spec = get_temporal_copy_spec(
+        state, block_ids, cur_block_idx=1, num_accepted_tokens=3
+    )
+    ckpt_spec = get_stable_temporal_copy_spec(
+        state, block_ids, cur_block_idx=1, num_accepted_tokens=3
+    )
+
+    assert old_fi_spec.start_addr == state[block_ids[3]].data_ptr()
+    assert ckpt_spec.start_addr == state[block_ids[1]].data_ptr()
+    assert old_fi_spec.num_elements == ckpt_spec.num_elements == 2
+
+
+def test_mamba2_checkpointing_copy_funcs_keep_ssm_replay_state_stable():
+    funcs = MambaStateCopyFuncCalculator.mamba2_checkpointing_state_copy_func()
+
+    assert len(funcs) == 8
+    assert funcs[1:] == (get_stable_temporal_copy_spec,) * 7
+    assert MambaStateCopyFuncCalculator.mamba2_state_copy_func()[1] is (
+        get_temporal_copy_spec
+    )

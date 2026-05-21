@@ -494,14 +494,22 @@ class MambaMixer2(MambaBase, PluggableLayer):
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
-        # The tuple is (conv_state, ssm_state)
-        self.kv_cache = (torch.tensor([]), torch.tensor([]))
+        # The tuple is (conv_state, ssm_state, old_x, old_B, old_dt,
+        # old_cumAdt, cache_buf_idx, prev_num_accepted_tokens).
+        self.kv_cache = tuple(torch.tensor([]) for _ in range(8))
+        self._checkpointing_old_x = torch.tensor([])
+        self._checkpointing_old_B = torch.tensor([])
+        self._checkpointing_old_dt = torch.tensor([])
+        self._checkpointing_old_cumAdt = torch.tensor([])
+        self._checkpointing_cache_buf_idx = torch.tensor([])
+        self._checkpointing_prev_num_accepted_tokens = torch.tensor([])
 
         self.model_config = model_config
         self.cache_config = cache_config
         self.prefix = prefix
 
         self.num_spec = vllm_config.num_speculative_tokens
+        self.mamba_checkpoint_interval = vllm_config.mamba_config.checkpoint_interval
         if self.num_spec > 0:
             self.register_buffer(
                 "_decode_state_offsets",
@@ -526,6 +534,25 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
         # Check if running on Blackwell (SM100+) for kernel tuning
         self.is_blackwell = current_platform.is_device_capability_family(100)
+
+    def _get_contiguous_checkpointing_buffer(
+        self,
+        source: torch.Tensor,
+        attr_name: str,
+        *,
+        copy_source: bool = False,
+    ) -> torch.Tensor:
+        buffer = getattr(self, attr_name)
+        if (
+            buffer.shape != source.shape
+            or buffer.device != source.device
+            or buffer.dtype != source.dtype
+        ):
+            buffer = torch.zeros_like(source, memory_format=torch.contiguous_format)
+            setattr(self, attr_name, buffer)
+        if copy_source:
+            buffer.copy_(source)
+        return buffer
 
     def forward(
         self,
@@ -591,7 +618,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
         # Triton's autotuner includes tensor dtypes in its cache key,
         # so state_dtype must match what real inference uses.
-        _, ssm_state_dtype = self.get_state_dtype()
+        ssm_state_dtype = self.get_state_dtype()[1]
 
         # SSD kernel autotune keys depend on dtype and head dimensions,
         # not on sequence length or batch size, so a single shape suffices.
@@ -702,6 +729,51 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 else self.kv_cache[0].transpose(-1, -2)
             )
             ssm_state = self.kv_cache[1]
+            old_x = self.kv_cache[2]
+            old_B = self.kv_cache[3]
+            old_dt = self.kv_cache[4]
+            old_cumAdt = self.kv_cache[5]
+            cache_buf_idx = self.kv_cache[6]
+            prev_num_accepted_tokens = self.kv_cache[7]
+            cache_buf_idx_src = cache_buf_idx
+            prev_num_accepted_tokens_src = prev_num_accepted_tokens
+            if not old_x.is_contiguous():
+                old_x = self._get_contiguous_checkpointing_buffer(
+                    old_x, "_checkpointing_old_x"
+                )
+            if not old_B.is_contiguous():
+                old_B = self._get_contiguous_checkpointing_buffer(
+                    old_B, "_checkpointing_old_B"
+                )
+            if not old_dt.is_contiguous():
+                old_dt = self._get_contiguous_checkpointing_buffer(
+                    old_dt, "_checkpointing_old_dt"
+                )
+            if not old_cumAdt.is_contiguous():
+                old_cumAdt = self._get_contiguous_checkpointing_buffer(
+                    old_cumAdt, "_checkpointing_old_cumAdt"
+                )
+            if not cache_buf_idx.is_contiguous():
+                cache_buf_idx = self._get_contiguous_checkpointing_buffer(
+                    cache_buf_idx,
+                    "_checkpointing_cache_buf_idx",
+                    copy_source=True,
+                )
+            if not prev_num_accepted_tokens.is_contiguous():
+                prev_num_accepted_tokens = self._get_contiguous_checkpointing_buffer(
+                    prev_num_accepted_tokens,
+                    "_checkpointing_prev_num_accepted_tokens",
+                    copy_source=True,
+                )
+
+            def reset_checkpointing_cache(block_indices: torch.Tensor) -> None:
+                old_x[block_indices] = 0
+                old_B[block_indices] = 0
+                old_dt[block_indices] = 0
+                old_cumAdt[block_indices] = 0
+                cache_buf_idx[block_indices] = 0
+                prev_num_accepted_tokens[block_indices] = 0
+
             has_initial_states_p = attn_metadata.has_initial_states_p
             prep_initial_states = attn_metadata.prep_initial_states
             chunk_size = attn_metadata.chunk_size
@@ -939,14 +1011,15 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
                     # Write the states
                     ssm_state[cache_blocks_to_fill] = from_where
+                    reset_checkpointing_cache(cache_blocks_to_fill)
 
                 # For all seqs, store the last state (note: might be partial):
                 assert state_indices_tensor_p is not None
-                ssm_state[
-                    state_indices_tensor_p.gather(
-                        1, block_idx_last_scheduled_token_p.unsqueeze(1)
-                    ).squeeze(1)
-                ] = varlen_states[last_chunk_indices_p]
+                last_state_indices = state_indices_tensor_p.gather(
+                    1, block_idx_last_scheduled_token_p.unsqueeze(1)
+                ).squeeze(1)
+                ssm_state[last_state_indices] = varlen_states[last_chunk_indices_p]
+                reset_checkpointing_cache(last_state_indices)
 
             else:
                 # update ssm states
@@ -954,6 +1027,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 #   tensor
                 assert state_indices_tensor_p is not None
                 ssm_state[state_indices_tensor_p] = varlen_states
+                reset_checkpointing_cache(state_indices_tensor_p)
 
         # Process decode requests
         if has_decode:
@@ -1042,10 +1116,21 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 out=preallocated_ssm_out_d.view(num_decode_tokens, -1, self.head_dim),
                 num_accepted_tokens=num_accepted_tokens,
                 cu_seqlens=query_start_loc_d,
+                max_seqlen=state_indices_tensor_d.size(-1),
                 is_blackwell=self.is_blackwell,
+                old_x=old_x,
+                old_B=old_B,
+                old_dt=old_dt,
+                old_cumAdt=old_cumAdt,
+                cache_buf_idx=cache_buf_idx,
+                prev_num_accepted_tokens=prev_num_accepted_tokens,
             )
+        if cache_buf_idx is not cache_buf_idx_src:
+            cache_buf_idx_src.copy_(cache_buf_idx)
+        if prev_num_accepted_tokens is not prev_num_accepted_tokens_src:
+            prev_num_accepted_tokens_src.copy_(prev_num_accepted_tokens)
 
-    def get_state_dtype(self) -> tuple[torch.dtype, torch.dtype]:
+    def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         assert self.model_config is not None
         assert self.cache_config is not None
         return MambaStateDtypeCalculator.mamba2_state_dtype(
@@ -1054,7 +1139,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
             self.cache_config.mamba_ssm_cache_dtype,
         )
 
-    def get_state_shape(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
         return MambaStateShapeCalculator.mamba2_state_shape(
             intermediate_size=self.intermediate_size,
             tp_world_size=get_tensor_model_parallel_world_size(),
@@ -1064,6 +1149,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
             state_size=self.ssm_state_size,
             conv_kernel=self.conv_kernel_size,
             num_spec=self.num_spec,
+            checkpoint_interval=self.mamba_checkpoint_interval,
         )
 
     @property
