@@ -33,6 +33,7 @@ class EagleMistralLarge3Model(DeepseekV2Model):
         self, *, vllm_config: VllmConfig, prefix: str = "", start_layer_id: int = 0
     ):
         nn.Module.__init__(self)
+        self.use_mha = False
 
         config = copy.deepcopy(vllm_config.model_config.hf_config)
         config.first_k_dense_replace += start_layer_id
