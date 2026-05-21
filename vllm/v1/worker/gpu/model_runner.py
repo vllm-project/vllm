@@ -719,9 +719,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     req_index, prompt_len, new_req_data.sampling_params
                 )
                 assert self.prompt_logprobs_worker is not None
-                self.prompt_logprobs_worker.add_request(
-                    req_id, req_index, new_req_data.sampling_params
-                )
+                # Pure prompt_embeds requests have no real prompt token ids,
+                # so prompt logprobs cannot be computed against them.
+                if new_req_data.prompt_token_ids is not None:
+                    self.prompt_logprobs_worker.add_request(
+                        req_id, req_index, new_req_data.sampling_params
+                    )
 
         if scheduler_output.scheduled_new_reqs:
             self.req_states.apply_staged_writes()
