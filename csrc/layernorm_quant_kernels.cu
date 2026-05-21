@@ -59,9 +59,12 @@ __global__ void rms_norm_static_fp8_quant_kernel(
 
   auto* v_in = reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(input_row);
   auto* v_w = reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(weight);
+  using vout_t = q8_n_t<fp8_type, VEC_SIZE>;
+  auto* v_out = reinterpret_cast<vout_t*>(out + blockIdx.x * hidden_size);
   for (int idx = threadIdx.x; idx < hidden_size / VEC_SIZE; idx += blockDim.x) {
     vec_n_t<scalar_t, VEC_SIZE> src1 = v_in[idx];
     vec_n_t<scalar_t, VEC_SIZE> src2 = v_w[idx];
+    vout_t out_vec;
 #pragma unroll
     for (int j = 0; j < VEC_SIZE; j++) {
       float x = static_cast<float>(src1.val[j]);
@@ -72,10 +75,10 @@ __global__ void rms_norm_static_fp8_quant_kernel(
       // Without this round, the fused path is strictly more accurate and
       // disagrees with the composite at exact E4M3 quantization tie boundaries.
       scalar_t out_norm = static_cast<scalar_t>(x * s_variance * w);
-      out[blockIdx.x * hidden_size + idx * VEC_SIZE + j] =
-          scaled_fp8_conversion<true, fp8_type>(static_cast<float>(out_norm),
-                                                scale_inv);
+      out_vec.val[j] = scaled_fp8_conversion<true, fp8_type>(
+          static_cast<float>(out_norm), scale_inv);
     }
+    v_out[idx] = out_vec;
   }
 }
 
@@ -132,12 +135,15 @@ fused_add_rms_norm_static_fp8_quant_kernel(
   // invert scale to avoid division
   float const scale_inv = 1.0f / *scale;
 
+  using vout_t = q8_n_t<fp8_type, width>;
+  auto* v_out = reinterpret_cast<vout_t*>(out);
   for (int idx = threadIdx.x; idx < vec_hidden_size; idx += blockDim.x) {
     int id = blockIdx.x * vec_hidden_size + idx;
     _f16Vec<scalar_t, width> res = residual_v[id];
     _f16Vec<scalar_t, width> w = weight_v[idx];
     using Converter = _typeConvert<scalar_t>;
     using HipT = typename Converter::hip_type;
+    vout_t out_vec;
 #pragma unroll
     for (int i = 0; i < width; ++i) {
       float x = Converter::convert(res.data[i]);
@@ -147,9 +153,10 @@ fused_add_rms_norm_static_fp8_quant_kernel(
       // backend's hip_type for the intermediate since c10::Half/BFloat16 has
       // ambiguous conversions on CUDA and no implicit conversion on ROCm.
       HipT out_norm_h = Converter::convert(x * s_variance * wf);
-      out[id * width + i] = scaled_fp8_conversion<true, fp8_type>(
+      out_vec.val[i] = scaled_fp8_conversion<true, fp8_type>(
           Converter::convert(out_norm_h), scale_inv);
     }
+    v_out[id] = out_vec;
   }
 }
 
@@ -172,7 +179,7 @@ fused_add_rms_norm_static_fp8_quant_kernel(
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
     scalar_t z = input[blockIdx.x * input_stride + idx];
     z += residual[blockIdx.x * hidden_size + idx];
-    float x = (float)z;
+    float x = static_cast<float>(z);
     variance += x * x;
     residual[blockIdx.x * hidden_size + idx] = z;
   }
@@ -208,21 +215,27 @@ void rms_norm_static_fp8_quant(torch::Tensor& out,     // [..., hidden_size]
                                torch::Tensor& scale,   // [1]
                                double epsilon) {
   TORCH_CHECK(out.is_contiguous());
-  int hidden_size = input.size(-1);
-  int input_stride = input.stride(-2);
-  int num_tokens = input.numel() / hidden_size;
+  // Use a local handle to avoid mutating caller's tensor reference
+  torch::Tensor contiguous_input = input;
+  if (contiguous_input.stride(-1) != 1) {
+    contiguous_input = input.contiguous();
+  }
+  TORCH_CHECK(contiguous_input.stride(-1) == 1);
+  int hidden_size = contiguous_input.size(-1);
+  int input_stride = contiguous_input.stride(-2);
+  int num_tokens = contiguous_input.numel() / hidden_size;
 
   // For large num_tokens, use smaller blocks to increase SM concurrency.
   const int max_block_size = (num_tokens < 256) ? 1024 : 256;
   dim3 grid(num_tokens);
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(contiguous_input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(
-      input.scalar_type(), "rms_norm_kernel_scalar_type", [&] {
+      contiguous_input.scalar_type(), "rms_norm_kernel_scalar_type", [&] {
         VLLM_DISPATCH_FP8_TYPES(
             out.scalar_type(), "rms_norm_kernel_fp8_type", [&] {
-              const int calculated_vec_size =
-                  std::gcd(16 / sizeof(scalar_t), hidden_size);
+              const int calculated_vec_size = std::gcd(
+                  static_cast<int>(16 / sizeof(scalar_t)), hidden_size);
               const int block_size =
                   std::min(hidden_size / calculated_vec_size, max_block_size);
               dim3 block(block_size);
@@ -230,10 +243,10 @@ void rms_norm_static_fp8_quant(torch::Tensor& out,     // [..., hidden_size]
                 vllm::rms_norm_static_fp8_quant_kernel<scalar_t, fp8_t,
                                                        vec_size>
                     <<<grid, block, 0, stream>>>(
-                        out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),
-                        input_stride, weight.data_ptr<scalar_t>(),
-                        scale.data_ptr<float>(), epsilon, num_tokens,
-                        hidden_size);
+                        out.data_ptr<fp8_t>(),
+                        contiguous_input.data_ptr<scalar_t>(), input_stride,
+                        weight.data_ptr<scalar_t>(), scale.data_ptr<float>(),
+                        epsilon, num_tokens, hidden_size);
               });
             });
       });
