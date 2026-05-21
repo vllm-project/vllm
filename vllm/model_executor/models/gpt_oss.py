@@ -370,13 +370,6 @@ class GptOssModel(nn.Module, EagleModelMixin):
             num_redundant_experts=0,
         )
 
-    # Hooks for subclasses to transform gate/up layout after permute.
-    def _post_process_w13_weight(self, narrow: torch.Tensor) -> torch.Tensor:
-        return narrow
-
-    def _post_process_w13_bias(self, narrow: torch.Tensor) -> torch.Tensor:
-        return narrow
-
     def _load_weights_mxfp4(
         self,
         ep_rank_end: int,
@@ -1064,7 +1057,6 @@ class GptOssModel(nn.Module, EagleModelMixin):
                     narrow_weight = weight[:, :, 2 * tp_rank_start : 2 * tp_rank_end]
 
                 narrow_weight = narrow_weight.permute(0, 2, 1).contiguous()
-                narrow_weight = self._post_process_w13_weight(narrow_weight)
                 param = params_dict[name]
 
                 param.copy_(narrow_weight)
@@ -1090,7 +1082,6 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 else:
                     narrow_weight = weight[:, 2 * tp_rank_start : 2 * tp_rank_end]
 
-                narrow_weight = self._post_process_w13_bias(narrow_weight)
                 param = params_dict[name]
                 param.copy_(narrow_weight)
                 loaded_params.add(name)

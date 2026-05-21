@@ -58,20 +58,22 @@ class OpenAIPrivacyFilterDecoderLayer(TransformerBlock):
 class OpenAIPrivacyFilterModel(GptOssModel):
     block_cls = OpenAIPrivacyFilterDecoderLayer
 
-    @staticmethod
-    def _interleave_gate_up(narrow: torch.Tensor) -> torch.Tensor:
-        # swigluoai_and_mul expects gate/up interleaved per row; HF
-        # gate_up_proj is concat. MXFP4/quark already store interleaved.
-        e_dim, two_i, *rest = narrow.shape
-        i_dim = two_i // 2
-        return (
-            torch.stack([narrow[:, :i_dim], narrow[:, i_dim:]], dim=2)
-            .reshape(e_dim, two_i, *rest)
-            .contiguous()
-        )
 
-    _post_process_w13_weight = _interleave_gate_up
-    _post_process_w13_bias = _interleave_gate_up
+def _interleave_gate_up_concat_to_pairs(
+    weights: Iterable[tuple[str, torch.Tensor]],
+) -> Iterable[tuple[str, torch.Tensor]]:
+    # HF gate_up_proj is concat [gate | up]; swigluoai_and_mul wants
+    # gate/up interleaved. MXFP4/quark suffixes are already interleaved.
+    for name, weight in weights:
+        if name.endswith(".gate_up_proj") or name.endswith(".gate_up_proj_bias"):
+            *lead, two_i = weight.shape
+            i = two_i // 2
+            weight = (
+                torch.stack([weight[..., :i], weight[..., i:]], dim=-1)
+                .reshape(*lead, two_i)
+                .contiguous()
+            )
+        yield name, weight
 
 
 @attn_type("encoder_only")
@@ -119,4 +121,7 @@ class OpenAIPrivacyFilterForTokenClassification(nn.Module):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return loader.load_weights(
+            _interleave_gate_up_concat_to_pairs(weights),
+            mapper=self.hf_to_vllm_mapper,
+        )
