@@ -17,6 +17,7 @@ from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.network_utils import get_tcp_uri
+from vllm.utils.system_utils import get_mp_context
 from vllm.v1.engine.utils import CoreEngineProcManager, launch_core_engines
 from vllm.v1.executor import Executor
 from vllm.v1.executor.multiproc_executor import MultiprocExecutor
@@ -121,6 +122,10 @@ class ServeSubcommand(CLISubcommand):
                 args.api_server_count,
             )
             args.api_server_count = 1
+
+        # Auto-enable server load tracking when max_unfinished_requests is set
+        if args.max_unfinished_requests is not None:
+            args.enable_server_load_tracking = True
 
         if args.api_server_count < 1:
             run_headless(args)
@@ -293,6 +298,18 @@ def run_multi_api_server(args: argparse.Namespace):
     from vllm.v1.engine.utils import get_engine_zmq_addresses
 
     addresses = get_engine_zmq_addresses(vllm_config, num_api_servers)
+
+    # Create shared memory for tracking unfinished_requests across API servers
+    # Use mp context to match APIServerProcessManager
+    if args.max_unfinished_requests is not None and num_api_servers > 1:
+        mp_context = get_mp_context()
+        shared_unfinished_requests = mp_context.Array("i", num_api_servers, lock=False)
+        # Initialize all slots to 0
+        for i in range(num_api_servers):
+            shared_unfinished_requests[i] = 0
+        args.shared_unfinished_requests = shared_unfinished_requests
+    else:
+        args.shared_unfinished_requests = None
 
     with launch_core_engines(
         vllm_config, executor_class, log_stats, addresses, num_api_servers

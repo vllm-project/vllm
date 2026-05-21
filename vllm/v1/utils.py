@@ -213,6 +213,9 @@ class APIServerProcessManager:
                 client_config["stats_update_address"] = stats_update_address
             if tensor_queue is not None:
                 client_config["tensor_queue"] = tensor_queue
+            unfinished_arr = getattr(args, "shared_unfinished_requests", None)
+            if unfinished_arr is not None:
+                client_config["shared_unfinished_requests"] = unfinished_arr
 
             proc = spawn_context.Process(
                 target=target_server_fn or run_api_server_worker_proc,

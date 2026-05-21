@@ -103,6 +103,20 @@ def decrement_server_load(request: Request):
     request.app.state.server_load_metrics -= 1
 
 
+def _make_overloaded_response():
+    return JSONResponse(
+        status_code=HTTPStatus.SERVICE_UNAVAILABLE.value,
+        content=ErrorResponse(
+            error=ErrorInfo(
+                message="Server is overloaded",
+                type="ServiceUnavailableError",
+                code=HTTPStatus.SERVICE_UNAVAILABLE.value,
+                param=None,
+            )
+        ).model_dump(),
+    )
+
+
 def load_aware_call(func):
     @functools.wraps(func)
     async def wrapper(*args, **kwargs):
@@ -120,7 +134,26 @@ def load_aware_call(func):
         if not hasattr(raw_request.app.state, "server_load_metrics"):
             raw_request.app.state.server_load_metrics = 0
 
+        max_unfinished = getattr(raw_request.app.state, "max_unfinished_requests", None)
+        shared_array = getattr(
+            raw_request.app.state, "shared_unfinished_requests", None
+        )
+
         raw_request.app.state.server_load_metrics += 1
+
+        if max_unfinished is not None:
+            if shared_array is not None:
+                # Multi-server: update shared array and check total
+                server_index = getattr(raw_request.app.state, "server_index", 0)
+                shared_array[server_index] = raw_request.app.state.server_load_metrics
+                total_unfinished = sum(shared_array)
+            else:
+                # Single server: check local count directly
+                total_unfinished = raw_request.app.state.server_load_metrics
+
+            if total_unfinished > max_unfinished:
+                raw_request.app.state.server_load_metrics -= 1
+                return _make_overloaded_response()
         try:
             response = await func(*args, **kwargs)
         except Exception:
