@@ -177,6 +177,14 @@ class CompletionRequest(OpenAIBaseModel):
         "can detect such behavior and terminate early, saving time and tokens.",
     )
 
+    thinking_token_budget: int | None = Field(
+        default=None,
+        description=(
+            "Maximum number of tokens allowed for thinking operations "
+            "(reasoning models). -1 = unlimited."
+        ),
+    )
+
     # --8<-- [end:completion-extra-params]
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
@@ -322,6 +330,7 @@ class CompletionRequest(OpenAIBaseModel):
             extra_args=extra_args or None,
             skip_clone=True,  # Created fresh per request, safe to skip clone
             repetition_detection=self.repetition_detection,
+            thinking_token_budget=self.thinking_token_budget,
         )
 
     @model_validator(mode="before")
@@ -468,16 +477,22 @@ class CompletionResponseChoice(OpenAIBaseModel):
     token_ids: list[int] | None = None  # For response
     prompt_logprobs: list[dict[int, Logprob] | None] | None = None
     prompt_token_ids: list[int] | None = None  # For prompt
-    routed_experts: list[list[list[int]]] | None = None  # [gen_len, num_layers, top_k]
+    # Per-token expert routing decisions, base64-encoded ``.npy`` bytes
+    # (numpy serialization). Shape after decode:
+    #   (num_tokens - 1, num_layers, num_experts_per_tok)  dtype uint8/uint16
+    # ``num_tokens - 1`` because the last sampled token has not been
+    # forwarded yet and therefore has no routing data.
+    # Decode:
+    #   np.load(io.BytesIO(base64.b64decode(s)))
+    # ``None`` if (a) the request was aborted before any forward pass,
+    # or (b) ``enable_return_routed_experts`` is off server-side.
+    routed_experts: str | None = None
 
 
 class CompletionResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"cmpl-{random_uuid()}")
     object: Literal["text_completion"] = "text_completion"
     created: int = Field(default_factory=lambda: int(time.time()))
-    prompt_routed_experts: list[list[list[int]]] | None = (
-        None  # [prompt_len, num_layers, top_k]
-    )
     model: str
     choices: list[CompletionResponseChoice]
     service_tier: Literal["auto", "default", "flex", "scale", "priority"] | None = None
