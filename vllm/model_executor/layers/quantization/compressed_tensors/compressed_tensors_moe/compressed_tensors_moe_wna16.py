@@ -204,9 +204,53 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if self.wna16_moe_backend is not None:
+            from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
+                convert_to_wna16_moe_kernel_format,
+            )
+            from vllm.model_executor.utils import replace_parameter
+
+            (
+                w13,
+                w2,
+                w13_scale,
+                w2_scale,
+                _w13_g_idx,
+                _w2_g_idx,
+                _w13_g_idx_sort_indices,
+                _w2_g_idx_sort_indices,
+                w13_qzeros,
+                w2_qzeros,
+                _w13_input_global_scale,
+                _w2_input_global_scale,
+                _w13_bias,
+                _w2_bias,
+            ) = convert_to_wna16_moe_kernel_format(
+                backend=self.wna16_moe_backend,
+                layer=layer,
+                quant_config=self.weight_quant,
+                input_dtype=None,
+                w13=layer.w13_weight_packed,
+                w2=layer.w2_weight_packed,
+                w13_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
+            )
+
+            replace_parameter(layer, "w13_weight_packed", w13)
+            replace_parameter(layer, "w2_weight_packed", w2)
+            replace_parameter(layer, "w13_weight_scale", w13_scale)
+            replace_parameter(layer, "w2_weight_scale", w2_scale)
+            if w13_qzeros is not None:
+                layer.register_parameter(
+                    "w13_qzeros", torch.nn.Parameter(w13_qzeros, requires_grad=False)
+                )
+            if w2_qzeros is not None:
+                layer.register_parameter(
+                    "w2_qzeros", torch.nn.Parameter(w2_qzeros, requires_grad=False)
+                )
+
             self._setup_kernel(layer)
             return
-        
+
         # Reconfigure packed weights and scales to match moe_wna16 format
         layer.w13_weight_packed = torch.nn.Parameter(
             layer.w13_weight_packed.transpose(1, 2).contiguous().view(torch.uint8),
@@ -223,25 +267,22 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             layer.w2_weight_scale.transpose(1, 2).contiguous(), requires_grad=False
         )
 
-    def _setup_kernel(self, layer: FusedMoE) -> None:
+    def _setup_kernel(self, layer: RoutedExperts) -> None:
         """Build modular kernel and let experts repack weights."""
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        assert self.moe_quant_config is not None
         assert self.experts_cls is not None
         self.moe_kernel = make_wna16_moe_kernel(
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
             experts_cls=self.experts_cls,
-            layer=layer,
             is_k_full=True,
             w13_g_idx=None,
             w2_g_idx=None,
             w13_g_idx_sort_indices=None,
             w2_g_idx_sort_indices=None,
-            routing_tables=layer._maybe_init_expert_routing_tables(),
-            shared_experts=layer.shared_experts,
+            routing_tables=layer._expert_routing_tables(),
         )
-        # Let experts do weight repacking
-        self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
@@ -256,8 +297,8 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         return config_builder(
             w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
-            w1_zp=None,
-            w2_zp=None,
+            w1_zp=getattr(layer, "w13_qzeros", None),
+            w2_zp=getattr(layer, "w2_qzeros", None),
             block_shape=[0, self.group_size],
         )
 
@@ -308,7 +349,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 shared_experts_input=shared_experts_input,
             )
-        
+
         from vllm.model_executor.layers.fused_moe import fused_experts
 
         return fused_experts(
@@ -327,7 +368,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
 
     def apply_monolithic(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,

@@ -361,8 +361,9 @@ def prepare_int4_moe_layer_for_cpu(
     quant_algo: CPUQuantAlgo = CPUQuantAlgo.GPTQ,
     w13_zeros: torch.Tensor | None = None,
     w2_zeros: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
-           torch.Tensor, torch.Tensor]:
+) -> tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
+]:
     """Repack INT4 MoE weights via convert_weight_packed_scale_zp for CPU.
 
     Args:
@@ -389,7 +390,9 @@ def prepare_int4_moe_layer_for_cpu(
         N_w13 = w13_scale.size(2)  # 2*I
         _zp = _symmetric_zp_packed(quant_algo)
         w13_zeros = torch.full(
-            (E, num_groups_w13, N_w13 // 8), _zp, dtype=torch.int32,
+            (E, num_groups_w13, N_w13 // 8),
+            _zp,
+            dtype=torch.int32,
         )
 
     if w2_zeros is None:
@@ -397,7 +400,9 @@ def prepare_int4_moe_layer_for_cpu(
         N_w2 = w2_scale.size(2)  # K
         _zp = _symmetric_zp_packed(quant_algo)
         w2_zeros = torch.full(
-            (E, num_groups_w2, N_w2 // 8), _zp, dtype=torch.int32,
+            (E, num_groups_w2, N_w2 // 8),
+            _zp,
+            dtype=torch.int32,
         )
 
     blocked_w13, blocked_z13, blocked_s13 = convert_weight_packed_scale_zp(
@@ -406,8 +411,7 @@ def prepare_int4_moe_layer_for_cpu(
     blocked_w2, blocked_z2, blocked_s2 = convert_weight_packed_scale_zp(
         w2_packed, w2_zeros, w2_scale, quant_algo
     )
-    return (blocked_w13, blocked_w2, blocked_s13, blocked_s2,
-            blocked_z13, blocked_z2)
+    return (blocked_w13, blocked_w2, blocked_s13, blocked_s2, blocked_z13, blocked_z2)
 
 
 class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
@@ -426,10 +430,14 @@ class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
             moe_config,
             quant_config,
         )
-        self._w1_blocked_scale: torch.Tensor | None = None
-        self._w2_blocked_scale: torch.Tensor | None = None
-        self._w1_blocked_zero: torch.Tensor | None = None
-        self._w2_blocked_zero: torch.Tensor | None = None
+        # Initialize from quant_config.  For GPTQ, these are already blocked
+        # (convert_to_wna16_moe_kernel_format did the repacking).
+        # For compressed_tensors, these are raw and will be overridden by
+        # process_weights_after_loading.
+        self._w1_blocked_scale = quant_config.w1_scale
+        self._w2_blocked_scale = quant_config.w2_scale
+        self._w1_blocked_zero = quant_config.w1_zp
+        self._w2_blocked_zero = quant_config.w2_zp
 
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -489,45 +497,6 @@ class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
     def supports_expert_map(self) -> bool:
         return False
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        """Repack INT4 MoE weights to blocked format for CPU kernel."""
-        from vllm.model_executor.utils import replace_parameter
-
-        w13_packed = layer.w13_weight_packed
-        w2_packed = layer.w2_weight_packed
-        w13_scale = layer.w13_weight_scale
-        w2_scale = layer.w2_weight_scale
-
-        # Use checkpoint zero points if available (GPTQ/AWQ),
-        # otherwise None triggers synthetic zeros for symmetric quant.
-        w13_zeros = getattr(layer, "w13_weight_zero_point", None)
-        w2_zeros = getattr(layer, "w2_weight_zero_point", None)
-
-        group_size = w13_packed.size(1) * 8 // w13_scale.size(1)
-
-        (
-            blocked_w13,
-            blocked_w2,
-            blocked_s13,
-            blocked_s2,
-            blocked_z13,
-            blocked_z2,
-        ) = prepare_int4_moe_layer_for_cpu(
-            w13_packed, w2_packed, w13_scale, w2_scale, group_size,
-            w13_zeros=w13_zeros,
-            w2_zeros=w2_zeros,
-        )
-
-        # Replace packed weights with blocked format
-        replace_parameter(layer, "w13_weight_packed", blocked_w13)
-        replace_parameter(layer, "w2_weight_packed", blocked_w2)
-
-        # Store blocked scales and zeros on self for apply()
-        self._w1_blocked_scale = blocked_s13
-        self._w2_blocked_scale = blocked_s2
-        self._w1_blocked_zero = blocked_z13
-        self._w2_blocked_zero = blocked_z2
-
     def apply(
         self,
         hidden_states: torch.Tensor,
@@ -581,5 +550,9 @@ class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
             self._w1_blocked_zero,
             self._w2_blocked_zero,
             None,  # block_size
+            None,  # w1_bias
+            None,  # w2_bias
+            None,  # alpha
+            None,  # limit
             True,  # is_vnni
         )

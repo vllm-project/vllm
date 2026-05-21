@@ -527,8 +527,7 @@ def _pack_int4_gptq(w_int4: torch.Tensor) -> torch.Tensor:
     return w_packed
 
 
-def _ref_int4_moe(a, w1_int4, w2_int4, w1_s, w2_s, topk_weight, topk_ids,
-                  group_size):
+def _ref_int4_moe(a, w1_int4, w2_int4, w1_s, w2_s, topk_weight, topk_ids, group_size):
     """Reference INT4 W4A16 group-quantized fused MoE in pure torch.
 
     w1_int4: [E, 2*N, K] unsigned int4 (0..15), zero_point=8 (symmetric).
@@ -544,7 +543,7 @@ def _ref_int4_moe(a, w1_int4, w2_int4, w1_s, w2_s, topk_weight, topk_ids,
     for b in range(B):
         for t in range(topk):
             eid = topk_ids[b, t].item()
-            x = a[b:b + 1].float()
+            x = a[b : b + 1].float()
 
             # Dequantize w1: per-group along K dim (columns)
             # w1_int4[eid]: [2*N, K], w1_s[eid]: [K//group_size, 2*N]
@@ -555,9 +554,8 @@ def _ref_int4_moe(a, w1_int4, w2_int4, w1_s, w2_s, topk_weight, topk_ids,
                 k_start = g * group_size
                 k_end = min((g + 1) * group_size, K_dim)
                 w1_dq[:, k_start:k_end] = (
-                    (w1_int4[eid, :, k_start:k_end].float() - 8.0)
-                    * w1_s[eid, g, :].unsqueeze(1)
-                )
+                    w1_int4[eid, :, k_start:k_end].float() - 8.0
+                ) * w1_s[eid, g, :].unsqueeze(1)
 
             ic = torch.matmul(x, w1_dq.t())  # [1, 2*N]
             ic = _silu_and_mul(ic)
@@ -571,9 +569,8 @@ def _ref_int4_moe(a, w1_int4, w2_int4, w1_s, w2_s, topk_weight, topk_ids,
                 n_start = g * group_size
                 n_end = min((g + 1) * group_size, N_dim)
                 w2_dq[:, n_start:n_end] = (
-                    (w2_int4[eid, :, n_start:n_end].float() - 8.0)
-                    * w2_s[eid, g, :].unsqueeze(1)
-                )
+                    w2_int4[eid, :, n_start:n_end].float() - 8.0
+                ) * w2_s[eid, g, :].unsqueeze(1)
 
             oc = torch.matmul(ic, w2_dq.t())  # [1, K_out]
             out[b, t] = oc.squeeze(0)
@@ -607,10 +604,10 @@ def _make_int4_moe_weights(E, N, K, group_size):
     # Per-group scales
     num_groups_w1 = K // group_size
     num_groups_w2 = N // group_size
-    w1_s = (torch.randn(E, num_groups_w1, 2 * N, dtype=torch.bfloat16) * 0.01
-            ).abs() + 0.001
-    w2_s = (torch.randn(E, num_groups_w2, K, dtype=torch.bfloat16) * 0.01
-            ).abs() + 0.001
+    w1_s = (
+        torch.randn(E, num_groups_w1, 2 * N, dtype=torch.bfloat16) * 0.01
+    ).abs() + 0.001
+    w2_s = (torch.randn(E, num_groups_w2, K, dtype=torch.bfloat16) * 0.01).abs() + 0.001
 
     return w1_int4, w2_int4, w1_packed, w2_packed, w1_s, w2_s
 
@@ -623,8 +620,8 @@ def test_int4_w4a16_cpu_fused_moe(M, N, K, E, topk, group_size, seed):
     set_random_seed(seed)
 
     a = torch.randn(M, K, dtype=torch.bfloat16) / (0.5 * K**0.5)
-    w1_int4, w2_int4, w1_packed, w2_packed, w1_s, w2_s = (
-        _make_int4_moe_weights(E, N, K, group_size)
+    w1_int4, w2_int4, w1_packed, w2_packed, w1_s, w2_s = _make_int4_moe_weights(
+        E, N, K, group_size
     )
 
     score = torch.randn(M, E, dtype=torch.bfloat16)
@@ -641,22 +638,34 @@ def test_int4_w4a16_cpu_fused_moe(M, N, K, E, topk, group_size, seed):
         prepare_int4_moe_layer_for_cpu,
     )
 
-    (blocked_w1, blocked_w2, blocked_s1, blocked_s2,
-     blocked_z1, blocked_z2) = prepare_int4_moe_layer_for_cpu(
-        w1_packed, w2_packed, w1_s, w2_s, group_size
+    (blocked_w1, blocked_w2, blocked_s1, blocked_s2, blocked_z1, blocked_z2) = (
+        prepare_int4_moe_layer_for_cpu(w1_packed, w2_packed, w1_s, w2_s, group_size)
     )
 
     out = ops.fused_experts_cpu(
-        a.clone(), blocked_w1, blocked_w2, topk_weight, topk_ids,
+        a.clone(),
+        blocked_w1,
+        blocked_w2,
+        topk_weight,
+        topk_ids,
         False,  # inplace
         ops.CPUQuantMethod.INT4_W4A8,
-        blocked_s1, blocked_s2, blocked_z1, blocked_z2,
+        blocked_s1,
+        blocked_s2,
+        blocked_z1,
+        blocked_z2,
         None,  # block_size
+        None,  # w1_bias
+        None,  # w2_bias
+        None,  # alpha
+        None,  # limit
         True,  # is_vnni
     )
     torch.testing.assert_close(
-        ref_out.bfloat16(), out,
-        atol=INT4_W4A16_ATOL, rtol=INT4_W4A16_RTOL,
+        ref_out.bfloat16(),
+        out,
+        atol=INT4_W4A16_ATOL,
+        rtol=INT4_W4A16_RTOL,
     )
 
 

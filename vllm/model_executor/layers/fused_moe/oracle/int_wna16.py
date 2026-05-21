@@ -77,7 +77,7 @@ def _get_priority_backends() -> list[WNA16MoEBackend]:
 
     if current_platform.is_cpu():
         return [WNA16MoEBackend.CPU]
-    
+
     _AVAILABLE_BACKENDS = [
         WNA16MoEBackend.MARLIN,
         WNA16MoEBackend.BATCHED_MARLIN,
@@ -162,14 +162,12 @@ def make_wna16_moe_kernel(
     moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
     experts_cls: type[mk.FusedMoEExperts] | None,
-    layer: torch.nn.Module,
     is_k_full: bool,
     w13_g_idx: torch.Tensor | None,
     w2_g_idx: torch.Tensor | None,
     w13_g_idx_sort_indices: torch.Tensor | None,
     w2_g_idx_sort_indices: torch.Tensor | None,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    shared_experts: torch.nn.Module | None = None,
 ) -> mk.FusedMoEKernel:
     assert experts_cls is not None
 
@@ -218,8 +216,7 @@ def make_wna16_moe_kernel(
                 is_k_full=is_k_full,
             )
     elif (
-        prepare_finalize.activation_format
-        == mk.FusedMoEActivationFormat.BatchedExperts
+        prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts
     ):
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
         assert max_num_tokens is not None
@@ -238,12 +235,12 @@ def make_wna16_moe_kernel(
     return mk.FusedMoEKernel(
         prepare_finalize,
         experts,
-        shared_experts=shared_experts,
         inplace=(
             not moe_config.disable_inplace
             and not issubclass(experts_cls, mk.FusedMoEExpertsMonolithic)
         ),
     )
+
 
 # ---------------------------------------------------------------------------
 # Per-backend weight post-processing
@@ -654,6 +651,74 @@ def convert_to_wna16_moe_kernel_format(
             w2_g_idx,
             w13_qzeros,
             w2_qzeros,
+            w13_bias,
+            w2_bias,
+        )
+    elif backend == WNA16MoEBackend.CPU:
+        # CPU backend: repack INT4 weights to blocked format via
+        # prepare_int4_moe_layer_for_cpu (mirrors how Marlin repacks
+        # weights in _process_weights_marlin).
+        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+            prepare_int4_moe_layer_for_cpu,
+        )
+
+        # Determine zero points for repacking.
+        # For asymmetric GPTQ: reinterpret checkpoint qzeros as int32.
+        # For symmetric: pass None so prepare_int4_moe_layer_for_cpu
+        # synthesizes the correct zero points.
+        w13_zeros: torch.Tensor | None = None
+        w2_zeros: torch.Tensor | None = None
+        # Check symmetry: GPTQ uses "is_sym", compressed_tensors uses
+        # "symmetric".  Default to symmetric (True) if neither is present.
+        is_sym = getattr(
+            quant_config, "is_sym", getattr(quant_config, "symmetric", True)
+        )
+        if not is_sym:
+            raw_w13_zp = getattr(layer, "w13_qzeros", None)
+            raw_w2_zp = getattr(layer, "w2_qzeros", None)
+            if raw_w13_zp is not None:
+                w13_zeros = (
+                    raw_w13_zp.data.view(torch.int32)
+                    if raw_w13_zp.dtype != torch.int32
+                    else raw_w13_zp.data
+                )
+            if raw_w2_zp is not None:
+                w2_zeros = (
+                    raw_w2_zp.data.view(torch.int32)
+                    if raw_w2_zp.dtype != torch.int32
+                    else raw_w2_zp.data
+                )
+
+        group_size = w13.size(1) * 8 // w13_scale.size(1)
+        (
+            blocked_w13,
+            blocked_w2,
+            blocked_s13,
+            blocked_s2,
+            blocked_z13,
+            blocked_z2,
+        ) = prepare_int4_moe_layer_for_cpu(
+            w13,
+            w2,
+            w13_scale,
+            w2_scale,
+            group_size,
+            w13_zeros=w13_zeros,
+            w2_zeros=w2_zeros,
+        )
+        return (
+            blocked_w13,
+            blocked_w2,
+            blocked_s13,
+            blocked_s2,
+            w13_g_idx,
+            w2_g_idx,
+            None,  # w13_g_idx_sort_indices (unused on CPU)
+            None,  # w2_g_idx_sort_indices (unused on CPU)
+            blocked_z13,
+            blocked_z2,
+            None,  # w13_input_global_scale
+            None,  # w2_input_global_scale
             w13_bias,
             w2_bias,
         )
