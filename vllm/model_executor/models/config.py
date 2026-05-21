@@ -384,16 +384,6 @@ class MambaModelConfig(VerifyAndUpdateConfig):
             # to the block size as the basic granularity for prefix caching.
             if cache_config.mamba_block_size is None:
                 cache_config.mamba_block_size = cache_config.block_size
-            # For KV consumers in P/D disaggregated inference with "align"
-            # mode, Mamba states are NOT transferred via the KV connector.
-            # Set mamba_block_size to max_model_len so the Mamba layer does
-            # not participate in prefix-caching block alignment.
-            if (
-                cache_config.mamba_cache_mode == "align"
-                and vllm_config.kv_transfer_config is not None
-                and vllm_config.kv_transfer_config.is_kv_consumer
-            ):
-                cache_config.mamba_block_size = model_config.max_model_len
         else:
             if cache_config.mamba_cache_mode != "none":
                 cache_config.mamba_cache_mode = "none"
