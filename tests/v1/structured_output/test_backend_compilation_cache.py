@@ -96,12 +96,13 @@ def test_guidance_compile_grammar_reuses_serialized_grammar(monkeypatch):
 def test_lmfe_compile_grammar_reuses_cached_parser(monkeypatch):
     lmfe_mod._cached_compile_character_level_parser.cache_clear()
     parser_builds: list[tuple[str, object]] = []
-    token_enforcer_parsers: list[object] = []
 
     class FakeParser:
         def __init__(self, kind: str, payload: object):
             self.kind = kind
             self.payload = payload
+
+    token_enforcer_parsers: list[FakeParser] = []
 
     class FakeTokenEnforcer:
         def __init__(self, tokenizer_data, parser):
