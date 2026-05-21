@@ -447,7 +447,10 @@ class Qwen3VLMoeForConditionalGeneration(
 
         with self._mark_language_model(vllm_config):
             self.language_model = Qwen3MoeLLMForCausalLM(
-                vllm_config=vllm_config.with_hf_config(config.text_config),
+                vllm_config=vllm_config.with_hf_config(
+                    config.text_config,
+                    architectures=["Qwen3MoeForCausalLM"],
+                ),
                 prefix=maybe_prefix(prefix, "language_model"),
             )
 
