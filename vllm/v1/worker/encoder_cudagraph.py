@@ -216,12 +216,12 @@ class EncoderCudaGraphManager:
         buffers = capture_inputs.buffers
 
         with torch.inference_mode():
-            output = self.model.encoder_forward(mm_kwargs, buffers)
+            output = self.model.encoder_cudagraph_forward(mm_kwargs, buffers)
             output_buffer = torch.empty_like(output)
 
         graph = torch.cuda.CUDAGraph()
         with torch.inference_mode(), torch.cuda.graph(graph):
-            output = self.model.encoder_forward(mm_kwargs, buffers)
+            output = self.model.encoder_cudagraph_forward(mm_kwargs, buffers)
             output_buffer.copy_(output)
 
         # Since the image and video modalities share the same per-patch shape,
@@ -403,7 +403,7 @@ class EncoderCudaGraphManager:
                 )
                 self.graph_misses += len(batch_orig_indices)
                 with torch.inference_mode():
-                    raw = self.model.encoder_forward(batch_mm_kwargs)
+                    raw = self.model.encoder_eager_forward(batch_mm_kwargs)
                 scatter_output_slices(
                     raw,
                     batch_orig_indices,

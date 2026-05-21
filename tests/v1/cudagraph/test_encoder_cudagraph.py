@@ -370,10 +370,16 @@ class SimpleMockViTModel(torch.nn.Module):
         dummy_buf = torch.zeros(n_out, _HIDDEN, device=p.device, dtype=p.dtype)
         return EncoderCudaGraphReplayBuffers(buffers={"dummy_buf": dummy_buf})
 
-    def encoder_forward(
+    def encoder_cudagraph_forward(
         self,
         mm_kwargs: dict[str, Any],
-        buffers: dict[str, torch.Tensor] | None = None,
+        buffers: dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        return self._forward(mm_kwargs["pixel_values"])
+
+    def encoder_eager_forward(
+        self,
+        mm_kwargs: dict[str, Any],
     ) -> torch.Tensor:
         return self._forward(mm_kwargs["pixel_values"])
 
@@ -667,10 +673,16 @@ class SimpleMockViTVideoModel(SimpleMockViTModel):
         dummy_buf = torch.zeros(n_out, _HIDDEN, device=p.device, dtype=p.dtype)
         return EncoderCudaGraphReplayBuffers(buffers={"dummy_buf": dummy_buf})
 
-    def encoder_forward(
+    def encoder_cudagraph_forward(
         self,
         mm_kwargs: dict[str, Any],
-        buffers: dict[str, torch.Tensor] | None = None,
+        buffers: dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        return self._forward(self._get_pixel_values(mm_kwargs))
+
+    def encoder_eager_forward(
+        self,
+        mm_kwargs: dict[str, Any],
     ) -> torch.Tensor:
         return self._forward(self._get_pixel_values(mm_kwargs))
 

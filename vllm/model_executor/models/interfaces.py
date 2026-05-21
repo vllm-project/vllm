@@ -1621,17 +1621,24 @@ class SupportsEncoderCudaGraph(Protocol):
         """Compute buffer values from actual batch inputs for replay."""
         ...
 
-    def encoder_forward(
+    def encoder_cudagraph_forward(
         self,
         mm_kwargs: dict[str, Any],
-        buffers: dict[str, torch.Tensor] | None = None,
+        buffers: dict[str, torch.Tensor],
     ) -> torch.Tensor:
-        """Run the encoder forward pass.
+        """Run the encoder forward pass with precomputed metadata buffers.
 
-        When ``buffers`` is provided, the encoder should use the
-        precomputed metadata (used during CUDA graph capture and replay).
-        When ``None``, the encoder computes metadata internally
-        (used as eager fallback when inputs exceed all budgets).
+        Used during CUDA graph capture and replay.
+        """
+        ...
+
+    def encoder_eager_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> torch.Tensor:
+        """Run the encoder forward pass without precomputed metadata.
+
+        Used as eager fallback when inputs exceed all captured budgets.
         """
         ...
 
