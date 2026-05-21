@@ -309,10 +309,7 @@ class TokenizeParams:
         # we can slice from the requested side in _token_truncation. Disable
         # tokenizer-level truncation because generation tokenizers default to
         # left truncation while callers may request right truncation.
-        if (
-                self.truncation_side is not None
-                and self.truncate_prompt_tokens is not None
-        ):
+        if self.truncation_side is not None and self.truncate_prompt_tokens is not None:
             return dict(
                 truncation=False,
                 add_special_tokens=self.add_special_tokens,
