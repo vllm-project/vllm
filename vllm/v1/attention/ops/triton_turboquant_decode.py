@@ -518,6 +518,7 @@ def _tq_full_dequant_kv(
         v_vals = tl.zeros([BLOCK_D], dtype=tl.float32)
 
     vo_base = bid * stride_vo_b + hid * stride_vo_h + pos * stride_vo_s
+    # Rely on pointer element type for auto-cast: fp32 when value-MSE, fp16 otherwise.
     tl.store(V_out_ptr + vo_base + d_offs, v_vals, mask=d_mask)
 
 
@@ -584,6 +585,8 @@ def triton_turboquant_decode_attention(
 
     if value_mse is None:
         value_mse = True
+    if value_mse and value_centroids is None:
+        raise ValueError("value_centroids must be provided when value_mse=True")
     if value_centroids is None:
         value_centroids = centroids
 

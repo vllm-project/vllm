@@ -111,6 +111,71 @@ class TestTurboQuantConfig:
         with pytest.raises(ValueError, match="Unknown TurboQuant"):
             TurboQuantConfig.from_cache_dtype("turboquant_invalid", head_dim=128)
 
+    def test_store_value_mse_requires_value_midpoints(self):
+        from vllm.v1.attention.ops.triton_turboquant_store import (
+            triton_turboquant_store,
+        )
+
+        cfg = TurboQuantConfig.from_cache_dtype("turboquant_k3v4_nc", head_dim=16)
+        key = torch.empty(1, 1, cfg.head_dim, dtype=torch.float16)
+        value = torch.empty_like(key)
+        kv_cache = torch.empty(
+            1,
+            1,
+            1,
+            cfg.slot_size_aligned,
+            dtype=torch.uint8,
+        )
+        slot_mapping = torch.zeros(1, dtype=torch.int32)
+        PiT = torch.eye(cfg.head_dim, dtype=torch.float32)
+        midpoints = torch.zeros(cfg.n_key_centroids - 1, dtype=torch.float32)
+
+        with pytest.raises(ValueError, match="value_midpoints"):
+            triton_turboquant_store(
+                key,
+                value,
+                kv_cache,
+                slot_mapping,
+                PiT,
+                midpoints,
+                mse_bits=cfg.key_mse_bits,
+                key_packed_size=cfg.key_packed_size,
+                value_quant_bits=cfg.effective_value_quant_bits,
+            )
+
+    def test_decode_value_mse_requires_value_centroids(self):
+        from vllm.v1.attention.ops.triton_turboquant_decode import (
+            triton_turboquant_decode_attention,
+        )
+
+        cfg = TurboQuantConfig.from_cache_dtype("turboquant_k3v4_nc", head_dim=16)
+        query = torch.empty(1, 1, cfg.head_dim, dtype=torch.float16)
+        kv_cache = torch.empty(
+            1,
+            1,
+            1,
+            cfg.slot_size_aligned,
+            dtype=torch.uint8,
+        )
+        block_table = torch.zeros(1, 1, dtype=torch.int32)
+        seq_lens = torch.ones(1, dtype=torch.int32)
+        Pi = torch.eye(cfg.head_dim, dtype=torch.float32)
+        centroids = torch.zeros(cfg.n_key_centroids, dtype=torch.float32)
+
+        with pytest.raises(ValueError, match="value_centroids"):
+            triton_turboquant_decode_attention(
+                query=query,
+                kv_cache=kv_cache,
+                block_table=block_table,
+                seq_lens=seq_lens,
+                Pi=Pi,
+                centroids=centroids,
+                scale=1.0,
+                mse_bits=cfg.key_mse_bits,
+                key_packed_size=cfg.key_packed_size,
+                value_quant_bits=cfg.effective_value_quant_bits,
+            )
+
     # ---- Per-preset concrete value checks (table-driven) ----
 
     @pytest.mark.parametrize("preset", ALL_PRESETS)

@@ -548,6 +548,8 @@ def triton_turboquant_store(
     val_data_bytes = math.ceil(D * value_quant_bits / 8)
     if value_mse is None:
         value_mse = True
+    if value_mse and value_midpoints is None:
+        raise ValueError("value_midpoints must be provided when value_mse=True")
 
     BLOCK_VAL = triton.next_power_of_2(val_data_bytes)
 
@@ -566,8 +568,6 @@ def triton_turboquant_store(
 
         grid = (NH,)
         if value_mse:
-            if value_midpoints is None:
-                value_midpoints = midpoints
             v_flat = value.float().reshape(NH, D)
             v_norms = v_flat.norm(dim=1, keepdim=True)
             v_hat = v_flat / (v_norms + 1e-8)
@@ -629,8 +629,6 @@ def triton_turboquant_store(
 
     v_flat = value.float().reshape(NH, D)
     if value_mse:
-        if value_midpoints is None:
-            value_midpoints = midpoints
         v_norms = v_flat.norm(dim=1, keepdim=True)
         v_hat = v_flat / (v_norms + 1e-8)
         v_store = v_hat @ PiT

@@ -73,10 +73,10 @@ class TurboQuantConfig:
     through softmax.
 
     Named presets (use via --kv-cache-dtype):
-        turboquant_k8v4:   FP8 keys + 4-bit values, 2.6x, +1.17% PPL
-        turboquant_4bit_nc: 4-bit MSE keys + 4-bit values + NC, 3.8x, +2.71%
-        turboquant_k3v4_nc: 3-bit MSE keys + 4-bit values + NC, ~3.5x, +10.63%
-        turboquant_3bit_nc: 3-bit MSE keys + 3-bit values + NC, 4.9x, +20.59%
+        turboquant_k8v4:   FP8 keys + 4-bit MSE values.
+        turboquant_4bit_nc: 4-bit MSE keys + 4-bit MSE values + NC.
+        turboquant_k3v4_nc: 3-bit MSE keys + 4-bit MSE values + NC.
+        turboquant_3bit_nc: 3-bit MSE keys + 3-bit MSE values + NC.
 
     Args:
         head_dim: Attention head dimension (e.g. 64, 96, 128).
@@ -87,7 +87,7 @@ class TurboQuantConfig:
             (default).
         norm_correction: Re-normalize centroid vectors to unit norm before
             inverse rotation during dequant. Fixes quantization-induced norm
-            distortion, improving PPL by ~0.8% at 4-bit.
+            distortion.
     """
 
     head_dim: int = 128
