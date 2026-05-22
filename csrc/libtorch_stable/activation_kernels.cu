@@ -636,6 +636,7 @@ __device__ __forceinline__ T gelu_quick_kernel(const T& x) {
 template <typename T>
 __device__ __forceinline__ T relu2_kernel(const T& x) {
   const float f = (float)x;
+  if (isnan(f)) return x;
   const float r = f > 0.0f ? f : 0.0f;
   return (T)(r * r);
 }
