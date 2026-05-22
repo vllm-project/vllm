@@ -153,9 +153,7 @@ mkdocs.yaml @hmellor
 /vllm/model_executor/models/deepseek_mtp.py @luccafong
 
 # DeepseekV4-specific files
-/vllm/v1/attention/ops/deepseek_v4_ops @zyongye
-/vllm/model_executor/layers/deepseek_compressor.py @zyongye
-/vllm/model_executor/layers/deepseek_v4_attention.py @zyongye
+/vllm/models/deepseek_v4 @zyongye
 /vllm/model_executor/layers/sparse_attn_indexer.py @zyongye
 
 # Mistral-specific files
@@ -172,13 +170,13 @@ mkdocs.yaml @hmellor
 /vllm/model_executor/layers/fla @ZJY0516 @vadiklyutiy
 
 # ROCm related: specify owner with write access to notify AMD folks for careful code review
-/vllm/**/*rocm* @tjtanaa
-/docker/Dockerfile.rocm* @gshtras @tjtanaa
-/vllm/v1/attention/backends/rocm*.py @gshtras @tjtanaa
-/vllm/v1/attention/backends/mla/rocm*.py @gshtras @tjtanaa
-/vllm/v1/attention/ops/rocm*.py @gshtras @tjtanaa
-/vllm/model_executor/layers/fused_moe/rocm*.py @gshtras @tjtanaa
-/csrc/rocm @gshtras @tjtanaa
+/vllm/**/*rocm* @tjtanaa @dllehr-amd
+/docker/Dockerfile.rocm* @tjtanaa @dllehr-amd
+/vllm/v1/attention/backends/rocm*.py @tjtanaa @dllehr-amd
+/vllm/v1/attention/backends/mla/rocm*.py @tjtanaa @dllehr-amd
+/vllm/v1/attention/ops/rocm*.py @tjtanaa @dllehr-amd
+/vllm/model_executor/layers/fused_moe/rocm*.py @tjtanaa @dllehr-amd
+/csrc/rocm @tjtanaa @dllehr-amd
 /requirements/*rocm* @tjtanaa
 /tests/**/*rocm* @tjtanaa
 /docs/**/*rocm* @tjtanaa
