@@ -118,12 +118,13 @@ def pooler_for_token_classify(
     pooling: TokenPoolingMethod | TokenPoolingFn | None = None,
     classifier: ClassifierFn | None = None,
     act_fn: PoolerActivation | None = None,
-):
+) -> TokenPooler:
     if pooling is None:
         pooling = get_tok_pooling_method(pooler_config.get_tok_pooling_type())
 
     vllm_config = get_current_vllm_config()
     model_config = vllm_config.model_config
+    assert model_config.pooler_config is not None
     head = TokenClassifierPoolerHead(
         head_dtype=model_config.head_dtype,
         classifier=classifier,

@@ -13,6 +13,7 @@ from vllm.config.lora import LoRAConfig
 from vllm.lora.layers import (
     ColumnParallelLinearWithLoRA,
     MergedColumnParallelLinearWithLoRA,
+    ReplicatedLinearWithLoRA,
     RowParallelLinearWithLoRA,
 )
 from vllm.lora.lora_model import LoRAModel
@@ -26,6 +27,7 @@ from vllm.lora.model_manager import (
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager, WorkerLoRAManager
+from vllm.model_executor.layers.fused_moe import GateLinear
 from vllm.platforms import current_platform
 
 from .utils import create_peft_lora
@@ -38,7 +40,7 @@ EMBEDDING_MODULES = {
 DEVICE_TYPE = current_platform.device_type
 DEVICES = (
     [f"{DEVICE_TYPE}:{i}" for i in range(min(torch.accelerator.device_count(), 2))]
-    if current_platform.is_cuda_alike()
+    if (current_platform.is_cuda_alike() or current_platform.is_xpu())
     else ["cpu"]
 )
 
@@ -130,6 +132,229 @@ def test_replace_submodules(default_vllm_config, dist_init, dummy_model):
     )
     assert isinstance(model.get_submodule("dense2"), RowParallelLinearWithLoRA)
     assert isinstance(model.get_submodule("layer1.dense2"), RowParallelLinearWithLoRA)
+
+
+def test_wrap_replicated_linear_subclasses(default_vllm_config, dist_init, dummy_model):
+    from vllm.model_executor.layers.linear import ReplicatedLinear
+
+    class CustomReplicatedLinear(ReplicatedLinear):
+        pass
+
+    model = dummy_model
+    model.add_module("custom_gate", CustomReplicatedLinear(10, 10, bias=False))
+
+    manager = LoRAModelManager(
+        model,
+        1,
+        1,
+        1,
+        LoRAConfig(
+            max_lora_rank=8, max_cpu_loras=8, max_loras=8, lora_dtype=DEFAULT_DTYPE
+        ),
+        torch.device(DEVICES[0]),
+    )
+
+    assert isinstance(
+        manager.model.get_submodule("custom_gate"), ReplicatedLinearWithLoRA
+    )
+
+
+def test_wrap_gate_linear(default_vllm_config, dist_init, dummy_model):
+    model = dummy_model
+    model.add_module("router_gate", GateLinear(10, 4, bias=False))
+
+    manager = LoRAModelManager(
+        model,
+        1,
+        1,
+        1,
+        LoRAConfig(
+            max_lora_rank=8, max_cpu_loras=8, max_loras=8, lora_dtype=DEFAULT_DTYPE
+        ),
+        torch.device(DEVICES[0]),
+    )
+
+    assert isinstance(
+        manager.model.get_submodule("router_gate"), ReplicatedLinearWithLoRA
+    )
+
+
+def test_dedup_shared_module_across_paths(default_vllm_config, dist_init, dummy_model):
+    """A module reachable from two attribute paths (e.g. a MoE gate held
+    both directly on the block and inside its inner runner) must produce a
+    single LoRA wrapper. Both paths must end up pointing to that same
+    wrapper instance, and only the canonical path should live in
+    `manager.modules` — otherwise activate_adapter would call `reset_lora`
+    on the alias and clobber weights set under the canonical name.
+    """
+    from vllm.model_executor.layers.linear import ReplicatedLinear
+
+    class AliasContainer(nn.Module):
+        def __init__(self, gate: nn.Module):
+            super().__init__()
+            self.gate = gate  # canonical path: "moe.gate"
+
+            # Inner submodule holding the SAME gate instance under another
+            # path. This mirrors how FusedMoE.runner.gate references the
+            # block's gate in qwen3_moe.
+            class _Runner(nn.Module):
+                def __init__(self, g):
+                    super().__init__()
+                    self.gate = g  # alias path: "moe.runner.gate"
+
+            self.runner = _Runner(gate)
+
+    gate = ReplicatedLinear(10, 4, bias=False)
+    model = dummy_model
+    model.add_module("moe", AliasContainer(gate))
+
+    assert model.moe.gate is model.moe.runner.gate
+
+    manager = LoRAModelManager(
+        model,
+        1,
+        1,
+        1,
+        LoRAConfig(
+            max_lora_rank=8, max_cpu_loras=8, max_loras=8, lora_dtype=DEFAULT_DTYPE
+        ),
+        torch.device(DEVICES[0]),
+    )
+
+    canonical = manager.model.get_submodule("moe.gate")
+    alias = manager.model.get_submodule("moe.runner.gate")
+
+    # Same wrapper instance on both paths so forward through either side
+    # sees the LoRA-augmented module.
+    assert isinstance(canonical, ReplicatedLinearWithLoRA)
+    assert alias is canonical
+
+    # Only the canonical path is tracked as a LoRA target. Tracking the
+    # alias would cause activate_adapter to reset_lora on it after the
+    # canonical entry already populated the weights.
+    assert "moe.gate" in manager.modules
+    assert "moe.runner.gate" not in manager.modules
+
+
+def test_lm_head_exempt_from_dedup(default_vllm_config, dist_init, dummy_model):
+    """The dedup logic must NOT collapse `lm_head` even when it is reachable
+    from another attribute path (tied-embedding models do
+    `self.lm_head = self.model.embed_tokens`, sharing the same nn.Module
+    instance). The lm_head branch additionally rewires `logits_processor`
+    into a `LogitsProcessorWithLoRA`, so skipping it would silently break
+    LoRA on lm_head.
+    """
+    from vllm.lora.layers import LogitsProcessorWithLoRA
+
+    # Add a non-lm_head alias to the same module instance as lm_head. The
+    # dedup keys on id(module); without the lm_head exemption the alias
+    # would consume the wrapped_by_id slot first and lm_head would be
+    # silently skipped, so logits_processor would never be wrapped.
+    model = dummy_model
+    model.add_module("embed_tokens", model.lm_head)
+    assert model.embed_tokens is model.lm_head
+
+    manager = LoRAModelManager(
+        model,
+        1,
+        1,
+        1,
+        LoRAConfig(
+            max_lora_rank=8, max_cpu_loras=8, max_loras=8, lora_dtype=DEFAULT_DTYPE
+        ),
+        torch.device(DEVICES[0]),
+    )
+
+    # lm_head's special handling still ran: logits_processor got wrapped
+    # and the lm_head entry is tracked under self.modules.
+    assert isinstance(
+        manager.model.get_submodule("logits_processor"), LogitsProcessorWithLoRA
+    )
+    assert "lm_head" in manager.modules
+
+
+def test_skip_unsupported_matched_modules(default_vllm_config, dist_init, dummy_model):
+    class UnsupportedContainer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            # This name matches a supported target suffix ("dense1"),
+            # but nn.Linear is not currently a LoRA-wrappable layer type.
+            self.dense1 = nn.Linear(10, 10, bias=False)
+
+    model = dummy_model
+    model.add_module("unsupported", UnsupportedContainer())
+
+    manager = LoRAModelManager(
+        model,
+        1,
+        1,
+        1,
+        LoRAConfig(
+            max_lora_rank=8, max_cpu_loras=8, max_loras=8, lora_dtype=DEFAULT_DTYPE
+        ),
+        torch.device(DEVICES[0]),
+    )
+
+    # Should not crash and should keep unsupported matched modules unchanged.
+    assert isinstance(manager.model.get_submodule("unsupported.dense1"), nn.Linear)
+    assert "unsupported.dense1" not in manager.modules
+
+
+def test_target_modules_fail_closed_on_unsupported_matched_modules(
+    default_vllm_config, dist_init, dummy_model
+):
+    class UnsupportedContainer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.dense1 = nn.Linear(10, 10, bias=False)
+
+    model = dummy_model
+    model.add_module("unsupported", UnsupportedContainer())
+
+    with pytest.raises(ValueError, match="unsupported.dense1"):
+        LoRAModelManager(
+            model,
+            1,
+            1,
+            1,
+            LoRAConfig(
+                max_lora_rank=8,
+                max_cpu_loras=8,
+                max_loras=8,
+                lora_dtype=DEFAULT_DTYPE,
+                target_modules=["dense1"],
+            ),
+            torch.device(DEVICES[0]),
+        )
+
+
+def test_get_dummy_lora_warmup_rank_for_fully_sharded_moe():
+    manager = LoRAModelManager.__new__(LoRAModelManager)
+    manager.lora_config = LoRAConfig(
+        max_lora_rank=64,
+        max_cpu_loras=1,
+        max_loras=1,
+        lora_dtype=DEFAULT_DTYPE,
+        fully_sharded_loras=True,
+    )
+
+    class DummyModule:
+        def __init__(self, tp_size: int, fully_sharded: bool):
+            self.tp_size = tp_size
+            self.fully_sharded = fully_sharded
+
+    manager.modules = {
+        "model.layers.0.self_attn.q_proj": DummyModule(
+            tp_size=32,
+            fully_sharded=True,
+        ),
+        "model.layers.0.mlp.experts": DummyModule(
+            tp_size=32,
+            fully_sharded=True,
+        ),
+    }
+
+    assert manager.get_dummy_lora_warmup_rank(8) == 32
 
 
 @pytest.mark.parametrize("device", DEVICES)
@@ -796,107 +1021,19 @@ def test_target_modules_none_uses_all(
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_load_adapter_warns_on_unsupported_modules(
-    default_vllm_config, dist_init, dummy_model_gate_up, device, tmp_path
+def test_target_modules_match_packed_runtime_modules(
+    default_vllm_config, dist_init, dummy_model_gate_up, device
 ):
-    """Test that _load_adapter warns when a LoRA adapter contains modules
-    not in the model's supported LoRA target modules."""
-    from unittest.mock import patch
-
-    import vllm.lora.worker_manager as wm_module
-
-    lora_config = LoRAConfig(
-        max_lora_rank=8, max_cpu_loras=4, max_loras=4, lora_dtype=DEFAULT_DTYPE
-    )
-
-    dummy_lora_files = f"{tmp_path}/lora_adapter"
-    os.makedirs(dummy_lora_files, exist_ok=True)
-    create_peft_lora(
+    """Packed runtime modules should be selected by their adapter-visible names."""
+    _test_target_modules(
         dummy_model_gate_up,
-        save_dir=dummy_lora_files,
-        target_modules=["layer1.dense1", "dense2"],
-        lora_dtype=DEFAULT_DTYPE,
+        ["gate_proj"],
+        device,
+        expected_lora=[("gate_up_proj", MergedColumnParallelLinearWithLoRA)],
+        expected_no_lora=[
+            ("dense1", ColumnParallelLinearWithLoRA),
+            ("dense2", RowParallelLinearWithLoRA),
+            ("layer1.dense1", ColumnParallelLinearWithLoRA),
+            ("layer1.dense2", RowParallelLinearWithLoRA),
+        ],
     )
-
-    model_config = ModelConfig(max_model_len=16)
-    vllm_config = VllmConfig(model_config=model_config, lora_config=lora_config)
-    vllm_config.scheduler_config.max_num_seqs = 4
-    vllm_config.scheduler_config.max_num_batched_tokens = 2
-
-    worker_manager = WorkerLoRAManager(vllm_config, device, EMBEDDING_MODULES)
-    worker_manager.vocab_size = dummy_model_gate_up.unpadded_vocab_size
-    worker_manager.create_lora_manager(dummy_model_gate_up)
-
-    # Patch from_local_checkpoint to inject an unsupported module
-    original_from_checkpoint = LoRAModel.from_local_checkpoint
-
-    def patched_from_checkpoint(*args, **kwargs):
-        lora = original_from_checkpoint(*args, **kwargs)
-        lora.loras["unsupported_module"] = LoRALayerWeights(
-            module_name="unsupported_module",
-            rank=8,
-            lora_alpha=16,
-            lora_a=torch.randn(8, 10),
-            lora_b=torch.randn(10, 8),
-        )
-        return lora
-
-    lora_request = LoRARequest("test", 1, dummy_lora_files)
-    with (
-        patch.object(LoRAModel, "from_local_checkpoint", patched_from_checkpoint),
-        patch.object(wm_module.logger, "warning_once") as mock_warning,
-    ):
-        worker_manager._load_adapter(lora_request)
-        warning_args = mock_warning.call_args_list
-        found = any("unsupported_module" in str(call) for call in warning_args)
-        assert found, (
-            f"Expected warning about 'unsupported_module', got: {warning_args}"
-        )
-
-
-@pytest.mark.parametrize("device", DEVICES)
-def test_load_adapter_warns_on_target_modules_restriction(
-    default_vllm_config, dist_init, dummy_model_gate_up, device, tmp_path
-):
-    """Test that _load_adapter warns when a LoRA adapter contains modules
-    excluded by the deployment-time target_modules restriction."""
-    from unittest.mock import patch
-
-    import vllm.lora.worker_manager as wm_module
-
-    # Restrict to only dense2 — adapter has dense1 which will be excluded
-    lora_config = LoRAConfig(
-        max_lora_rank=8,
-        max_cpu_loras=4,
-        max_loras=4,
-        lora_dtype=DEFAULT_DTYPE,
-        target_modules=["dense2"],
-    )
-
-    dummy_lora_files = f"{tmp_path}/lora_adapter"
-    os.makedirs(dummy_lora_files, exist_ok=True)
-    create_peft_lora(
-        dummy_model_gate_up,
-        save_dir=dummy_lora_files,
-        target_modules=["layer1.dense1", "dense2"],
-        lora_dtype=DEFAULT_DTYPE,
-    )
-
-    model_config = ModelConfig(max_model_len=16)
-    vllm_config = VllmConfig(model_config=model_config, lora_config=lora_config)
-    vllm_config.scheduler_config.max_num_seqs = 4
-    vllm_config.scheduler_config.max_num_batched_tokens = 2
-
-    worker_manager = WorkerLoRAManager(vllm_config, device, EMBEDDING_MODULES)
-    worker_manager.vocab_size = dummy_model_gate_up.unpadded_vocab_size
-    worker_manager.create_lora_manager(dummy_model_gate_up)
-
-    lora_request = LoRARequest("test", 1, dummy_lora_files)
-    with patch.object(wm_module.logger, "warning_once") as mock_warning:
-        worker_manager._load_adapter(lora_request)
-        warning_args = mock_warning.call_args_list
-        # dense1 is supported by the model but excluded by target_modules
-        found = any("target_modules" in str(call) for call in warning_args)
-        assert found, (
-            f"Expected warning about target_modules restriction, got: {warning_args}"
-        )

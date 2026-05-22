@@ -3,8 +3,8 @@
 from collections import OrderedDict
 from collections.abc import Iterable
 
-from vllm.v1.kv_offload.abstract import OffloadKey
-from vllm.v1.kv_offload.cpu.policies.abstract import BlockStatus, CachePolicy
+from vllm.v1.kv_offload.base import OffloadKey
+from vllm.v1.kv_offload.cpu.policies.base import BlockStatus, CachePolicy
 
 
 class ARCCachePolicy(CachePolicy):
@@ -93,6 +93,13 @@ class ARCCachePolicy(CachePolicy):
                 self.target_t1_size = max(self.target_t1_size - delta, 0)
                 # move to MRU position (end) to keep it fresh in the ghost list
                 self.b2.move_to_end(key)
+
+    def clear(self) -> None:
+        self.t1.clear()
+        self.t2.clear()
+        self.b1.clear()
+        self.b2.clear()
+        self.target_t1_size = 0.0
 
     def evict(
         self, n: int, protected: set[OffloadKey]

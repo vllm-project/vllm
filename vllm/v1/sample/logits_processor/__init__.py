@@ -18,7 +18,6 @@ from vllm.v1.sample.logits_processor.builtin import (
     LogitBiasLogitsProcessor,
     MinPLogitsProcessor,
     MinTokensLogitsProcessor,
-    ThinkingTokenBudgetLogitsProcessor,
     process_dict_updates,
 )
 from vllm.v1.sample.logits_processor.interface import (
@@ -51,7 +50,6 @@ BUILTIN_LOGITS_PROCESSORS: list[type[LogitsProcessor]] = [
     MinTokensLogitsProcessor,
     LogitBiasLogitsProcessor,
     MinPLogitsProcessor,
-    ThinkingTokenBudgetLogitsProcessor,
 ]
 
 
@@ -356,5 +354,4 @@ __all__ = [
     "STR_POOLING_REJECTS_LOGITSPROCS",
     "LOGITSPROCS_GROUP",
     "AdapterLogitsProcessor",
-    "ThinkingTokenBudgetLogitsProcessor",
 ]

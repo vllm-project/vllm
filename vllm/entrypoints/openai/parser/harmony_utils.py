@@ -3,7 +3,6 @@
 
 import datetime
 from collections.abc import Iterable, Sequence
-from typing import Literal
 
 from openai.types.responses.tool import Tool
 from openai_harmony import (
@@ -26,6 +25,42 @@ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionTools
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+
+def is_function_recipient(
+    recipient: str,
+    allowed_function_tool_names: frozenset[str] | None = None,
+) -> bool:
+    """Check whether *recipient* refers to a function tool call.
+
+    The optional *allowed_function_tool_names* parameter is used by the
+    Responses API to distinguish bare function-call recipients (missing the
+    ``functions.`` prefix) from MCP tool calls.  When provided, a bare
+    recipient is only treated as a function call if it appears in the set.
+    The Chat Completions path omits this parameter so that all bare
+    recipients are accepted as function calls (the heuristic fallback).
+    """
+    if not recipient:
+        return False
+    if recipient.startswith("<|"):
+        return False
+    if recipient.startswith("functions."):
+        return len(recipient) > len("functions.")
+    if recipient == "assistant":
+        return False
+    if recipient in BUILTIN_TOOL_TO_MCP_SERVER_LABEL:
+        return False
+    first_segment = recipient.split(".", 1)[0]
+    if first_segment in BUILTIN_TOOL_TO_MCP_SERVER_LABEL:
+        return False
+    if allowed_function_tool_names is not None:
+        return recipient in allowed_function_tool_names
+    return True
+
+
+def extract_function_from_recipient(recipient: str) -> str:
+    return recipient.removeprefix("functions.")
+
 
 REASONING_EFFORT = {
     "high": ReasoningEffort.HIGH,
@@ -66,7 +101,7 @@ def get_encoding():
 
 def get_system_message(
     model_identity: str | None = None,
-    reasoning_effort: Literal["high", "medium", "low"] | None = None,
+    reasoning_effort: str | None = None,
     start_date: str | None = None,
     browser_description: str | None = None,
     python_description: str | None = None,
@@ -84,6 +119,12 @@ def get_system_message(
         )
         sys_msg_content = sys_msg_content.with_model_identity(new_identity)
     if reasoning_effort is not None:
+        if reasoning_effort not in REASONING_EFFORT:
+            supported_values = ", ".join(REASONING_EFFORT)
+            raise ValueError(
+                f"reasoning_effort={reasoning_effort!r} is not supported by "
+                f"Harmony. Supported values are: {supported_values}."
+            )
         sys_msg_content = sys_msg_content.with_reasoning_effort(
             REASONING_EFFORT[reasoning_effort]
         )

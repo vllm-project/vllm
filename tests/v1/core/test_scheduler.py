@@ -1892,6 +1892,7 @@ def create_scheduler_with_priority(
         log_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
         block_size=block_size,
+        hash_block_size=block_size,
     )
 
 
@@ -2544,6 +2545,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.finished_req_ids_dict = None
     scheduler.vllm_config = Mock()
     scheduler.vllm_config.model_config.enable_return_routed_experts = False
+    scheduler.enable_return_routed_experts = False
     scheduler.recompute_kv_load_failures = False
     scheduler.make_stats = Mock(return_value=None)
     scheduler.max_model_len = 128
@@ -4008,6 +4010,7 @@ def _create_encoder_decoder_scheduler(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
         block_size=block_size,
+        hash_block_size=block_size,
         structured_output_manager=StructuredOutputManager(vllm_config),
     )
 

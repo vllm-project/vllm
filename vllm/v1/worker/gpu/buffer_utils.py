@@ -167,7 +167,7 @@ class StagedWriteTensor:
 
         # Special handling for write_contents
         write_contents = async_tensor_h2d(
-            self._staged_write_contents, self.dtype, self.device, pin_memory=True
+            self._staged_write_contents, self.dtype, self.device
         )
 
         # Write diffs to the GPU buffer
