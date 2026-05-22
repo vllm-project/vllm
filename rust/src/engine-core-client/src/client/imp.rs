@@ -16,9 +16,10 @@ use crate::client::{AbortCause, AbortRequest};
 use crate::error::{client_closed, dispatcher_closed, unexpected_dispatcher_output};
 use crate::metrics::record_scheduler_stats;
 use crate::protocol::stats::SchedulerStats;
+use crate::protocol::utility::UtilityOutput;
 use crate::protocol::{
     ClassifiedEngineCoreOutputs, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequestType,
-    UtilityOutput, encode_msgpack,
+    encode_msgpack,
 };
 use crate::transport::{ConnectedEngine, EngineId};
 use crate::{Error, Result, transport};
@@ -72,7 +73,7 @@ impl ClientInner {
     }
 
     /// Allocate the next utility `call_id` and register its waiting receiver.
-    pub fn allocate_and_register_utility_call(&self) -> Result<(i64, UtilityReceiver)> {
+    pub fn allocate_and_register_utility_call(&self) -> Result<(u64, UtilityReceiver)> {
         let mut registry = self.utility_reg.lock();
         if registry.is_closed() {
             return Err(self.closed_error());
@@ -83,7 +84,7 @@ impl ClientInner {
     /// Undo a batch of utility call allocations when the fan-out send fails
     /// partway through. Silently ignores unknown call ids so callers can pass
     /// the full set without first filtering successful sends.
-    pub fn unregister_utility_calls(&self, call_ids: impl IntoIterator<Item = i64>) {
+    pub fn unregister_utility_calls(&self, call_ids: impl IntoIterator<Item = u64>) {
         self.utility_reg.lock().unregister_many(call_ids);
     }
 
@@ -160,7 +161,12 @@ impl ClientInner {
     /// Resolve one utility output to the waiting caller. Returns `true` if a
     /// waiting caller existed.
     pub fn resolve_utility_output(&self, output: UtilityOutput) -> bool {
-        match self.utility_reg.lock().resolve(&output.call_id) {
+        let Some(call_id) = output.call_id.as_u64() else {
+            // Currently, all utility call issued by the client should have unsigned call IDs.
+            return false;
+        };
+
+        match self.utility_reg.lock().resolve(&call_id) {
             Some(sender) => {
                 sender.send(Ok(output)).unwrap_or_default();
                 true
@@ -342,13 +348,13 @@ pub(crate) async fn run_output_dispatcher_loop(
                     let call_id = utility.output.call_id;
                     if inner.resolve_utility_output(utility.output) {
                         trace!(
-                            call_id,
+                            %call_id,
                             engine_index = utility.engine_index,
                             "resolved utility output"
                         );
                     } else {
                         warn!(
-                            call_id,
+                            %call_id,
                             engine_index = utility.engine_index,
                             "dropping output for unexpected utility call"
                         );
