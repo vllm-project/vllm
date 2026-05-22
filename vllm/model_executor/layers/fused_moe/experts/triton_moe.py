@@ -31,9 +31,6 @@ from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
     moe_kernel_quantize_input,
 )
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    is_deep_gemm_e8m0_used,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
@@ -296,7 +293,6 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             and self.quant_config.use_fp8_w8a8
             and self.block_shape == [128, 128]
             and lora_context is None
-            and not is_deep_gemm_e8m0_used()
         ):
             qintermediate_cache2, a2q_scale = ops.silu_and_mul_per_block_quant(
                 intermediate_cache1.view(-1, N),
