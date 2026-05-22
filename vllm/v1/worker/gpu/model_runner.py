@@ -1091,13 +1091,25 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # FIXME: Replace this with LoRA warmup:
                 # https://github.com/vllm-project/vllm/pull/35536
                 assert hasattr(self, "lora_manager")
-                self.lora_manager._adapter_manager.set_adapter_mapping(
+                adapter_manager = self.lora_manager._adapter_manager
+                adapter_manager.set_adapter_mapping(
                     LoRAMapping(
                         index_mapping=(0,) * input_batch.num_tokens_after_padding,
                         prompt_mapping=(0,) * input_batch.num_reqs,
                         is_prefill=True,
                     )
                 )
+                seen_wrappers: set[int] = set()
+                for punica_wrapper in adapter_manager.punica_wrapper_mapping.values():
+                    if id(punica_wrapper) in seen_wrappers:
+                        continue
+                    seen_wrappers.add(id(punica_wrapper))
+                    for kernel_meta in (
+                        punica_wrapper.token_mapping_meta,  # type: ignore[attr-defined]
+                        punica_wrapper.prompt_mapping_meta,  # type: ignore[attr-defined]
+                    ):
+                        kernel_meta.no_lora_flag_cpu[0] = False
+                        kernel_meta.num_active_loras_cpu[0] = 1
 
         attn_metadata = None
         slot_mappings_by_layer = None
