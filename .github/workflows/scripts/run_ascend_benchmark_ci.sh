@@ -147,13 +147,21 @@ export_sudo_preserved_env_vars() {
   done
 }
 
-build_root_helper_shell_wrapper() {
-  cat <<'EOF'
+prepare_root_helper_python_bin() {
+  local helper_runtime_root=${runtime_root:-${VLLM_HUST_CI_RUNTIME_ROOT:-${GITHUB_WORKSPACE:-$PWD}/.ci-runtime}}
+  local helper_python_bin="${ROOT_HELPER_PYTHON_BIN_FILE:-$helper_runtime_root/root-helper-python.sh}"
+  local resolved_python_bin=${PYTHON_BIN:?PYTHON_BIN must be set}
+  local quoted_python_bin
+
+  quoted_python_bin=$(printf '%q' "$resolved_python_bin")
+  mkdir -p "$(dirname "$helper_python_bin")"
+  cat >"$helper_python_bin" <<EOF
+#!/usr/bin/env bash
 set -euo pipefail
 
-if [[ -n "${HUST_ATB_SET_ENV:-}" && -f "${HUST_ATB_SET_ENV}" ]]; then
+if [[ -n "\${HUST_ATB_SET_ENV:-}" && -f "\${HUST_ATB_SET_ENV}" ]]; then
   set +u
-  source "${HUST_ATB_SET_ENV}" --cxx_abi=1
+  source "\${HUST_ATB_SET_ENV}" --cxx_abi=1
   set -u
 elif [[ -f /usr/local/Ascend/nnal/atb/set_env.sh ]]; then
   set +u
@@ -161,8 +169,10 @@ elif [[ -f /usr/local/Ascend/nnal/atb/set_env.sh ]]; then
   set -u
 fi
 
-exec "$@"
+exec ${quoted_python_bin} "\$@"
 EOF
+  chmod 755 "$helper_python_bin"
+  printf '%s\n' "$helper_python_bin"
 }
 
 benchmark_root_helper_fix_command() {
@@ -215,7 +225,7 @@ verify_root_helper_ready() {
 
 run_ascend_root_helper() {
   local preserve_list
-  local shell_wrapper
+  local helper_python_bin
 
   if [[ "$ASCEND_BENCHMARK_USE_SUDO" != "1" ]]; then
     echo "run_ascend_root_helper requires ASCEND_BENCHMARK_USE_SUDO=1" >&2
@@ -224,12 +234,12 @@ run_ascend_root_helper() {
 
   export_sudo_preserved_env_vars
   preserve_list=$(build_sudo_env_preserve_list)
-  shell_wrapper=$(build_root_helper_shell_wrapper)
+  helper_python_bin=$(prepare_root_helper_python_bin)
 
   if [[ -n "$preserve_list" ]]; then
-    sudo --preserve-env="$preserve_list" -E -n bash -lc "$shell_wrapper" bash "$ASCEND_BENCHMARK_ROOT_HELPER" "$@"
+    PYTHON_BIN="$helper_python_bin" sudo --preserve-env="$preserve_list" -E -n "$ASCEND_BENCHMARK_ROOT_HELPER" "$@"
   else
-    sudo -E -n bash -lc "$shell_wrapper" bash "$ASCEND_BENCHMARK_ROOT_HELPER" "$@"
+    PYTHON_BIN="$helper_python_bin" sudo -E -n "$ASCEND_BENCHMARK_ROOT_HELPER" "$@"
   fi
 }
 
@@ -513,14 +523,14 @@ start_server() {
   if command -v setsid >/dev/null 2>&1; then
     if [[ "$ASCEND_BENCHMARK_USE_SUDO" == "1" ]]; then
       local preserve_list
-      local shell_wrapper
+      local helper_python_bin
       export_sudo_preserved_env_vars
       preserve_list=$(build_sudo_env_preserve_list)
-      shell_wrapper=$(build_root_helper_shell_wrapper)
+      helper_python_bin=$(prepare_root_helper_python_bin)
       if [[ -n "$preserve_list" ]]; then
-        setsid sudo --preserve-env="$preserve_list" -E -n bash -lc "$shell_wrapper" bash "$ASCEND_BENCHMARK_ROOT_HELPER" serve >"$SERVER_LOG" 2>&1 &
+        PYTHON_BIN="$helper_python_bin" setsid sudo --preserve-env="$preserve_list" -E -n "$ASCEND_BENCHMARK_ROOT_HELPER" serve >"$SERVER_LOG" 2>&1 &
       else
-        setsid sudo -E -n bash -lc "$shell_wrapper" bash "$ASCEND_BENCHMARK_ROOT_HELPER" serve >"$SERVER_LOG" 2>&1 &
+        PYTHON_BIN="$helper_python_bin" setsid sudo -E -n "$ASCEND_BENCHMARK_ROOT_HELPER" serve >"$SERVER_LOG" 2>&1 &
       fi
     else
       setsid "${VLLM_CLI[@]}" serve "$MODEL_NAME" \
@@ -670,12 +680,16 @@ if [[ "$ASCEND_BENCHMARK_USE_SUDO" == "1" ]]; then
   if ! verify_root_helper_ready; then
     exit 1
   fi
-  if ! wait_for_ascend_runtime_ready; then
+  if wait_for_ascend_runtime_ready; then
+    :
+  else
     status=$?
     exit "$status"
   fi
 else
-  if ! ensure_runner_npu_ready; then
+  if ensure_runner_npu_ready; then
+    :
+  else
     status=$?
     if [[ "$status" -eq 2 ]]; then
       exit 0
