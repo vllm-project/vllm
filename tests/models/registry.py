@@ -850,6 +850,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "nvidia/Cosmos3-Nano",
         max_model_len=4096,
         min_transformers_version="4.57",
+        is_available_online=False,
     ),
     "DeepseekVLV2ForCausalLM": _HfExamplesInfo(
         "deepseek-ai/deepseek-vl2-tiny",
