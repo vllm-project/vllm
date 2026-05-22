@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     LoadSpec,
+    ReqMeta,
     RequestTracker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler import (
@@ -264,4 +265,86 @@ def test_resumed_from_preemption_without_load_still_saves():
     assert req_meta.can_save is True
     assert req_meta.load_spec is None
     tracker = scheduler._request_trackers["req-0"]
+    assert tracker.num_saved_tokens == 48
+
+
+# Focused tests for ReqMeta.from_request_tracker — the centralized guard that
+# enforces "a ReqMeta never carries both a save and a load".
+
+
+def test_from_request_tracker_load_overrides_caller_skip_save():
+    # Caller asks for skip_save=False, but load_spec.can_load=True. The
+    # function must force skip_save=True to avoid producing a ReqMeta the
+    # worker would enqueue on both kv_send_thread and kv_recv_thread.
+    tracker = RequestTracker(
+        req_id="req-0",
+        token_len=48,
+        allocated_block_ids=([0, 1, 2],),
+        num_saved_tokens=0,
+    )
+    load_spec = LoadSpec(
+        vllm_cached_tokens=0, kvpool_cached_tokens=48, can_load=True
+    )
+
+    req_meta = ReqMeta.from_request_tracker(
+        tracker,
+        block_size=16,
+        load_spec=load_spec,
+        skip_save=False,
+        block_hashes=[b"h0", b"h1", b"h2"],
+    )
+
+    assert req_meta is not None
+    assert req_meta.can_save is False
+    assert req_meta.load_spec is load_spec
+    assert tracker.num_saved_tokens == 0
+
+
+def test_from_request_tracker_load_with_can_load_false_still_saves():
+    # A LoadSpec with can_load=False (e.g., no external tokens to load after
+    # update_state_after_alloc) must not suppress the save.
+    tracker = RequestTracker(
+        req_id="req-0",
+        token_len=48,
+        allocated_block_ids=([0, 1, 2],),
+        num_saved_tokens=0,
+    )
+    load_spec = LoadSpec(
+        vllm_cached_tokens=0, kvpool_cached_tokens=48, can_load=False
+    )
+
+    req_meta = ReqMeta.from_request_tracker(
+        tracker,
+        block_size=16,
+        load_spec=load_spec,
+        skip_save=False,
+        block_hashes=[b"h0", b"h1", b"h2"],
+    )
+
+    assert req_meta is not None
+    assert req_meta.can_save is True
+    # from_request_tracker clears load_spec when can_load is False.
+    assert req_meta.load_spec is None
+    assert tracker.num_saved_tokens == 48
+
+
+def test_from_request_tracker_no_load_saves_normally():
+    tracker = RequestTracker(
+        req_id="req-0",
+        token_len=48,
+        allocated_block_ids=([0, 1, 2],),
+        num_saved_tokens=0,
+    )
+
+    req_meta = ReqMeta.from_request_tracker(
+        tracker,
+        block_size=16,
+        load_spec=None,
+        skip_save=False,
+        block_hashes=[b"h0", b"h1", b"h2"],
+    )
+
+    assert req_meta is not None
+    assert req_meta.can_save is True
+    assert req_meta.load_spec is None
     assert tracker.num_saved_tokens == 48

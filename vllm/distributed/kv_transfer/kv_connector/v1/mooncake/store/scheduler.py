@@ -273,17 +273,11 @@ class MooncakeStoreScheduler:
                         if self._discard_partial_chunks
                         else len(prefill_tokens)
                     )
-                    # When a load is also issued in this step, skip the save
-                    # to avoid co-queuing recv+send for the same req_id (see
-                    # comment in the load-only branch below).
-                    skip_save_this_step = force_skip_save or (
-                        load_spec is not None and load_spec.can_load
-                    )
                     req_meta = ReqMeta.from_request_tracker(
                         request_tracker,
                         self._block_size,
                         load_spec=load_spec,
-                        skip_save=skip_save_this_step,
+                        skip_save=force_skip_save,
                         block_hashes=request_real.block_hashes,
                         is_last_chunk=(
                             request_tracker.token_len >= last_chunk_tokens_num
@@ -362,7 +356,7 @@ class MooncakeStoreScheduler:
                     request_tracker,
                     self._block_size,
                     load_spec=load_spec,
-                    skip_save=True, # Do not save when we have to load (load_spec is not None)
+                    skip_save=None,
                     block_hashes=unfinished_req.block_hashes,
                     discard_partial_chunks=self._discard_partial_chunks,
                 )
