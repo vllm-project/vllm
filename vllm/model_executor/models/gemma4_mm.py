@@ -1159,13 +1159,15 @@ def _gemma4_vision_attention_forward(
 ) -> torch.Tensor:
     key_states = _repeat_kv(key, module.num_key_value_groups)
     value_states = _repeat_kv(value, module.num_key_value_groups)
-
-    attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * module.scaling
-    if attention_mask is not None:
-        attn_weights = attn_weights + attention_mask
-
-    attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
-    attn_output = torch.matmul(attn_weights, value_states)
+    attn_output = F.scaled_dot_product_attention(
+        query,
+        key_states,
+        value_states,
+        attn_mask=attention_mask,
+        dropout_p=0.0,
+        scale=module.scaling,
+        is_causal=False,
+    )
     return attn_output.transpose(1, 2).contiguous()
 
 
@@ -1337,16 +1339,10 @@ class Gemma4VisionEncoder(nn.Module):
         inputs_embeds: torch.Tensor,
         attention_mask: torch.Tensor,
     ) -> torch.Tensor:
-        min_dtype = torch.finfo(inputs_embeds.dtype).min
-        mask = torch.zeros(
-            attention_mask.shape[0],
-            1,
-            1,
-            attention_mask.shape[1],
-            dtype=inputs_embeds.dtype,
-            device=inputs_embeds.device,
+        seq_len = attention_mask.shape[1]
+        return attention_mask[:, None, None, :].expand(
+            attention_mask.shape[0], 1, seq_len, seq_len
         )
-        return mask.masked_fill(~attention_mask[:, None, None, :], min_dtype)
 
     def forward(
         self,
