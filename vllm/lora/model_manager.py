@@ -213,9 +213,17 @@ class LoRAModelManager:
 
         mm_budget = MultiModalBudget(vllm_config, mm_registry)
         limit_per_prompt = max(mm_budget.mm_max_items_per_prompt.values())
-        num_encoder_tokens = self.model.get_num_mm_encoder_tokens(
-            mm_budget.get_encoder_budget()
+        modality = mm_budget.get_modality_with_max_tokens()
+        max_lora_tokens = min(
+            mm_budget.get_encoder_budget(),
+            max_num_batched_tokens,
         )
+        lora_token_counts = self.model.get_mm_lora_token_counts(
+            modality=modality,
+            mm_kwargs=None,
+            num_mm_embeds=max_lora_tokens,
+        )
+        num_encoder_tokens = lora_token_counts.tower
 
         # Tower wrappers
         tower_punica_wrapper = get_punica_wrapper(
@@ -229,10 +237,8 @@ class LoRAModelManager:
 
         # Use wrapper for connector if present.
         if self.mm_mapping.connector:
-            if hasattr(self.model, "get_num_mm_connector_tokens"):
-                connector_tokens = self.model.get_num_mm_connector_tokens(
-                    num_encoder_tokens
-                )
+            connector_tokens = lora_token_counts.connector
+            if connector_tokens is not None:
                 connector_punica_wrapper = get_punica_wrapper(
                     connector_tokens,
                     max_batches=self.max_num_seqs * limit_per_prompt,

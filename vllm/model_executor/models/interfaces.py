@@ -11,6 +11,7 @@ from collections.abc import (
     Sequence,
 )
 from contextlib import ExitStack, contextmanager, nullcontext
+from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -43,7 +44,7 @@ from .interfaces_base import VllmModel
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.model_executor.models.utils import WeightsMapper
-    from vllm.multimodal.inputs import MultiModalFeatureSpec
+    from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem
     from vllm.multimodal.registry import _ProcessorFactories
     from vllm.sequence import IntermediateTensors
     from vllm.v1.worker.encoder_cudagraph_defs import (
@@ -88,6 +89,17 @@ def _require_is_multimodal(is_multimodal: Tensor | None) -> Tensor:
 
 # Cache results of `SupportsMultiModal.get_language_model`
 _language_model_by_module = dict[nn.Module, VllmModel]()
+
+
+@dataclass(frozen=True)
+class MultiModalLoRATokenCounts:
+    """Token counts used to build LoRA mappings for multimodal modules."""
+
+    tower: int
+    """Number of tokens processed by the multimodal tower."""
+
+    connector: int | None = None
+    """Number of tokens processed by the multimodal connector, if present."""
 
 
 @runtime_checkable
@@ -330,7 +342,7 @@ class SupportsMultiModal(Protocol):
         """
         ...
 
-    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
+    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int | None:
         """
         Implement this function to enable LoRA support
         for the connector module of the multi-modal model.
@@ -338,6 +350,32 @@ class SupportsMultiModal(Protocol):
         multi-modal connector tokens.
         """
         ...
+
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: "MultiModalKwargsItem | None",
+        num_mm_embeds: int,
+    ) -> MultiModalLoRATokenCounts:
+        """
+        Return token counts for multimodal tower and connector LoRA mappings.
+
+        The default preserves the historical contract where the tower token
+        count is derived from the decoder-side multimodal embedding count, and
+        the connector token count is derived from the tower token count.
+        Models with padded encoder inputs can override this to report the
+        actual token counts seen by their tower and connector modules.
+        """
+        del modality, mm_kwargs
+        num_encoder_tokens = self.get_num_mm_encoder_tokens(num_mm_embeds)
+        num_connector_tokens = self.get_num_mm_connector_tokens(num_encoder_tokens)
+        return MultiModalLoRATokenCounts(
+            tower=num_encoder_tokens,
+            connector=(
+                num_connector_tokens if isinstance(num_connector_tokens, int) else None
+            ),
+        )
 
     @overload
     def embed_input_ids(self, input_ids: Tensor) -> Tensor: ...

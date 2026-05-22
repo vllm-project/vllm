@@ -48,6 +48,7 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
     VideoItem,
 )
@@ -70,6 +71,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
     MultiModalEmbeddings,
+    MultiModalLoRATokenCounts,
     SupportsEagle3,
     SupportsLoRA,
     SupportsMultiModal,
@@ -2084,6 +2086,62 @@ class Gemma4ForConditionalGeneration(
         vision_config = hf_config.vision_config
         pooling_kernel_size = vision_config.pooling_kernel_size
         return num_vision_tokens // pooling_kernel_size**2
+
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> MultiModalLoRATokenCounts:
+        if modality in ("image", "video"):
+            vision_config = self.config.vision_config
+            pooling_k2 = vision_config.pooling_kernel_size**2
+            max_soft_tokens = (
+                _VIDEO_MAX_SOFT_TOKENS
+                if modality == "video"
+                else vision_config.default_output_length
+            )
+
+            if modality == "image":
+                mm_processor_kwargs = getattr(
+                    getattr(self, "multimodal_config", None),
+                    "mm_processor_kwargs",
+                    None,
+                )
+                if isinstance(mm_processor_kwargs, Mapping):
+                    val, _ = _get_max_soft_tokens(mm_processor_kwargs)
+                    if isinstance(val, int) and val in _SUPPORTED_SOFT_TOKENS:
+                        max_soft_tokens = val
+
+            pixel_values_key = (
+                "pixel_values" if modality == "image" else "pixel_values_videos"
+            )
+            tower_tokens = None
+            if mm_kwargs is not None and (field := mm_kwargs.get(pixel_values_key)):
+                data = field.data
+                if isinstance(data, torch.Tensor) and data.ndim >= 2:
+                    tower_tokens = int(math.prod(data.shape[:-1]))
+
+            if tower_tokens is None:
+                min_soft_tokens = min(_SUPPORTED_SOFT_TOKENS)
+                tower_tokens = (
+                    math.ceil(num_mm_embeds / min_soft_tokens)
+                    * max_soft_tokens
+                    * pooling_k2
+                )
+
+            return MultiModalLoRATokenCounts(
+                tower=tower_tokens,
+                connector=num_mm_embeds,
+            )
+
+        tower_tokens = self.get_num_mm_encoder_tokens(num_mm_embeds)
+        connector_tokens = self.get_num_mm_connector_tokens(tower_tokens)
+        return MultiModalLoRATokenCounts(
+            tower=tower_tokens,
+            connector=connector_tokens,
+        )
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
