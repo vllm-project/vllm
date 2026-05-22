@@ -337,36 +337,6 @@ class EncoderCudaGraphManager:
 
         per_item_out_tokens = self._get_per_item_out_tokens(mm_kwargs)
 
-        # Check if actual frames per item exceeds capture capacity.
-        # If so, fallback to eager to avoid shape mismatch.
-        if self.max_frames_per_batch > 0:
-            grid_thw_key = f"{self.model.get_input_modality(mm_kwargs)}_grid_thw"
-            grid_thw = mm_kwargs[grid_thw_key]
-            if not isinstance(grid_thw, list):
-                grid_thw = grid_thw.tolist()
-
-            max_replay_frames = max(t for t, h, w in grid_thw)
-            frames_per_item = self.max_frames_per_batch // self.max_batch_size
-            if max_replay_frames > frames_per_item:
-                logger.warning(
-                    "Input video frames exceeds capture capacity, fallback to eagar,"
-                    "please manually set "
-                    "'encoder_cudagraph_max_vision_items_per_batch "
-                    "and 'encoder_cudagraph_max_frames_per_batch' "
-                    "in 'compilation-config'"
-                )
-                self.graph_misses += num_items
-                eager_outputs: dict[int, torch.Tensor] = {}
-                with torch.inference_mode():
-                    raw = self.model.encoder_eager_forward(mm_kwargs)
-                scatter_output_slices(
-                    raw,
-                    list(range(num_items)),
-                    per_item_out_tokens,
-                    eager_outputs,
-                )
-                return [eager_outputs[i] for i in range(num_items)]
-
         # Sort ascending by output token count (smallest first)
         sorted_indices = sorted(range(num_items), key=lambda i: per_item_out_tokens[i])
 
@@ -408,6 +378,15 @@ class EncoderCudaGraphManager:
                 )
             )
 
+        # extract actual frames per item
+        actual_frames_per_item = None
+        if self.max_frames_per_batch > 0:
+            grid_thw_key = f"{self.model.get_input_modality(mm_kwargs)}_grid_thw"
+            grid_thw = mm_kwargs[grid_thw_key]
+            if not isinstance(grid_thw, list):
+                grid_thw = grid_thw.tolist()
+            actual_frames_per_item = [t for t, h, w in grid_thw]
+
         # outputs_by_orig_idx maps each original image index to its output
         # tensor. Needed because greedy packing reorders images; we restore
         # the original order before returning.
@@ -418,6 +397,22 @@ class EncoderCudaGraphManager:
                 mm_kwargs, batch_orig_indices
             )
             batch_out_tokens = sum(per_item_out_tokens[i] for i in batch_orig_indices)
+
+            if actual_frames_per_item is not None:
+                batch_max_frames = max(
+                    actual_frames_per_item[i] for i in batch_orig_indices
+                )
+                if batch_max_frames > self.max_frames_per_batch // self.max_batch_size:
+                    # Check if actual frames per item exceeds capture capacity.
+                    # If so, fallback to eager to avoid shape mismatch.
+                    token_budget = None
+                    logger.warning(
+                        "Input video frames exceeds capture capacity, "
+                        "fallback to eagar, please manually set "
+                        "'encoder_cudagraph_max_vision_items_per_batch "
+                        "and 'encoder_cudagraph_max_frames_per_batch' "
+                        "in 'compilation-config'"
+                    )
 
             if token_budget is None:
                 # Single oversized image: item_tokens > max_budget.
