@@ -640,6 +640,7 @@ RUN rm -f /usr/bin/sccache || true \
 # This prevents S3 bucket config from leaking into production images
 ENV SCCACHE_BUCKET=
 ENV SCCACHE_REGION=
+ENV SCCACHE_ENDPOINT=
 ENV SCCACHE_S3_NO_CREDENTIALS=
 ENV SCCACHE_IDLE_TIMEOUT=
 
