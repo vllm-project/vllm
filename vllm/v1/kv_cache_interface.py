@@ -147,6 +147,10 @@ class KVCacheSpec:
         Whether this KVCacheSpec is uniform with all specs of all layers.
         """
         uniform_type_base_spec = KVCacheSpecRegistry.get_uniform_type_base_spec(self)
+        assert uniform_type_base_spec is not None, (
+            f"Unsupported KV cache spec type: {type(self)}. "
+            "Please register it using @register_kv_cache_spec decorator."
+        )
         return all(
             isinstance(spec, uniform_type_base_spec) for spec in kv_cache_specs.values()
         )

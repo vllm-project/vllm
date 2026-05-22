@@ -29,6 +29,7 @@ from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
+from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import KVCacheConfig, UniformTypeKVCacheSpecs
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -1196,6 +1197,11 @@ class SpecDecodeBaseProposer:
             self.vllm_config,
             AttentionLayerBase,  # type: ignore[type-abstract]
         )
+        # KVCacheSpec should be registered before get_kv_cache_spec.
+        # the model initialization happens before the spec is registered,
+        # so we need to call register_all_kvcache_specs here to ensure
+        # that all specs are registered.
+        register_all_kvcache_specs(self.vllm_config)
         # Filter to only layers that have KV cache specs.
         self._draft_attn_layer_names = {
             name
