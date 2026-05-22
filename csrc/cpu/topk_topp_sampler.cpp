@@ -646,10 +646,11 @@ static void _top_p_row_core(float* __restrict__ row, int V, float p_val,
   if (n_at_boundary > 0) {
     double remaining = (double)p_val - sum_above;
     if (remaining > 0.0 && (double)boundary_prob > 0.0) {
-      int64_t needed64 = (int64_t)ceil(remaining / (double)boundary_prob);
-      if (needed64 < 0) needed64 = 0;
-      if (needed64 > n_at_boundary) needed64 = n_at_boundary;
-      n_keep_at_boundary = (int)needed64;
+      double needed_d = ceil(remaining / (double)boundary_prob);
+      if (needed_d >= (double)n_at_boundary)
+        n_keep_at_boundary = n_at_boundary;
+      else if (needed_d > 0.0)
+        n_keep_at_boundary = (int)needed_d;
     }
   }
 
@@ -693,8 +694,9 @@ void cpu_topp_sampling(torch::Tensor& logits, const torch::Tensor& p) {
   check_logits(logits);
   check_batch_float(p, logits, "p");
 
-  const int B = static_cast<int>(logits.size(0));
-  const int V = static_cast<int>(logits.size(1));
+  const int64_t B = logits.size(0);
+  const int64_t V = logits.size(1);
+  const int V_int = static_cast<int>(V);
   if (V == 0) return;
   float* lp = logits.data_ptr<float>();
   const float* pp = p.data_ptr<float>();
@@ -704,11 +706,12 @@ void cpu_topp_sampling(torch::Tensor& logits, const torch::Tensor& p) {
   {
     thread_local std::vector<float> scratch_tls;
     thread_local std::vector<float> outlier_tls;
-    if ((int)scratch_tls.size() < V) scratch_tls.resize(V);
-    if ((int)outlier_tls.size() < V) outlier_tls.resize(V);
+    if ((int64_t)scratch_tls.size() < V) scratch_tls.resize(V);
+    if ((int64_t)outlier_tls.size() < V) outlier_tls.resize(V);
 #pragma omp for schedule(dynamic, 1)
-    for (int b = 0; b < B; ++b) {
-      top_p_row(lp + b * V, V, pp[b], scratch_tls.data(), outlier_tls.data());
+    for (int64_t b = 0; b < B; ++b) {
+      top_p_row(lp + b * V, V_int, pp[b], scratch_tls.data(),
+                outlier_tls.data());
     }
   }
 }
@@ -717,8 +720,9 @@ void cpu_topk_sampling(torch::Tensor& logits, const torch::Tensor& k) {
   check_logits(logits);
   check_batch_int(k, logits, "k");
 
-  const int B = static_cast<int>(logits.size(0));
-  const int V = static_cast<int>(logits.size(1));
+  const int64_t B = logits.size(0);
+  const int64_t V = logits.size(1);
+  const int V_int = static_cast<int>(V);
   if (V == 0) return;
   float* lp = logits.data_ptr<float>();
   const int* kp = k.data_ptr<int>();
@@ -726,11 +730,12 @@ void cpu_topk_sampling(torch::Tensor& logits, const torch::Tensor& k) {
 #pragma omp parallel
   {
     thread_local std::vector<float> outlier_tls;
-    if ((int)outlier_tls.size() < V) outlier_tls.resize(V);
+    if ((int64_t)outlier_tls.size() < V) outlier_tls.resize(V);
 #pragma omp for schedule(dynamic, 1)
-    for (int b = 0; b < B; ++b) {
+    for (int64_t b = 0; b < B; ++b) {
       int kv = kp[b];
-      if (kv > 0 && kv < V) top_k_row(lp + b * V, V, kv, outlier_tls.data());
+      if (kv > 0 && kv < V_int)
+        top_k_row(lp + b * V, V_int, kv, outlier_tls.data());
     }
   }
 }
@@ -741,8 +746,9 @@ void cpu_topk_topp_sampling(torch::Tensor& logits, const torch::Tensor& k,
   check_batch_int(k, logits, "k");
   check_batch_float(p, logits, "p");
 
-  const int B = static_cast<int>(logits.size(0));
-  const int V = static_cast<int>(logits.size(1));
+  const int64_t B = logits.size(0);
+  const int64_t V = logits.size(1);
+  const int V_int = static_cast<int>(V);
   if (V == 0) return;
   float* lp = logits.data_ptr<float>();
   const int* kp = k.data_ptr<int>();
@@ -752,17 +758,17 @@ void cpu_topk_topp_sampling(torch::Tensor& logits, const torch::Tensor& k,
   {
     thread_local std::vector<float> scratch_tls;
     thread_local std::vector<float> outlier_tls;
-    if ((int)scratch_tls.size() < V) scratch_tls.resize(V);
-    if ((int)outlier_tls.size() < V) outlier_tls.resize(V);
+    if ((int64_t)scratch_tls.size() < V) scratch_tls.resize(V);
+    if ((int64_t)outlier_tls.size() < V) outlier_tls.resize(V);
 #pragma omp for schedule(dynamic, 1)
-    for (int b = 0; b < B; ++b) {
+    for (int64_t b = 0; b < B; ++b) {
       float* row = lp + b * V;
       int kv = kp[b];
       float pv = pp[b];
-      if (kv > 0 && kv < V) {
-        top_k_p_row(row, V, kv, pv, scratch_tls.data(), outlier_tls.data());
+      if (kv > 0 && kv < V_int) {
+        top_k_p_row(row, V_int, kv, pv, scratch_tls.data(), outlier_tls.data());
       } else {
-        top_p_row(row, V, pv, scratch_tls.data(), outlier_tls.data());
+        top_p_row(row, V_int, pv, scratch_tls.data(), outlier_tls.data());
       }
     }
   }
