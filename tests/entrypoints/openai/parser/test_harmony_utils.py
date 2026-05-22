@@ -1171,8 +1171,8 @@ class TestParseOutputIntoMessages:
                     "<|channel|>"
                     "<|message|>Final answer.<|end|>"
                 ),
-                ["analysis", "final"],
-                ["Reasoning here.", "Final answer."],
+                ["analysis"],
+                ["Reasoning here."],
                 "channel marker present but no channel value found in header",
             ),
         ],

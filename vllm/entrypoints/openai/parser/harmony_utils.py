@@ -389,7 +389,7 @@ def parse_output_into_messages(token_ids: Iterable[int]) -> StreamableParser:
             # rather than letting the openai_harmony Rust binding raise out
             # to the route handler.
             logger.warning(
-                "Harmony parser at token %d, returning partial parse: %r",
+                "Harmony parser error at token ID %d, returning partial parse: %r",
                 token_id,
                 err,
             )
