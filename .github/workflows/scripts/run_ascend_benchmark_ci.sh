@@ -642,6 +642,42 @@ print(f"validated benchmark result: completed={completed}, failed={failed}, tota
 PY
 }
 
+normalize_hf_cache_repo_id() {
+  local repo_id=${1:-}
+
+  repo_id=${repo_id#/}
+  repo_id=${repo_id%/}
+  repo_id=${repo_id//\//--}
+  printf '%s\n' "$repo_id"
+}
+
+prepare_hf_publish_cache_for_runner() {
+  local normalized_repo_id
+  local -a cleanup_targets=()
+
+  if [[ "$PUBLISH_TO_HF" != "1" ]]; then
+    return 0
+  fi
+
+  if [[ -z "${HUGGINGFACE_HUB_CACHE:-}" ]]; then
+    return 0
+  fi
+
+  cleanup_targets+=("$HUGGINGFACE_HUB_CACHE/.locks")
+
+  normalized_repo_id=$(normalize_hf_cache_repo_id "${HF_REPO_ID:-}")
+  if [[ -n "$normalized_repo_id" ]]; then
+    cleanup_targets+=("$HUGGINGFACE_HUB_CACHE/datasets--$normalized_repo_id")
+  fi
+
+  echo "Preparing Hugging Face cache for runner-user publish access"
+  if [[ "$ASCEND_BENCHMARK_USE_SUDO" == "1" ]]; then
+    run_ascend_root_helper cleanup-paths "${cleanup_targets[@]}"
+  else
+    rm -rf -- "${cleanup_targets[@]}"
+  fi
+}
+
 run_same_spec_current_benchmark() {
   local same_spec_runner=$VLLM_HUST_BENCHMARK_REPO/scripts/run-current-ascend-same-spec.sh
   local same_spec_raw_result=$RESULT_ROOT/raw_benchmark_result.json
@@ -1019,6 +1055,8 @@ if [[ "$PUBLISH_TO_HF" == "1" ]]; then
     echo "HF_REPO_ID must be set when PUBLISH_TO_HF=1" >&2
     exit 2
   fi
+
+  prepare_hf_publish_cache_for_runner
 
   "$PYTHON_BIN" -m vllm_hust_benchmark.cli sync-submission-to-hf \
     --submission-dir "$SUBMISSION_DIR" \
