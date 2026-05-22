@@ -790,17 +790,10 @@ class DeepseekV4ROCMAiterMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
         kv = workspace_manager.get_simultaneous(
             ((cls.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
         )[0]
-        # The workspace allocator returns uninitialized memory and is shared
-        # across requests + other layers. dequantize_and_gather_k_cache only
-        # writes the compressed-K prefix (rows [0, seq_len/compress_ratio))
-        # and the SWA window (rows [N, N+gather_lens)) for each chunk row,
-        # leaving holes in the M dimension. rocm_sparse_attn_prefill then
-        # reads ``kv.view(-1, 1, head_dim)`` via ragged indices which can
-        # reach those holes for very short sequences, causing data-dependent
-        # non-determinism across otherwise-identical temperature=0 requests.
-        # Zero once per call so the holes are deterministic (zero attention
-        # contribution). The cost is one bf16 fill of the workspace tile,
-        # which is dwarfed by the FP8 dequant + sparse attention themselves.
+        # TODO: workspace is torch.empty() and only the compressed-K prefix +
+        # SWA window are written per chunk row; the indexer's topK can land in
+        # the unwritten holes for short sequences. Proper fix is to mask invalid
+        # rows in the indexer (score = -inf) or in rocm_sparse_attn_prefill.
         kv.zero_()
         for chunk_idx in range(num_chunks):
             chunk_start = chunk_idx * cls.PREFILL_CHUNK_SIZE
@@ -810,12 +803,7 @@ class DeepseekV4ROCMAiterMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
                 assert attn_metadata is not None
                 assert compressed_k_cache is not None
                 block_table = attn_metadata.block_table[num_decodes:]
-                # The compressed-K encoder (Triton _fused_kv_compress_norm_...
-                # in fused_compress_quant_cache.py) writes bytes via
-                # tl.float8e4nv with FP8_MAX=448.0 regardless of platform.
-                # The SWA-side C++ encoder, by contrast, switches to FNUZ on
-                # gfx942 (PR #42893), so the two caches need different
-                # use_fnuz settings even on the same MI300X.
+                # compressed_k_cache is OCP on every platform (Triton encoder).
                 dequantize_and_gather_k_cache(
                     kv[:chunk_size],
                     compressed_k_cache,

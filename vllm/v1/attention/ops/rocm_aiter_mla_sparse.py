@@ -565,16 +565,11 @@ def rocm_fp8_mqa_logits(
 
     k_fp8, scale = kv
 
-    # gfx942 (MI300X): the AITER ``fp8_mqa_logits`` wrapper bundled in the
-    # currently-pinned aiter wheel launches its Triton kernel with
-    # ``(BLOCK_KV=128, num_stages=2)``, which requests ~96 KiB of LDS for
-    # the DSv4 sparse indexer shape. MI300X CUs have 64 KiB of LDS, so
-    # the launch JIT-aborts with ``OutOfResources: shared memory`` on the
-    # first inference. Route gfx942 callers to a vLLM-vendored copy of
-    # the same kernel that selects ``(BLOCK_KV=64, num_stages=1)`` when
-    # the default tile doesn't fit (~33 KiB), matching the fix in
-    # ROCm/aiter#3257. This entire branch can be removed once vLLM bumps
-    # to an AITER version that includes that PR.
+    # gfx942: AITER's bundled fp8_mqa_logits launches with BLOCK_KV=128 +
+    # num_stages=2 (~96 KiB LDS), exceeding MI300X's 64 KiB LDS so it aborts
+    # with OutOfResources. Route gfx942 to a vendored copy that drops to
+    # BLOCK_KV=64 + num_stages=1 (~33 KiB) per ROCm/aiter#3257. Remove this
+    # branch once vLLM bumps AITER to a version that includes that PR.
     if _ON_GFX942 and rocm_aiter_ops.is_enabled():
         from vllm.v1.attention.ops.triton_fp8_mqa_logits import (
             fp8_mqa_logits_gfx942,
@@ -1193,10 +1188,8 @@ def _sparse_attn_decode_ragged_kernel(
     NOPE_DIM: tl.constexpr,
     NOPE_BLOCK: tl.constexpr,
     ROPE_DIM: tl.constexpr,
-    # `main_cache` is the SWA K-cache (written by the C++ encoder, FNUZ on
-    # gfx942 / OCP on gfx950). `extra_cache` is the compressed K-cache
-    # (Triton encoder, OCP on every platform). Reading both with the same
-    # `IS_FNUZ` would mis-decode one of them by the FNUZ/OCP scale ratio.
+    # SWA K-cache (main): C++ encoder writes FNUZ on gfx942, OCP on gfx950.
+    # Compressed K-cache (extra): Triton encoder writes OCP everywhere.
     IS_FNUZ_MAIN: tl.constexpr,
     IS_FNUZ_EXTRA: tl.constexpr,
     BLOCK_H: tl.constexpr,
@@ -1601,10 +1594,6 @@ def _rocm_sparse_attn_decode_ragged_triton(
         NOPE_DIM=nope_head_dim,
         NOPE_BLOCK=triton.next_power_of_2(nope_head_dim),
         ROPE_DIM=rope_head_dim,
-        # main_cache = swa_k_cache (C++ encoder, FNUZ on gfx942 / OCP on gfx950).
-        # extra_cache = compressed kv_cache (Triton encoder, OCP everywhere).
-        # Reading both with a single IS_FNUZ would mis-decode one of them by
-        # the FNUZ/OCP scale ratio (~1.87×).
         IS_FNUZ_MAIN=current_platform.is_fp8_fnuz(),
         IS_FNUZ_EXTRA=False,
         BLOCK_H=block_h,
