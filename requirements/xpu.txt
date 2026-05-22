@@ -7,7 +7,6 @@ packaging>=24.2
 setuptools-scm>=8
 setuptools-rust>=1.9.0
 setuptools>=77.0.3,<81.0.0
-setuptools-rust>=1.9.0
 wheel
 jinja2>=3.1.6
 datasets # for benchmark scripts
