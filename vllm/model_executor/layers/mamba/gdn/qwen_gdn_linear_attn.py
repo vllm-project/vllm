@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Qwen3-Next/Qwen3.5 model."""
 
+import functools
+
 import torch
 from einops import rearrange
 from torch import nn
@@ -80,6 +82,69 @@ if GDN_AITER_TRITON_AVAILABLE:
 logger = init_logger(__name__)
 
 
+@functools.cache
+def _is_cu13_libcute_dsl_runtime() -> bool:
+    """Return True if ``nvidia_cutlass_dsl/lib/libcute_dsl_runtime.so`` on
+    disk matches the SHA-256 declared by the ``nvidia-cutlass-dsl-libs-cu13``
+    wheel's ``RECORD``.
+
+    ``nvidia-cutlass-dsl-libs-base`` and ``nvidia-cutlass-dsl-libs-cu13``
+    both ship that file at the same on-disk path but with different
+    content. Whichever wheel extracts last wins; with parallel installers
+    (e.g. ``uv``) the order is racy and the ``-libs-base`` variant can
+    land, which then fails MLIR legalization when JIT-compiling the
+    FlashInfer Blackwell GDN prefill kernel. See
+    https://github.com/NVIDIA/cutlass/issues/3259.
+
+    Returns False on any error (uninstalled, missing RECORD entry,
+    missing file, hash mismatch); the caller should fall back to the
+    Triton/FLA path.
+    """
+    import base64
+    import csv
+    import hashlib
+    import importlib.metadata
+    import os
+
+    target_rel = "nvidia_cutlass_dsl/lib/libcute_dsl_runtime.so"
+
+    try:
+        record_text = (
+            importlib.metadata.distribution("nvidia-cutlass-dsl-libs-cu13").read_text(
+                "RECORD"
+            )
+            or ""
+        )
+    except importlib.metadata.PackageNotFoundError:
+        return False
+
+    expected = ""
+    for row in csv.reader(record_text.splitlines()):
+        if row and row[0] == target_rel and len(row) >= 2:
+            expected = row[1]
+            break
+    if not expected:
+        return False
+
+    try:
+        import nvidia_cutlass_dsl
+    except ImportError:
+        return False
+    so_path = os.path.join(
+        os.path.dirname(nvidia_cutlass_dsl.__file__),
+        "lib",
+        "libcute_dsl_runtime.so",
+    )
+    try:
+        with open(so_path, "rb") as f:
+            digest = hashlib.sha256(f.read()).digest()
+    except OSError:
+        return False
+
+    actual = "sha256=" + base64.urlsafe_b64encode(digest).decode().rstrip("=")
+    return actual == expected
+
+
 def _should_use_flashinfer_gdn_prefill(backend: str, head_k_dim: int | None) -> bool:
     """Whether to use FlashInfer's GDN prefill kernel instead of the
     Triton/FLA fallback.
@@ -89,7 +154,10 @@ def _should_use_flashinfer_gdn_prefill(backend: str, head_k_dim: int | None) -> 
     * ``platform == cuda``;
     * one of the following:
       - Hopper (SM90) — no further constraints;
-      - Blackwell (SM10.x) with ``head_k_dim == 128`` and ``cuda_runtime >= 13``.
+      - Blackwell (SM10.x) with ``head_k_dim == 128``, ``cuda_runtime >= 13``,
+        and the ``nvidia-cutlass-dsl-libs-cu13`` variant of
+        ``libcute_dsl_runtime.so`` actually on disk (see
+        :func:`_is_cu13_libcute_dsl_runtime`).
     """
     if backend not in ["flashinfer", "auto"]:
         return False
@@ -101,7 +169,19 @@ def _should_use_flashinfer_gdn_prefill(backend: str, head_k_dim: int | None) -> 
         return False  # Neither Hopper nor Blackwell.
     if head_k_dim != 128:
         return False
-    return current_platform.get_cuda_runtime_major() >= 13
+    if current_platform.get_cuda_runtime_major() < 13:
+        return False
+    if not _is_cu13_libcute_dsl_runtime():
+        logger.warning_once(
+            "FlashInfer Blackwell GDN requires the cu13 variant of "
+            "libcute_dsl_runtime.so, but a different variant is installed "
+            "(install-order race in nvidia-cutlass-dsl packaging — see "
+            "https://github.com/NVIDIA/cutlass/issues/3259). Falling back "
+            "to Triton/FLA. Repair with: pip install --force-reinstall "
+            "--no-deps nvidia-cutlass-dsl-libs-cu13"
+        )
+        return False
+    return True
 
 
 def _log_gdn_backend_decision(
