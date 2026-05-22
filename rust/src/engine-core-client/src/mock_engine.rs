@@ -78,12 +78,11 @@ pub struct MockEngineDataSockets {
 pub struct MockEngineSockets {
     /// Decoded INIT message sent by the frontend during handshake.
     pub init: HandshakeInitMessage,
-    /// Socket used to receive frontend requests.
-    pub dealer: DealerSocket,
-    /// Socket used to publish normal request outputs back to the frontend.
-    pub push: PushSocket,
-    /// Additional frontend clients for multi-API-server launches.
-    pub additional_data_sockets: Vec<MockEngineDataSockets>,
+    /// Data sockets for all frontend clients in client-index order.
+    ///
+    /// For Rust frontend this will always be one socket, while for Python frontend
+    /// this may be multiple sockets if there are multiple API server processes.
+    pub data_sockets: Vec<MockEngineDataSockets>,
     /// Optional coordinator sockets when the client enabled the in-process
     /// coordinator.
     pub coordinator: Option<MockCoordinatorSockets>,
@@ -196,8 +195,6 @@ pub async fn connect_to_frontend(
         data_sockets.push(MockEngineDataSockets { dealer, push });
     }
 
-    let first_data_socket = data_sockets.remove(0);
-
     let coordinator = match (
         init.addresses.coordinator_input.as_deref(),
         init.addresses.coordinator_output.as_deref(),
@@ -237,9 +234,7 @@ pub async fn connect_to_frontend(
 
     Ok(MockEngineSockets {
         init,
-        dealer: first_data_socket.dealer,
-        push: first_data_socket.push,
-        additional_data_sockets: data_sockets,
+        data_sockets,
         coordinator,
     })
 }

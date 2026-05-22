@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use vllm_engine_core_client::EngineId;
 use vllm_engine_core_client::mock_engine::{
-    MockEngineConfig, MockEngineDataSockets, MockEngineSockets, connect_to_frontend,
+    MockEngineConfig, MockEngineDataSockets, connect_to_frontend,
 };
 use vllm_engine_core_client::protocol::utility::{
     EngineCoreUtilityRequest, UtilityOutput, UtilityResultEnvelope,
@@ -23,6 +23,7 @@ use vllm_engine_core_client::protocol::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest,
     EngineCoreRequestType, decode_msgpack, encode_msgpack,
 };
+use vllm_engine_core_client::test_utils::MockEngineSockets;
 use zeromq::ZmqMessage;
 use zeromq::prelude::{SocketRecv, SocketSend};
 
@@ -464,11 +465,7 @@ async fn run_engine(engine_id: EngineId, opt: Opt, shutdown: CancellationToken) 
         .engine_index()
         .context("mock engine id must encode a two-byte engine index")?;
     let MockEngineSockets {
-        dealer,
-        push,
-        additional_data_sockets,
-        coordinator: _coordinator,
-        ..
+        mut data_sockets, ..
     } = connect_to_frontend(
         &opt.handshake_address,
         engine_id,
@@ -478,10 +475,6 @@ async fn run_engine(engine_id: EngineId, opt: Opt, shutdown: CancellationToken) 
     .with_context(|| format!("failed to connect mock engine {engine_index}"))?;
 
     info!(engine_index, "mock engine connected");
-
-    let mut data_sockets = Vec::with_capacity(additional_data_sockets.len() + 1);
-    data_sockets.push(MockEngineDataSockets { dealer, push });
-    data_sockets.extend(additional_data_sockets);
 
     let mut active_requests = BTreeMap::<String, ActiveRequest>::new();
 

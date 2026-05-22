@@ -8,7 +8,9 @@ use zeromq::{DealerSocket, PushSocket};
 
 use crate::EngineId;
 pub use crate::mock_engine::{MockCoordinatorSockets, MockEngineSockets};
-use crate::mock_engine::{MockEngineConfig, connect_to_bootstrapped_frontend, connect_to_frontend};
+use crate::mock_engine::{
+    MockEngineConfig, MockEngineDataSockets, connect_to_bootstrapped_frontend, connect_to_frontend,
+};
 use crate::protocol::ModelDtype;
 use crate::protocol::handshake::{EngineCoreReadyResponse, HandshakeInitMessage};
 
@@ -103,8 +105,10 @@ pub async fn setup_mock_engine_with_init(
     engine_id: impl Into<EngineId>,
 ) -> (HandshakeInitMessage, DealerSocket, PushSocket) {
     let MockEngineSockets {
-        init, dealer, push, ..
+        init, data_sockets, ..
     } = setup_mock_engine_sockets(engine_handshake, engine_id).await;
+    let MockEngineDataSockets { dealer, push } =
+        data_sockets.into_iter().next().expect("mock engine data socket");
     (init, dealer, push)
 }
 
