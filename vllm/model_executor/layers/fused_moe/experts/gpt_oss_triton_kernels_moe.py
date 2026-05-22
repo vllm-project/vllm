@@ -81,15 +81,28 @@ def _patch_make_bitmatrix_metadata() -> None:
     import triton.language as tl
 
     try:
-        from triton_kernels.tensor_details import bitmatrix as _bm
-        from triton_kernels.tensor_details.bitmatrix import (
-            BitmatrixMetadata,
-            _keyed_add,
-            cdiv,
-        )
-        from triton_kernels.tensor_details.bitmatrix_details.sum_bitmatrix_rows import (
-            sum_bitmatrix_rows,
-        )
+        if current_platform.is_rocm():
+            from triton_kernels.tensor_details import bitmatrix as _bm
+            from triton_kernels.tensor_details.bitmatrix import (
+                BitmatrixMetadata,
+                _keyed_add,
+                cdiv,
+            )
+            from triton_kernels.tensor_details.bitmatrix_details.sum_bitmatrix_rows import (  # noqa: E501
+                sum_bitmatrix_rows,
+            )
+        else:
+            from vllm.third_party.triton_kernels.tensor_details import (
+                bitmatrix as _bm,
+            )
+            from vllm.third_party.triton_kernels.tensor_details.bitmatrix import (
+                BitmatrixMetadata,
+                _keyed_add,
+                cdiv,
+            )
+            from vllm.third_party.triton_kernels.tensor_details.bitmatrix_details.sum_bitmatrix_rows import (  # noqa: E501
+                sum_bitmatrix_rows,
+            )
     except ImportError:
         return
 
