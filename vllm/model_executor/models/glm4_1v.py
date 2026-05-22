@@ -889,6 +889,10 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         """
         return self.get_image_processor().size["longest_edge"]
 
+    def _get_video_max_pixels(self) -> int:
+        """Read max_pixels from the HF video processor config."""
+        return self.get_video_processor().size["longest_edge"]
+
     def get_image_size_with_most_features(self) -> ImageSize:
         # Use num_frames=1 for single-image budget estimation.
         # _get_vision_info defaults to num_frames=16 (video), which
@@ -926,6 +930,29 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
             image_height=target_height,
         )
 
+    def get_max_video_tokens(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> int:
+        target_width, target_height = self.get_image_size_with_most_features()
+
+        return self.get_num_video_tokens(
+            image_width=target_width,
+            image_height=target_height,
+            num_frames=self.get_num_frames_with_most_features(seq_len, mm_counts),
+        )
+
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
+        max_image_tokens = self.get_max_image_tokens()
+        max_video_tokens = self.get_max_video_tokens(seq_len, mm_counts)
+
+        return {"image": max_image_tokens, "video": max_video_tokens}
+
     def get_num_video_tokens(
         self,
         *,
@@ -937,7 +964,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
             image_width=image_width,
             image_height=image_height,
             num_frames=num_frames,
-            max_image_pixels=28 * 28 * 2 * 30000,
+            max_image_pixels=self._get_video_max_pixels(),
         )
         return num_video_tokens
 
