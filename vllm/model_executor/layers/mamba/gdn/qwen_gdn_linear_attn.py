@@ -82,6 +82,11 @@ if GDN_AITER_TRITON_AVAILABLE:
 logger = init_logger(__name__)
 
 
+# TODO(arpera): remove ``_is_libs_cu13_install_intact`` and its caller in
+# ``_should_use_flashinfer_gdn_prefill`` once the upstream packaging bug is
+# fixed and the broken wheels are yanked / superseded on PyPI:
+#   https://github.com/NVIDIA/cutlass/issues/3170
+#   https://github.com/NVIDIA/cutlass/issues/3259
 @functools.cache
 def _is_libs_cu13_install_intact() -> bool:
     """Return True if every file installed by ``nvidia-cutlass-dsl-libs-cu13``
@@ -97,8 +102,10 @@ def _is_libs_cu13_install_intact() -> bool:
     ``-libs-base`` variant fails MLIR legalization when JIT-compiling
     the FlashInfer Blackwell GDN prefill kernel, and any other
     cuTe-DSL-based kernel can break too if on-disk files diverge from
-    what ``-libs-cu13``'s wheel expects. Tracked upstream at
-    https://github.com/NVIDIA/cutlass/issues/3259.
+    what ``-libs-cu13``'s wheel expects. Tracked upstream at:
+
+      * https://github.com/NVIDIA/cutlass/issues/3170
+      * https://github.com/NVIDIA/cutlass/issues/3259
 
     This helper re-hashes every file the ``-libs-cu13`` wheel claims to
     own and compares against its declared SHA-256. Returns False on any
@@ -170,6 +177,7 @@ def _should_use_flashinfer_gdn_prefill(backend: str, head_k_dim: int | None) -> 
             "-libs-cu13 install, but some on-disk files do not match the "
             "SHA-256 declared in its RECORD (install-order race in "
             "nvidia-cutlass-dsl packaging — see "
+            "https://github.com/NVIDIA/cutlass/issues/3170 and "
             "https://github.com/NVIDIA/cutlass/issues/3259). Falling back "
             "to Triton/FLA. Repair with: pip install --force-reinstall "
             "--no-deps nvidia-cutlass-dsl-libs-cu13"
