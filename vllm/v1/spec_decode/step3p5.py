@@ -16,7 +16,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.eagle import EagleProposer
-from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
+from vllm.v1.spec_decode.utils import PADDING_SLOT_ID
 from vllm.v1.worker.utils import AttentionGroup
 
 
@@ -31,9 +31,93 @@ class Step3p5MTPProposer(EagleProposer):
     ):
         super().__init__(vllm_config, device, runner)
         self._per_group_block_tables: dict[int, torch.Tensor] = {}
+        self._per_group_slot_mappings: dict[int, torch.Tensor] = {}
+        # Slot-mapping buffers for non-primary KV cache groups (the primary
+        # group reuses self._slot_mapping_buffer from the base class).
+        self._per_group_slot_mapping_buffers: dict[int, torch.Tensor] = {}
 
-    def set_per_group_block_table(self, gid: int, block_table: torch.Tensor) -> None:
+    def set_per_group_attn_metadata(
+        self,
+        gid: int,
+        block_table: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> None:
         self._per_group_block_tables[gid] = block_table
+        self._per_group_slot_mappings[gid] = slot_mapping
+
+    def _slot_mapping_buffer_for(self, gid: int) -> torch.Tensor:
+        if gid == self.kv_cache_gid:
+            return self._slot_mapping_buffer
+        buf = self._per_group_slot_mapping_buffers.get(gid)
+        if buf is None:
+            buf = torch.zeros(
+                self.max_positions, dtype=torch.int64, device=self.device
+            )
+            self._per_group_slot_mapping_buffers[gid] = buf
+        return buf
+
+    def _get_slot_mapping(
+        self,
+        num_tokens: int,
+        slot_mapping: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """Per-layer slot_mapping with one buffer per KV cache group."""
+        per_layer: dict[str, torch.Tensor] = {}
+        for attn_group in self.draft_attn_groups:
+            gid = attn_group.kv_cache_group_id
+            buf = self._slot_mapping_buffer_for(gid)
+            source = self._per_group_slot_mappings.get(gid, slot_mapping)
+            if source is not None and buf.data_ptr() != source.data_ptr():
+                n = source.shape[0]
+                buf[:n].copy_(source)
+                if num_tokens > n:
+                    buf[n:num_tokens].fill_(PADDING_SLOT_ID)
+            view = buf[:num_tokens]
+            for layer_name in attn_group.layer_names:
+                per_layer[layer_name] = view
+        return per_layer
+
+    def _update_positions_dependent_metadata(
+        self,
+        positions: torch.Tensor,
+        common_attn_metadata: CommonAttentionMetadata,
+        batch_size: int,
+        input_batch_size: int,
+        block_size: int,
+    ) -> torch.Tensor:
+        old_positions_1d = positions[0] if self.uses_mrope else positions
+        positions = super()._update_positions_dependent_metadata(
+            positions,
+            common_attn_metadata,
+            batch_size,
+            input_batch_size,
+            block_size,
+        )
+        # Parent already produced slot_mapping for the primary gid.
+        self._per_group_slot_mappings[self.kv_cache_gid] = (
+            common_attn_metadata.slot_mapping
+        )
+        # Recompute slot_mapping for the remaining gids using their own block tables.
+        new_positions_1d = positions[0] if self.uses_mrope else positions
+        exceeds = old_positions_1d + 1 >= self.max_model_len
+        for attn_group in self.draft_attn_groups:
+            gid = attn_group.kv_cache_group_id
+            if gid == self.kv_cache_gid:
+                continue
+            block_table = self._per_group_block_tables.get(gid)
+            if block_table is None:
+                continue
+            n_blocks = block_table.shape[1]
+            bn = (new_positions_1d // block_size).clamp(max=n_blocks - 1).to(torch.long)
+            block_ids = block_table[:batch_size].gather(1, bn.unsqueeze(1)).squeeze(1)
+            sm = block_ids * block_size + (new_positions_1d % block_size)
+            sm.masked_fill_(exceeds, PADDING_SLOT_ID)
+            buf = self._slot_mapping_buffer_for(gid)
+            buf[:batch_size].copy_(sm)
+            if input_batch_size > batch_size:
+                buf[batch_size:input_batch_size].fill_(PADDING_SLOT_ID)
+            self._per_group_slot_mappings[gid] = buf[:batch_size]
+        return positions
 
     def build_per_group_and_layer_attn_metadata(
         self,
@@ -47,6 +131,8 @@ class Step3p5MTPProposer(EagleProposer):
             if gid in self._per_group_block_tables:
                 cm = copy(common_attn_metadata)
                 cm.block_table_tensor = self._per_group_block_tables[gid]
+                if gid in self._per_group_slot_mappings:
+                    cm.slot_mapping = self._per_group_slot_mappings[gid]
             else:
                 cm = common_attn_metadata
             attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
@@ -112,16 +198,16 @@ class Step3p5MTPProposer(EagleProposer):
                     layer_to_spec[layer_name] = group_spec
 
         attention_groups: dict[
-            tuple[tuple[str, str], KVCacheSpec], AttentionGroup
+            tuple[str, int], AttentionGroup
         ] = {}
-        for layer_name in self._draft_attn_layer_names:
+        for layer_name in sorted(self._draft_attn_layer_names):
             if layer_name not in layer_to_spec:
                 continue
             attn_layer = all_attn_layers[layer_name]
             attn_backend = attn_layer.get_attn_backend()
             spec = layer_to_spec[layer_name]
             gid = layer_to_gid[layer_name]
-            group_key = (attn_backend.full_cls_name(), spec)
+            group_key = (attn_backend.full_cls_name(), gid)
 
             if group_key not in attention_groups:
                 kernel_block_size = (
@@ -157,57 +243,6 @@ class Step3p5MTPProposer(EagleProposer):
             self.block_size = kv_cache_config.kv_cache_groups[
                 0
             ].kv_cache_spec.block_size
-
-    def prepare_next_token_ids_padded(
-        self,
-        sampled_token_ids: torch.Tensor,
-        requests: dict[str, CachedRequestState],
-        gpu_input_batch: InputBatch,
-        discard_request_mask: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        num_reqs = gpu_input_batch.num_reqs
-        for i in range(num_reqs):
-            self.backup_next_token_ids.np[i] = requests[
-                gpu_input_batch.req_ids[i]
-            ].get_token_id(gpu_input_batch.num_tokens_no_spec[i] - 1)
-        self.backup_next_token_ids.copy_to_gpu(num_reqs)
-
-        valid_sampled_mask = (sampled_token_ids[:num_reqs] >= 0) & (
-            sampled_token_ids[:num_reqs] < gpu_input_batch.vocab_size
-        )
-        valid_sampled_tokens_count = valid_sampled_mask.sum(dim=1).to(torch.int32)
-        max_valid_count = valid_sampled_tokens_count.new_full(
-            valid_sampled_tokens_count.shape,
-            sampled_token_ids.shape[1],
-        )
-        valid_sampled_tokens_count = torch.minimum(
-            valid_sampled_tokens_count,
-            max_valid_count,
-        )
-        valid_sampled_tokens_count = torch.where(
-            discard_request_mask[:num_reqs],
-            torch.zeros_like(valid_sampled_tokens_count),
-            valid_sampled_tokens_count,
-        )
-
-        gather_indices = (
-            torch.clamp(valid_sampled_tokens_count, min=1).to(torch.int64) - 1
-        )
-        last_sampled_token_ids = sampled_token_ids[:num_reqs].gather(
-            1,
-            gather_indices.unsqueeze(1),
-        )
-        last_sampled_token_ids = last_sampled_token_ids.squeeze(1).to(torch.int32)
-
-        use_backup = discard_request_mask[:num_reqs] | (
-            valid_sampled_tokens_count == 0
-        )
-        next_token_ids = torch.where(
-            use_backup,
-            self.backup_next_token_ids.gpu[:num_reqs],
-            last_sampled_token_ids,
-        )
-        return next_token_ids, valid_sampled_tokens_count
 
     def _sample_draft_tokens_for_step(
         self,
