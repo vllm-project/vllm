@@ -97,6 +97,8 @@ def _moe_forward(
     input_ids: torch.Tensor | None,
     prepared_a1q: torch.Tensor | None,
     prepared_a1q_scale: torch.Tensor | None,
+    prepared_topk_weights: torch.Tensor | None,
+    prepared_topk_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
     hidden_dim_unpadded: int,
 ) -> torch.Tensor:
@@ -109,6 +111,8 @@ def _moe_forward(
         input_ids,
         prepared_a1q,
         prepared_a1q_scale,
+        prepared_topk_weights,
+        prepared_topk_ids,
     )
 
 
@@ -119,6 +123,8 @@ def _moe_forward_fake(
     input_ids: torch.Tensor | None,
     prepared_a1q: torch.Tensor | None,
     prepared_a1q_scale: torch.Tensor | None,
+    prepared_topk_weights: torch.Tensor | None,
+    prepared_topk_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
     hidden_dim_unpadded: int,
 ) -> torch.Tensor:
@@ -138,6 +144,8 @@ def _moe_forward_shared(
     input_ids: torch.Tensor | None,
     prepared_a1q: torch.Tensor | None,
     prepared_a1q_scale: torch.Tensor | None,
+    prepared_topk_weights: torch.Tensor | None,
+    prepared_topk_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
     hidden_dim_unpadded: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -150,6 +158,8 @@ def _moe_forward_shared(
         input_ids,
         prepared_a1q,
         prepared_a1q_scale,
+        prepared_topk_weights,
+        prepared_topk_ids,
     )
 
 
@@ -160,6 +170,8 @@ def _moe_forward_shared_fake(
     input_ids: torch.Tensor | None,
     prepared_a1q: torch.Tensor | None,
     prepared_a1q_scale: torch.Tensor | None,
+    prepared_topk_weights: torch.Tensor | None,
+    prepared_topk_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
     hidden_dim_unpadded: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -515,6 +527,8 @@ class MoERunner(MoERunnerInterface):
         router_logits: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
         input_ids: torch.Tensor | None = None,
+        prepared_topk_weights: torch.Tensor | None = None,
+        prepared_topk_ids: torch.Tensor | None = None,
         prepared_a1q: torch.Tensor | None = None,
         prepared_a1q_scale: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
@@ -536,11 +550,21 @@ class MoERunner(MoERunnerInterface):
                 input_ids=input_ids,
             )
         else:
-            topk_weights, topk_ids = self.router.select_experts(
-                hidden_states=hidden_states,
-                router_logits=router_logits,
-                input_ids=input_ids,
-            )
+            if prepared_topk_weights is not None and prepared_topk_ids is not None:
+                topk_weights, topk_ids = prepared_topk_weights, prepared_topk_ids
+                prepare_precomputed = getattr(
+                    self.router, "prepare_precomputed_experts", None
+                )
+                if prepare_precomputed is not None:
+                    topk_weights, topk_ids = prepare_precomputed(
+                        topk_weights, topk_ids
+                    )
+            else:
+                topk_weights, topk_ids = self.router.select_experts(
+                    hidden_states=hidden_states,
+                    router_logits=router_logits,
+                    input_ids=input_ids,
+                )
 
             # Passing shared_experts_input in case SharedExpertsOrder is
             # MK_INTERNAL_OVERLAPPED.
@@ -624,6 +648,8 @@ class MoERunner(MoERunnerInterface):
         input_ids: torch.Tensor | None = None,
         prepared_a1q: torch.Tensor | None = None,
         prepared_a1q_scale: torch.Tensor | None = None,
+        prepared_topk_weights: torch.Tensor | None = None,
+        prepared_topk_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Invoke the fused moe layer.
 
@@ -670,6 +696,21 @@ class MoERunner(MoERunnerInterface):
             )
             prepared_a1q = None
             prepared_a1q_scale = None
+        if (
+            prepared_topk_weights is None
+            or prepared_topk_ids is None
+            or prepared_topk_weights.shape != prepared_topk_ids.shape
+            or prepared_topk_weights.dim() != 2
+            or prepared_topk_weights.shape[:1] != hidden_states.shape[:1]
+            or prepared_topk_weights.shape[-1] != self.moe_config.experts_per_token
+        ):
+            if prepared_topk_weights is not None or prepared_topk_ids is not None:
+                logger.debug_once(
+                    "Discarding prepared MoE topk because its shape does not "
+                    "match routed hidden_states/top_k."
+                )
+            prepared_topk_weights = None
+            prepared_topk_ids = None
 
         result = self._forward_entry(
             hidden_states,
@@ -678,6 +719,8 @@ class MoERunner(MoERunnerInterface):
             input_ids,
             prepared_a1q,
             prepared_a1q_scale,
+            prepared_topk_weights,
+            prepared_topk_ids,
             self._encode_layer_name(),
             self._trtllm_mxfp4_unpadded_dim(),
         )
@@ -789,6 +832,8 @@ class MoERunner(MoERunnerInterface):
         input_ids: torch.Tensor | None = None,
         prepared_a1q: torch.Tensor | None = None,
         prepared_a1q_scale: torch.Tensor | None = None,
+        prepared_topk_weights: torch.Tensor | None = None,
+        prepared_topk_ids: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Entry point called by the custom op to run the MoE computation.
 
@@ -834,6 +879,8 @@ class MoERunner(MoERunnerInterface):
                 router_logits=router_logits,
                 shared_experts_input=shared_experts_input,
                 input_ids=input_ids,
+                prepared_topk_weights=prepared_topk_weights,
+                prepared_topk_ids=prepared_topk_ids,
                 prepared_a1q=prepared_a1q,
                 prepared_a1q_scale=prepared_a1q_scale,
             )

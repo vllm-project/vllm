@@ -288,6 +288,55 @@ def test_moe_align_block_size_with_expert_map(
     )
 
 
+@pytest.mark.parametrize("m", [1, 16, 128])
+@pytest.mark.parametrize("block_size", [32, 128])
+@pytest.mark.parametrize("use_expert_map", [False, True])
+def test_minimax_m2_small_m_moe_align_block_size(
+    m: int, block_size: int, use_expert_map: bool
+):
+    """Covers the MiniMax-M2 decode branch: 256 experts, topk=8, <=1024 slots."""
+    topk = 8
+    num_experts = 256
+    topk_ids = torch.zeros((m, topk), device="cuda", dtype=torch.int32)
+    for i in range(m):
+        experts = torch.randperm(num_experts, device="cuda")[:topk]
+        topk_ids[i] = experts
+
+    expert_map = None
+    if use_expert_map:
+        expert_map = torch.full((num_experts,), -1, device="cuda", dtype=torch.int32)
+        local_experts = list(range(0, num_experts, 4))
+        for i, expert_id in enumerate(local_experts):
+            expert_map[expert_id] = i
+
+    actual_sorted_ids, actual_expert_ids, actual_num_tokens = moe_align_block_size(
+        topk_ids=topk_ids,
+        block_size=block_size,
+        num_experts=num_experts,
+        expert_map=expert_map,
+        ignore_invalid_experts=use_expert_map,
+    )
+    golden_sorted_ids, golden_expert_ids, golden_num_tokens = (
+        torch_moe_align_block_size(
+            topk_ids=topk_ids,
+            block_size=block_size,
+            num_experts=num_experts,
+            expert_map=expert_map,
+        )
+    )
+
+    torch.testing.assert_close(actual_num_tokens, golden_num_tokens, atol=0, rtol=0)
+    torch.testing.assert_close(actual_expert_ids, golden_expert_ids, atol=0, rtol=0)
+    _verify_expert_level_sorting(
+        actual_sorted_ids,
+        golden_sorted_ids,
+        actual_expert_ids,
+        block_size,
+        actual_num_tokens.item(),
+        m * topk,
+    )
+
+
 def test_moe_align_block_size_deterministic():
     m, topk, num_experts, block_size = 128, 2, 32, 64
 

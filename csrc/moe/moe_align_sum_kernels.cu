@@ -378,6 +378,94 @@ __global__ void moe_align_block_size_small_batch_expert_kernel(
 }
 
 template <typename scalar_t>
+__global__ void moe_align_block_size_small_m_kernel(
+    const scalar_t* __restrict__ topk_ids,
+    int32_t* __restrict__ sorted_token_ids, int32_t* __restrict__ expert_ids,
+    int32_t* __restrict__ total_tokens_post_pad,
+    int32_t* __restrict__ expert_map, int32_t num_experts, int32_t block_size,
+    size_t numel, int32_t max_num_tokens_padded, int32_t max_num_m_blocks,
+    bool has_expert_map) {
+  extern __shared__ int32_t shared_mem[];
+  int32_t* counts = shared_mem;
+  int32_t* offsets = counts + num_experts;
+  int32_t* cursors = offsets + num_experts + 1;
+
+  for (int32_t expert = threadIdx.x; expert < num_experts;
+       expert += blockDim.x) {
+    counts[expert] = 0;
+  }
+  if (threadIdx.x == 0) {
+    offsets[0] = 0;
+  }
+
+  for (int32_t i = threadIdx.x; i < max_num_tokens_padded; i += blockDim.x) {
+    sorted_token_ids[i] = numel;
+  }
+
+  __syncthreads();
+
+  for (size_t i = threadIdx.x; i < numel; i += blockDim.x) {
+    int32_t expert_id = static_cast<int32_t>(topk_ids[i]);
+    if (expert_id < 0 || expert_id >= num_experts) {
+      continue;
+    }
+    if (has_expert_map) {
+      expert_id = expert_map[expert_id];
+      if (expert_id < 0 || expert_id >= num_experts) {
+        continue;
+      }
+    }
+    atomicAdd(&counts[expert_id], 1);
+  }
+
+  __syncthreads();
+
+  if (threadIdx.x == 0) {
+    int32_t running_offset = 0;
+    for (int32_t expert = 0; expert < num_experts; ++expert) {
+      running_offset += CEILDIV(counts[expert], block_size) * block_size;
+      offsets[expert + 1] = running_offset;
+      cursors[expert] = offsets[expert];
+    }
+    total_tokens_post_pad[0] = running_offset;
+  }
+
+  __syncthreads();
+
+  for (int32_t expert = threadIdx.x; expert < num_experts;
+       expert += blockDim.x) {
+    for (int32_t i = offsets[expert]; i < offsets[expert + 1];
+         i += block_size) {
+      expert_ids[i / block_size] = expert;
+    }
+  }
+
+  const int32_t num_valid_m_blocks = offsets[num_experts] / block_size;
+  for (int32_t i = num_valid_m_blocks + threadIdx.x; i < max_num_m_blocks;
+       i += blockDim.x) {
+    expert_ids[i] = -1;
+  }
+
+  __syncthreads();
+
+  for (size_t i = threadIdx.x; i < numel; i += blockDim.x) {
+    int32_t expert_id = static_cast<int32_t>(topk_ids[i]);
+    if (expert_id < 0 || expert_id >= num_experts) {
+      continue;
+    }
+    if (has_expert_map) {
+      expert_id = expert_map[expert_id];
+      if (expert_id < 0 || expert_id >= num_experts) {
+        continue;
+      }
+    }
+
+    const int32_t rank_post_pad = atomicAdd(&cursors[expert_id], 1);
+    sorted_token_ids[rank_post_pad] = static_cast<int32_t>(i);
+  }
+}
+
+template <typename scalar_t>
 __global__ void moe_lora_align_block_size_kernel(
     scalar_t* __restrict__ topk_ids, int32_t* __restrict__ token_lora_mapping,
     int64_t block_size, int32_t* __restrict__ expert_map, int num_experts,
@@ -523,8 +611,27 @@ void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
         // calc needed amount of shared mem for `cumsum` tensors
         bool small_batch_expert_mode =
             (topk_ids.numel() < 1024) && (num_experts <= 64);
+        bool minimax_small_m_mode = (topk_ids.numel() <= 1024) &&
+                                    (num_experts == 256) &&
+                                    (topk_ids.dim() == 2) &&
+                                    (topk_ids.size(1) == 8);
 
-        if (small_batch_expert_mode) {
+        if (minimax_small_m_mode) {
+          constexpr int32_t threads = 256;
+          const int32_t shared_mem_size =
+              (3 * num_experts + 1) * sizeof(int32_t);
+
+          auto small_m_kernel =
+              vllm::moe::moe_align_block_size_small_m_kernel<scalar_t>;
+          small_m_kernel<<<1, threads, shared_mem_size, stream>>>(
+              topk_ids.data_ptr<scalar_t>(),
+              sorted_token_ids.data_ptr<int32_t>(),
+              experts_ids.data_ptr<int32_t>(),
+              num_tokens_post_pad.data_ptr<int32_t>(),
+              expert_map.data_ptr<int32_t>(), num_experts, block_size,
+              topk_ids.numel(), sorted_token_ids.size(0), experts_ids.size(0),
+              has_expert_map);
+        } else if (small_batch_expert_mode) {
           const int32_t threads = max((int32_t)num_experts, WARP_SIZE);
           const int32_t shared_mem_size =
               ((threads + 1) * num_experts + (num_experts + 1)) *

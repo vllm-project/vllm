@@ -30,6 +30,8 @@ class MoERunnerInterface(PluggableLayer, ABC):
         input_ids: torch.Tensor | None = None,
         prepared_a1q: torch.Tensor | None = None,
         prepared_a1q_scale: torch.Tensor | None = None,
+        prepared_topk_weights: torch.Tensor | None = None,
+        prepared_topk_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         raise NotImplementedError
 
