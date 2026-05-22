@@ -313,6 +313,18 @@ class Attention(nn.Module, AttentionLayerBase):
             )
         else:
             self.attn_backend = attn_backend
+            # Adjust kv cache layout if the selected backend requires a specific one
+            required_layout = attn_backend.get_required_kv_cache_layout()
+            if required_layout is not None:
+                from vllm.v1.attention.backends.utils import set_kv_cache_layout
+
+                set_kv_cache_layout(required_layout)
+                logger.info(
+                    "Using %s KV cache layout for %s backend.",
+                    required_layout,
+                    attn_backend.get_name(),
+                )
+
         backend_supports_alibi_sqrt = self.attn_backend.supports_alibi_sqrt()
         use_alibi_sqrt = use_alibi_sqrt if use_alibi_sqrt else False
         if use_alibi_sqrt and not backend_supports_alibi_sqrt:
