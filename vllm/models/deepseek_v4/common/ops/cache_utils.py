@@ -296,7 +296,9 @@ def _dequantize_and_gather_k_kernel(
 
                 # Load and decode UE8M0 scale
                 # UE8M0: scale = 2^(stored_value - 127)
-                encoded_scale = tl.load(token_scale_ptr + qblock_idx, mask=valid, other=0)
+                encoded_scale = tl.load(
+                    token_scale_ptr + qblock_idx, mask=valid, other=0
+                )
                 exponent = encoded_scale.to(tl.float32) - 127.0
                 scale = tl.exp2(exponent)
 

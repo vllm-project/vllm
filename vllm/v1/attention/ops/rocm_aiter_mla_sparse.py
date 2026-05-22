@@ -172,7 +172,9 @@ def _cp_gather_indexer_quant_cache_kernel(
     )
     safe_block_table_id = tl.where(valid_block_table, block_table_id, 0)
     block_table_offset = safe_batch_id * block_table_stride + safe_block_table_id
-    block_id = tl.load(block_table_ptr + block_table_offset, mask=valid_block_table, other=-1)
+    block_id = tl.load(
+        block_table_ptr + block_table_offset, mask=valid_block_table, other=-1
+    )
     valid_block = valid_block_table & (block_id >= 0) & (block_id < NUM_BLOCKS)
     safe_block_id = tl.where(valid_block, block_id, 0)
     safe_block_offset = tl.where(valid_block, block_offset, 0)
@@ -184,7 +186,9 @@ def _cp_gather_indexer_quant_cache_kernel(
             + tiled_block_offset * HEAD_TILE_SIZE
         )
     else:
-        src_cache_offset = safe_block_id * kv_cache_stride + safe_block_offset * HEAD_DIM
+        src_cache_offset = (
+            safe_block_id * kv_cache_stride + safe_block_offset * HEAD_DIM
+        )
     src_scale_offset = safe_block_id * kv_cache_scale_stride + safe_block_offset
     dst_offset = tid * HEAD_DIM
     src_scale_ptr = kv_cache_scale_ptr + src_scale_offset
