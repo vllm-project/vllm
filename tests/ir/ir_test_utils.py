@@ -1,14 +1,37 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 """
-Shared test utilities for vLLM IR op correctness tests.
+Shared test utilities for vLLM IR op tests.
+
+This module provides:
+1. Common test parameters (NUM_TOKENS, COMMON_HIDDEN_SIZES)
+2. Generic helpers (clone_args, supported_providers, assert_close)
+3. Lowering test helpers (assert_supports_args_returns_bool, assert_op_e2e_correctness)
 """
 
+from collections.abc import Callable
+
+import pytest
 import torch
+from torch import nn
 
+import vllm.kernels  # noqa: F401 to register kernels
+from tests.compile.backend import TestBackend
+from vllm import ir
+from vllm.compilation.passes.ir.lowering_pass import (
+    VllmIRLoweringPass,
+)
+from vllm.config import get_current_vllm_config
 from vllm.ir.op import IrOp
+from vllm.platforms import current_platform
+
+# ============================================================
+# Common test parameters
+# ============================================================
 
 NUM_TOKENS = [1, 8, 17, 32, 512, 2048]
+
 COMMON_HIDDEN_SIZES = [
     2048,  # Llama 3.2 1B, Qwen 3 MoE 30B-A3B, Gemma 3n
     4096,  # Llama 3 8B, Qwen 3 8B
@@ -18,21 +41,31 @@ COMMON_HIDDEN_SIZES = [
 ]
 
 
+# ============================================================
+# Generic helpers
+# ============================================================
+
+
 def clone_args(args: tuple) -> tuple:
+    """Deep copy args to avoid tensor mutation between test cases."""
     return tuple(a.clone() if isinstance(a, torch.Tensor) else a for a in args)
 
 
 def supported_providers(op: IrOp) -> list[str]:
+    """Get list of non-native supported provider names."""
     return [
         name for name, impl in op.impls.items() if name != "native" and impl.supported
     ]
 
 
 def assert_close(op: IrOp, actual, expected):
+    """Assert tensors are close, using op-defined tolerances."""
     if isinstance(actual, torch.Tensor):
         tol = op.get_tolerance(actual.dtype)
         try:
-            torch.testing.assert_close(actual, expected, **tol)
+            torch.testing.assert_close(
+                actual, expected, atol=tol["atol"], rtol=tol["rtol"]
+            )
         except AssertionError as e:
             raise AssertionError(
                 f"{e}\n\nTo adjust tolerance, use:\n"
@@ -44,3 +77,258 @@ def assert_close(op: IrOp, actual, expected):
             assert_close(op, a, ex)
     else:
         assert actual == expected
+
+
+# ============================================================
+# Lowering test helpers
+# ============================================================
+
+
+def _make_simple_model(op: IrOp, real_args: tuple) -> nn.Module:
+    """Create a simple model that calls the op with given arguments."""
+
+    class SimpleModel(nn.Module):
+        def forward(self, x):
+            return op(*real_args)
+
+    return SimpleModel()
+
+
+def assert_supports_args_returns_bool(
+    op: IrOp,
+    provider: str,
+    symbolic_params: list[str] | None = None,
+    **generate_kwargs,
+) -> None:
+    """
+    Assert that supports_args returns a proper bool (not SymBool) with unbacked SymInts.
+
+    This is a necessary condition for Dynamo compatibility. If supports_args
+    returns a SymBool (e.g., from comparing a dimension to a concrete number),
+    it indicates the implementation may specialize on batch size.
+
+    Args:
+        op: The IrOp to test.
+        provider: The provider/implementation to test.
+        symbolic_params: List of parameter names whose tensors should have
+            their first dimension replaced by unbacked SymInt.
+            Defaults to op.activations (e.g., ["x"] or ["x", "x_residual"]).
+        **generate_kwargs: Keyword arguments passed to op.generate_inputs().
+
+    Raises:
+        AssertionError: If supports_args returns a non-bool (SymBool).
+    """
+    impl = op.impls[provider]
+    if not impl.supported:
+        return  # Skip unsupported implementations
+
+    fake_args = generate_symbolic_inputs(
+        op, symbolic_params=symbolic_params, **generate_kwargs
+    )
+    result = impl.supports_args(*fake_args)
+    assert isinstance(result, bool), (
+        f"supports_args for {op.name}/{provider} returned {type(result).__name__}, "
+        f"expected bool. This likely means the implementation specializes on "
+        f"batch size (e.g., x.size(0) == 8)."
+    )
+
+
+def assert_op_e2e_correctness(
+    op: IrOp,
+    provider: str,
+    real_args: tuple,
+) -> None:
+    """
+    Assert lowering produces correct results by comparing with two baselines:
+    1. torch_wrap=False: implementations traced by Dynamo directly
+    2. No lowering at all: IR ops remain in the Inductor-produced artifact
+    Also verifies lowering pass selection matches direct dispatch.
+
+    Args:
+        op: The IrOp to test.
+        provider: The provider/implementation to test.
+        real_args: The concrete input arguments generated by op.generate_inputs().
+
+    Raises:
+        AssertionError: If lowering fails or results don't match baselines.
+    """
+    if not op.impls[provider].supported:
+        pytest.skip(f"Provider {provider} not supported")
+
+    lowering_pass = VllmIRLoweringPass(get_current_vllm_config())
+    backend = TestBackend(lowering_pass)
+    torch.set_default_device(current_platform.device_type)
+    x = torch.randn(8, 16, dtype=torch.bfloat16)
+
+    # Get expected result from direct dispatch
+    with op.set_priority([provider, "native"]):
+        expected_impl = op.dispatch(*real_args)
+
+    # Case 1: lowering enabled with torch_wrap=True
+    with op.set_priority([provider, "native"]), ir.enable_torch_wrap(True):
+        model = _make_simple_model(op, real_args)
+        compiled_model = torch.compile(model, backend=backend, fullgraph=True)
+        output = compiled_model(x.clone())
+
+    # Verify lowering pass selection matches direct dispatch
+    if op.name in lowering_pass.selected_impls:
+        selected = lowering_pass.selected_impls[op.name]
+        assert len(selected) > 0
+        for node_name, selected_provider in selected.items():
+            assert selected_provider == expected_impl.provider, (
+                f"lowering selected {selected_provider} for {node_name}, "
+                f"but direct dispatch got {expected_impl.provider}"
+            )
+
+    # Case 2: torch_wrap=False - implementations traced by Dynamo directly
+    backend_no_wrap = TestBackend()
+    with op.set_priority([provider, "native"]), ir.enable_torch_wrap(False):
+        model_no_wrap = _make_simple_model(op, real_args)
+        compiled_no_wrap = torch.compile(
+            model_no_wrap, backend=backend_no_wrap, fullgraph=True
+        )
+        output_no_wrap = compiled_no_wrap(x.clone())
+
+    # Case 3: no lowering at all - IR ops remain in Inductor artifact
+    backend_no_lowering = TestBackend()
+    with op.set_priority([provider, "native"]):
+        model_no_lowering = _make_simple_model(op, real_args)
+        compiled_no_lowering = torch.compile(
+            model_no_lowering, backend=backend_no_lowering, fullgraph=True
+        )
+        output_no_lowering = compiled_no_lowering(x.clone())
+
+    # Use op-defined tolerances for dtype-aware comparison
+    assert_close(op, output, output_no_wrap)
+    assert_close(op, output, output_no_lowering)
+
+
+def assert_impl_numerical(op: IrOp, provider: str, args: tuple) -> None:
+    """
+    Assert that impl produces numerically correct results compared to native.
+
+    This verifies the implementation's numerical correctness without going
+    through the lowering pipeline.
+
+    Args:
+        op: The IrOp to test.
+        provider: The provider/implementation to test.
+        args: The concrete input arguments.
+    """
+    impl = op.impls[provider]
+    if not impl.supports_args(*args):
+        pytest.skip(f"{provider} does not support args")
+
+    ref = op.impls["native"].impl_fn(*clone_args(args))
+    out = impl.impl_fn(*clone_args(args))
+    assert_close(op, out, ref)
+
+
+def assert_dispatch_matches_direct(op: IrOp, provider: str, args: tuple) -> None:
+    """
+    Assert that dispatch matches direct implementation call.
+
+    This verifies the priority-based dispatch is working correctly.
+
+    Args:
+        op: The IrOp to test.
+        provider: The provider/implementation to test.
+        args: The concrete input arguments.
+    """
+    with op.set_priority([provider, "native"]):
+        out_dispatched = op(*args)
+    out_direct = op.impls[provider].impl_fn(*args)
+    torch.testing.assert_close(out_dispatched, out_direct, rtol=0.0, atol=0.0)
+
+
+# ============================================================
+# Fixture for registering test ops with automatic cleanup
+# ============================================================
+
+
+def generate_symbolic_inputs(
+    op: IrOp,
+    symbolic_params: list[str] | None = None,
+    **kwargs,
+) -> tuple:
+    """
+    Generate inputs with unbacked SymInts for specified parameters.
+
+    This is useful for testing that `supports_args` works correctly
+    with symbolic shapes during torch.compile graph tracing.
+
+    Args:
+        op: The IrOp to generate inputs for.
+        symbolic_params: List of parameter names whose tensors should have
+            their first dimension replaced by unbacked SymInt.
+            Defaults to op.activations (e.g., ["x"] or ["x", "x_residual"]).
+        **kwargs: Keyword arguments passed to op.generate_inputs().
+
+    Returns:
+        Tuple of arguments with specified parameters' tensors having
+        their first dimension replaced by unbacked SymInts.
+    """
+    from torch.fx.experimental.symbolic_shapes import ShapeEnv
+
+    args = op.generate_inputs(**kwargs)
+    params = list(op._py_signature.parameters.keys())
+    shape_env = ShapeEnv()
+    sym_int = shape_env.create_unbacked_symint()
+
+    # Default to activations (parameters starting with 'x')
+    if symbolic_params is None:
+        symbolic_params = op.activations
+
+    result = []
+    for arg, param_name in zip(args, params):
+        if (
+            isinstance(arg, torch.Tensor)
+            and arg.dim() >= 1
+            and param_name in symbolic_params
+        ):
+            new_shape = (sym_int,) + arg.shape[1:]
+            result.append(torch.empty(new_shape, device="meta", dtype=arg.dtype))
+        else:
+            result.append(arg)
+    return tuple(result)
+
+
+@pytest.fixture
+def registered_test_op():
+    """
+    Fixture to register a test IR op with automatic cleanup.
+
+    Usage:
+        def test_something(registered_test_op):
+            op = registered_test_op(
+                name="_my_test_op",
+                native_fn=my_native_fn,
+                input_generator=my_input_gen,
+                impls={"impl1": (supports_fn, impl_fn)},
+            )
+            # ... test with op ...
+            # Cleanup is automatic when test ends
+    """
+    registered_names: list[str] = []
+
+    def _register(
+        name: str,
+        native_fn: Callable[..., torch.Tensor],
+        input_generator: Callable[[], tuple],
+        impls: dict[str, tuple[Callable[..., bool] | None, Callable]],
+    ) -> IrOp:
+        from vllm import ir
+
+        op = ir.register_op(name=name)(native_fn)
+        op.register_input_generator(input_generator)
+
+        for impl_name, (supports_args, impl_fn) in impls.items():
+            op.register_impl(impl_name, supports_args=supports_args)(impl_fn)
+
+        registered_names.append(name)
+        return op
+
+    yield _register
+
+    for name in registered_names:
+        IrOp.registry.pop(name, None)

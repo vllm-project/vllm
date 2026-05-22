@@ -1,69 +1,153 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import pytest
 import torch
-from torch import nn
 
 import vllm.kernels  # noqa: F401 to register kernels
+from tests.ir.ir_test_utils import (
+    _make_simple_model,
+    generate_symbolic_inputs,
+)
 from vllm import ir
 from vllm.compilation.passes.ir.lowering_pass import (
     VllmIRLoweringPass,
 )
 from vllm.config import get_current_vllm_config
-from vllm.ir import ops
+from vllm.ir.op import IrOp
 from vllm.platforms import current_platform
 
 from ...backend import TestBackend
 
-
-class Model(nn.Module):
-    def __init__(self, hidden_size=16, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.hidden_size = hidden_size
-        self.weight = torch.ones(hidden_size, dtype=torch.bfloat16)
-
-    def forward(self, x):
-        x1 = x + 4.0
-        x2 = ops.rms_norm(x1, self.weight, 1e-5)
-        x3 = x2 * 5.0
-        # no weight
-        x4 = ops.rms_norm(x3, None, 1e-5)
-        x5 = x4 / 2.0
-        # dispatch to native due to variance_size parameter
-        x6 = ops.rms_norm(x5, self.weight, 1e-5, self.hidden_size // 2)
-        return x6 + 3.0
+# ============================================================
+# Lowering unit tests with fake ops
+# ============================================================
 
 
-@pytest.mark.parametrize("rms_provider", ops.rms_norm.supported_providers())
-def test_lowering_rms_norm(rms_provider, default_vllm_config):
-    torch.set_default_device(current_platform.device_type)
+class TestFakeOpLowering:
+    """
+    Lowering unit tests with fake ops to stress-test implementation selection
+    through the VllmIRLoweringPass.
+    """
 
-    lowering_pass = VllmIRLoweringPass(get_current_vllm_config())
-    backend = TestBackend(lowering_pass)
-    backend_unlowered = TestBackend()
+    def test_impl_selection_and_fallback(self, default_vllm_config, registered_test_op):
+        """
+        Test that lowering correctly selects implementation based on supports_args,
+        and falls back to native when no custom impl matches.
+        """
+        torch.set_default_device(current_platform.device_type)
 
-    model = Model()
-    x = torch.randn(8, 16, dtype=torch.bfloat16)
-    with (
-        ops.rms_norm.set_priority([rms_provider, "native"]),
-        ir.enable_torch_wrap(True),
-    ):
-        compiled_model = torch.compile(model, backend=backend, fullgraph=True)
-        compiled_unlowered_model = torch.compile(
-            model, backend=backend_unlowered, fullgraph=True
+        # --- Test 1: dtype-based selection ---
+        def _selection_input_gen() -> tuple:
+            return (torch.randn(8, 16, dtype=torch.bfloat16),)
+
+        def _selection_native_fn(x: torch.Tensor) -> torch.Tensor:
+            return x
+
+        def _bf16_impl_fn(x: torch.Tensor) -> torch.Tensor:
+            return x * 2
+
+        def _fp32_impl_fn(x: torch.Tensor) -> torch.Tensor:
+            return x + 1
+
+        selection_op = registered_test_op(
+            "_test_selection_op",
+            native_fn=_selection_native_fn,
+            input_generator=_selection_input_gen,
+            impls={
+                "bf16_impl": (lambda x: x.dtype == torch.bfloat16, _bf16_impl_fn),
+                "fp32_impl": (lambda x: x.dtype == torch.float32, _fp32_impl_fn),
+            },
         )
-        output = compiled_model(x)
-        output_unlowered = compiled_unlowered_model(x)
+        lowering_pass = VllmIRLoweringPass(get_current_vllm_config())
+        backend = TestBackend(lowering_pass)
+        with selection_op.set_priority(["bf16_impl", "fp32_impl", "native"]):
+            real_args = selection_op.generate_inputs()
+            model = _make_simple_model(selection_op, real_args)
+            x = torch.randn(8, 16, dtype=torch.bfloat16)
+            compiled = torch.compile(model, backend=backend, fullgraph=True)
+            _ = compiled(x)
 
-    selected = lowering_pass.selected_impls["rms_norm"]
-    assert len(selected) == 3
-    assert selected["rms_norm"] == rms_provider
-    assert selected["rms_norm_1"] == rms_provider
-    assert selected["rms_norm_2"] == "native"
+        # Verify bf16_impl was selected
+        selected = lowering_pass.selected_impls["_test_selection_op"]
+        assert "bf16_impl" in selected.values()
 
-    # Compiled function guards on global value, avoid recompilation
-    with ir.enable_torch_wrap(True):
-        output2 = compiled_model(x)
+        # --- Test 2: fallback to native ---
+        def _fallback_input_gen() -> tuple:
+            return (torch.randn(8, 16, dtype=torch.bfloat16),)
 
-    torch.testing.assert_close(output_unlowered, output)
-    torch.testing.assert_close(output_unlowered, output2)
+        def _fallback_native_fn(x: torch.Tensor) -> torch.Tensor:
+            return x
+
+        def _never_matches_impl_fn(x: torch.Tensor) -> torch.Tensor:
+            return x * 2
+
+        fallback_op = registered_test_op(
+            "_test_fallback_op",
+            native_fn=_fallback_native_fn,
+            input_generator=_fallback_input_gen,
+            impls={
+                "never_matches": (lambda x: False, _never_matches_impl_fn),
+            },
+        )
+        lowering_pass = VllmIRLoweringPass(get_current_vllm_config())
+        backend = TestBackend(lowering_pass)
+        # Set priority WITHOUT native - it will be auto-appended
+        with fallback_op.set_priority(["never_matches"]):
+            real_args = fallback_op.generate_inputs()
+            model = _make_simple_model(fallback_op, real_args)
+            x = torch.randn(8, 16, dtype=torch.bfloat16)
+            compiled = torch.compile(model, backend=backend, fullgraph=True)
+            _ = compiled(x)
+
+        # Verify native was selected (fallback)
+        selected = lowering_pass.selected_impls["_test_fallback_op"]
+        assert "native" in selected.values()
+
+    def test_supports_args_validation(self, registered_test_op):
+        """
+        Test supports_args signature validation and batch size specialization detection.
+        """
+
+        # --- Test 1: signature mismatch ---
+        @ir.register_op(name="_test_sig_op")
+        def _test_sig_op(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+            return x + y
+
+        try:
+            with pytest.raises(ValueError, match="number of parameters"):
+
+                @_test_sig_op.register_impl("bad_sig", supports_args=lambda x: True)
+                def bad_sig_impl(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+                    return x + y
+        finally:
+            IrOp.registry.pop("_test_sig_op", None)
+
+        # --- Test 2: batch size specialization (negative test) ---
+        def _batch_dep_input_gen() -> tuple:
+            return (torch.randn(8, 16, dtype=torch.bfloat16),)
+
+        def _batch_dep_native_fn(x: torch.Tensor) -> torch.Tensor:
+            return x
+
+        def _batch_dep_impl_fn(x: torch.Tensor) -> torch.Tensor:
+            return x * 2
+
+        batch_op = registered_test_op(
+            "_test_batch_dep_op",
+            native_fn=_batch_dep_native_fn,
+            input_generator=_batch_dep_input_gen,
+            impls={
+                "batch_dep_impl": (lambda x: x.size(0) == 8, _batch_dep_impl_fn),
+            },
+        )
+        fake_args = generate_symbolic_inputs(batch_op)
+        impl = batch_op.impls["batch_dep_impl"]
+        result = impl.supports_args(*fake_args)
+
+        # This should NOT be a bool - it's a SymBool (Eq(u0, 8))
+        # indicating the implementation specializes on batch size
+        assert not isinstance(result, bool), (
+            f"supports_args returned {type(result).__name__}, expected SymBool. "
+            f"The impl lambda x: x.size(0) == 8 creates a symbolic comparison."
+        )
