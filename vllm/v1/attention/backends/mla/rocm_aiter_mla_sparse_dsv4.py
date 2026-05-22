@@ -7,7 +7,10 @@ from typing import TYPE_CHECKING, cast
 import torch
 
 from vllm.forward_context import get_forward_context
-from vllm.models.deepseek_v4.common.ops import dequantize_and_gather_k_cache
+from vllm.models.deepseek_v4.common.ops import (
+    combine_topk_swa_indices,
+    dequantize_and_gather_k_cache,
+)
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import (
     AttentionLayer,
@@ -702,31 +705,23 @@ class DeepseekV4ROCMAiterMLASparseImpl(
                 query_start_loc_cpu[num_decodes + chunk_end] - prefill_token_base
             )
 
-            combined_ragged_indices, combined_ragged_indptr, combined_lens = (
-                combine_topk_swa_indices_ragged(
-                    topk_indices[query_start:query_end],
-                    query_start_loc[
-                        num_decodes + chunk_start : num_decodes + chunk_end + 1
-                    ],
-                    seq_lens[chunk_start:chunk_end],
-                    gather_lens[chunk_start:chunk_end],
-                    layer.window_size,
-                    layer.compress_ratio,
-                    top_k,
-                    M,
-                    N,
-                )
+            combined_indices, combined_lens = combine_topk_swa_indices(
+                topk_indices[query_start:query_end],
+                query_start_loc[
+                    num_decodes + chunk_start : num_decodes + chunk_end + 1
+                ],
+                seq_lens[chunk_start:chunk_end],
+                gather_lens[chunk_start:chunk_end],
+                layer.window_size,
+                layer.compress_ratio,
+                top_k,
+                M,
+                N,
             )
             rocm_sparse_attn_prefill(
                 q=q[query_start:query_end],
                 kv=kv.view(-1, 1, q.shape[-1]),
-                indices=torch.empty(
-                    q[query_start:query_end].shape[0],
-                    1,
-                    0,
-                    dtype=torch.int32,
-                    device=q.device,
-                ),
+                indices=combined_indices,
                 topk_length=combined_lens,
                 scale=layer.scale,
                 head_dim=layer.head_dim,
@@ -734,8 +729,6 @@ class DeepseekV4ROCMAiterMLASparseImpl(
                 rope_head_dim=layer.rope_head_dim,
                 attn_sink=layer.attn_sink,
                 output=output[query_start:query_end],
-                ragged_indices=combined_ragged_indices,
-                ragged_indptr=combined_ragged_indptr,
             )
 
 

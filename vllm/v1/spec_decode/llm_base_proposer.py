@@ -246,12 +246,18 @@ class SpecDecodeBaseProposer:
             from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
                 ROCMAiterMLASparseMetadata,
             )
+            from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse_dsv4 import (
+                DeepseekV4ROCMAiterMLASparseMetadata,
+                DeepseekV4ROCMAiterSparseSWAMetadata,
+            )
             from vllm.v1.attention.backends.rocm_attn import RocmAttentionMetadata
 
             rocm_types = [
                 TritonAttentionMetadata,
                 RocmAttentionMetadata,
                 ROCMAiterMLASparseMetadata,
+                DeepseekV4ROCMAiterMLASparseMetadata,
+                DeepseekV4ROCMAiterSparseSWAMetadata,
                 DeepseekV32IndexerMetadata,
             ]
             # ROCM_AITER_FA is an optional backend
