@@ -1578,6 +1578,7 @@ class Qwen2_5_VLForConditionalGeneration(
         # embedding formats between eager and cudagraph paths.
         modalities = [] if self.is_multimodal_pruning_enabled else ["image", "video"]
 
+        max_frames = self.get_max_frames_per_video() if "video" in modalities else 1
         return EncoderCudaGraphConfig(
             modalities=modalities,
             input_key_by_modality={
@@ -1595,6 +1596,7 @@ class Qwen2_5_VLForConditionalGeneration(
                 "max_seqlen_window",
             ],
             out_hidden_size=self.visual.out_hidden_size,
+            max_frames_per_video=max_frames,
         )
 
     def get_input_modality(
@@ -1603,7 +1605,9 @@ class Qwen2_5_VLForConditionalGeneration(
     ) -> str:
         if "image_grid_thw" in mm_kwargs:
             return "image"
-        return "video"
+        elif "video_grid_thw" in mm_kwargs:
+            return "video"
+        raise AssertionError("This line should be unreachable.")
 
     def get_max_frames_per_video(self) -> int:
         mm_registry = MULTIMODAL_REGISTRY
@@ -1649,26 +1653,21 @@ class Qwen2_5_VLForConditionalGeneration(
             grid_thw = grid_thw.tolist()
         return grid_thw
 
-    def get_encoder_cudagraph_num_items(
+    def get_encoder_cudagraph_item_specs(
         self,
         mm_kwargs: dict[str, Any],
-    ) -> int:
-        return len(self._get_grid_thw_by_modality(mm_kwargs))
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
 
-    def get_encoder_cudagraph_per_item_output_tokens(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> list[int]:
         m = self.visual.spatial_merge_size
         grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
-        return [t * (h // m) * (w // m) for t, h, w in grid_thw]
-
-    def get_encoder_cudagraph_per_item_input_sizes(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> list[int]:
-        grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
-        return [t * h * w for t, h, w in grid_thw]
+        return [
+            EncoderItemSpec(
+                input_size=t * h * w,
+                output_tokens=t * (h // m) * (w // m),
+            )
+            for t, h, w in grid_thw
+        ]
 
     def select_encoder_cudagraph_items(
         self,
@@ -1684,11 +1683,13 @@ class Qwen2_5_VLForConditionalGeneration(
                     "pixel_values": pixel_values[:0],
                     "image_grid_thw": [],
                 }
-            else:
+            elif self.get_input_modality(mm_kwargs) == "video":
                 return {
                     "pixel_values_videos": pixel_values[:0],
                     "video_grid_thw": [],
                 }
+            else:
+                raise AssertionError("This line should be unreachable.")
 
         # Compute cumulative patch offsets for slicing pixel_values
         patches_per_item = [t * h * w for t, h, w in grid_thw]
@@ -1706,11 +1707,13 @@ class Qwen2_5_VLForConditionalGeneration(
                 "pixel_values": selected_pv,
                 "image_grid_thw": selected_grid,
             }
-        else:
+        elif self.get_input_modality(mm_kwargs) == "video":
             return {
                 "pixel_values_videos": selected_pv,
                 "video_grid_thw": selected_grid,
             }
+        else:
+            raise AssertionError("This line should be unreachable.")
 
     def prepare_encoder_cudagraph_capture_inputs(
         self,
@@ -1831,7 +1834,7 @@ class Qwen2_5_VLForConditionalGeneration(
                     self.model_config.max_model_len,
                 ),
             )
-        else:
+        elif modality == "video":
             buffers = self.visual.prepare_encoder_metadata(
                 grid_thw_list,
                 max_frames_per_batch=max_frames_per_batch,
@@ -1840,6 +1843,8 @@ class Qwen2_5_VLForConditionalGeneration(
                     self.model_config.max_model_len,
                 ),
             )
+        else:
+            raise AssertionError("This line should be unreachable.")
 
         return EncoderCudaGraphReplayBuffers(buffers=buffers)
 
