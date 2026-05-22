@@ -117,7 +117,6 @@ ONBUILD RUN git clone ${VLLM_REPO} \
 	    && cd vllm \
 	    && git fetch -v --prune -- origin ${VLLM_BRANCH} \
 	    && git checkout FETCH_HEAD \
-	    && git submodule update --init --recursive \
         && if [ ${VLLM_REPO} != "https://github.com/vllm-project/vllm.git" ] ; then \
                git remote add upstream "https://github.com/vllm-project/vllm.git" \
                && git fetch upstream ; fi
@@ -130,16 +129,7 @@ FROM fetch_vllm_${REMOTE_VLLM} AS fetch_vllm
 FROM fetch_vllm AS rust-build
 ARG COMMON_WORKDIR
 
-# Fail loudly if the rust submodule was not initialized on the host before
-# `docker build`. The rust frontend source is brought in via the fetch_vllm
-# stage, so an uninitialized submodule would otherwise produce a confusing
-# cargo failure.
-RUN if [ ! -f ${COMMON_WORKDIR}/vllm/rust/Cargo.toml ]; then \
-        echo "ERROR: rust/ submodule is not initialized."; \
-        echo "Run 'git submodule update --init --recursive' on the host before building."; \
-        exit 1; \
-    fi
-
+# protoc is used by tonic-build/prost-build.
 RUN apt-get update -q -y && apt-get install -q -y --no-install-recommends \
         ca-certificates curl unzip \
     && rm -rf /var/lib/apt/lists/*
@@ -147,7 +137,7 @@ RUN apt-get update -q -y && apt-get install -q -y --no-install-recommends \
 COPY tools/install_protoc.sh /tmp/install_protoc.sh
 RUN /tmp/install_protoc.sh && rm /tmp/install_protoc.sh
 
-# Install rustup; the toolchain itself is pinned by rust/rust-toolchain.toml.
+# Install rustup; the toolchain itself is pinned by rust-toolchain.toml.
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
     sh -s -- -y --profile minimal --default-toolchain none
 ENV PATH="/root/.cargo/bin:${PATH}"
@@ -162,9 +152,8 @@ ENV CARGO_BUILD_JOBS=4
 RUN --mount=type=cache,id=vllm-rocm-cargo-registry,target=/root/.cargo/registry \
     --mount=type=cache,id=vllm-rocm-cargo-git,target=/root/.cargo/git \
     --mount=type=cache,id=vllm-rocm-cargo-target,target=${COMMON_WORKDIR}/vllm/rust/target \
-    cd ${COMMON_WORKDIR}/vllm/rust \
-    && cargo build --release --bin vllm-rs --features native-tls-vendored \
-    && cp target/release/vllm-rs /tmp/vllm-rs
+    cd ${COMMON_WORKDIR}/vllm \
+    && VLLM_RS_TARGET_PATH=/tmp/vllm-rs bash build_rust.sh
 
 # -----------------------
 # vLLM native build stages
