@@ -781,6 +781,15 @@ class BaseRenderer(ABC, Generic[_T]):
             engine_input["prompt"] = prompt_text
         if cache_salt := prompt.get("cache_salt"):
             engine_input["cache_salt"] = cache_salt
+        # `prompt_token_offsets` is only defined on TokensInput; the
+        # multimodal branch never carries offsets (offset computation is
+        # skipped in `_tokenize_prompt` whenever multi_modal_* fields are
+        # present), so guarding on the type discriminator is both
+        # type-safe and behavior-preserving.
+        if engine_input["type"] == "token" and (
+            (offsets := prompt.get("prompt_token_offsets")) is not None
+        ):
+            engine_input["prompt_token_offsets"] = offsets
 
         return engine_input
 
@@ -839,6 +848,12 @@ class BaseRenderer(ABC, Generic[_T]):
             engine_input["prompt"] = prompt_text
         if cache_salt := prompt.get("cache_salt"):
             engine_input["cache_salt"] = cache_salt
+        # See `_process_tokens` for why this is gated on the type
+        # discriminator.
+        if engine_input["type"] == "token" and (
+            (offsets := prompt.get("prompt_token_offsets")) is not None
+        ):
+            engine_input["prompt_token_offsets"] = offsets
 
         return engine_input
 

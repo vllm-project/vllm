@@ -213,3 +213,66 @@ class TestTokenizePromptOffsets:
         # raising and without offset_mapping.
         assert "input_ids" in plain_result
         assert "offset_mapping" not in plain_result
+
+
+class TestProcessTokensForwardsOffsets:
+    """End-to-end regression tests for the chain
+    `_tokenize_prompt` -> `_process_tokens` -> `TokensInput`.
+
+    The previously-passing endpoint tests mocked the preprocessing
+    layer and returned hand-crafted engine inputs, which masked a bug
+    where `_process_tokens` rebuilt the engine input from scratch and
+    forwarded only `prompt` and `cache_salt`, dropping
+    `prompt_token_offsets` before it reached `create_tokenize`.
+    """
+
+    def test_process_tokens_forwards_offsets_to_engine_input(self, fast_tokenizer):
+        renderer = _make_base_renderer_with(fast_tokenizer)
+        params = TokenizeParams(max_total_tokens=None, return_token_offsets=True)
+        prompt = {"prompt": "Hello, world."}
+
+        tokens_prompt = renderer._tokenize_prompt(prompt, params)
+        # Sanity: the TokensPrompt must already carry offsets, otherwise
+        # this regression test is checking the wrong layer.
+        assert "prompt_token_offsets" in tokens_prompt
+        expected_offsets = tokens_prompt["prompt_token_offsets"]
+
+        engine_input = renderer._process_tokens(tokens_prompt)
+
+        assert "prompt_token_offsets" in engine_input
+        assert engine_input["prompt_token_offsets"] == expected_offsets
+
+    @pytest.mark.asyncio
+    async def test_process_tokens_async_forwards_offsets_to_engine_input(
+        self, fast_tokenizer
+    ):
+        from vllm.utils.async_utils import AsyncMicrobatchTokenizer
+
+        renderer = _make_base_renderer_with(fast_tokenizer)
+        renderer._async_tokenizer = AsyncMicrobatchTokenizer(fast_tokenizer)
+        params = TokenizeParams(max_total_tokens=None, return_token_offsets=True)
+        prompt = {"prompt": "Hello, world."}
+
+        tokens_prompt = await renderer._tokenize_prompt_async(prompt, params)
+        assert "prompt_token_offsets" in tokens_prompt
+        expected_offsets = tokens_prompt["prompt_token_offsets"]
+
+        engine_input = await renderer._process_tokens_async(tokens_prompt)
+
+        assert "prompt_token_offsets" in engine_input
+        assert engine_input["prompt_token_offsets"] == expected_offsets
+
+    def test_process_tokens_no_offsets_when_flag_off(self, fast_tokenizer):
+        """Negative case: when the flag is off, `_tokenize_prompt` does
+        not set the field on the TokensPrompt, and `_process_tokens`
+        must not add it to the engine input either."""
+        renderer = _make_base_renderer_with(fast_tokenizer)
+        params = TokenizeParams(max_total_tokens=None)  # flag defaults False
+        prompt = {"prompt": "Hello, world."}
+
+        tokens_prompt = renderer._tokenize_prompt(prompt, params)
+        assert "prompt_token_offsets" not in tokens_prompt
+
+        engine_input = renderer._process_tokens(tokens_prompt)
+
+        assert "prompt_token_offsets" not in engine_input
