@@ -275,27 +275,6 @@ __attribute__((always_inline)) static inline void vec_max_min_with_pad_blend(
   *tail_i_out = i;
 }
 
-// Zero exp lanes excluded by top-k without a separate row pass.
-__attribute__((always_inline)) static inline vec_op::FP32Vec16
-apply_topk_mask_zero(const vec_op::FP32Vec16& e16, const vec_op::FP32Vec16& v16,
-                     float tk_pivot) {
-#if defined(__AVX512F__)
-  const __m512 vp = _mm512_set1_ps(tk_pivot);
-  __mmask16 keep = _mm512_cmp_ps_mask(v16.reg, vp, _CMP_GT_OQ);
-  return vec_op::FP32Vec16(_mm512_maskz_mov_ps(keep, e16.reg));
-#elif defined(__AVX2__)
-  const __m256 vp = _mm256_set1_ps(tk_pivot);
-  const __m256 zero = _mm256_setzero_ps();
-  __m256 keep_lo = _mm256_cmp_ps(v16.reg_low, vp, _CMP_GT_OQ);
-  __m256 keep_hi = _mm256_cmp_ps(v16.reg_high, vp, _CMP_GT_OQ);
-  return vec_op::FP32Vec16(_mm256_blendv_ps(zero, e16.reg_low, keep_lo),
-                           _mm256_blendv_ps(zero, e16.reg_high, keep_hi));
-#else
-  (void)tk_pivot;
-  return e16;
-#endif
-}
-
 __attribute__((always_inline)) static inline int gather_outliers(
     const float* buf, int n, float threshold, float* out, double* sum_out) {
   int m = 0;
@@ -353,6 +332,54 @@ static inline void apply_boundary_tie_loop(float* row, int V, float pivot,
 }
 
 }  // namespace
+
+// Pre-computed per-row statistics shared between top-k and top-p passes.
+struct RowStats {
+  float avg, std_v, max_l, min_l;
+  int n_finite;
+};
+
+// Compute RowStats for row[0..V). min_l is clamped to max_l if no finite min
+// was found (degenerate all-PAD row).
+static inline void compute_row_stats(const float* row, int V, RowStats* st) {
+  compute_mean_std(row, V, &st->avg, &st->std_v);
+  int tail_i;
+  vec_max_min_with_pad_blend(row, V, kPadSentinel, &st->max_l, &st->min_l,
+                             &st->n_finite, &tail_i);
+  for (int i = tail_i; i < V; ++i) {
+    float v = row[i];
+    if (v > st->max_l) st->max_l = v;
+    if (v > kPadSentinel) {
+      ++st->n_finite;
+      if (v < st->min_l) st->min_l = v;
+    }
+  }
+  if (st->min_l > st->max_l) st->min_l = st->max_l;
+}
+
+// Entry-point validation helpers shared by all three public functions.
+static void check_logits(const torch::Tensor& logits) {
+  TORCH_CHECK(logits.dim() == 2, "logits must be 2D");
+  TORCH_CHECK(logits.is_cpu(), "logits must be CPU");
+  TORCH_CHECK(logits.dtype() == torch::kFloat32, "logits must be float32");
+  TORCH_CHECK(logits.is_contiguous(), "logits must be contiguous");
+}
+
+static void check_batch_float(const torch::Tensor& t,
+                              const torch::Tensor& logits, const char* name) {
+  TORCH_CHECK(t.is_cpu(), name, " must be CPU");
+  TORCH_CHECK(t.dtype() == torch::kFloat32, name, " must be float32");
+  TORCH_CHECK(t.dim() == 1 && t.size(0) == logits.size(0), name,
+              " must be 1D with size == batch size");
+}
+
+static void check_batch_int(const torch::Tensor& t, const torch::Tensor& logits,
+                            const char* name) {
+  TORCH_CHECK(t.is_cpu(), name, " must be CPU");
+  TORCH_CHECK(t.dtype() == torch::kInt32, name, " must be int32");
+  TORCH_CHECK(t.dim() == 1 && t.size(0) == logits.size(0), name,
+              " must be 1D with size == batch size");
+}
 
 static float binary_search_buffer(const float* buf, int n, float p_val,
                                   float lo, float hi, double* sum_above_out) {
@@ -472,39 +499,26 @@ static float ternary_search_topk(const float* buf, int n, int k, float lo,
   return final_pivot;
 }
 
-static void top_k_row(float* __restrict__ row, int V, int k_val,
-                      float* __restrict__ outlier_buf) {
-  float avg, std_v;
-  compute_mean_std(row, V, &avg, &std_v);
-
+// Core top-k logic. Receives pre-computed RowStats; does not re-scan the row
+// for mean/std or max/min.
+static void _top_k_row_core(float* __restrict__ row, int V, int k_val,
+                            const RowStats& st,
+                            float* __restrict__ outlier_buf) {
   int tidx = (int)((double)k_val / V * 200);
   if (tidx < 0) tidx = 0;
   if (tidx > 199) tidx = 199;
   float sigma = PERCENTILE_TO_STD_TABLE[tidx];
   sigma = sigma + fabsf(sigma) * -0.15f;
-  float outlier_logit = avg + std_v * sigma;
+  float outlier_logit = st.avg + st.std_v * sigma;
 
-  float max_l, min_l;
-  int n_finite, tail_i;
-  vec_max_min_with_pad_blend(row, V, kPadSentinel, &max_l, &min_l, &n_finite,
-                             &tail_i);
-  for (int i = tail_i; i < V; ++i) {
-    float v = row[i];
-    if (v > max_l) max_l = v;
-    if (v > kPadSentinel) {
-      ++n_finite;
-      if (v < min_l) min_l = v;
-    }
-  }
   int n_outliers = gather_outliers(row, V, outlier_logit, outlier_buf, nullptr);
-  if (min_l > max_l) min_l = max_l;
 
-  if (n_finite <= k_val) return;
+  if (st.n_finite <= k_val) return;
 
   const float neg_inf = -std::numeric_limits<float>::infinity();
 
   // Degenerate-flat: ternary search is unstable when all values are equal.
-  if (max_l - min_l < kKDuplicateTol) {
+  if (st.max_l - st.min_l < kKDuplicateTol) {
     int kept = 0;
     for (int i = 0; i < V; ++i) {
       if (row[i] > kPadSentinel) {
@@ -522,10 +536,10 @@ static void top_k_row(float* __restrict__ row, int V, int k_val,
   if (n_outliers > k_val) {
     final_pivot =
         ternary_search_topk(outlier_buf, n_outliers, k_val, outlier_logit,
-                            max_l, &dup_value, &n_dup, &n_above);
+                            st.max_l, &dup_value, &n_dup, &n_above);
   } else {
-    final_pivot = ternary_search_topk(row, V, k_val, min_l, max_l, &dup_value,
-                                      &n_dup, &n_above);
+    final_pivot = ternary_search_topk(row, V, k_val, st.min_l, st.max_l,
+                                      &dup_value, &n_dup, &n_above);
   }
 
   int n_keep_at_boundary = n_dup - (n_above - k_val);
@@ -540,41 +554,28 @@ static void top_k_row(float* __restrict__ row, int V, int k_val,
   }
 }
 
-static void top_p_row(float* __restrict__ row, int V, float p_val,
-                      float* __restrict__ scratch,
-                      float* __restrict__ outlier_buf) {
+// Core top-p logic. Receives pre-computed RowStats; does not re-scan the row.
+static void _top_p_row_core(float* __restrict__ row, int V, float p_val,
+                            const RowStats& st, float* __restrict__ scratch,
+                            float* __restrict__ outlier_buf) {
   if (p_val >= 1.0f) return;
 
-  float avg, std_v;
-  compute_mean_std(row, V, &avg, &std_v);
+  const float neg_inf = -std::numeric_limits<float>::infinity();
+  if (p_val <= 0.0f) {
+    mask_write_below(row, V, st.max_l - kBoundaryTol, neg_inf);
+    return;
+  }
 
   int tidx = (int)(p_val * 200);
   if (tidx < 0) tidx = 0;
   if (tidx > 199) tidx = 199;
   float sigma = NORMAL_CDF_TO_SIGMA_TABLE[tidx];
   sigma = sigma + fabsf(sigma) * -0.25f;
-  float outlier_logit = avg + std_v * sigma;
-
-  float max_l, min_l;
-  int n_finite, tail_i;
-  vec_max_min_with_pad_blend(row, V, kPadSentinel, &max_l, &min_l, &n_finite,
-                             &tail_i);
-  for (int i = tail_i; i < V; ++i) {
-    float v = row[i];
-    if (v > max_l) max_l = v;
-    if (v > kPadSentinel && v < min_l) min_l = v;
-  }
-  if (min_l > max_l) min_l = max_l;
-
-  const float neg_inf = -std::numeric_limits<float>::infinity();
-  if (p_val <= 0.0f) {
-    mask_write_below(row, V, max_l - kBoundaryTol, neg_inf);
-    return;
-  }
+  float outlier_logit = st.avg + st.std_v * sigma;
 
 #if defined(__AVX512F__) || defined(__AVX2__)
   DEFINE_FAST_EXP
-  vec_op::FP32Vec16 base16(max_l);
+  vec_op::FP32Vec16 base16(st.max_l);
 #endif
   double sum_exp_d = 0.0;
   {
@@ -588,13 +589,13 @@ static void top_p_row(float* __restrict__ row, int V, float p_val,
     }
     sum_exp_d += acc.reduce();
 #endif
-    for (; i < V; ++i) sum_exp_d += (double)expf(row[i] - max_l);
+    for (; i < V; ++i) sum_exp_d += (double)expf(row[i] - st.max_l);
   }
   float sum_exp = (float)sum_exp_d;
 
-  float outlier_prob = expf(outlier_logit - max_l) / sum_exp;
+  float outlier_prob = expf(outlier_logit - st.max_l) / sum_exp;
   float max_prob = 1.0f / sum_exp;
-  float min_prob = expf(min_l - max_l) / sum_exp;
+  float min_prob = expf(st.min_l - st.max_l) / sum_exp;
 
   double sum_out_d = 0.0;
   {
@@ -608,7 +609,7 @@ static void top_p_row(float* __restrict__ row, int V, float p_val,
       p16.save(scratch + i);
     }
 #endif
-    for (; i < V; ++i) scratch[i] = expf(row[i] - max_l) * inv_sum;
+    for (; i < V; ++i) scratch[i] = expf(row[i] - st.max_l) * inv_sum;
   }
   int n_out =
       gather_outliers(scratch, V, outlier_prob, outlier_buf, &sum_out_d);
@@ -632,10 +633,10 @@ static void top_p_row(float* __restrict__ row, int V, float p_val,
   float boundary_prob =
       binary_search_buffer(sbuf, sn, p_val, buf_lo, buf_hi, &sum_above);
 
-  float dup_logit = logf(boundary_prob * sum_exp) + max_l;
+  float dup_logit = logf(boundary_prob * sum_exp) + st.max_l;
 
   // NaN or overflow above max_l means binary search degenerated; skip masking.
-  if (!(dup_logit <= max_l)) {
+  if (!(dup_logit <= st.max_l)) {
     return;
   }
 
@@ -658,6 +659,21 @@ static void top_p_row(float* __restrict__ row, int V, float p_val,
     apply_boundary_tie_loop(row, V, dup_logit, dup_logit, kBoundaryTol,
                             n_keep_at_boundary);
   }
+}
+
+static void top_k_row(float* __restrict__ row, int V, int k_val,
+                      float* __restrict__ outlier_buf) {
+  RowStats st;
+  compute_row_stats(row, V, &st);
+  _top_k_row_core(row, V, k_val, st, outlier_buf);
+}
+
+static void top_p_row(float* __restrict__ row, int V, float p_val,
+                      float* __restrict__ scratch,
+                      float* __restrict__ outlier_buf) {
+  RowStats st;
+  compute_row_stats(row, V, &st);
+  _top_p_row_core(row, V, p_val, st, scratch, outlier_buf);
 }
 
 // Fused top-k + top-p: shared mean/std and max/min passes save ~2 row reads
@@ -665,178 +681,17 @@ static void top_p_row(float* __restrict__ row, int V, float p_val,
 static void top_k_p_row(float* __restrict__ row, int V, int k_val, float p_val,
                         float* __restrict__ scratch,
                         float* __restrict__ outlier_buf) {
-  float avg, std_v;
-  compute_mean_std(row, V, &avg, &std_v);
-
-  int k_tidx = (int)((double)k_val / V * 200);
-  if (k_tidx < 0) k_tidx = 0;
-  if (k_tidx > 199) k_tidx = 199;
-  float k_sigma = PERCENTILE_TO_STD_TABLE[k_tidx];
-  k_sigma = k_sigma + fabsf(k_sigma) * -0.15f;
-  float k_outlier_logit = avg + std_v * k_sigma;
-
-  int p_tidx = (int)(p_val * 200);
-  if (p_tidx < 0) p_tidx = 0;
-  if (p_tidx > 199) p_tidx = 199;
-  float p_sigma = NORMAL_CDF_TO_SIGMA_TABLE[p_tidx];
-  p_sigma = p_sigma + fabsf(p_sigma) * -0.25f;
-  float p_outlier_logit = avg + std_v * p_sigma;
-
-  float max_l, min_l;
-  int n_finite, tail_i;
-  vec_max_min_with_pad_blend(row, V, kPadSentinel, &max_l, &min_l, &n_finite,
-                             &tail_i);
-  for (int i = tail_i; i < V; ++i) {
-    float v = row[i];
-    if (v > max_l) max_l = v;
-    if (v > kPadSentinel) {
-      ++n_finite;
-      if (v < min_l) min_l = v;
-    }
-  }
-  int n_k_outliers =
-      gather_outliers(row, V, k_outlier_logit, outlier_buf, nullptr);
-  if (min_l > max_l) min_l = max_l;
-
-  const float neg_inf = -std::numeric_limits<float>::infinity();
-
-  if (k_val > 0 && k_val < V && n_finite > k_val) {
-    if (max_l - min_l < kKDuplicateTol) {
-      // Degenerate-flat: ternary search is unstable when all values are equal.
-      int kept = 0;
-      for (int i = 0; i < V; ++i) {
-        if (row[i] > kPadSentinel) {
-          if (kept < k_val)
-            ++kept;
-          else
-            row[i] = neg_inf;
-        }
-      }
-    } else {
-      float dup_value;
-      int n_dup, n_above;
-      float final_pivot;
-      if (n_k_outliers > k_val) {
-        final_pivot = ternary_search_topk(outlier_buf, n_k_outliers, k_val,
-                                          k_outlier_logit, max_l, &dup_value,
-                                          &n_dup, &n_above);
-      } else {
-        final_pivot = ternary_search_topk(row, V, k_val, min_l, max_l,
-                                          &dup_value, &n_dup, &n_above);
-      }
-      int tk_keep_at_boundary = n_dup - (n_above - k_val);
-      if (tk_keep_at_boundary < 0) tk_keep_at_boundary = 0;
-      if (tk_keep_at_boundary > n_dup) tk_keep_at_boundary = n_dup;
-
-      if (tk_keep_at_boundary == 0) {
-        mask_write_below(row, V, final_pivot, neg_inf);
-      } else {
-        apply_boundary_tie_loop(row, V, dup_value, dup_value, kKDuplicateTol,
-                                tk_keep_at_boundary);
-      }
-    }
-  }
-
-  if (p_val >= 1.0f) return;
-  if (p_val <= 0.0f) {
-    mask_write_below(row, V, max_l - kBoundaryTol, neg_inf);
-    return;
-  }
-
+  RowStats st;
+  compute_row_stats(row, V, &st);
+  // k_val > 0 && k_val < V is pre-checked by the caller.
+  _top_k_row_core(row, V, k_val, st, outlier_buf);
   // Top-k filtered lanes hold neg_inf; exp(-inf)=0 so they don't affect sum.
-#if defined(__AVX512F__) || defined(__AVX2__)
-  DEFINE_FAST_EXP
-  vec_op::FP32Vec16 base16(max_l);
-#endif
-  double sum_exp_d = 0.0;
-  {
-    int i = 0;
-#if defined(__AVX512F__) || defined(__AVX2__)
-    Fp64Acc16 acc;
-    for (; i + 16 <= V; i += 16) {
-      vec_op::FP32Vec16 v16(row + i);
-      acc.add(fast_exp(v16 - base16));
-    }
-    sum_exp_d += acc.reduce();
-#endif
-    for (; i < V; ++i) sum_exp_d += (double)expf(row[i] - max_l);
-  }
-  float sum_exp = (float)sum_exp_d;
-
-  float p_outlier_prob = expf(p_outlier_logit - max_l) / sum_exp;
-  float max_prob = 1.0f / sum_exp;
-  float min_prob = expf(min_l - max_l) / sum_exp;
-
-  {
-    const float inv_sum = 1.0f / sum_exp;
-    int i = 0;
-#if defined(__AVX512F__) || defined(__AVX2__)
-    vec_op::FP32Vec16 isum16(inv_sum);
-    for (; i + 16 <= V; i += 16) {
-      vec_op::FP32Vec16 v16(row + i);
-      (fast_exp(v16 - base16) * isum16).save(scratch + i);
-    }
-#endif
-    for (; i < V; ++i) scratch[i] = expf(row[i] - max_l) * inv_sum;
-  }
-  double sum_out_d = 0.0;
-  int n_out =
-      gather_outliers(scratch, V, p_outlier_prob, outlier_buf, &sum_out_d);
-
-  float* sbuf;
-  int sn;
-  float buf_lo, buf_hi;
-  if (sum_out_d >= (double)p_val) {
-    sbuf = outlier_buf;
-    sn = n_out;
-    buf_hi = max_prob;
-    buf_lo = p_outlier_prob;
-  } else {
-    sbuf = scratch;
-    sn = V;
-    buf_hi = max_prob;
-    buf_lo = min_prob;
-  }
-  double sum_above;
-  float boundary_prob =
-      binary_search_buffer(sbuf, sn, p_val, buf_lo, buf_hi, &sum_above);
-
-  float dup_logit = logf(boundary_prob * sum_exp) + max_l;
-
-  // NaN or overflow above max_l means binary search degenerated; skip masking.
-  if (!(dup_logit <= max_l)) {
-    return;
-  }
-
-  int n_at_boundary = count_within_tol(row, V, dup_logit, kBoundaryTol);
-  int n_keep_at_boundary = 0;
-  if (n_at_boundary > 0) {
-    double remaining = (double)p_val - sum_above;
-    if (remaining > 0.0 && (double)boundary_prob > 0.0) {
-      int64_t needed64 = (int64_t)ceil(remaining / (double)boundary_prob);
-      if (needed64 < 0) needed64 = 0;
-      if (needed64 > n_at_boundary) needed64 = n_at_boundary;
-      n_keep_at_boundary = (int)needed64;
-    }
-  }
-
-  if (n_keep_at_boundary == 0) {
-    mask_write_below(row, V, dup_logit, neg_inf);
-  } else {
-    apply_boundary_tie_loop(row, V, dup_logit, dup_logit, kBoundaryTol,
-                            n_keep_at_boundary);
-  }
+  _top_p_row_core(row, V, p_val, st, scratch, outlier_buf);
 }
 
 void cpu_topp_sampling(torch::Tensor& logits, const torch::Tensor& p) {
-  TORCH_CHECK(logits.dim() == 2, "logits must be 2D");
-  TORCH_CHECK(logits.is_cpu(), "logits must be CPU");
-  TORCH_CHECK(p.is_cpu(), "p must be CPU");
-  TORCH_CHECK(logits.dtype() == torch::kFloat32, "logits must be float32");
-  TORCH_CHECK(p.dtype() == torch::kFloat32, "p must be float32");
-  TORCH_CHECK(p.dim() == 1 && p.size(0) == logits.size(0),
-              "p must be 1D with size == batch size");
-  TORCH_CHECK(logits.is_contiguous(), "logits must be contiguous");
+  check_logits(logits);
+  check_batch_float(p, logits, "p");
 
   const int B = static_cast<int>(logits.size(0));
   const int V = static_cast<int>(logits.size(1));
@@ -859,14 +714,8 @@ void cpu_topp_sampling(torch::Tensor& logits, const torch::Tensor& p) {
 }
 
 void cpu_topk_sampling(torch::Tensor& logits, const torch::Tensor& k) {
-  TORCH_CHECK(logits.dim() == 2, "logits must be 2D");
-  TORCH_CHECK(logits.is_cpu(), "logits must be CPU");
-  TORCH_CHECK(k.is_cpu(), "k must be CPU");
-  TORCH_CHECK(logits.dtype() == torch::kFloat32, "logits must be float32");
-  TORCH_CHECK(k.dim() == 1 && k.size(0) == logits.size(0),
-              "k must be 1D with size == batch size");
-  TORCH_CHECK(k.dtype() == torch::kInt32, "k must be int32");
-  TORCH_CHECK(logits.is_contiguous(), "logits must be contiguous");
+  check_logits(logits);
+  check_batch_int(k, logits, "k");
 
   const int B = static_cast<int>(logits.size(0));
   const int V = static_cast<int>(logits.size(1));
@@ -888,18 +737,9 @@ void cpu_topk_sampling(torch::Tensor& logits, const torch::Tensor& k) {
 
 void cpu_topk_topp_sampling(torch::Tensor& logits, const torch::Tensor& k,
                             const torch::Tensor& p) {
-  TORCH_CHECK(logits.dim() == 2, "logits must be 2D");
-  TORCH_CHECK(logits.is_cpu(), "logits must be CPU");
-  TORCH_CHECK(k.is_cpu(), "k must be CPU");
-  TORCH_CHECK(p.is_cpu(), "p must be CPU");
-  TORCH_CHECK(logits.dtype() == torch::kFloat32, "logits must be float32");
-  TORCH_CHECK(k.dim() == 1 && k.size(0) == logits.size(0),
-              "k must be 1D with size == batch size");
-  TORCH_CHECK(k.dtype() == torch::kInt32, "k must be int32");
-  TORCH_CHECK(p.dtype() == torch::kFloat32, "p must be float32");
-  TORCH_CHECK(p.dim() == 1 && p.size(0) == logits.size(0),
-              "p must be 1D with size == batch size");
-  TORCH_CHECK(logits.is_contiguous(), "logits must be contiguous");
+  check_logits(logits);
+  check_batch_int(k, logits, "k");
+  check_batch_float(p, logits, "p");
 
   const int B = static_cast<int>(logits.size(0));
   const int V = static_cast<int>(logits.size(1));
