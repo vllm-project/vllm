@@ -24,10 +24,10 @@ use crate::protocol::multimodal::{
 };
 use crate::protocol::stats::SchedulerStats;
 use crate::protocol::tensor::WireTensor;
+use crate::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
 use crate::protocol::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest,
-    EngineCoreRequestType, EngineCoreSamplingParams, UtilityOutput, UtilityResultEnvelope,
-    decode_engine_core_outputs,
+    EngineCoreRequestType, EngineCoreSamplingParams, decode_engine_core_outputs,
 };
 use crate::test_utils::{
     IpcNamespace, setup_bootstrapped_mock_engine, setup_mock_engine_connections,
@@ -878,7 +878,7 @@ async fn client_fail_closes_when_main_output_path_receives_dp_control() {
                     push,
                     EngineCoreOutputs {
                         utility_output: Some(UtilityOutput {
-                            call_id: 1,
+                            call_id: 1_u64.into(),
                             failure_message: None,
                             result: None,
                         }),
@@ -978,7 +978,7 @@ async fn client_fail_closes_when_main_output_path_receives_mixed_shape_output() 
                     push,
                     EngineCoreOutputs {
                         utility_output: Some(UtilityOutput {
-                            call_id: 1,
+                            call_id: 1_u64.into(),
                             failure_message: None,
                             result: None,
                         }),
@@ -1309,7 +1309,7 @@ async fn is_sleeping_wrapper_sends_typed_request_and_returns_typed_response() {
                 };
                 assert_eq!(array.len(), 4);
                 assert_eq!(array[0], Value::from(5));
-                let call_id = array[1].as_i64().expect("call_id");
+                let call_id = array[1].as_u64().expect("call_id");
                 assert_eq!(array[2], Value::from("is_sleeping"));
                 assert_eq!(array[3], Value::Array(Vec::new()));
 
@@ -1317,7 +1317,7 @@ async fn is_sleeping_wrapper_sends_typed_request_and_returns_typed_response() {
                     push,
                     EngineCoreOutputs {
                         utility_output: Some(UtilityOutput {
-                            call_id,
+                            call_id: call_id.into(),
                             failure_message: None,
                             result: Some(utility_result_value(true)),
                         }),
@@ -1366,13 +1366,13 @@ async fn call_utility_failure_message_surfaces_as_error() {
                 assert_eq!(utility[0].as_ref(), &[0x03]);
                 let payload = decode_value(&utility[1]);
                 let call_id =
-                    payload.as_array().and_then(|array| array[1].as_i64()).expect("call_id");
+                    payload.as_array().and_then(|array| array[1].as_u64()).expect("call_id");
 
                 send_outputs(
                     push,
                     EngineCoreOutputs {
                         utility_output: Some(UtilityOutput {
-                            call_id,
+                            call_id: call_id.into(),
                             failure_message: Some("boom".to_string()),
                             result: None,
                         }),
@@ -1865,13 +1865,13 @@ async fn multi_engine_abort_is_grouped_and_utility_fans_out_to_all_engines() {
                     Value::Array(array) => array,
                     other => panic!("expected utility payload array, got {other:?}"),
                 };
-                let call_id = array[1].as_i64().expect("call_id");
+                let call_id = array[1].as_u64().expect("call_id");
                 assert_eq!(array[2], Value::from("is_sleeping"));
                 send_outputs(
                     push,
                     EngineCoreOutputs {
                         utility_output: Some(UtilityOutput {
-                            call_id,
+                            call_id: call_id.into(),
                             failure_message: None,
                             result: Some(utility_result_value(true)),
                         }),
@@ -1919,13 +1919,13 @@ async fn multi_engine_abort_is_grouped_and_utility_fans_out_to_all_engines() {
                     Value::Array(array) => array,
                     other => panic!("expected utility payload array, got {other:?}"),
                 };
-                let call_id = array[1].as_i64().expect("call_id");
+                let call_id = array[1].as_u64().expect("call_id");
                 assert_eq!(array[2], Value::from("is_sleeping"));
                 send_outputs(
                     push,
                     EngineCoreOutputs {
                         utility_output: Some(UtilityOutput {
-                            call_id,
+                            call_id: call_id.into(),
                             failure_message: None,
                             result: Some(utility_result_value(true)),
                         }),
@@ -2029,14 +2029,14 @@ async fn collective_rpc_flattens_results_from_all_engines() {
                     Value::Array(array) => array,
                     other => panic!("expected utility payload array, got {other:?}"),
                 };
-                let call_id = array[1].as_i64().expect("call_id");
+                let call_id = array[1].as_u64().expect("call_id");
                 assert_eq!(array[2], Value::from("collective_rpc"));
 
                 send_outputs(
                     push,
                     EngineCoreOutputs {
                         utility_output: Some(UtilityOutput {
-                            call_id,
+                            call_id: call_id.into(),
                             failure_message: None,
                             result: Some(utility_result_value(vec!["engine-0-worker"])),
                         }),
@@ -2060,14 +2060,14 @@ async fn collective_rpc_flattens_results_from_all_engines() {
                     Value::Array(array) => array,
                     other => panic!("expected utility payload array, got {other:?}"),
                 };
-                let call_id = array[1].as_i64().expect("call_id");
+                let call_id = array[1].as_u64().expect("call_id");
                 assert_eq!(array[2], Value::from("collective_rpc"));
 
                 send_outputs(
                     push,
                     EngineCoreOutputs {
                         utility_output: Some(UtilityOutput {
-                            call_id,
+                            call_id: call_id.into(),
                             failure_message: None,
                             result: Some(utility_result_value(vec!["engine-1-worker"])),
                         }),
