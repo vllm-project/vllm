@@ -66,6 +66,7 @@ class Sampler:
         self,
         logits: torch.Tensor,
         input_batch: InputBatch,
+        shard_vocab_start: int | None = None,
     ) -> SamplerOutput:
         expanded_idx_mapping = input_batch.expanded_idx_mapping
         idx_mapping_np = input_batch.idx_mapping_np
@@ -84,6 +85,7 @@ class Sampler:
             pos,
             input_ids,
             expanded_local_pos,
+            shard_vocab_start,
         )
 
         max_num_logprobs = self.sampling_states.max_num_logprobs(idx_mapping_np)
@@ -176,6 +178,7 @@ class Sampler:
         pos: torch.Tensor,
         input_ids: torch.Tensor,
         expanded_local_pos: torch.Tensor,
+        shard_vocab_start: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         processed_logits = self.apply_sampling_params(
             logits,
@@ -195,5 +198,19 @@ class Sampler:
             pos,
             apply_temperature=False,
             use_fp64=self.use_fp64_gumbel,
+            shard_vocab_start=shard_vocab_start,
         )
         return sampled, processed_logits
+
+    def can_sharded_sample(self, idx_mapping_np: np.ndarray) -> bool:
+        ss = self.sampling_states
+        return (
+            not np.any(self.logit_bias_state.use_logit_bias[idx_mapping_np])
+            and not np.any(self.penalties_state.use_penalty[idx_mapping_np])
+            and np.all(self.bad_words_state.num_bad_words.np[idx_mapping_np] == 0)
+            and np.all(ss.min_p.np[idx_mapping_np] == 0.0)
+            and np.all(ss.top_k.np[idx_mapping_np] == ss.vocab_size)
+            and np.all(ss.top_p.np[idx_mapping_np] == 1.0)
+            and ss.max_num_logprobs(idx_mapping_np) == NO_LOGPROBS
+            and self.logprob_token_ids_state.max_num_token_ids(idx_mapping_np) == 0
+        )

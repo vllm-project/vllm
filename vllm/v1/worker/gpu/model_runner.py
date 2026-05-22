@@ -939,8 +939,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         input_batch: InputBatch,
         grammar_output: GrammarOutput | None,
     ) -> tuple[SamplerOutput, torch.Tensor, torch.Tensor]:
+        assert self.sampler is not None
         sample_hidden_states = hidden_states[input_batch.logits_indices]
-        logits = self.model.compute_logits(sample_hidden_states)
+        if (
+            self.parallel_config.tensor_parallel_size > 1
+            and self.sampler.can_sharded_sample(input_batch.idx_mapping_np)
+        ):
+            # Compute local shard logits without TP all-gather.
+            logits = self.model.logits_processor.get_local_logits(
+                self.model.lm_head, sample_hidden_states
+            )
+            shard_vocab_start = self.model.lm_head.shard_indices.org_vocab_start_index
+        else:
+            logits = self.model.compute_logits(sample_hidden_states)
+            shard_vocab_start = None
+
         if grammar_output is not None:
             # Apply grammar bitmask to the logits in-place.
             assert self.structured_outputs_worker is not None
@@ -949,12 +962,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch,
                 grammar_output.structured_output_request_ids,
                 grammar_output.grammar_bitmask,
+                shard_vocab_start or 0,
             )
 
         if input_batch.num_draft_tokens == 0:
             # No draft tokens (common case).
-            assert self.sampler is not None
-            sampler_output = self.sampler(logits, input_batch)
+            sampler_output = self.sampler(
+                logits,
+                input_batch,
+                shard_vocab_start,
+            )
         else:
             # Rejection sampling for spec decoding.
             assert self.rejection_sampler is not None
@@ -964,6 +981,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch,
                 # Draft logits are needed for probabilistic rejection sampling.
                 self.speculator.draft_logits,
+                shard_vocab_start,
             )
 
         # Get the number of sampled and rejected tokens.

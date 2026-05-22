@@ -103,6 +103,27 @@ class LogitsProcessor(PluggableLayer):
             logits = logits[..., : self.org_vocab_size]
         return logits
 
+    def get_local_logits(
+        self,
+        lm_head: VocabParallelEmbedding,
+        hidden_states: torch.Tensor,
+        embedding_bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Compute logits on the local TP shard without all-gathering.
+
+        Returns a tensor of shape [batch, shard_vocab_size] containing
+        the logits for this rank's vocab partition only.
+        """
+        logits = lm_head.quant_method.apply(lm_head, hidden_states, bias=embedding_bias)
+        if self.soft_cap is not None:
+            logits = torch.tanh(logits / self.soft_cap) * self.soft_cap
+        if self.scale != 1.0:
+            logits = logits * self.scale
+        num_pad = lm_head.shard_indices.num_org_vocab_padding
+        if num_pad > 0:
+            logits = logits[..., :-num_pad]
+        return logits
+
     def get_top_tokens(
         self,
         lm_head: VocabParallelEmbedding,

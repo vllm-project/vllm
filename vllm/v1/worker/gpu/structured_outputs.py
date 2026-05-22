@@ -26,6 +26,7 @@ class StructuredOutputsWorker:
         input_batch: InputBatch,
         grammar_req_ids: list[str],
         grammar_bitmask: np.ndarray,
+        vocab_start: int = 0,
     ) -> None:
         if not grammar_req_ids:
             return
@@ -72,6 +73,7 @@ class StructuredOutputsWorker:
             bitmask,
             bitmask.stride(0),
             vocab_size,
+            vocab_start,
             BLOCK_SIZE=BLOCK_SIZE,
         )
 
@@ -90,14 +92,18 @@ def _apply_grammar_bitmask_kernel(
     bitmask_ptr,
     bitmask_stride,
     vocab_size,
+    vocab_start,
     BLOCK_SIZE: tl.constexpr,
 ):
     bitmask_idx = tl.program_id(0)
     logits_idx = tl.load(logits_indices_ptr + bitmask_idx)
 
-    # Load the bitmask.
+    # Load the bitmask. Offset by vocab_start so that sharded logits
+    # read the correct slice of the global bitmask.
     block_id = tl.program_id(1)
-    bitmask_offset = (block_id * BLOCK_SIZE) // 32 + tl.arange(0, BLOCK_SIZE // 32)
+    bitmask_offset = (block_id * BLOCK_SIZE + vocab_start) // 32 + tl.arange(
+        0, BLOCK_SIZE // 32
+    )
     packed_bitmask = tl.load(
         bitmask_ptr + bitmask_idx * bitmask_stride + bitmask_offset,
         mask=bitmask_offset < bitmask_stride,

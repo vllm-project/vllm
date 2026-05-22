@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
+from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.triton_utils import HAS_TRITON, tl, triton
 
 # Smallest positive normal fp32 value. Used to clamp the uniform draw so that
@@ -89,6 +90,7 @@ def gumbel_block_argmax(
     processed_logits_stride,
     processed_logits_col_ptr,
     vocab_size,
+    vocab_start,
     APPLY_TEMPERATURE: tl.constexpr,
     USE_FP64: tl.constexpr,
 ):
@@ -126,9 +128,9 @@ def gumbel_block_argmax(
         gumbel_seed = tl.randint(seed, pos)
 
         if USE_FP64:
-            u = tl_rand64(gumbel_seed, block, includes_zero=False)
+            u = tl_rand64(gumbel_seed, block + vocab_start, includes_zero=False)
         else:
-            u = tl.rand(gumbel_seed, block)
+            u = tl.rand(gumbel_seed, block + vocab_start)
             u = tl.maximum(u, _FP32_TINY)
         gumbel_noise = -tl.log(-tl.log(u))
 
@@ -155,6 +157,7 @@ def _gumbel_sample_kernel(
     pos_ptr,
     temp_ptr,
     vocab_size,
+    vocab_start,
     BLOCK_SIZE: tl.constexpr,
     APPLY_TEMPERATURE: tl.constexpr,
     USE_FP64: tl.constexpr,
@@ -183,10 +186,11 @@ def _gumbel_sample_kernel(
         processed_logits_stride,
         processed_logits_col_ptr,
         vocab_size,
+        vocab_start,
         APPLY_TEMPERATURE=APPLY_TEMPERATURE,
         USE_FP64=USE_FP64,
     )
-    token_id = block_idx * BLOCK_SIZE + idx
+    token_id = vocab_start + block_idx * BLOCK_SIZE + idx
     tl.store(local_argmax_ptr + token_idx * local_argmax_stride + block_idx, token_id)
     tl.store(local_max_ptr + token_idx * local_max_stride + block_idx, value)
 
@@ -201,6 +205,7 @@ def gumbel_sample(
     output_processed_logits: torch.Tensor | None = None,
     output_processed_logits_col: torch.Tensor | None = None,
     use_fp64: bool = False,
+    shard_vocab_start: int | None = None,
 ) -> torch.Tensor:
     num_tokens, vocab_size = logits.shape
     BLOCK_SIZE = 1024
@@ -223,10 +228,24 @@ def gumbel_sample(
         pos,
         temperature,
         vocab_size,
+        shard_vocab_start or 0,
         BLOCK_SIZE=BLOCK_SIZE,
         APPLY_TEMPERATURE=apply_temperature,
         USE_FP64=use_fp64,
     )
+
+    # TP all-gather resampled max/argmax across ranks if the
+    # logits are sharded.
+    if shard_vocab_start is not None:
+        resampled_pair = torch.stack(
+            [local_argmax.float(), local_max.float()],
+            dim=-1,
+        )
+        gathered = tensor_model_parallel_all_gather(resampled_pair, dim=-1)
+        gathered = gathered.view(num_tokens, -1, 2)
+        local_argmax = gathered[:, :, 0].to(torch.int64).contiguous()
+        local_max = gathered[:, :, 1].to(local_max_dtype).contiguous()
+
     # NOTE(woosuk): Use int64 for later indexing.
     max_block_idx = local_max.argmax(dim=-1, keepdim=True)
     sampled = local_argmax.gather(dim=-1, index=max_block_idx).view(-1)

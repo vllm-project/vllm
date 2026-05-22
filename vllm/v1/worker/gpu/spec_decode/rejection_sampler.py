@@ -97,6 +97,7 @@ class RejectionSampler:
         logits: torch.Tensor,
         input_batch: InputBatch,
         draft_logits: torch.Tensor | None = None,
+        shard_vocab_start: int | None = None,
     ) -> SamplerOutput:
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
         # that num_nans is computed before applying penalties and temperature.
@@ -126,6 +127,7 @@ class RejectionSampler:
             self.num_speculative_steps,
             self.synthetic_conditional_rates,
             use_fp64=self.sampler.use_fp64_gumbel,
+            shard_vocab_start=shard_vocab_start,
         )
         logprobs_tensors = self._get_logprobs_tensors(
             input_batch,
