@@ -14,7 +14,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.reasoning import ReasoningParserManager
 from vllm.reasoning.deepseek_v4_reasoning_parser import (
     DeepSeekV4ReasoningParser,
@@ -293,7 +292,10 @@ def test_is_reasoning_end_streaming_sticky_after_split(parser):
     )
     assert parser._implicit_end_seen is True
     # Now a plain content-only delta.
-    assert parser.is_reasoning_end_streaming([800, DSML_MARKER_TOKEN_ID, 900], [900]) is True
+    assert (
+        parser.is_reasoning_end_streaming([800, DSML_MARKER_TOKEN_ID, 900], [900])
+        is True
+    )
 
 
 # ---------------------------------------------------------------------------
