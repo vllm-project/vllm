@@ -625,7 +625,7 @@ jobs:
             --require-npu \
             --json | tee "$PRECHECK_DIR/runtime-check.json"
 
-      - name: Run benchmark CI and optional HF sync
+      - name: Run benchmark CI and optional formal publish
         env:
           WORKSPACE_ROOT: ${{ github.workspace }}
           VLLM_ASCEND_HUST_REPO: ${{ github.workspace }}/vllm-ascend-hust
@@ -686,7 +686,7 @@ jobs:
           comment_path = result_root / 'benchmark_comment.md'
           run_url = f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
           bench_scenario = os.environ.get('BENCH_SCENARIO', 'random-online')
-          publish_mode = 'hf-sync' if os.environ.get('PUBLISH_TO_HF') == '1' else 'artifact-preview'
+          publish_mode = 'formal-publish' if os.environ.get('PUBLISH_TO_HF') == '1' else 'artifact-preview'
           model_name = os.environ.get('MODEL_NAME', 'unknown')
           hf_repo = os.environ.get('HF_REPO_ID', 'unknown')
           leaderboard_url = os.environ.get('WEBSITE_LEADERBOARD_URL', '').strip()

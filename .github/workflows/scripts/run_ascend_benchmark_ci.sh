@@ -13,11 +13,11 @@ RAW_RESULT_FILE=${RAW_RESULT_FILE:-$RESULT_ROOT/raw_benchmark.json}
 SUBMISSIONS_ROOT=${SUBMISSIONS_ROOT:-$RESULT_ROOT/submissions}
 SUBMISSION_DIR=${SUBMISSION_DIR:-$SUBMISSIONS_ROOT/$RUN_ID}
 AGGREGATE_OUTPUT_DIR=${AGGREGATE_OUTPUT_DIR:-$RESULT_ROOT/leaderboard-data}
+BENCHMARK_PUBLICATION_SYNC_SCRIPT=${BENCHMARK_PUBLICATION_SYNC_SCRIPT:-$VLLM_HUST_REPO/.github/workflows/scripts/sync_benchmark_snapshots_to_github.sh}
 SERVER_LOG=${SERVER_LOG:-$RESULT_ROOT/server.log}
 RUNNER_PREFLIGHT_FAILURE_FILE=${RUNNER_PREFLIGHT_FAILURE_FILE:-$RESULT_ROOT/runner_preflight_failure.txt}
 DIAGNOSTICS_DIR=${DIAGNOSTICS_DIR:-$RESULT_ROOT/diagnostics}
 NODE_ENV_FAILURE_FILE=${NODE_ENV_FAILURE_FILE:-$RESULT_ROOT/node_env_failure.txt}
-BENCHMARK_SNAPSHOT_SYNC_BRANCH=${BENCHMARK_SNAPSHOT_SYNC_BRANCH:-bot/leaderboard-snapshot-sync}
 BENCH_SCENARIO=${BENCH_SCENARIO:-random-online}
 BENCH_DATASET_PATH=${BENCH_DATASET_PATH:-}
 BENCH_CONSTRAINTS_FILE=${BENCH_CONSTRAINTS_FILE:-}
@@ -885,128 +885,29 @@ prepare_hf_publish_cache_for_runner() {
   fi
 }
 
-mirror_benchmark_snapshots_to_git_branch() {
-  local mirror_root="$runtime_root/benchmark-snapshot-sync"
-  local snapshot_target_dir="$mirror_root/leaderboard-data/snapshots"
-  local sync_branch=${BENCHMARK_SNAPSHOT_SYNC_BRANCH:-bot/leaderboard-snapshot-sync}
-  local -a snapshot_files=(
-    leaderboard_single.json
-    leaderboard_multi.json
-    leaderboard_compare.json
-    last_updated.json
-  )
-  local snapshot_file
+sync_benchmark_publication_to_github() {
+  local publisher_script=${BENCHMARK_PUBLICATION_SYNC_SCRIPT:-$VLLM_HUST_REPO/.github/workflows/scripts/sync_benchmark_snapshots_to_github.sh}
 
   if [[ "$PUBLISH_TO_HF" != "1" ]]; then
     return 0
   fi
 
-  BENCHMARK_SNAPSHOT_SYNC_PR_REQUIRED=0
-  BENCHMARK_SNAPSHOT_SYNC_PR_BRANCH=
-
-  if [[ -z "${BENCHMARK_REPO_URL:-}" ]]; then
-    echo "BENCHMARK_REPO_URL must be set when mirroring GitHub snapshot files" >&2
+  if [[ ! -x "$publisher_script" ]]; then
+    echo "benchmark publication sync script is missing or not executable: $publisher_script" >&2
     return 2
   fi
 
-  for snapshot_file in "${snapshot_files[@]}"; do
-    if [[ ! -f "$AGGREGATE_OUTPUT_DIR/$snapshot_file" ]]; then
-      echo "missing aggregated snapshot file: $AGGREGATE_OUTPUT_DIR/$snapshot_file" >&2
-      return 2
-    fi
-  done
-
-  rm -rf "$mirror_root"
-  git clone --depth 1 "$BENCHMARK_REPO_URL" "$mirror_root"
-  git -C "$mirror_root" fetch --depth 1 origin main
-  git -C "$mirror_root" checkout -B "$sync_branch" origin/main
-
-  mkdir -p "$snapshot_target_dir"
-  for snapshot_file in "${snapshot_files[@]}"; do
-    cp "$AGGREGATE_OUTPUT_DIR/$snapshot_file" "$snapshot_target_dir/$snapshot_file"
-  done
-
-  if git -C "$mirror_root" diff --quiet -- leaderboard-data/snapshots; then
-    echo "Benchmark GitHub snapshot mirror is already up to date"
-    return 0
-  fi
-
-  git -C "$mirror_root" config user.name "vLLM-HUST Benchmark Bot"
-  git -C "$mirror_root" config user.email "benchmark-bot@vllm-hust.local"
-  git -C "$mirror_root" add leaderboard-data/snapshots
-  git -C "$mirror_root" commit \
-    -m "chore(data): sync leaderboard snapshots $RUN_ID" \
-    -m "Mirror refreshed leaderboard snapshot files for the website's GitHub-first data path." \
-    -m "Source run: $RUN_ID" \
-    -m "Source repo: ${GITHUB_REPOSITORY:-vLLM-HUST/vllm-hust}" \
-    -m "Source commit: ${GITHUB_SHA:-local}"
-  git -C "$mirror_root" push --force-with-lease origin "HEAD:refs/heads/$sync_branch"
-
-  BENCHMARK_SNAPSHOT_SYNC_PR_REQUIRED=1
-  BENCHMARK_SNAPSHOT_SYNC_PR_BRANCH=$sync_branch
-
-  echo "Pushed benchmark snapshot sync branch: $sync_branch"
-}
-
-open_benchmark_snapshot_sync_pr() {
-  local sync_branch=${BENCHMARK_SNAPSHOT_SYNC_PR_BRANCH:-${BENCHMARK_SNAPSHOT_SYNC_BRANCH:-bot/leaderboard-snapshot-sync}}
-  local repo_slug=${BENCHMARK_REPO_SLUG:-vLLM-HUST/vllm-hust-benchmark}
-  local snapshot_marker=
-  local title="chore(data): sync leaderboard snapshots"
-  local body
-  local pr_number=
-
-  if [[ "$PUBLISH_TO_HF" != "1" || "${BENCHMARK_SNAPSHOT_SYNC_PR_REQUIRED:-0}" != "1" ]]; then
-    return 0
-  fi
-
-  if ! command -v gh >/dev/null 2>&1; then
-    echo "gh CLI is required to create the benchmark snapshot PR" >&2
-    return 2
-  fi
-
-  if [[ -n "${BENCHMARK_REPO_GH_TOKEN:-}" ]]; then
-    export GH_TOKEN="$BENCHMARK_REPO_GH_TOKEN"
-  fi
-
-  if [[ -z "${GH_TOKEN:-}" ]] && ! gh auth status -h github.com >/dev/null 2>&1; then
-    echo "No GitHub CLI auth is available to create the benchmark snapshot PR" >&2
-    echo "Provide BENCHMARK_REPO_GH_TOKEN or pre-authenticate gh on the trusted runner." >&2
-    return 2
-  fi
-
-  if [[ -f "$AGGREGATE_OUTPUT_DIR/last_updated.json" ]]; then
-    snapshot_marker=$(python3 -c "import json, pathlib, sys; payload=json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')); print(payload.get('last_updated', ''))" "$AGGREGATE_OUTPUT_DIR/last_updated.json")
-  fi
-
-  if [[ -n "$snapshot_marker" ]]; then
-    title="$title ($snapshot_marker)"
-  fi
-
-  body=$(printf '%s\n' \
-    'This PR mirrors refreshed leaderboard snapshot files into `leaderboard-data/snapshots` for the website GitHub-first data path.' \
-    '' \
-    "- source branch: ${sync_branch}" \
-    "- source run: ${RUN_ID}" \
-    "- source repo: ${GITHUB_REPOSITORY:-vLLM-HUST/vllm-hust}" \
-    "- source commit: ${GITHUB_SHA:-local}" \
-    "- snapshot marker: ${snapshot_marker:-unknown}")
-
-  pr_number=$(gh pr list \
-    -R "$repo_slug" \
-    --base main \
-    --head "$sync_branch" \
-    --state open \
-    --json number \
-    --jq '.[0].number // empty')
-
-  if [[ -n "$pr_number" ]]; then
-    gh pr edit -R "$repo_slug" "$pr_number" --title "$title" --body "$body"
-  else
-    gh pr create -R "$repo_slug" --base main --head "$sync_branch" --title "$title" --body "$body"
-  fi
-
-  echo "Created or updated benchmark snapshot PR for branch: $sync_branch"
+  BENCHMARK_REPO_DIR="$VLLM_HUST_BENCHMARK_REPO" \
+  WEBSITE_REPO_DIR="$VLLM_HUST_WEBSITE_REPO" \
+  CURRENT_SUBMISSION_DIR="$SUBMISSION_DIR" \
+  VLLM_HUST_REPO_DIR="$VLLM_HUST_REPO" \
+  LOCAL_SNAPSHOT_OUTPUT_DIR="$AGGREGATE_OUTPUT_DIR" \
+  PYTHON_BIN="$PYTHON_BIN" \
+  BENCHMARK_REPO_SLUG="${BENCHMARK_REPO_SLUG:-vLLM-HUST/vllm-hust-benchmark}" \
+  BENCHMARK_REPO_GH_TOKEN="${BENCHMARK_REPO_GH_TOKEN:-}" \
+  SNAPSHOT_COMMIT_MESSAGE="chore(data): sync benchmark publication $RUN_ID" \
+  RUN_ID="$RUN_ID" \
+  "$publisher_script"
 }
 
 run_same_spec_current_benchmark() {
@@ -1385,23 +1286,7 @@ PY
 fi
 
 if [[ "$PUBLISH_TO_HF" == "1" ]]; then
-  if [[ -z "$HF_REPO_ID" ]]; then
-    echo "HF_REPO_ID must be set when PUBLISH_TO_HF=1" >&2
-    exit 2
-  fi
-
-  prepare_hf_publish_cache_for_runner
-
-  "$PYTHON_BIN" -m vllm_hust_benchmark.cli sync-submission-to-hf \
-    --submission-dir "$SUBMISSION_DIR" \
-    --aggregate-output-dir "$AGGREGATE_OUTPUT_DIR" \
-    --repo-id "$HF_REPO_ID" \
-    --submissions-prefix submissions-auto \
-    --commit-message "chore: sync vllm-hust benchmark $RUN_ID (${GITHUB_REF_NAME:-detached}@$(printf '%s' "${GITHUB_SHA:-local}" | cut -c1-8))" \
-    --execute
-
-  mirror_benchmark_snapshots_to_git_branch
-  open_benchmark_snapshot_sync_pr
+  sync_benchmark_publication_to_github
 else
   "$PYTHON_BIN" -m vllm_hust_benchmark.cli publish-website \
     --source-dir "$SUBMISSIONS_ROOT" \
