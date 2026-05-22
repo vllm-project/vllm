@@ -60,6 +60,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
 from vllm.triton_utils import tl, triton
+from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
@@ -431,6 +432,17 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
         )
 
+        # Auxiliary CUDA stream + events used to overlap the two independent
+        # input projections (in_proj_qkvz and in_proj_ba) in forward_cuda.
+        # On non-CUDA-alike platforms maybe_execute_in_parallel falls back to
+        # serial execution when aux_stream is None.
+        if current_platform.is_cuda_alike():
+            self._in_proj_aux_stream = torch.cuda.Stream()
+            self._in_proj_events = (torch.cuda.Event(), torch.cuda.Event())
+        else:
+            self._in_proj_aux_stream = None
+            self._in_proj_events = (None, None)
+
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -793,8 +805,15 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
-        mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
-        ba, _ = self.in_proj_ba(hidden_states)
+        # in_proj_qkvz and in_proj_ba are two independent GEMMs on the same
+        # input. Run them on separate CUDA streams to overlap their kernels.
+        (mixed_qkvz, _), (ba, _) = maybe_execute_in_parallel(
+            lambda: self.in_proj_qkvz(hidden_states),
+            lambda: self.in_proj_ba(hidden_states),
+            self._in_proj_events[0],
+            self._in_proj_events[1],
+            self._in_proj_aux_stream,
+        )
 
         if self.gqa_interleaved_layout:
             # Qwen3-Next: unpack the interleaved GQA layout
