@@ -139,12 +139,8 @@ class MambaHybridModelState(DefaultModelState):
         )
 
     def postprocess_state(
-        self,
-        input_batch: InputBatch,
-        num_sampled: torch.Tensor,
+        self, idx_mapping: torch.Tensor, num_sampled: torch.Tensor
     ) -> None:
         # Chunked prefill does not sample a token, so num_sampled can be 0.
         # Mamba treats num_accepted_tokens=1 as the neutral non-spec value.
-        self.num_accepted_tokens_gpu[input_batch.idx_mapping] = torch.clamp(
-            num_sampled, min=1
-        )
+        self.num_accepted_tokens_gpu[idx_mapping] = torch.clamp(num_sampled, min=1)
