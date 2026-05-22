@@ -27,11 +27,14 @@ WORKDIR /workspace
 ARG PYTHON_VERSION=3.12
 ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu"
 
+ARG max_jobs=32
+ENV MAX_JOBS=${max_jobs}
+
 # Install minimal dependencies and uv
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update -y \
-    && apt-get install -y --no-install-recommends sudo ccache git curl wget ca-certificates \
+    && apt-get install -y --no-install-recommends sudo ccache git curl wget ca-certificates zlib1g-dev \
     gcc-12 g++-12 libtcmalloc-minimal4 libnuma-dev ffmpeg libsm6 libxext6 libgl1 jq lsof make xz-utils \
     && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12 \
     && curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -90,11 +93,13 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update -y \
     && apt-get install -y --no-install-recommends \
-        ca-certificates curl git build-essential \
-        protobuf-compiler libprotobuf-dev \
+        ca-certificates curl git build-essential unzip \
     && rm -rf /var/lib/apt/lists/*
 
-# Install rustup; the toolchain itself is pinned by rust/rust-toolchain.toml.
+COPY tools/install_protoc.sh /tmp/install_protoc.sh
+RUN /tmp/install_protoc.sh && rm /tmp/install_protoc.sh
+
+# Install rustup; the toolchain itself is pinned by rust-toolchain.toml.
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
     sh -s -- -y --profile minimal --default-toolchain none
 ENV PATH="/root/.cargo/bin:${PATH}"
@@ -103,14 +108,8 @@ WORKDIR /workspace
 
 # Copy only the rust workspace — the binary is the sole artifact we need.
 COPY rust rust
-
-# Fail loudly if the rust submodule was not initialized on the host before
-# `docker build`. Without this check, cargo would emit a confusing error.
-RUN if [ ! -f rust/Cargo.toml ]; then \
-        echo "ERROR: rust/ submodule is not initialized."; \
-        echo "Run 'git submodule update --init --recursive' on the host before building."; \
-        exit 1; \
-    fi
+COPY rust-toolchain.toml rust-toolchain.toml
+COPY build_rust.sh build_rust.sh
 
 # Cap cargo parallelism to avoid exhausting the CI host's open-file limit
 # (rustc spawns enough concurrent processes to hit RLIMIT_NOFILE otherwise).
@@ -122,15 +121,10 @@ ENV CARGO_BUILD_JOBS=4
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     --mount=type=cache,target=/workspace/rust/target \
-    cd rust \
-    && cargo build --release --bin vllm-rs --features native-tls-vendored \
-    && cp target/release/vllm-rs /workspace/vllm-rs
+    VLLM_RS_TARGET_PATH=/workspace/vllm-rs bash build_rust.sh
 
 ######################### BUILD IMAGE #########################
 FROM base AS vllm-build
-
-ARG max_jobs=32
-ENV MAX_JOBS=${max_jobs}
 
 ARG GIT_REPO_CHECK=0
 # Support for cross-compilation with x86 ISA including AVX2 and AVX512: docker build --build-arg VLLM_CPU_X86="true" ...
@@ -263,8 +257,7 @@ WORKDIR /vllm-workspace
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=bind,from=vllm-build,src=/vllm-workspace/dist,target=dist \
-    uv pip install dist/*.whl && \
-    uv pip install "vllm[audio]"
+    uv pip install "$(realpath dist/*.whl)[audio,triton-cpu]"
 
 # Add labels to document build configuration
 LABEL org.opencontainers.image.title="vLLM CPU"

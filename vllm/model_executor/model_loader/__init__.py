@@ -12,6 +12,9 @@ from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.bitsandbytes_loader import BitsAndBytesModelLoader
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
+from vllm.model_executor.model_loader.modelexpress_loader import (
+    ModelExpressModelLoader,
+)
 from vllm.model_executor.model_loader.runai_streamer_loader import (
     RunaiModelStreamerLoader,
 )
@@ -35,6 +38,7 @@ LoadFormats = Literal[
     "fastsafetensors",
     "instanttensor",
     "mistral",
+    "modelexpress",
     "npcache",
     "pt",
     "runai_streamer",
@@ -51,6 +55,7 @@ _LOAD_FORMAT_TO_MODEL_LOADER: dict[str, type[BaseModelLoader]] = {
     "fastsafetensors": DefaultModelLoader,
     "instanttensor": DefaultModelLoader,
     "mistral": DefaultModelLoader,
+    "modelexpress": ModelExpressModelLoader,
     "npcache": DefaultModelLoader,
     "pt": DefaultModelLoader,
     "runai_streamer": RunaiModelStreamerLoader,
@@ -146,6 +151,7 @@ __all__ = [
     "register_model_loader",
     "BaseModelLoader",
     "BitsAndBytesModelLoader",
+    "ModelExpressModelLoader",
     "DefaultModelLoader",
     "DummyModelLoader",
     "RunaiModelStreamerLoader",

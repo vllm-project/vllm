@@ -53,6 +53,7 @@ class LoadConfig:
       supporting efficient loading of tensor-parallel models.
     - "mistral" will load weights from consolidated safetensors files used by
       Mistral models.
+    - "modelexpress" will load weights using ModelExpress.
     - Other custom values can be supported via plugins.
     """
     download_dir: str | None = None

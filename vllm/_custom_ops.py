@@ -57,11 +57,11 @@ def create_fp4_scale_tensor(
         rounded_m = round_up(m, 128)
         scale_n = n // block_size
         rounded_n = round_up(scale_n, 4)
-        return torch.zeros(
+        return torch.empty(
             (rounded_m, rounded_n // 4), device=device, dtype=torch.int32
         )
     else:
-        return torch.zeros((m, n // block_size), device=device, dtype=torch.uint8)
+        return torch.empty((m, n // block_size), device=device, dtype=torch.uint8)
 
 
 def create_fp4_output_tensors(
@@ -2695,6 +2695,50 @@ def indexer_k_quant_and_cache(
 ) -> None:
     torch.ops._C_cache_ops.indexer_k_quant_and_cache(
         k, kv_cache, slot_mapping, quant_block_size, kv_cache_dtype
+    )
+
+
+def top_k_per_row_prefill(
+    logits: torch.Tensor,
+    cu_seqlen_ks: torch.Tensor,
+    cu_seqlen_ke: torch.Tensor,
+    raw_topk_indices: torch.Tensor,
+    num_rows: int,
+    stride0: int,
+    stride1: int,
+    topk_tokens: int,
+) -> None:
+    torch.ops._C.top_k_per_row_prefill(
+        logits,
+        cu_seqlen_ks,
+        cu_seqlen_ke,
+        raw_topk_indices,
+        num_rows,
+        stride0,
+        stride1,
+        topk_tokens,
+    )
+
+
+def top_k_per_row_decode(
+    logits: torch.Tensor,
+    next_n: int,
+    seq_lens: torch.Tensor,
+    raw_topk_indices: torch.Tensor,
+    num_rows: int,
+    stride0: int,
+    stride1: int,
+    topk_tokens: int,
+) -> None:
+    torch.ops._C.top_k_per_row_decode(
+        logits,
+        next_n,
+        seq_lens,
+        raw_topk_indices,
+        num_rows,
+        stride0,
+        stride1,
+        topk_tokens,
     )
 
 
