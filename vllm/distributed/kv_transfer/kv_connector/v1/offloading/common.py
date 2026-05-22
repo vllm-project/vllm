@@ -43,10 +43,27 @@ class OffloadingWorkerMetadata(KVConnectorWorkerMetadata):
     """
 
     completed_jobs: dict[int, int] = field(default_factory=dict)
+    transfer_stats: dict[str, int | float | list[int | float]] = field(
+        default_factory=dict
+    )
 
     def mark_completed(self, job_id: int) -> None:
         """Record a transfer job completion from this worker."""
         self.completed_jobs[job_id] = 1
+
+    def set_counter(self, counter_name: str, counter_value: int | float) -> None:
+        """Record a counter increment from this worker."""
+        existing = self.transfer_stats.get(counter_name, 0)
+        assert not isinstance(existing, list)
+        self.transfer_stats[counter_name] = existing + counter_value
+
+    def observe_histogram(
+        self, histogram_name: str, histogram_value: int | float
+    ) -> None:
+        """Record a histogram observation from this worker."""
+        values = self.transfer_stats.setdefault(histogram_name, [])
+        assert isinstance(values, list)
+        values.append(histogram_value)
 
     def aggregate(
         self, other: "KVConnectorWorkerMetadata"
@@ -57,4 +74,19 @@ class OffloadingWorkerMetadata(KVConnectorWorkerMetadata):
         for job_id, v in other.completed_jobs.items():
             merged[job_id] = merged.get(job_id, 0) + v
 
-        return OffloadingWorkerMetadata(completed_jobs=merged)
+        transfer_stats = dict(self.transfer_stats)
+        for key, value in other.transfer_stats.items():
+            if isinstance(value, list):
+                if key not in transfer_stats:
+                    transfer_stats[key] = list(value)
+                else:
+                    assert isinstance(transfer_stats[key], list)
+                    transfer_stats[key].extend(value)
+            else:
+                existing = transfer_stats.get(key, 0)
+                assert not isinstance(existing, list)
+                transfer_stats[key] = existing + value
+
+        return OffloadingWorkerMetadata(
+            completed_jobs=merged, transfer_stats=transfer_stats
+        )

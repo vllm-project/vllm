@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass
-from typing import Any, Callable
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
@@ -28,9 +29,11 @@ LOAD_SIZE = "load_size"
 STORE_BYTES = "store_bytes"
 STORE_TIME = "store_time"
 STORE_SIZE = "store_size"
+STORES_SKIPPED = "stores_skipped"
 
 _LOAD_TRANSFER_TYPE = "CPU_to_GPU"
 _STORE_TRANSFER_TYPE = "GPU_to_CPU"
+_TRANSFER_TYPES = (_LOAD_TRANSFER_TYPE, _STORE_TRANSFER_TYPE)
 
 _TRANSFER_SIZE_BUCKETS = (
     1e6,
@@ -73,11 +76,43 @@ _CONNECTOR_METRIC_DEFINITIONS: dict[str, OffloadingMetricMetadata] = {
         buckets=_TRANSFER_SIZE_BUCKETS,
     ),
 }
-_KNOWN_COUNTER_METRIC_NAMES = {
-    metric_name
-    for metric_name, metadata in _CONNECTOR_METRIC_DEFINITIONS.items()
-    if isinstance(metadata, OffloadingCounterMetadata)
-} | {"stores_skipped"}
+
+# Deprecated legacy transfer metrics, kept during the migration to the flat
+# metric names above. These stay in a separate definition block because they
+# use a transfer_type label, but are emitted from the same flat stats payload
+# for compatibility.
+_DEPRECATED_CONNECTOR_METRIC_DEFINITIONS: dict[str, OffloadingMetricMetadata] = {
+    "total_bytes": OffloadingCounterMetadata(
+        name="vllm:kv_offload_total_bytes",
+        documentation="Number of bytes offloaded by KV connector",
+    ),
+    "total_time": OffloadingCounterMetadata(
+        name="vllm:kv_offload_total_time",
+        documentation="Total time measured by all KV offloading operations",
+    ),
+    "size": OffloadingHistogramMetadata(
+        name="vllm:kv_offload_size",
+        documentation="Histogram of KV offload transfer size, in bytes.",
+        buckets=_TRANSFER_SIZE_BUCKETS,
+    ),
+}
+
+_DEFAULT_MANAGER_METRIC_DEFINITIONS: dict[str, OffloadingMetricMetadata] = {
+    STORES_SKIPPED: OffloadingCounterMetadata(
+        name="vllm:kv_offload_stores_skipped",
+        documentation=(
+            "Number of KV offload stores skipped because the reuse threshold "
+            "was not reached."
+        ),
+    )
+}
+
+
+def _default_metric_metadata() -> dict[str, OffloadingMetricMetadata]:
+    return {
+        **_CONNECTOR_METRIC_DEFINITIONS,
+        **_DEFAULT_MANAGER_METRIC_DEFINITIONS,
+    }
 
 
 @dataclass
@@ -88,6 +123,10 @@ class OffloadingConnectorStats(KVConnectorStats):
     Counter values are aggregated by summing, gauge values use the latest
     snapshot, and histogram values are lists of observed samples.
     """
+
+    metric_metadata: dict[str, OffloadingMetricMetadata] = field(
+        default_factory=_default_metric_metadata
+    )
 
     def __post_init__(self):
         if not self.data:
@@ -100,20 +139,24 @@ class OffloadingConnectorStats(KVConnectorStats):
     def aggregate(self, other: "KVConnectorStats") -> "KVConnectorStats":
         if not other.is_empty():
             for key, value in other.data.items():
-                if isinstance(value, list):
+                metadata = self.metric_metadata.get(key)
+                if metadata is None:
+                    raise AssertionError(f"Unknown offloading stats key: {key}")
+                if isinstance(metadata, OffloadingHistogramMetadata):
                     assert isinstance(value, list)
                     if key not in self.data:
                         self.data[key] = value
                     else:
                         assert isinstance(self.data[key], list)
                         self.data[key].extend(value)
-                elif isinstance(value, int | float):
-                    if key in _KNOWN_COUNTER_METRIC_NAMES:
-                        self.data[key] = self.data.get(key, 0) + value
-                    else:
-                        self.data[key] = value
+                elif isinstance(metadata, OffloadingCounterMetadata):
+                    assert isinstance(value, int | float)
+                    self.data[key] = self.data.get(key, 0) + value
+                elif isinstance(metadata, OffloadingGaugeMetadata):
+                    assert isinstance(value, int | float)
+                    self.data[key] = value
                 else:
-                    raise AssertionError(f"Invalid offloading stats value: {key}")
+                    raise AssertionError(f"Unknown offloading metric metadata: {key}")
         return self
 
     def reduce(self) -> dict[str, int | float]:
@@ -125,14 +168,20 @@ class OffloadingConnectorStats(KVConnectorStats):
         """
         return_dict: dict[str, int | float] = {}
         for key, value in self.data.items():
-            if isinstance(value, list):
+            metadata = self.metric_metadata.get(key)
+            if metadata is None:
+                raise AssertionError(f"Unknown offloading stats key: {key}")
+            if isinstance(metadata, OffloadingHistogramMetadata):
                 assert isinstance(value, list)
                 return_dict[f"{key}_count"] = len(value)
                 return_dict[f"{key}_sum"] = sum(value)
-            elif isinstance(value, int | float):
+            elif isinstance(
+                metadata, OffloadingCounterMetadata | OffloadingGaugeMetadata
+            ):
+                assert isinstance(value, int | float)
                 return_dict[key] = value
             else:
-                raise AssertionError(f"Invalid offloading stats value: {key}")
+                raise AssertionError(f"Unknown offloading metric metadata: {key}")
         return return_dict
 
     def is_empty(self) -> bool:
@@ -192,21 +241,27 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
         ] = {}
 
         self._counter_kv_bytes = self._counter_cls(
-            name="vllm:kv_offload_total_bytes",
-            documentation="Number of bytes offloaded by KV connector",
+            name=_DEPRECATED_CONNECTOR_METRIC_DEFINITIONS["total_bytes"].name,
+            documentation=_DEPRECATED_CONNECTOR_METRIC_DEFINITIONS[
+                "total_bytes"
+            ].documentation,
             labelnames=labelnames + ["transfer_type"],
         )
 
         self._counter_kv_transfer_time = self._counter_cls(
-            name="vllm:kv_offload_total_time",
-            documentation="Total time measured by all KV offloading operations",
+            name=_DEPRECATED_CONNECTOR_METRIC_DEFINITIONS["total_time"].name,
+            documentation=_DEPRECATED_CONNECTOR_METRIC_DEFINITIONS[
+                "total_time"
+            ].documentation,
             labelnames=labelnames + ["transfer_type"],
         )
 
+        deprecated_size_metadata = _DEPRECATED_CONNECTOR_METRIC_DEFINITIONS["size"]
+        assert isinstance(deprecated_size_metadata, OffloadingHistogramMetadata)
         self._histogram_transfer_size = self._histogram_cls(
-            name="vllm:kv_offload_size",
-            documentation="Histogram of KV offload transfer size, in bytes.",
-            buckets=_TRANSFER_SIZE_BUCKETS,
+            name=deprecated_size_metadata.name,
+            documentation=deprecated_size_metadata.documentation,
+            buckets=deprecated_size_metadata.buckets,
             labelnames=labelnames + ["transfer_type"],
         )
 

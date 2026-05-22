@@ -184,11 +184,8 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         return True
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
-        if self.connector_worker is not None:
-            return self.connector_worker.get_kv_connector_stats()
-
         if self.connector_scheduler is not None:
-            return self.connector_scheduler.manager.get_stats()
+            return self.connector_scheduler.get_stats()
 
         return None
 

@@ -19,6 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
 )
 from vllm.v1.kv_offload.base import (
+    OffloadingCounterMetadata,
     OffloadingGaugeMetadata,
     OffloadingHistogramMetadata,
 )
@@ -54,6 +55,47 @@ class _FakeVllmConfig:
         self.kv_transfer_config = SimpleNamespace(
             kv_connector_extra_config={"store_threshold": store_threshold}
         )
+
+
+def _metric_metadata():
+    return {
+        LOAD_BYTES: OffloadingCounterMetadata(
+            name="vllm:kv_offload_load_bytes",
+            documentation="load bytes",
+        ),
+        LOAD_TIME: OffloadingCounterMetadata(
+            name="vllm:kv_offload_load_time",
+            documentation="load time",
+        ),
+        LOAD_SIZE: OffloadingHistogramMetadata(
+            name="vllm:kv_offload_load_size",
+            documentation="load size",
+        ),
+        STORE_BYTES: OffloadingCounterMetadata(
+            name="vllm:kv_offload_store_bytes",
+            documentation="store bytes",
+        ),
+        STORE_TIME: OffloadingCounterMetadata(
+            name="vllm:kv_offload_store_time",
+            documentation="store time",
+        ),
+        STORE_SIZE: OffloadingHistogramMetadata(
+            name="vllm:kv_offload_store_size",
+            documentation="store size",
+        ),
+        "stores_skipped": OffloadingCounterMetadata(
+            name="vllm:kv_offload_stores_skipped",
+            documentation="stores skipped",
+        ),
+        "pending_stores": OffloadingGaugeMetadata(
+            name="vllm:kv_offload_pending_stores",
+            documentation="pending stores",
+        ),
+        "lookup_latency": OffloadingHistogramMetadata(
+            name="vllm:kv_offload_lookup_latency_seconds",
+            documentation="lookup latency",
+        ),
+    }
 
 
 def test_build_kv_connector_stats_with_none():
@@ -115,7 +157,8 @@ def test_aggregate_same_connector():
             "stores_skipped": 1,
             "pending_stores": 3,
             "lookup_latency": [0.1],
-        }
+        },
+        metric_metadata=_metric_metadata(),
     )
 
     stats2 = OffloadingConnectorStats(
@@ -129,7 +172,8 @@ def test_aggregate_same_connector():
             "stores_skipped": 3,
             "pending_stores": 1,
             "lookup_latency": [0.2, 0.3],
-        }
+        },
+        metric_metadata=_metric_metadata(),
     )
 
     result = stats1.aggregate(stats2)
@@ -160,7 +204,8 @@ def test_reduce():
             "stores_skipped": 11,
             "pending_stores": 2,
             "lookup_latency": [0.1, 0.2, 0.3],
-        }
+        },
+        metric_metadata=_metric_metadata(),
     )
 
     reduced = stats.reduce()

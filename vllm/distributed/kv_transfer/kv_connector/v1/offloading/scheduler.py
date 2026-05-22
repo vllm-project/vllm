@@ -14,6 +14,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     ReqId,
     TransferJob,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
+    _CONNECTOR_METRIC_DEFINITIONS,
+    OffloadingConnectorStats,
+)
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -262,6 +266,13 @@ class OffloadingConnectorScheduler:
     def __init__(self, spec: OffloadingSpec):
         self.config = SchedulerOffloadConfig.from_spec(spec)
         self.manager: OffloadingManager = spec.get_manager()
+        self._offloading_metric_metadata = {
+            **_CONNECTOR_METRIC_DEFINITIONS,
+            **type(self.manager).get_metric_definitions(spec.vllm_config),
+        }
+        self._connector_stats = OffloadingConnectorStats(
+            metric_metadata=self._offloading_metric_metadata
+        )
 
         full_attention_groups: list[int] = []
         sliding_window_groups: list[int] = []
@@ -952,6 +963,13 @@ class OffloadingConnectorScheduler:
         if not isinstance(meta, OffloadingWorkerMetadata):
             assert meta is None
             meta = OffloadingWorkerMetadata()
+        if meta.transfer_stats:
+            self._connector_stats.aggregate(
+                OffloadingConnectorStats(
+                    data=meta.transfer_stats,
+                    metric_metadata=self._offloading_metric_metadata,
+                )
+            )
         for job_id, count in meta.completed_jobs.items():
             assert count > 0
             if job_id < self._stale_job_threshold:
@@ -989,6 +1007,24 @@ class OffloadingConnectorScheduler:
             req_status.transfer_jobs.remove(job_id)
             if not req_status.transfer_jobs and req_status.req.is_finished():
                 del self._req_status[job_status.req_id]
+
+    def get_stats(self) -> OffloadingConnectorStats | None:
+        stats = None
+        if not self._connector_stats.is_empty():
+            stats = self._connector_stats
+            self._connector_stats = OffloadingConnectorStats(
+                metric_metadata=self._offloading_metric_metadata
+            )
+
+        manager_stats = self.manager.get_stats()
+        if manager_stats is not None:
+            manager_stats = OffloadingConnectorStats(
+                data=manager_stats.data,
+                metric_metadata=self._offloading_metric_metadata,
+            )
+            stats = manager_stats if stats is None else stats.aggregate(manager_stats)
+
+        return stats
 
     def request_finished(
         self,

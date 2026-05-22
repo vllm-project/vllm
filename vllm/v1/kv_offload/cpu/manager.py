@@ -31,6 +31,16 @@ _CACHE_POLICIES: dict[str, type[CachePolicy]] = {
     "arc": ARCCachePolicy,
 }
 
+_CPU_OFFLOADING_METRIC_DEFINITIONS: dict[str, OffloadingMetricMetadata] = {
+    "stores_skipped": OffloadingCounterMetadata(
+        name="vllm:kv_offload_stores_skipped",
+        documentation=(
+            "Number of KV offload stores skipped because the reuse "
+            "threshold was not reached."
+        ),
+    )
+}
+
 
 class CPUOffloadingManager(OffloadingManager):
     """
@@ -46,15 +56,7 @@ class CPUOffloadingManager(OffloadingManager):
     def get_metric_definitions(
         cls, vllm_config: "VllmConfig"
     ) -> dict[str, OffloadingMetricMetadata]:
-        return {
-            "stores_skipped": OffloadingCounterMetadata(
-                name="vllm:kv_offload_stores_skipped",
-                documentation=(
-                    "Number of KV offload stores skipped because the reuse "
-                    "threshold was not reached."
-                ),
-            )
-        }
+        return dict(_CPU_OFFLOADING_METRIC_DEFINITIONS)
 
     def __init__(
         self,
@@ -285,7 +287,9 @@ class CPUOffloadingManager(OffloadingManager):
             OffloadingConnectorStats,
         )
 
-        stats = OffloadingConnectorStats()
+        stats = OffloadingConnectorStats(
+            metric_metadata=_CPU_OFFLOADING_METRIC_DEFINITIONS
+        )
         stats.set_counter("stores_skipped", self.stores_skipped)
         self.stores_skipped = 0
         return stats
