@@ -534,9 +534,12 @@ class MPClient(EngineCoreClient):
 
                 with launch_core_engines(
                     vllm_config, executor_class, log_stats, addresses
-                ) as (engine_manager, coordinator, addresses, tensor_queue):
-                    self.resources.coordinator = coordinator
-                    self.resources.engine_manager = engine_manager
+                ) as engine_launch:
+                    self.resources.coordinator = engine_launch.coordinator
+                    self.resources.engine_manager = engine_launch.engine_manager
+                    coordinator = engine_launch.coordinator
+                    addresses = engine_launch.addresses
+                    tensor_queue = engine_launch.tensor_queue
 
                 self.stats_update_address = addresses.frontend_stats_publish_address
                 if coordinator is not None:

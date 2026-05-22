@@ -312,7 +312,11 @@ def run_multi_api_server(args: argparse.Namespace):
 
     with launch_core_engines(
         vllm_config, executor_class, log_stats, addresses, num_api_servers
-    ) as (local_engine_manager, coordinator, addresses, tensor_queue):
+    ) as engine_launch:
+        local_engine_manager = engine_launch.engine_manager
+        coordinator = engine_launch.coordinator
+        addresses = engine_launch.addresses
+        tensor_queue = engine_launch.tensor_queue
         stats_update_address = (
             coordinator.get_stats_publish_address() if coordinator else None
         )
@@ -340,6 +344,11 @@ def run_multi_api_server(args: argparse.Namespace):
                 stats_update_address=stats_update_address,
                 tensor_queue=tensor_queue,
             )
+
+        # Set frontend processes to watch during engine startup.
+        # If any of these processes exit before the engines are up, the engine startup
+        # will be aborted with an error.
+        engine_launch.set_watched_frontend_processes(api_server_manager.processes)
 
     # Wait for API servers.
     try:
