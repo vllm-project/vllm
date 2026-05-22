@@ -84,11 +84,13 @@ prepare_artifact_image() {
   local artifact_image="rocm/vllm-ci-artifact:${BUILDKITE_COMMIT:-local}"
   local wheel_dir=""
   local context_dir=""
+  local workspace_dir=""
 
   artifact_work_dir=$(mktemp -d -t vllm-rocm-artifact.XXXXXX)
   wheel_dir="${artifact_work_dir}/wheels"
   context_dir="${artifact_work_dir}/context"
-  mkdir -p "${wheel_dir}" "${context_dir}/wheels"
+  workspace_dir="${context_dir}/workspace"
+  mkdir -p "${wheel_dir}" "${context_dir}/wheels" "${workspace_dir}"
 
   echo "--- Downloading ROCm wheel artifact"
   if ! buildkite-agent artifact download "${artifact_glob}" "${artifact_work_dir}"; then
@@ -115,14 +117,22 @@ prepare_artifact_image() {
     echo "ROCm wheel artifact did not contain a wheel"
     return 1
   fi
+  if [[ ! -d "${wheel_dir}/tests" ]]; then
+    echo "ROCm wheel artifact did not contain the test workspace"
+    return 1
+  fi
 
   cp "${wheel_dir}"/*.whl "${context_dir}/wheels/" || return 1
+  tar -C "${wheel_dir}" --exclude='*.whl' -cf - . \
+    | tar -C "${workspace_dir}" -xf - || return 1
   cat > "${context_dir}/Dockerfile" <<'EOF'
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 COPY wheels/ /tmp/vllm-wheels/
+COPY workspace/ /vllm-workspace/
 RUN python3 -m pip install --no-deps --force-reinstall /tmp/vllm-wheels/*.whl \
     && rm -rf /tmp/vllm-wheels
+WORKDIR /vllm-workspace
 EOF
 
   echo "--- Building local ROCm test image"
