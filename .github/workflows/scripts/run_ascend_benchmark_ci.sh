@@ -17,6 +17,7 @@ SERVER_LOG=${SERVER_LOG:-$RESULT_ROOT/server.log}
 RUNNER_PREFLIGHT_FAILURE_FILE=${RUNNER_PREFLIGHT_FAILURE_FILE:-$RESULT_ROOT/runner_preflight_failure.txt}
 DIAGNOSTICS_DIR=${DIAGNOSTICS_DIR:-$RESULT_ROOT/diagnostics}
 NODE_ENV_FAILURE_FILE=${NODE_ENV_FAILURE_FILE:-$RESULT_ROOT/node_env_failure.txt}
+BENCHMARK_SNAPSHOT_SYNC_BRANCH=${BENCHMARK_SNAPSHOT_SYNC_BRANCH:-bot/leaderboard-snapshot-sync}
 BENCH_SCENARIO=${BENCH_SCENARIO:-random-online}
 BENCH_DATASET_PATH=${BENCH_DATASET_PATH:-}
 BENCH_CONSTRAINTS_FILE=${BENCH_CONSTRAINTS_FILE:-}
@@ -678,6 +679,63 @@ prepare_hf_publish_cache_for_runner() {
   fi
 }
 
+mirror_benchmark_snapshots_to_git_branch() {
+  local mirror_root="$runtime_root/benchmark-snapshot-sync"
+  local snapshot_target_dir="$mirror_root/leaderboard-data/snapshots"
+  local sync_branch=${BENCHMARK_SNAPSHOT_SYNC_BRANCH:-bot/leaderboard-snapshot-sync}
+  local -a snapshot_files=(
+    leaderboard_single.json
+    leaderboard_multi.json
+    leaderboard_compare.json
+    last_updated.json
+  )
+  local snapshot_file
+
+  if [[ "$PUBLISH_TO_HF" != "1" ]]; then
+    return 0
+  fi
+
+  if [[ -z "${BENCHMARK_REPO_URL:-}" ]]; then
+    echo "BENCHMARK_REPO_URL must be set when mirroring GitHub snapshot files" >&2
+    return 2
+  fi
+
+  for snapshot_file in "${snapshot_files[@]}"; do
+    if [[ ! -f "$AGGREGATE_OUTPUT_DIR/$snapshot_file" ]]; then
+      echo "missing aggregated snapshot file: $AGGREGATE_OUTPUT_DIR/$snapshot_file" >&2
+      return 2
+    fi
+  done
+
+  rm -rf "$mirror_root"
+  git clone --depth 1 "$BENCHMARK_REPO_URL" "$mirror_root"
+  git -C "$mirror_root" fetch --depth 1 origin main
+  git -C "$mirror_root" checkout -B "$sync_branch" origin/main
+
+  mkdir -p "$snapshot_target_dir"
+  for snapshot_file in "${snapshot_files[@]}"; do
+    cp "$AGGREGATE_OUTPUT_DIR/$snapshot_file" "$snapshot_target_dir/$snapshot_file"
+  done
+
+  if git -C "$mirror_root" diff --quiet -- leaderboard-data/snapshots; then
+    echo "Benchmark GitHub snapshot mirror is already up to date"
+    return 0
+  fi
+
+  git -C "$mirror_root" config user.name "vLLM-HUST Benchmark Bot"
+  git -C "$mirror_root" config user.email "benchmark-bot@vllm-hust.local"
+  git -C "$mirror_root" add leaderboard-data/snapshots
+  git -C "$mirror_root" commit \
+    -m "chore(data): sync leaderboard snapshots $RUN_ID" \
+    -m "Mirror refreshed leaderboard snapshot files for the website's GitHub-first data path." \
+    -m "Source run: $RUN_ID" \
+    -m "Source repo: ${GITHUB_REPOSITORY:-vLLM-HUST/vllm-hust}" \
+    -m "Source commit: ${GITHUB_SHA:-local}"
+  git -C "$mirror_root" push --force-with-lease origin "HEAD:refs/heads/$sync_branch"
+
+  echo "Pushed benchmark snapshot sync branch: $sync_branch"
+}
+
 run_same_spec_current_benchmark() {
   local same_spec_runner=$VLLM_HUST_BENCHMARK_REPO/scripts/run-current-ascend-same-spec.sh
   local same_spec_raw_result=$RESULT_ROOT/raw_benchmark_result.json
@@ -1065,6 +1123,8 @@ if [[ "$PUBLISH_TO_HF" == "1" ]]; then
     --submissions-prefix submissions-auto \
     --commit-message "chore: sync vllm-hust benchmark $RUN_ID (${GITHUB_REF_NAME:-detached}@$(printf '%s' "${GITHUB_SHA:-local}" | cut -c1-8))" \
     --execute
+
+  mirror_benchmark_snapshots_to_git_branch
 else
   "$PYTHON_BIN" -m vllm_hust_benchmark.cli publish-website \
     --source-dir "$SUBMISSIONS_ROOT" \
