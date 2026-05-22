@@ -93,8 +93,8 @@ def _is_libs_cu13_install_intact() -> bool:
 
 
 def _resolve_gdn_prefill_backend(
-    backend: str, head_k_dim: int | None
-) -> Literal["triton", "flashinfer", "cutedsl"]:
+    vllm_config: VllmConfig,
+) -> tuple[str, Literal["triton", "flashinfer", "cutedsl"]]:
     """Resolve GDN prefill backend.
 
     FlashInfer's GDN prefill kernel is chosen when:
@@ -110,6 +110,16 @@ def _resolve_gdn_prefill_backend(
     * "cutedsl" is requested; (opt-in only)
     * Blackwell (SM10.x) with ``head_k_dim == 128``;
     """
+    additional_config = vllm_config.additional_config
+    backend_cfg = (
+        additional_config.get("gdn_prefill_backend", "auto")
+        if isinstance(additional_config, dict)
+        else "auto"
+    )
+    backend = str(backend_cfg).strip().lower()
+    head_k_dim = getattr(
+        vllm_config.model_config.hf_config, "linear_key_head_dim", None
+    )
     is_cuda = current_platform.is_cuda()
 
     supports_flashinfer = False
@@ -142,10 +152,10 @@ def _resolve_gdn_prefill_backend(
     )
 
     if backend in ["flashinfer", "auto"] and supports_flashinfer:
-        return "flashinfer"
+        return backend, "flashinfer"
     if backend == "cutedsl" and supports_cutedsl:
-        return "cutedsl"
-    return "triton"
+        return backend, "cutedsl"
+    return backend, "triton"
 
 
 class GDNAttentionBackend(AttentionBackend):
@@ -216,17 +226,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         self.compilation_config = vllm_config.compilation_config
         self.speculative_config = vllm_config.speculative_config
         self.kv_cache_spec = kv_cache_spec
-        additional_config = vllm_config.additional_config
-        backend_cfg = (
-            additional_config.get("gdn_prefill_backend", "auto")
-            if isinstance(additional_config, dict)
-            else "auto"
-        )
-        backend = str(backend_cfg).strip().lower()
-        head_k_dim = kv_cache_spec.shapes[1][-1]
-        self.gdn_prefill_backend: Literal["triton", "flashinfer", "cutedsl"] = (
-            _resolve_gdn_prefill_backend(backend, head_k_dim)
-        )
+        _, self.gdn_prefill_backend = _resolve_gdn_prefill_backend(vllm_config)
 
         if self.speculative_config:
             assert self.speculative_config.num_speculative_tokens is not None

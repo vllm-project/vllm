@@ -84,11 +84,14 @@ logger = init_logger(__name__)
 
 
 def _log_gdn_backend_decision(
+    vllm_config: VllmConfig,
     requested_backend: str,
     active_backend: str,
-    head_k_dim: int | None,
 ) -> None:
     """Log the GDN prefill backend choice in the attention-selector style."""
+    head_k_dim = getattr(
+        vllm_config.model_config.hf_config, "linear_key_head_dim", None
+    )
     chosen = {
         "flashinfer": "FlashInfer",
         "cutedsl": "CuteDSL",
@@ -158,13 +161,10 @@ def fi_chunk_gated_delta_rule(
 
 @CustomOp.register("chunk_gated_delta_rule")
 class ChunkGatedDeltaRule(CustomOp):
-    def __init__(self, head_k_dim: int | None = None) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        additional_config = get_current_vllm_config().additional_config
-        assert isinstance(additional_config, dict)
-        backend_cfg = additional_config.get("gdn_prefill_backend", "auto")
-        backend = str(backend_cfg).strip().lower()
-        active_backend = _resolve_gdn_prefill_backend(backend, head_k_dim)
+        vllm_config = get_current_vllm_config()
+        backend, active_backend = _resolve_gdn_prefill_backend(vllm_config)
         self.gdn_prefill_backend = active_backend
 
         if backend in ("flashinfer", "cutedsl") and active_backend != backend:
@@ -173,7 +173,7 @@ class ChunkGatedDeltaRule(CustomOp):
                 "kernel on the current platform. Falling back to Triton/FLA.",
                 backend,
             )
-        _log_gdn_backend_decision(backend, active_backend, head_k_dim)
+        _log_gdn_backend_decision(vllm_config, backend, active_backend)
 
         if active_backend == "flashinfer":
             self._forward_method = self.forward_cuda
@@ -423,7 +423,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             prefix=f"{prefix}.out_proj",
         )
 
-        self.chunk_gated_delta_rule = ChunkGatedDeltaRule(head_k_dim=self.head_k_dim)
+        self.chunk_gated_delta_rule = ChunkGatedDeltaRule()
         self.gdn_prefill_backend = self.chunk_gated_delta_rule.gdn_prefill_backend
         self._prefill_kernels_warmed_up = False
         self.enable_packed_recurrent_decode = (
