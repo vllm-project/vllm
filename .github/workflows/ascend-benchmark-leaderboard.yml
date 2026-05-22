@@ -511,12 +511,55 @@ jobs:
 
       - name: Verify installation
         env:
+          TORCH_DEVICE_BACKEND_AUTOLOAD: "0"
           VLLM_ASCEND_HUST_REPO: ${{ github.workspace }}/vllm-ascend-hust
         run: |
           source "${VLLM_ASCEND_HUST_REPO}/scripts/use_single_ascend_env.sh"
           "${PYTHON_BIN}" --version
-          "${PYTHON_BIN}" -c "import vllm; print(f'vLLM version: {vllm.__version__}')"
-          "${PYTHON_BIN}" -c "import importlib; importlib.import_module('vllm.entrypoints.cli.main'); print('vLLM CLI module import: ok')"
+          "${PYTHON_BIN}" - <<'PY'
+          import importlib.metadata as metadata
+          import importlib.util
+          import os
+          from pathlib import Path
+
+
+          def module_path(module_name: str) -> Path:
+            spec = importlib.util.find_spec(module_name)
+            if spec is None or spec.origin is None:
+              raise SystemExit(f"{module_name} is not importable")
+            return Path(spec.origin).resolve()
+
+
+          def dist_version(*dist_names: str) -> str:
+            for dist_name in dist_names:
+              try:
+                return metadata.version(dist_name)
+              except metadata.PackageNotFoundError:
+                continue
+            return "<unknown>"
+
+
+          expected_repo = Path(os.environ["VLLM_ASCEND_HUST_REPO"]).resolve()
+          vllm_path = module_path("vllm")
+          vllm_ascend_path = module_path("vllm_ascend")
+          platform_plugins = metadata.entry_points(group="vllm.platform_plugins")
+          ascend_plugin = [ep for ep in platform_plugins if ep.name == "ascend"]
+
+          print(f"vLLM version: {dist_version('vllm-hust', 'vllm')}")
+          print(f"vllm_ascend version: {dist_version('vllm-ascend-hust', 'vllm-ascend')}")
+          print(f"vLLM module path: {vllm_path}")
+          print(f"vllm_ascend module path: {vllm_ascend_path}")
+          print(f"vllm.platform_plugins ascend entry point: {ascend_plugin[0].value if ascend_plugin else '<missing>'}")
+
+          if expected_repo not in vllm_ascend_path.parents:
+            raise SystemExit(
+              "vllm_ascend is not resolved from the checked-out workspace: "
+              f"{vllm_ascend_path} (expected under {expected_repo})"
+            )
+
+          if not ascend_plugin:
+            raise SystemExit("ascend platform plugin entry point is not installed")
+          PY
 
       - name: Runner health preflight (before benchmark)
         env:
