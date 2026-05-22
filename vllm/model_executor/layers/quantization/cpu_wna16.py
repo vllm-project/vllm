@@ -294,6 +294,9 @@ class CPUAWQLinearMethod(LinearMethodBase):
             ops.CPUQuantAlgo.AWQ,
         )
 
+        if layer.bias is not None:
+            layer.bias.data = layer.bias.float()
+
         layer.packed_weight = blocked_w
         layer.packed_qzeros = blocked_zp
         layer.packed_scales = blocked_s
