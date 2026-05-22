@@ -137,6 +137,28 @@ def _replace_tower_linear_with_vllm_linear(
             )
 
 
+def _gemma4_vision_patch_embed(
+    vision_tower: nn.Module,
+    pixel_values: torch.Tensor,
+    pixel_position_ids: torch.Tensor,
+    padding_positions: torch.Tensor,
+    input_dtype: torch.dtype,
+) -> torch.Tensor:
+    """Run Gemma4 patch embedding with the compute dtype for BNB activations."""
+    patch_embedder = vision_tower.patch_embedder
+
+    # HF Gemma4VisionPatchEmbedder casts pixel_values to input_proj.weight.dtype.
+    # For BNB packed weights that dtype is uint8, which is storage dtype rather
+    # than activation dtype, so keep image activations in the model compute dtype.
+    scaled_pixels = 2 * (pixel_values - 0.5)
+    inputs_embeds = patch_embedder.input_proj(scaled_pixels.to(input_dtype))
+    position_embeddings = patch_embedder._position_embeddings(
+        pixel_position_ids,
+        padding_positions,
+    )
+    return inputs_embeds + position_embeddings
+
+
 # ---------------------------------------------------------------------------
 # Input schema
 # ---------------------------------------------------------------------------
@@ -1263,7 +1285,20 @@ class Gemma4ForConditionalGeneration(
                 )
                 pad_tensor = (pp_tensor == -1).all(dim=-1)
 
-                inputs_embeds = vt.patch_embedder(pv_tensor, pp_tensor, pad_tensor)
+                if self.uses_bnb_quant:
+                    inputs_embeds = _gemma4_vision_patch_embed(
+                        vt,
+                        pv_tensor,
+                        pp_tensor,
+                        pad_tensor,
+                        self.model_dtype,
+                    )
+                else:
+                    inputs_embeds = vt.patch_embedder(
+                        pv_tensor,
+                        pp_tensor,
+                        pad_tensor,
+                    )
                 encoder_outputs = vt.encoder(
                     inputs_embeds=inputs_embeds,
                     attention_mask=~pad_tensor,
@@ -1300,7 +1335,11 @@ class Gemma4ForConditionalGeneration(
             all_valid_states[orig_idx] = valid_states
             valid_lens[orig_idx] = valid_states.shape[0]
 
-        target_dtype = self.embed_vision.embedding_projection.weight.dtype
+        target_dtype = (
+            self.model_dtype
+            if self.uses_bnb_quant
+            else self.embed_vision.embedding_projection.weight.dtype
+        )
 
         # Project all images in a single batched call.
         flat_valid_states = torch.cat(all_valid_states, dim=0).to(target_dtype)
@@ -1343,7 +1382,11 @@ class Gemma4ForConditionalGeneration(
         vt = self.vision_tower
         vision_cfg = self.config.vision_config
         pooling_k2 = vision_cfg.pooling_kernel_size**2
-        target_dtype = self.embed_vision.embedding_projection.weight.dtype
+        target_dtype = (
+            self.model_dtype
+            if self.uses_bnb_quant
+            else self.embed_vision.embedding_projection.weight.dtype
+        )
 
         if isinstance(frame_counts, torch.Tensor):
             fc_list = frame_counts.tolist()
@@ -1371,7 +1414,20 @@ class Gemma4ForConditionalGeneration(
             pp_chunk = pixel_position_ids[i : i + max_batch_size]
             pad_chunk = padding_positions[i : i + max_batch_size]
 
-            inputs_embeds = vt.patch_embedder(pv_chunk, pp_chunk, pad_chunk)
+            if self.uses_bnb_quant:
+                inputs_embeds = _gemma4_vision_patch_embed(
+                    vt,
+                    pv_chunk,
+                    pp_chunk,
+                    pad_chunk,
+                    self.model_dtype,
+                )
+            else:
+                inputs_embeds = vt.patch_embedder(
+                    pv_chunk,
+                    pp_chunk,
+                    pad_chunk,
+                )
             encoder_outputs = vt.encoder(
                 inputs_embeds=inputs_embeds,
                 attention_mask=~pad_chunk,
