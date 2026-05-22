@@ -742,7 +742,7 @@ class DeepseekV4MoE(nn.Module):
         self.n_local_experts = config.n_routed_experts // self.tp_size
         self.experts_start_idx = self.tp_rank * self.n_local_experts
         self.experts_end_idx = self.experts_start_idx + self.n_local_experts
-        # We don't pass `gate` into FusedMoE
+
         self.experts = FusedMoE(
             shared_experts=self.shared_experts,
             gate=self.gate,
