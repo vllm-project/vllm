@@ -3,17 +3,24 @@
 """TurboQuant attention backend for vLLM.
 
 Prefill: Standard scaled dot-product attention on uncompressed K/V,
-         then quantize K and store K+V into combined cache slot.
-Decode:  Compute TQ attention scores from compressed cache,
-         unpack FP16 values, softmax + weighted sum.
+         then quantize K/V into one combined cache slot per KV head.
+Decode:  Compute TQ attention scores from compressed K, dequantize
+         compressed V, then run softmax + weighted sum.
 
 Cache layout (no leading 2 dimension):
   (num_blocks, block_size, num_kv_heads, slot_size)
-  where slot_size = key_packed_size + value_fp16_size
 
 Per-head per-position slot layout:
-  [key_packed (kps bytes) | value_fp16 (D*2 bytes)]
-  For turboquant_k3v4_nc head_dim=256: [100 bytes key | 512 bytes value] = 612
+  [key_payload | value_payload]
+
+For MSE keys/values, each payload stores packed centroid indices followed
+by an fp16 norm. For FP8-key presets, the key payload stores packed FP8
+values while the value payload still uses the MSE value layout.
+
+Example for turboquant_k3v4_nc with head_dim=256:
+  key payload:   ceil(256 * 3 / 8) + 2 = 98 bytes
+  value payload: ceil(256 * 4 / 8) + 2 = 130 bytes
+  slot_size = 228 bytes before backend alignment.
 """
 
 import functools

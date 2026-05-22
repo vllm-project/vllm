@@ -639,7 +639,10 @@ def triton_turboquant_store(
     else:
         value_midpoints = midpoints
         v_store = v_flat
-        v_norms_arg = norms.squeeze(1)
+        # Uniform fallback stores value min/max, not an MSE value norm.
+        # Pass a correctly shaped dummy tensor to keep the shared kernel
+        # signature consistent; VALUE_MSE=False makes the kernel ignore it.
+        v_norms_arg = torch.empty_like(v_flat[:, 0])
         n_value_centroids = n_centroids
 
     # Fused kernel: bucketize + MSE index pack + norm store + value pack
