@@ -535,6 +535,22 @@ use_existing_builder() {
     docker buildx inspect --bootstrap
 }
 
+buildx_driver() {
+    local builder="${1:-}"
+
+    if [[ -n "${builder}" ]]; then
+        docker buildx inspect "${builder}" 2>/dev/null
+    else
+        docker buildx inspect 2>/dev/null
+    fi | awk -F': *' '$1 == "Driver" { print $2; exit }'
+}
+
+builder_supports_registry_cache() {
+    local driver="$1"
+
+    [[ -n "${driver}" && "${driver}" != "docker" ]]
+}
+
 create_and_bootstrap_builder() {
     local driver="$1"
     local endpoint="${2:-}"
@@ -841,13 +857,39 @@ maybe_skip_existing_image() {
 setup_builder() {
     echo "--- :buildkite: Setting up buildx builder"
 
-    if [[ "${ROCM_SETUP_BUILDX_BUILDER:-0}" != "1" ]]; then
+    local setup_mode="${ROCM_SETUP_BUILDX_BUILDER:-auto}"
+    local current_driver=""
+    local named_driver=""
+
+    if [[ "${setup_mode}" == "0" || "${setup_mode}" == "false" ]]; then
         echo "Using current Docker buildx builder"
-        echo "Set ROCM_SETUP_BUILDX_BUILDER=1 to create/use ${BUILDER_NAME}"
+        echo "ROCM_SETUP_BUILDX_BUILDER=${setup_mode}; cache exporters may fail if the driver is docker"
         docker buildx inspect --bootstrap
         echo "Active builder:"
         docker buildx ls | grep -E '^\*|^NAME' || docker buildx ls
         return 0
+    fi
+
+    current_driver=$(buildx_driver || true)
+    if [[ "${setup_mode}" != "1" ]] && builder_supports_registry_cache "${current_driver}"; then
+        echo "Using current Docker buildx builder with ${current_driver} driver"
+        docker buildx inspect --bootstrap
+        echo "Active builder:"
+        docker buildx ls | grep -E '^\*|^NAME' || docker buildx ls
+        return 0
+    fi
+
+    if [[ "${setup_mode}" != "1" ]]; then
+        echo "Current buildx driver '${current_driver:-unknown}' cannot export registry caches"
+        echo "Creating or using a cache-capable builder: ${BUILDER_NAME}"
+    fi
+
+    if docker buildx inspect "${BUILDER_NAME}" >/dev/null 2>&1; then
+        named_driver=$(buildx_driver "${BUILDER_NAME}" || true)
+        if ! builder_supports_registry_cache "${named_driver}"; then
+            echo "Builder '${BUILDER_NAME}' uses ${named_driver:-unknown} driver; using ${BUILDER_NAME}-cache instead"
+            BUILDER_NAME="${BUILDER_NAME}-cache"
+        fi
     fi
 
     if [[ -S "${BUILDKIT_SOCKET}" ]]; then

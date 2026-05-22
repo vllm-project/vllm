@@ -476,9 +476,10 @@ else
     -v "${HF_CACHE}:${HF_MOUNT}" \
     -e "HF_HOME=${HF_MOUNT}" \
     -e "PYTHONPATH=${MYPYTHONPATH}" \
+    -e "PYTORCH_ROCM_ARCH=" \
     --name "${container_name}" \
     "${image_name}" \
-    /bin/bash -c "unset PYTORCH_ROCM_ARCH && ${commands}"
+    /bin/bash -c "${commands}"
 
   exit_code=$?
   handle_pytest_exit "$exit_code"
