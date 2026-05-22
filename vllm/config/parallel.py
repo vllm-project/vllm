@@ -292,6 +292,10 @@ class ParallelConfig:
     timeout parameter. If None, PyTorch's default timeout is used (600s for NCCL).
     Increase this for multi-node setups where model downloads may be slow."""
 
+    cpu_distributed_timeout_seconds: int | None = None
+    """Timeout (in seconds) for cpu communication groups. If None, PyTorch's
+    default timeout is used (1800s for gloo)."""
+
     world_size: int = Field(init=False)
     """world_size is TPxPP, it affects the number of workers we create."""
 
