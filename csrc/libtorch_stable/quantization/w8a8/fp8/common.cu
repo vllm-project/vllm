@@ -4,12 +4,130 @@
 #include "../../vectorization_utils.cuh"
 #include "../../../torch_utils.h"
 #include <torch/csrc/stable/macros.h>
+#include <array>
+#include <mutex>
+#include <tuple>
 namespace vllm {
 
-template <typename fp8_t>
-__device__ __forceinline__ fp8_t fp8_from_scaled(float v, float scale) {
-  // Store fp8 of (v / scale). Scale is stored separately.
-  return fp8_t(v / scale);
+constexpr int kDynamicPerTokenUnroll = 4;
+constexpr size_t kDynamicPerTokenSharedMemoryReserveBytes = 4096;
+// The shared-memory cache path is not enabled by default. On realistic
+// serving shapes (many tokens and medium hidden sizes), the second global
+// read is usually L2-resident, while caching the whole row in shared memory
+// adds an extra store/read pass and can reduce occupancy. Keep the fallback
+// path as the production default and use the minimal benchmark to revisit this
+// only if profiling shows a clear win for a specific architecture/shape.
+constexpr bool kEnableDynamicPerTokenSharedMemoryCache = false;
+
+struct DynamicPerTokenLaunchConfig {
+  int block_size;
+  bool use_shared_memory;
+  size_t shared_memory_bytes;
+};
+
+struct DynamicPerTokenDeviceInfo {
+  int major;
+  int max_dynamic_smem_size;
+};
+
+inline DynamicPerTokenDeviceInfo get_dynamic_per_token_device_info(
+    int device_index) {
+  constexpr int kMaxCudaDevices = 64;
+  STD_TORCH_CHECK(device_index >= 0 && device_index < kMaxCudaDevices,
+                  "invalid CUDA device index: ", device_index);
+  static std::array<std::once_flag, kMaxCudaDevices> init_flags;
+  static std::array<DynamicPerTokenDeviceInfo, kMaxCudaDevices> infos;
+
+  std::call_once(init_flags[device_index], [device_index] {
+    cudaDeviceProp prop{};
+    STD_CUDA_CHECK(cudaGetDeviceProperties(&prop, device_index));
+    infos[device_index].major = prop.major;
+    if constexpr (kEnableDynamicPerTokenSharedMemoryCache) {
+      STD_CUDA_CHECK(cudaDeviceGetAttribute(
+          &infos[device_index].max_dynamic_smem_size,
+          cudaDevAttrMaxSharedMemoryPerBlockOptin, device_index));
+    } else {
+      infos[device_index].max_dynamic_smem_size = 0;
+    }
+  });
+
+  return infos[device_index];
+}
+
+template <typename scalar_t, typename fp8_t, int BLOCK_SIZE>
+__global__ void dynamic_per_token_scaled_fp8_quant_kernel_strided(
+    fp8_t* __restrict__ out,
+    float* __restrict__ scale,
+    const scalar_t* __restrict__ input,
+    const float* __restrict__ scale_ub,
+    int hidden_size,
+    int64_t in_row_stride,
+    int64_t out_row_stride,
+    bool use_shared_memory);
+
+template <typename scalar_t, typename fp8_t, int BLOCK_SIZE>
+__global__ void dynamic_per_token_scaled_fp8_quant_kernel_strided_fallback(
+    fp8_t* __restrict__ out,
+    float* __restrict__ scale,
+    const scalar_t* __restrict__ input,
+    const float* __restrict__ scale_ub,
+    int hidden_size,
+    int64_t in_row_stride,
+    int64_t out_row_stride);
+
+inline DynamicPerTokenLaunchConfig get_dynamic_per_token_launch_config(
+    int device_index, int num_tokens, int hidden_size, size_t elem_size) {
+  DynamicPerTokenLaunchConfig cfg{};
+  const auto device_info = get_dynamic_per_token_device_info(device_index);
+
+  if (hidden_size <= 2048) {
+    cfg.block_size = 128;
+  } else if (device_info.major >= 9) {
+    if (hidden_size >= 16384) {
+      cfg.block_size = 512;
+    } else {
+      cfg.block_size = 256;
+    }
+  } else {
+    cfg.block_size = 256;
+  }
+
+  if constexpr (kEnableDynamicPerTokenSharedMemoryCache) {
+    cfg.shared_memory_bytes = static_cast<size_t>(hidden_size) * elem_size;
+    cfg.use_shared_memory = cfg.shared_memory_bytes +
+                                 kDynamicPerTokenSharedMemoryReserveBytes <=
+                             static_cast<size_t>(
+                                 device_info.max_dynamic_smem_size);
+  } else {
+    cfg.shared_memory_bytes = 0;
+    cfg.use_shared_memory = false;
+  }
+  return cfg;
+}
+
+template <typename scalar_t, typename fp8_t, int BLOCK_SIZE>
+DynamicPerTokenLaunchConfig resolve_dynamic_per_token_launch_config(
+    DynamicPerTokenLaunchConfig cfg) {
+  if (!cfg.use_shared_memory) {
+    cfg.shared_memory_bytes = 0;
+    return cfg;
+  }
+
+  auto kernel =
+      dynamic_per_token_scaled_fp8_quant_kernel_strided<scalar_t, fp8_t,
+                                                        BLOCK_SIZE>;
+  if (cfg.shared_memory_bytes > 48 * 1024) {
+    auto err = cudaFuncSetAttribute(kernel,
+                                    cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                    static_cast<int>(cfg.shared_memory_bytes));
+    if (err != cudaSuccess) {
+      cfg.use_shared_memory = false;
+      cfg.shared_memory_bytes = 0;
+      return cfg;
+    }
+  }
+
+  return cfg;
 }
 
 // STRIDE_I_ZERO: true if scale_stride_i == 0 (per-tensor or per-channel)
@@ -140,8 +258,103 @@ __global__ void scaled_fp8_quant_kernel_strided_dynamic(
       });
 }
 
-template <typename scalar_t, typename fp8_t>
+template <typename scalar_t, typename fp8_t, int BLOCK_SIZE>
 __global__ void dynamic_per_token_scaled_fp8_quant_kernel_strided(
+    fp8_t* __restrict__ out,
+    float* __restrict__ scale,
+    const scalar_t* __restrict__ input,
+    const float* __restrict__ scale_ub,
+    int hidden_size,
+    int64_t in_row_stride,
+    int64_t out_row_stride,
+    bool use_shared_memory) {
+  const int64_t token_idx = blockIdx.x;
+  const int tid = threadIdx.x;
+
+  const int64_t in_offset = token_idx * in_row_stride;
+  const int64_t out_offset = token_idx * out_row_stride;
+  const scalar_t* token_in = input + in_offset;
+  fp8_t* token_out = out + out_offset;
+
+  extern __shared__ __align__(16) unsigned char smem_raw[];
+  float absmax_val = 0.f;
+
+  if (use_shared_memory) {
+    scalar_t* token_smem = reinterpret_cast<scalar_t*>(smem_raw);
+    // 1) cache token into shared memory while computing per-thread absmax
+    for (int base = tid; base < hidden_size;
+         base += BLOCK_SIZE * kDynamicPerTokenUnroll) {
+#pragma unroll
+      for (int u = 0; u < kDynamicPerTokenUnroll; ++u) {
+        const int i = base + u * BLOCK_SIZE;
+        if (i < hidden_size) {
+          const scalar_t v = token_in[i];
+          token_smem[i] = v;
+          absmax_val = fmaxf(absmax_val, fabsf(static_cast<float>(v)));
+        }
+      }
+    }
+  } else {
+    // Fallback when token does not fit in dynamic shared memory.
+    for (int base = tid; base < hidden_size;
+         base += BLOCK_SIZE * kDynamicPerTokenUnroll) {
+#pragma unroll
+      for (int u = 0; u < kDynamicPerTokenUnroll; ++u) {
+        const int i = base + u * BLOCK_SIZE;
+        if (i < hidden_size) {
+          absmax_val =
+              fmaxf(absmax_val, fabsf(static_cast<float>(token_in[i])));
+        }
+      }
+    }
+  }
+  __syncthreads();
+
+  using BlockReduce = cub::BlockReduce<float, BLOCK_SIZE>;
+  __shared__ typename BlockReduce::TempStorage tmp;
+  const float block_max =
+      BlockReduce(tmp).Reduce(absmax_val, CubMaxOp{});
+
+  __shared__ float token_scale;
+  if (tid == 0) {
+    float t = scale_ub ? fminf(block_max, *scale_ub) : block_max;
+    t = fmaxf(t / quant_type_max_v<fp8_t>, min_scaling_factor<fp8_t>::val());
+    token_scale = t;
+    scale[token_idx] = t;
+  }
+  __syncthreads();
+
+  if (use_shared_memory) {
+    // 2) quantize reading from shared memory (avoid second global read)
+    scalar_t* token_smem = reinterpret_cast<scalar_t*>(smem_raw);
+    for (int base = tid; base < hidden_size;
+         base += BLOCK_SIZE * kDynamicPerTokenUnroll) {
+#pragma unroll
+      for (int u = 0; u < kDynamicPerTokenUnroll; ++u) {
+        const int i = base + u * BLOCK_SIZE;
+        if (i < hidden_size) {
+          token_out[i] = scaled_fp8_conversion<false, fp8_t>(
+              static_cast<float>(token_smem[i]), token_scale);
+        }
+      }
+    }
+  } else {
+    for (int base = tid; base < hidden_size;
+         base += BLOCK_SIZE * kDynamicPerTokenUnroll) {
+#pragma unroll
+      for (int u = 0; u < kDynamicPerTokenUnroll; ++u) {
+        const int i = base + u * BLOCK_SIZE;
+        if (i < hidden_size) {
+          token_out[i] = scaled_fp8_conversion<false, fp8_t>(
+              static_cast<float>(token_in[i]), token_scale);
+        }
+      }
+    }
+  }
+}
+
+template <typename scalar_t, typename fp8_t, int BLOCK_SIZE>
+__global__ void dynamic_per_token_scaled_fp8_quant_kernel_strided_fallback(
     fp8_t* __restrict__ out,
     float* __restrict__ scale,
     const scalar_t* __restrict__ input,
@@ -157,34 +370,76 @@ __global__ void dynamic_per_token_scaled_fp8_quant_kernel_strided(
   const scalar_t* token_in = input + in_offset;
   fp8_t* token_out = out + out_offset;
 
-  extern __shared__ __align__(16) unsigned char smem_raw[];
-  scalar_t* token_smem = reinterpret_cast<scalar_t*>(smem_raw);
-
-  // 1) cache token into shared memory while computing per-thread absmax
   float absmax_val = 0.f;
-  for (int i = tid; i < hidden_size; i += blockDim.x) {
-    const scalar_t v = token_in[i];
-    token_smem[i] = v;
-    absmax_val = fmaxf(absmax_val, fabsf(to_f32(v)));
+  for (int base = tid; base < hidden_size;
+       base += BLOCK_SIZE * kDynamicPerTokenUnroll) {
+#pragma unroll
+    for (int u = 0; u < kDynamicPerTokenUnroll; ++u) {
+      const int i = base + u * BLOCK_SIZE;
+      if (i < hidden_size) {
+        absmax_val = fmaxf(absmax_val, fabsf(static_cast<float>(token_in[i])));
+      }
+    }
   }
   __syncthreads();
 
-  using BlockReduce = cub::BlockReduce<float, 256>;
+  using BlockReduce = cub::BlockReduce<float, BLOCK_SIZE>;
   __shared__ typename BlockReduce::TempStorage tmp;
-  const float block_max = BlockReduce(tmp).Reduce(absmax_val, cub::Max());
+  const float block_max = BlockReduce(tmp).Reduce(absmax_val, CubMaxOp{});
 
   __shared__ float token_scale;
   if (tid == 0) {
     float t = scale_ub ? fminf(block_max, *scale_ub) : block_max;
-    t = fmaxf(t / quant_type_max_v<fp8_t>::value, min_scaling_factor<fp8_t>::val());
+    t = fmaxf(t / quant_type_max_v<fp8_t>, min_scaling_factor<fp8_t>::val());
     token_scale = t;
     scale[token_idx] = t;
   }
   __syncthreads();
 
-  // 2) quantize reading from shared memory (avoid second global read)
-  for (int i = tid; i < hidden_size; i += blockDim.x) {
-    token_out[i] = fp8_from_scaled<fp8_t>(to_f32(token_smem[i]), token_scale);
+  for (int base = tid; base < hidden_size;
+       base += BLOCK_SIZE * kDynamicPerTokenUnroll) {
+#pragma unroll
+    for (int u = 0; u < kDynamicPerTokenUnroll; ++u) {
+      const int i = base + u * BLOCK_SIZE;
+      if (i < hidden_size) {
+        token_out[i] = scaled_fp8_conversion<false, fp8_t>(
+            static_cast<float>(token_in[i]), token_scale);
+      }
+    }
+  }
+}
+
+template <typename scalar_t, typename fp8_t, int BLOCK_SIZE>
+void launch_dynamic_per_token_quant_kernel(
+    const DynamicPerTokenLaunchConfig& cfg,
+    torch::stable::Tensor& out,
+    torch::stable::Tensor& scales,
+    torch::stable::Tensor const& input,
+    const float* scale_ub_ptr,
+    int num_tokens,
+    int hidden_size,
+    int64_t in_row_stride,
+    int64_t out_row_stride,
+    cudaStream_t stream) {
+  const auto resolved_cfg =
+      vllm::resolve_dynamic_per_token_launch_config<scalar_t, fp8_t,
+                                                    BLOCK_SIZE>(cfg);
+
+  if (resolved_cfg.use_shared_memory) {
+    vllm::dynamic_per_token_scaled_fp8_quant_kernel_strided<scalar_t, fp8_t,
+                                                             BLOCK_SIZE>
+        <<<dim3(num_tokens), dim3(BLOCK_SIZE),
+           resolved_cfg.shared_memory_bytes, stream>>>(
+            out.mutable_data_ptr<fp8_t>(), scales.mutable_data_ptr<float>(),
+            input.const_data_ptr<scalar_t>(), scale_ub_ptr, hidden_size,
+            in_row_stride, out_row_stride, true);
+  } else {
+    vllm::dynamic_per_token_scaled_fp8_quant_kernel_strided_fallback<
+        scalar_t, fp8_t, BLOCK_SIZE>
+        <<<dim3(num_tokens), dim3(BLOCK_SIZE), 0, stream>>>(
+            out.mutable_data_ptr<fp8_t>(), scales.mutable_data_ptr<float>(),
+            input.const_data_ptr<scalar_t>(), scale_ub_ptr, hidden_size,
+            in_row_stride, out_row_stride);
   }
 }
 
@@ -399,12 +654,31 @@ void dynamic_per_token_scaled_fp8_quant(
                   "last dimension of input must be contiguous");
   STD_TORCH_CHECK(out.stride(-1) == 1,
                   "last dimension of output must be contiguous");
+  STD_TORCH_CHECK(scales.is_cuda(), "scales must be a CUDA tensor");
+  STD_TORCH_CHECK(scales.scalar_type() == torch::headeronly::ScalarType::Float,
+                  "scales must be a float32 tensor");
+  STD_TORCH_CHECK(out.get_device_index() == input.get_device_index(),
+                  "out must be on the same CUDA device as input");
+  STD_TORCH_CHECK(scales.get_device_index() == input.get_device_index(),
+                  "scales must be on the same CUDA device as input");
 
   const int hidden_size = input.size(-1);
   const int num_tokens = input.numel() / hidden_size;
-  const int block_size = 256;
-  dim3 grid(num_tokens);
-  dim3 block(std::min(hidden_size, block_size));
+  STD_TORCH_CHECK(scales.numel() >= num_tokens,
+                  "scales must have at least one element per input token");
+
+  const float* scale_ub_ptr = nullptr;
+  if (scale_ub.has_value()) {
+    STD_TORCH_CHECK(scale_ub->is_cuda(), "scale_ub must be a CUDA tensor");
+    STD_TORCH_CHECK(
+        scale_ub->scalar_type() == torch::headeronly::ScalarType::Float,
+        "scale_ub must be a float32 tensor");
+    STD_TORCH_CHECK(scale_ub->numel() == 1,
+                    "scale_ub must contain a single value");
+    STD_TORCH_CHECK(scale_ub->get_device_index() == input.get_device_index(),
+                    "scale_ub must be on the same CUDA device as input");
+    scale_ub_ptr = scale_ub->const_data_ptr<float>();
+  }
 
   const int64_t in_row_stride = input.stride(-2);
   const int64_t out_row_stride = out.stride(-2);
@@ -418,15 +692,30 @@ void dynamic_per_token_scaled_fp8_quant(
         VLLM_STABLE_DISPATCH_FP8_TYPES(
             out.scalar_type(),
             "dynamic_per_token_scaled_fp8_quant_kernel_fp8_type", [&] {
-              vllm::dynamic_per_token_scaled_fp8_quant_kernel_strided<scalar_t,
-                                                                      fp8_t>
-                  <<<grid, block, 0, stream>>>(
-                      out.mutable_data_ptr<fp8_t>(),
-                      scales.mutable_data_ptr<float>(),
-                      input.const_data_ptr<scalar_t>(),
-                      scale_ub.has_value() ? scale_ub->const_data_ptr<float>()
-                                           : nullptr,
-                      hidden_size, in_row_stride, out_row_stride);
+              const auto cfg = vllm::get_dynamic_per_token_launch_config(
+                  input.get_device_index(), num_tokens, hidden_size,
+                  sizeof(scalar_t));
+
+              switch (cfg.block_size) {
+                case 128:
+                  vllm::launch_dynamic_per_token_quant_kernel<scalar_t, fp8_t,
+                                                              128>(
+                      cfg, out, scales, input, scale_ub_ptr, num_tokens,
+                      hidden_size, in_row_stride, out_row_stride, stream);
+                  break;
+                case 512:
+                  vllm::launch_dynamic_per_token_quant_kernel<scalar_t, fp8_t,
+                                                              512>(
+                      cfg, out, scales, input, scale_ub_ptr, num_tokens,
+                      hidden_size, in_row_stride, out_row_stride, stream);
+                  break;
+                default:
+                  vllm::launch_dynamic_per_token_quant_kernel<scalar_t, fp8_t,
+                                                              256>(
+                      cfg, out, scales, input, scale_ub_ptr, num_tokens,
+                      hidden_size, in_row_stride, out_row_stride, stream);
+                  break;
+              }
             });
       });
 }

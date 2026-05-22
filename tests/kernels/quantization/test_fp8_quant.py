@@ -85,6 +85,43 @@ def test_dynamic_per_token_fp8_quant(
     opcheck_fp8_quant(ops_out, x, None, scale_ub, use_per_token_if_dynamic=True)
 
 
+@torch.inference_mode()
+def test_dynamic_per_token_fp8_quant_large_hidden_size_fallback() -> None:
+    """Exercise the non-shared-memory fallback path in the CUDA kernel."""
+    hidden_size = 70_000
+    x = torch.rand(1, hidden_size, dtype=torch.float, device="cuda") + 1e-6
+
+    ref_out, ref_scales = ref_dynamic_per_token_quant(x, FP8_DTYPE, scale_ub=None)
+    ops_out, ops_scales = ops.scaled_fp8_quant(x, use_per_token_if_dynamic=True)
+
+    torch.testing.assert_close(ref_scales, ops_scales)
+    torch.testing.assert_close(
+        ref_out.to(dtype=torch.float32), ops_out.to(dtype=torch.float32)
+    )
+
+
+@torch.inference_mode()
+def test_dynamic_per_token_fp8_quant_direct_op_multidim() -> None:
+    """Regression test: direct CUDA op supports input shaped [..., hidden]."""
+    hidden_size = 1025
+    x = torch.rand(2, 3, hidden_size, dtype=torch.bfloat16, device="cuda") + 1e-6
+    out = torch.empty_like(x, dtype=FP8_DTYPE)
+    scales = torch.empty(
+        (x.numel() // hidden_size, 1), device=x.device, dtype=torch.float32
+    )
+
+    torch.ops._C.dynamic_per_token_scaled_fp8_quant(out, x, scales, None)
+
+    ref_out, ref_scales = ref_dynamic_per_token_quant(
+        x.reshape(-1, hidden_size), FP8_DTYPE, scale_ub=None
+    )
+    torch.testing.assert_close(ref_scales, scales)
+    torch.testing.assert_close(
+        ref_out.to(dtype=torch.float32),
+        out.reshape(-1, hidden_size).to(dtype=torch.float32),
+    )
+
+
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
