@@ -525,7 +525,7 @@ class EngineCore:
                 ):
                     # Don't block on next worker response unless the queue is full
                     # or there are no more requests to schedule.
-                    return None, True
+                    return None, model_executed
 
         elif not batch_queue:
             # Queue is empty. We should not reach here since this method should
