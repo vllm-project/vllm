@@ -83,67 +83,60 @@ logger = init_logger(__name__)
 
 
 @functools.cache
-def _is_cu13_libcute_dsl_runtime() -> bool:
-    """Return True if ``nvidia_cutlass_dsl/lib/libcute_dsl_runtime.so`` on
-    disk matches the SHA-256 declared by the ``nvidia-cutlass-dsl-libs-cu13``
-    wheel's ``RECORD``.
+def _is_libs_cu13_install_intact() -> bool:
+    """Return True if every file installed by ``nvidia-cutlass-dsl-libs-cu13``
+    matches the SHA-256 declared in its wheel ``RECORD``.
 
     ``nvidia-cutlass-dsl-libs-base`` and ``nvidia-cutlass-dsl-libs-cu13``
-    both ship that file at the same on-disk path but with different
-    content. Whichever wheel extracts last wins; with parallel installers
-    (e.g. ``uv``) the order is racy and the ``-libs-base`` variant can
-    land, which then fails MLIR legalization when JIT-compiling the
-    FlashInfer Blackwell GDN prefill kernel. See
+    both ship into the shared ``nvidia_cutlass_dsl/`` namespace and
+    write many of the same on-disk paths (the runtime ``.so``, the MLIR
+    Python bindings, cuTe-DSL Python sources, ...) with different
+    content. Whichever wheel extracts last wins; with a parallel
+    installer (e.g. ``uv``) the order is racy and the resulting venv
+    can end up with a mix of files from both variants. The
+    ``-libs-base`` variant fails MLIR legalization when JIT-compiling
+    the FlashInfer Blackwell GDN prefill kernel, and any other
+    cuTe-DSL-based kernel can break too if on-disk files diverge from
+    what ``-libs-cu13``'s wheel expects. Tracked upstream at
     https://github.com/NVIDIA/cutlass/issues/3259.
 
-    Returns False on any error (uninstalled, missing RECORD entry,
-    missing file, hash mismatch); the caller should fall back to the
-    Triton/FLA path.
+    This helper re-hashes every file the ``-libs-cu13`` wheel claims to
+    own and compares against its declared SHA-256. Returns False on any
+    error (uninstalled, missing RECORD, missing file, hash mismatch).
+    Result is cached per-process.
     """
-    import csv
     import hashlib
     import importlib.metadata
-    import os
 
     import pybase64 as base64
 
-    target_rel = "nvidia_cutlass_dsl/lib/libcute_dsl_runtime.so"
-
     try:
-        record_text = (
-            importlib.metadata.distribution("nvidia-cutlass-dsl-libs-cu13").read_text(
-                "RECORD"
-            )
-            or ""
-        )
+        dist = importlib.metadata.distribution("nvidia-cutlass-dsl-libs-cu13")
     except importlib.metadata.PackageNotFoundError:
         return False
 
-    expected = ""
-    for row in csv.reader(record_text.splitlines()):
-        if row and row[0] == target_rel and len(row) >= 2:
-            expected = row[1]
-            break
-    if not expected:
+    files = dist.files
+    if not files:
         return False
 
-    try:
-        import nvidia_cutlass_dsl
-    except ImportError:
-        return False
-    so_path = os.path.join(
-        os.path.dirname(nvidia_cutlass_dsl.__file__),
-        "lib",
-        "libcute_dsl_runtime.so",
-    )
-    try:
-        with open(so_path, "rb") as f:
-            digest = hashlib.sha256(f.read()).digest()
-    except OSError:
-        return False
+    for pkg_path in files:
+        file_hash = pkg_path.hash
+        # Skip RECORD rows without a hash (RECORD itself, generated
+        # ``.pyc`` files, ...) and any non-SHA-256 hash modes.
+        if file_hash is None or not file_hash.value:
+            continue
+        if file_hash.mode != "sha256":
+            continue
+        try:
+            with open(pkg_path.locate(), "rb") as f:
+                digest = hashlib.sha256(f.read()).digest()
+        except OSError:
+            return False
+        actual = base64.urlsafe_b64encode(digest).decode().rstrip("=")
+        if actual != file_hash.value:
+            return False
 
-    actual = "sha256=" + base64.urlsafe_b64encode(digest).decode().rstrip("=")
-    return actual == expected
+    return True
 
 
 def _should_use_flashinfer_gdn_prefill(backend: str, head_k_dim: int | None) -> bool:
@@ -156,9 +149,8 @@ def _should_use_flashinfer_gdn_prefill(backend: str, head_k_dim: int | None) -> 
     * one of the following:
       - Hopper (SM90) — no further constraints;
       - Blackwell (SM10.x) with ``head_k_dim == 128``, ``cuda_runtime >= 13``,
-        and the ``nvidia-cutlass-dsl-libs-cu13`` variant of
-        ``libcute_dsl_runtime.so`` actually on disk (see
-        :func:`_is_cu13_libcute_dsl_runtime`).
+        and an intact ``nvidia-cutlass-dsl-libs-cu13`` install on disk
+        (see :func:`_is_libs_cu13_install_intact`).
     """
     if backend not in ["flashinfer", "auto"]:
         return False
@@ -172,11 +164,12 @@ def _should_use_flashinfer_gdn_prefill(backend: str, head_k_dim: int | None) -> 
         return False
     if current_platform.get_cuda_runtime_major() < 13:
         return False
-    if not _is_cu13_libcute_dsl_runtime():
+    if not _is_libs_cu13_install_intact():
         logger.warning_once(
-            "FlashInfer Blackwell GDN requires the cu13 variant of "
-            "libcute_dsl_runtime.so, but a different variant is installed "
-            "(install-order race in nvidia-cutlass-dsl packaging — see "
+            "FlashInfer Blackwell GDN requires an intact nvidia-cutlass-dsl"
+            "-libs-cu13 install, but some on-disk files do not match the "
+            "SHA-256 declared in its RECORD (install-order race in "
+            "nvidia-cutlass-dsl packaging — see "
             "https://github.com/NVIDIA/cutlass/issues/3259). Falling back "
             "to Triton/FLA. Repair with: pip install --force-reinstall "
             "--no-deps nvidia-cutlass-dsl-libs-cu13"
