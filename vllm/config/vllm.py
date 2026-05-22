@@ -66,7 +66,13 @@ else:
 
 logger = init_logger(__name__)
 
-DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset({"Qwen3ForCausalLM"})
+DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
+    {
+        "LlamaForCausalLM",
+        "MistralForCausalLM",
+        "Qwen3ForCausalLM",
+    }
+)
 
 
 class OptimizationLevel(IntEnum):
@@ -1996,10 +2002,11 @@ class VllmConfig:
             unsupported.append("sequence parallelism")
 
         if speculative_config is not None:
-            # TODO: ngram / ngram_gpu are not supported by the v2 model runner yet
+            # TODO: ngram / ngram_gpu / eagle are not supported by the v2
+            # model runner yet.
             if speculative_config.method in ("ngram", "ngram_gpu"):
                 unsupported.append("ngram/ngram_gpu speculative decoding")
-            elif speculative_config.method not in ("eagle", "eagle3", "mtp"):
+            elif speculative_config.method not in ("eagle3", "mtp"):
                 unsupported.append(f"speculative method '{speculative_config.method}'")
 
             # V2 EagleSpeculator does not support parallel_drafting (required by PEagle)
