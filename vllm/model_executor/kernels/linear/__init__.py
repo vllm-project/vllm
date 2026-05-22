@@ -13,7 +13,6 @@ or kernel implementation, add it to this __init__.py to maintain
 import stability.
 """
 
-import warnings
 from typing import TypeVar
 
 import torch
@@ -102,6 +101,7 @@ from vllm.model_executor.kernels.linear.nvfp4.fbgemm import (
     FbgemmNvFp4LinearKernel,
 )
 from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
+    FlashInferB12xNvFp4LinearKernel,
     FlashInferCudnnNvFp4LinearKernel,
     FlashInferCutlassNvFp4LinearKernel,
     FlashInferTrtllmNvFp4LinearKernel,
@@ -367,6 +367,9 @@ _POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
 
 _POSSIBLE_NVFP4_KERNELS: dict[PlatformEnum, list[type[NvFp4LinearKernel]]] = {
     PlatformEnum.CUDA: [
+        # FlashInferB12xNvFp4LinearKernel excluded from auto-selection until
+        # upstream CUTLASS SM121 MMA op guard is resolved; use
+        # VLLM_NVFP4_GEMM_BACKEND=flashinfer-b12x to opt in explicitly.
         FlashInferCutlassNvFp4LinearKernel,
         CutlassNvFp4LinearKernel,
         MarlinNvFp4LinearKernel,
@@ -812,6 +815,7 @@ def init_wfp8_a16_linear_kernel(
 
 # Maps VLLM_NVFP4_GEMM_BACKEND env var values to kernel classes.
 _NVFP4_BACKEND_TO_KERNEL: dict[str, type[NvFp4LinearKernel]] = {
+    "flashinfer-b12x": FlashInferB12xNvFp4LinearKernel,
     "flashinfer-cutlass": FlashInferCutlassNvFp4LinearKernel,
     "cutlass": CutlassNvFp4LinearKernel,
     "marlin": MarlinNvFp4LinearKernel,
@@ -846,31 +850,12 @@ def init_nvfp4_linear_kernel() -> NvFp4LinearKernel:
         force_kernel = EmulationNvFp4LinearKernel
     elif linear_backend == "auto":
         # Deprecated env-var overrides — only honoured when --linear-backend
-        # is "auto". Will be removed in v0.21; users should migrate to
-        # --linear-backend.
+        # is "auto". Deprecation warnings are emitted from vllm/envs.py.
         if envs.VLLM_USE_FBGEMM:
-            warnings.warn(
-                "VLLM_USE_FBGEMM is deprecated and will be removed in "
-                "v0.21. Use --linear-backend fbgemm instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
             force_kernel = FbgemmNvFp4LinearKernel
         elif envs.VLLM_USE_NVFP4_CT_EMULATIONS:
-            warnings.warn(
-                "VLLM_USE_NVFP4_CT_EMULATIONS is deprecated and will be "
-                "removed in v0.21. Use --linear-backend emulation instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
             force_kernel = EmulationNvFp4LinearKernel
         elif envs.VLLM_NVFP4_GEMM_BACKEND is not None:
-            warnings.warn(
-                "VLLM_NVFP4_GEMM_BACKEND is deprecated and will be "
-                "removed in v0.21. Use --linear-backend instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
             backend_name = envs.VLLM_NVFP4_GEMM_BACKEND
             force_kernel = _NVFP4_BACKEND_TO_KERNEL.get(backend_name)
             if force_kernel is None:
@@ -1041,6 +1026,7 @@ __all__ = [
     "CutlassNvFp4LinearKernel",
     "EmulationNvFp4LinearKernel",
     "FbgemmNvFp4LinearKernel",
+    "FlashInferB12xNvFp4LinearKernel",
     "FlashInferCutlassNvFp4LinearKernel",
     "FlashInferTrtllmNvFp4LinearKernel",
     "FlashInferCudnnNvFp4LinearKernel",
