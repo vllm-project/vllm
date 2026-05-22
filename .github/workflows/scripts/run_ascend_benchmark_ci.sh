@@ -327,17 +327,19 @@ PY
   fi
 }
 
-enforce_single_runtime_source() {
+enforce_single_runtime_source_environment() {
   "$PYTHON_BIN" - <<'PY'
+import importlib.util
 import os
 import pathlib
 import site
 import sys
 
-import torch
-import torch_npu
+torch_npu_spec = importlib.util.find_spec("torch_npu")
+if torch_npu_spec is None or torch_npu_spec.origin is None:
+    raise RuntimeError("torch_npu is not importable in the benchmark environment")
 
-torch_npu_file = pathlib.Path(torch_npu.__file__).resolve()
+torch_npu_file = pathlib.Path(torch_npu_spec.origin).resolve()
 site_roots = [pathlib.Path(p).resolve() for p in site.getsitepackages() if p]
 user_site = site.getusersitepackages()
 if user_site:
@@ -367,11 +369,7 @@ if str(ascend_home_path / "lib64") not in ld_library_path:
         "LD_LIBRARY_PATH does not include ASCEND_HOME_PATH/lib64"
     )
 
-device_count = int(torch.npu.device_count())
-if device_count <= 0:
-    raise RuntimeError("torch.npu.device_count() returned 0 during runtime-source check")
-
-print("runtime_source_check=ok")
+print("runtime_source_environment_check=ok")
 print(f"torch_npu_module={torch_npu_file}")
 print(f"ascend_home_path={ascend_home_path}")
 PY
@@ -573,8 +571,10 @@ echo "benchmark port: $PORT"
 echo "benchmark scenario: $BENCH_SCENARIO"
 echo "publish to hf: $PUBLISH_TO_HF"
 echo "ascend benchmark use sudo: $ASCEND_BENCHMARK_USE_SUDO"
+echo "vllm-ascend-hust repo: $VLLM_ASCEND_HUST_REPO"
 if [[ "$ASCEND_BENCHMARK_USE_SUDO" == "1" ]]; then
   echo "ascend benchmark root helper: $ASCEND_BENCHMARK_ROOT_HELPER"
+  echo "repo benchmark root helper source: $REPO_ASCEND_BENCHMARK_ROOT_HELPER"
 fi
 
 case "$BENCH_SCENARIO" in
@@ -636,14 +636,14 @@ if [[ ! -f "$EFFECTIVE_CONSTRAINTS_FILE" ]]; then
   exit 2
 fi
 
-if ! enforce_single_runtime_source; then
-  collect_ascend_diagnostics "runtime-source-check-failure"
-  mark_node_env_failure "runtime source mismatch between torch_npu and toolkit"
-  echo "Ascend runtime source check failed." >&2
-  exit "$NODE_ENV_RETRY_EXIT_CODE"
+if ! enforce_single_runtime_source_environment; then
+  collect_ascend_diagnostics "runtime-source-environment-check-failure"
+  echo "Ascend runtime source environment check failed." >&2
+  exit 1
 fi
 
 if [[ "$ASCEND_BENCHMARK_USE_SUDO" == "1" ]]; then
+  echo "Skipping runner-user torch.npu.device_count() probe because sudo mode delegates device access checks to the root helper."
   if ! verify_root_helper_ready; then
     exit 1
   fi
