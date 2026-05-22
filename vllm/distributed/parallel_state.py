@@ -1076,6 +1076,16 @@ class GroupCoordinator:
 
     def destroy(self):
         if hasattr(self, "device_group"):
+            # NCCL/RCCL: abort any in-flight collective so the destroy below
+            # doesn't block, otherwise the outer shutdown timeout SIGKILLs
+            # the worker mid-cleanup. destroy_process_group() handles the
+            # graceful pg.shutdown() itself.
+            try:
+                backend = self.device_group._get_backend(self.device)
+                if hasattr(backend, "abort"):
+                    backend.abort()
+            except Exception as e:
+                logger.warning_once("Backend abort failed during destroy: %s", str(e))
             torch.distributed.destroy_process_group(self.device_group)
             del self.device_group
         if hasattr(self, "cpu_group"):
