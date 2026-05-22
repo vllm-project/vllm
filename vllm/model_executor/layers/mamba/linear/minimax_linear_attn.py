@@ -7,30 +7,20 @@ from collections.abc import Callable
 import torch
 import torch.nn.functional as F
 from einops import rearrange
-from torch import nn
 
-from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
-from vllm.distributed.parallel_state import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
+from vllm.config import get_current_vllm_config
 from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.lightning_attn import (
     lightning_attention,
     linear_decode_forward_triton,
 )
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
-from vllm.model_executor.layers.mamba.abstract import MambaBase
-from vllm.model_executor.layers.mamba.mamba_utils import (
-    MambaStateDtypeCalculator,
-    MambaStateShapeCalculator,
-)
+from vllm.model_executor.layers.mamba.linear.base import LinearAttention
 from vllm.model_executor.layers.minimax_rms_norm import MiniMaxText01RMSNormTP
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
-from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 
 def clear_linear_attention_cache_for_new_sequences(
@@ -157,79 +147,39 @@ class MiniMaxText01LinearKernel:
         return rearrange(output.squeeze(0), "h n d -> n (h d)")
 
 
-class MiniMaxText01LinearAttention(nn.Module, MambaBase):
-    @property
-    def mamba_type(self) -> MambaAttentionBackendEnum:
-        return MambaAttentionBackendEnum.LINEAR
-
-    def get_state_dtype(self) -> tuple[torch.dtype]:
-        assert self.model_config is not None
-        assert self.cache_config is not None
-        return MambaStateDtypeCalculator.linear_attention_state_dtype(
-            self.model_config.dtype,
-            self.cache_config.mamba_cache_dtype,
-        )
-
-    def get_state_shape(self) -> tuple[tuple[int, int, int], ...]:
-        return MambaStateShapeCalculator.linear_attention_state_shape(
-            num_heads=self.num_heads, tp_size=self.tp_size, head_dim=self.head_dim
-        )
-
+@PluggableLayer.register("minimax_text_01_attention")
+class MiniMaxText01LinearAttention(LinearAttention):
     def __init__(
         self,
-        hidden_size: int,
-        hidden_inner_size: int,
-        num_heads: int,
-        head_dim: int,
-        max_position: int,
-        block_size: int,
-        num_hidden_layer: int,
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        layer_idx: int = 0,
-        linear_layer_idx: int = 0,
+        config,
+        vllm_config,
         prefix: str = "linear_attn",
     ) -> None:
-        super().__init__()
+        super().__init__(config, vllm_config, prefix)
 
-        self.layer_idx = layer_idx
-        self.BLOCK = block_size
-        self.hidden_size = hidden_size
-        self.num_heads = num_heads
-        self.head_dim = head_dim
-        self.total_num_heads = num_heads
-        self.hidden_inner_size = hidden_inner_size
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.tp_rank = get_tensor_model_parallel_rank()
-
-        assert self.total_num_heads % self.tp_size == 0
-        self.tp_heads = self.total_num_heads // self.tp_size
+        self.tp_heads = self.num_heads // self.tp_size
         self.qkv_size = self.num_heads * self.head_dim
         self.tp_hidden = self.head_dim * self.tp_heads
-        self.model_config = model_config
-        self.cache_config = cache_config
-        self.prefix = prefix
 
         self.qkv_proj = ColumnParallelLinear(
-            hidden_size,
+            self.hidden_size,
             self.hidden_inner_size * 3,
             bias=False,
-            quant_config=quant_config,
+            quant_config=self.quant_config,
             prefix=f"{prefix}.qkv_proj",
         )
         self.output_gate = ColumnParallelLinear(
-            hidden_size,
+            self.hidden_size,
             self.hidden_inner_size,
             bias=False,
-            quant_config=quant_config,
+            quant_config=self.quant_config,
             prefix=f"{prefix}.output_gate",
         )
         self.out_proj = RowParallelLinear(
             self.hidden_inner_size,
-            hidden_size,
+            self.hidden_size,
             bias=False,
-            quant_config=quant_config,
+            quant_config=self.quant_config,
             prefix=f"{prefix}.out_proj",
         )
         self.norm = MiniMaxText01RMSNormTP(
@@ -238,11 +188,11 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
         )
 
         slope_rate = MiniMaxText01LinearAttention._build_slope_tensor(self.num_heads)
-        if num_hidden_layer <= 1:
+        if self.num_hidden_layers <= 1:
             self.slope_rate = slope_rate * (1 + 1e-5)
         else:
             self.slope_rate = slope_rate * (
-                1 - layer_idx / (num_hidden_layer - 1) + 1e-5
+                1 - self.layer_idx / (self.num_hidden_layers - 1) + 1e-5
             )
         self.tp_slope = self.slope_rate[
             self.tp_rank * self.tp_heads : (self.tp_rank + 1) * self.tp_heads
