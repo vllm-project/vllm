@@ -23,6 +23,10 @@ try:
     )
     from vllm._custom_ops import cpu_topp_sampling as _cpu_topp_sampling_op
 
+    # Probe the dispatcher: raises AttributeError on non-CPU builds where
+    # the op is absent (the Python wrappers import cleanly regardless).
+    torch.ops._C.cpu_topk_sampling  # noqa: B018
+
     _HAS_CPU_SAMPLING_OPS = True
 except (ImportError, AttributeError):
     _HAS_CPU_SAMPLING_OPS = False
