@@ -160,7 +160,9 @@ def init_attn_backend(
     )
 
 
-def _allocate_kv_cache(kv_cache_config: KVCacheConfig, device: torch.device):
+def _allocate_kv_cache(
+    kv_cache_config: KVCacheConfig, shared_layers: dict[str, str], device: torch.device
+):
     kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
         tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=device)
@@ -171,7 +173,7 @@ def _allocate_kv_cache(kv_cache_config: KVCacheConfig, device: torch.device):
     for group in kv_cache_config.kv_cache_groups:
         for layer_name in group.layer_names:
             layer_names.add(layer_name)
-    assert set(kv_cache_raw_tensors.keys()) <= layer_names, (
+    assert layer_names == (kv_cache_raw_tensors.keys() | shared_layers.keys()), (
         "Some layers are not correctly initialized"
     )
     return kv_cache_raw_tensors
@@ -289,9 +291,7 @@ def _reshape_kv_cache(
                 )
 
     if has_attn and has_mamba:
-        _update_hybrid_attention_layout(
-            kv_caches, kv_cache_config, shared_kv_cache_layers
-        )
+        _update_hybrid_attention_layout(kv_caches, kv_cache_config)
 
     # Map any sharing layers to their target layer's KV cache.
     for layer_name, target_layer_name in shared_kv_cache_layers.items():
@@ -301,13 +301,12 @@ def _reshape_kv_cache(
 
 
 def _update_hybrid_attention_layout(
-    kv_caches: dict[str, Any],
-    kv_cache_config: KVCacheConfig,
-    shared_kv_cache_layers: dict[str, str],
+    kv_caches: dict[str, Any], kv_cache_config: KVCacheConfig
 ) -> None:
     for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
         for layer_name in kv_cache_group_spec.layer_names:
-            if layer_name in shared_kv_cache_layers:
+            if layer_name not in kv_caches:
+                # Shared layer — will be aliased to its target after this pass.
                 continue
             kv_cache_spec = kv_cache_group_spec.kv_cache_spec
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
@@ -340,8 +339,10 @@ def init_kv_cache(
     kernel_block_sizes: list[int],
     vllm_config: VllmConfig,
 ) -> dict[str, Any]:
-    kv_cache_raw_tensors = _allocate_kv_cache(kv_cache_config, device)
     shared_kv_cache_layers = get_shared_kv_cache_layers(vllm_config)
+    kv_cache_raw_tensors = _allocate_kv_cache(
+        kv_cache_config, shared_kv_cache_layers, device
+    )
     kv_caches = _reshape_kv_cache(
         kv_cache_config,
         kv_cache_raw_tensors,
