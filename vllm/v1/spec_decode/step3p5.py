@@ -126,13 +126,21 @@ class Step3p5MTPProposer(EagleProposer):
     ) -> tuple[list[object], dict[str, object]]:
         per_group_attn_metadata: list[object] = []
         per_layer_attn_metadata: dict[str, object] = {}
+        # The proposer always works in unpadded shape. Per-group block tables
+        # registered via set_per_group_attn_metadata are stored at the model
+        # runner's padded shape; slice them to match cm's num_reqs.
+        num_reqs = common_attn_metadata.num_reqs
+        num_actual_tokens = common_attn_metadata.num_actual_tokens
         for attn_group in self.draft_attn_groups:
             gid = attn_group.kv_cache_group_id
             if gid in self._per_group_block_tables:
                 cm = copy(common_attn_metadata)
-                cm.block_table_tensor = self._per_group_block_tables[gid]
+                cm.block_table_tensor = self._per_group_block_tables[gid][:num_reqs]
                 if gid in self._per_group_slot_mappings:
-                    cm.slot_mapping = self._per_group_slot_mappings[gid]
+                    sm = self._per_group_slot_mappings[gid]
+                    if sm.shape[0] >= num_actual_tokens:
+                        sm = sm[:num_actual_tokens]
+                    cm.slot_mapping = sm
             else:
                 cm = common_attn_metadata
             attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
