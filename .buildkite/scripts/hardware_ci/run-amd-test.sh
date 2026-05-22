@@ -68,6 +68,75 @@ cleanup_network() {
   fi
 }
 
+prepare_artifact_image() {
+  if [[ "${VLLM_CI_USE_ARTIFACTS:-0}" != "1" ]]; then
+    return 1
+  fi
+  if ! command -v buildkite-agent >/dev/null 2>&1; then
+    echo "buildkite-agent not found; cannot download ROCm wheel artifact"
+    return 1
+  fi
+
+  local artifact_glob="${VLLM_CI_ARTIFACT_GLOB:-artifacts/vllm-rocm-install/vllm-rocm-install.tar.gz}"
+  local archive=""
+  local metadata_file=""
+  local base_image="${VLLM_CI_BASE_IMAGE:-rocm/vllm-dev:ci_base}"
+  local artifact_image="rocm/vllm-ci-artifact:${BUILDKITE_COMMIT:-local}"
+  local wheel_dir=""
+  local context_dir=""
+
+  artifact_work_dir=$(mktemp -d -t vllm-rocm-artifact.XXXXXX)
+  wheel_dir="${artifact_work_dir}/wheels"
+  context_dir="${artifact_work_dir}/context"
+  mkdir -p "${wheel_dir}" "${context_dir}/wheels"
+
+  echo "--- Downloading ROCm wheel artifact"
+  if ! buildkite-agent artifact download "${artifact_glob}" "${artifact_work_dir}"; then
+    echo "Failed to download ${artifact_glob}"
+    return 1
+  fi
+  buildkite-agent artifact download \
+    "artifacts/vllm-rocm-install/ci-base-image.txt" \
+    "${artifact_work_dir}" >/dev/null 2>&1 || true
+
+  archive=$(find "${artifact_work_dir}" -name "vllm-rocm-install.tar.gz" -type f | head -1)
+  if [[ -z "${archive}" || ! -f "${archive}" ]]; then
+    echo "ROCm wheel artifact archive was not found"
+    return 1
+  fi
+
+  metadata_file=$(find "${artifact_work_dir}" -name "ci-base-image.txt" -type f | head -1)
+  if [[ -n "${metadata_file}" && -s "${metadata_file}" ]]; then
+    base_image=$(tr -d '[:space:]' < "${metadata_file}")
+  fi
+
+  tar -xzf "${archive}" -C "${wheel_dir}" || return 1
+  if ! ls "${wheel_dir}"/*.whl >/dev/null 2>&1; then
+    echo "ROCm wheel artifact did not contain a wheel"
+    return 1
+  fi
+
+  cp "${wheel_dir}"/*.whl "${context_dir}/wheels/" || return 1
+  cat > "${context_dir}/Dockerfile" <<'EOF'
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+COPY wheels/ /tmp/vllm-wheels/
+RUN python3 -m pip install --no-deps --force-reinstall /tmp/vllm-wheels/*.whl \
+    && rm -rf /tmp/vllm-wheels
+EOF
+
+  echo "--- Building local ROCm test image"
+  echo "Base image: ${base_image}"
+  docker pull "${base_image}" || return 1
+  docker build \
+    --pull=false \
+    --build-arg "BASE_IMAGE=${base_image}" \
+    -t "${artifact_image}" \
+    "${context_dir}" || return 1
+  image_name="${artifact_image}"
+  return 0
+}
+
 is_multi_node() {
   local cmds="$1"
   # Primary signal: NUM_NODES environment variable set by the pipeline
@@ -259,14 +328,23 @@ cleanup_docker
 
 # --- Pull test image ---
 echo "--- Pulling container"
-image_name="rocm/vllm-ci:${BUILDKITE_COMMIT}"
+image_name="${VLLM_CI_FALLBACK_IMAGE:-rocm/vllm-ci:${BUILDKITE_COMMIT:-local}}"
+artifact_work_dir=""
 container_name="rocm_${BUILDKITE_COMMIT}_$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 10; echo)"
-docker pull "${image_name}"
 
 remove_docker_container() {
-  docker rm -f "${container_name}" || docker image rm -f "${image_name}" || true
+  docker rm -f "${container_name}" || true
+  docker image rm -f "${image_name}" || true
+  if [[ -n "${artifact_work_dir}" ]]; then
+    rm -rf "${artifact_work_dir}"
+  fi
 }
 trap remove_docker_container EXIT
+
+if ! prepare_artifact_image; then
+  echo "Using full ROCm CI image: ${image_name}"
+  docker pull "${image_name}" || exit 1
+fi
 
 # --- Prepare commands ---
 echo "--- Running container"

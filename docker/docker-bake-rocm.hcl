@@ -8,8 +8,8 @@
 #   docker buildx bake -f docker/docker-bake-rocm.hcl final-rocm   # Build final image
 #   docker buildx bake -f docker/docker-bake-rocm.hcl --print      # Show resolved config
 #
-# CI usage (with ci-rocm.hcl overlay from ci-infra):
-#   docker buildx bake -f docker/docker-bake-rocm.hcl -f /tmp/ci-rocm.hcl test-rocm-ci
+# CI usage (with the vLLM-owned CI overlay):
+#   docker buildx bake -f docker/docker-bake-rocm.hcl -f docker/ci-rocm.hcl test-rocm-ci
 
 variable "MAX_JOBS" {
   # Empty string lets the Dockerfile fall back to $(nproc) via
@@ -50,10 +50,9 @@ variable "CI_BASE_IMAGE" {
   default = "rocm/vllm-dev:ci_base"
 }
 
-# Upstream dependency commit pins -- extracted from Dockerfile.rocm ARG
-# defaults by ci-bake-rocm.sh and exported as env vars. Empty defaults
-# here mean the cache functions in ci-rocm.hcl are no-ops for local builds
-# (which is fine; the dependency cache targets are CI-only).
+# Upstream dependency commit pins. Plain local bake builds use the Dockerfile
+# ARG defaults. ci-bake-rocm.sh resolves those defaults (plus any env
+# overrides) and writes a small HCL override before invoking CI targets.
 variable "RIXL_BRANCH" {
   default = ""
 }
@@ -83,10 +82,6 @@ target "_common-rocm" {
     REMOTE_VLLM                     = REMOTE_VLLM
     VLLM_BRANCH                     = VLLM_BRANCH
     CI_BASE_IMAGE                   = CI_BASE_IMAGE
-    RIXL_BRANCH                     = RIXL_BRANCH
-    UCX_BRANCH                      = UCX_BRANCH
-    ROCSHMEM_BRANCH                 = ROCSHMEM_BRANCH
-    DEEPEP_BRANCH                   = DEEPEP_BRANCH
   }
 }
 

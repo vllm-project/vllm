@@ -4,6 +4,7 @@ job_dirs:
 run_all_patterns:
   - "docker/Dockerfile.rocm"
   - "docker/Dockerfile.rocm_base"
+  - "docker/ci-rocm.hcl"
   - "docker/docker-bake-rocm.hcl"
   - ".buildkite/hardware_tests/amd.yaml"
   - ".buildkite/scripts/ci-bake-rocm.sh"
