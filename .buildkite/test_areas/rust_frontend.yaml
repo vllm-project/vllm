@@ -1,4 +1,4 @@
-group: Rust Frontend
+group: Rust Frontend E2E
 depends_on:
   - image-build
 steps:

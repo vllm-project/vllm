@@ -256,6 +256,32 @@ repos:
     entry: python tools/pre_commit/check_boolean_context_manager.py
     language: python
     types: [python]
+  # Rust hooks. These shell out to `cargo`; tools/pre_commit/rust-check.sh
+  # skips with a warning when cargo is not installed.
+  - id: rust-cargo-autoinherit
+    name: Rust - Normalize Cargo manifests with autoinherit
+    entry: tools/pre_commit/rust-check.sh autoinherit --prefer-simple-dotted
+    language: script
+    pass_filenames: false
+    require_serial: true
+    stages: [pre-commit] # Only run locally as Buildkite will cover this
+    files: ^rust/(Cargo\.toml|src/.*/Cargo\.toml)$
+  - id: rust-cargo-sort
+    name: Rust - Sort Cargo manifest sections
+    entry: tools/pre_commit/rust-check.sh sort --workspace
+    language: script
+    pass_filenames: false
+    require_serial: true
+    stages: [pre-commit] # Only run locally as Buildkite will cover this
+    files: ^rust/(Cargo\.toml|src/.*/Cargo\.toml)$
+  - id: rust-cargo-fmt
+    name: Rust - Format code
+    entry: tools/pre_commit/rust-check.sh fmt
+    language: script
+    pass_filenames: false
+    require_serial: true
+    stages: [pre-commit] # Only run locally as Buildkite will cover this
+    files: ^rust/.*(\.rs|Cargo\.toml|rustfmt\.toml)$
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion
