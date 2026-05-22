@@ -16,6 +16,7 @@
 
 #include <cmath>
 #include <cuda_runtime.h>
+#include <limits>
 #include <type_traits>
 
 #include <torch/cuda.h>
@@ -112,7 +113,7 @@ __global__ void fusedQKNormRopeKernel(
     void const* k_weight_void,       // RMSNorm weights for key
     void const* cos_sin_cache_void,  // Pre-computed cos/sin cache
     int64_t const* position_ids,     // Position IDs for RoPE
-    int const num_tokens,            // Number of tokens
+    int64_t const num_tokens,        // Number of tokens
     int const rotary_dim             // Dimension for RoPE
 ) {
 #if (!defined(__CUDA_ARCH__) || __CUDA_ARCH__ < 800) && !defined(USE_ROCM)
@@ -147,14 +148,15 @@ __global__ void fusedQKNormRopeKernel(
 
     // Calculate global warp index to determine which head/token this warp
     // processes
-    int const globalWarpIdx = blockIdx.x * warpsPerBlock + warpId;
+    int64_t const globalWarpIdx =
+        static_cast<int64_t>(blockIdx.x) * warpsPerBlock + warpId;
 
     // Total number of attention heads (Q and K)
     int const total_qk_heads = num_heads_q + num_heads_k;
 
     // Determine which token and head type (Q or K) this warp processes
-    int const tokenIdx = globalWarpIdx / total_qk_heads;
-    int const localHeadIdx = globalWarpIdx % total_qk_heads;
+    int64_t const tokenIdx = globalWarpIdx / total_qk_heads;
+    int const localHeadIdx = static_cast<int>(globalWarpIdx % total_qk_heads);
 
     // Skip if this warp is assigned beyond the number of tokens
     if (tokenIdx >= num_tokens) return;
@@ -178,17 +180,20 @@ __global__ void fusedQKNormRopeKernel(
         4;  // Use packed_as<uint, vecSize> to perform loading/saving.
     using vec_T = typename tensorrt_llm::common::packed_as<uint, vecSize>::type;
 
-    int offsetWarp;  // Offset for the warp
+    int64_t offsetWarp;  // Offset for the warp
     if (isQ) {
       // Q segment: token offset + head offset within Q segment
-      offsetWarp = tokenIdx * num_heads * head_dim + headIdx * head_dim;
+      offsetWarp = tokenIdx * num_heads * head_dim +
+                   static_cast<int64_t>(headIdx) * head_dim;
     } else {
       // K segment: token offset + entire Q segment + head offset within K
       // segment
-      offsetWarp = tokenIdx * num_heads * head_dim + num_heads_q * head_dim +
-                   headIdx * head_dim;
+      offsetWarp = tokenIdx * num_heads * head_dim +
+                   static_cast<int64_t>(num_heads_q) * head_dim +
+                   static_cast<int64_t>(headIdx) * head_dim;
     }
-    int offsetThread = offsetWarp + laneId * numElemsPerThread;
+    int64_t const offsetThread =
+        offsetWarp + static_cast<int64_t>(laneId) * numElemsPerThread;
 
     // Sum of squares for RMSNorm
     float sumOfSquares = 0.0f;
@@ -316,7 +321,8 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
     void* qkv_void, int const num_heads_q, int const num_heads_k,
     int const num_heads_v, float const eps, void const* q_weight_void,
     void const* k_weight_void, void const* cos_sin_cache_void,
-    int64_t const* position_ids, int const num_tokens, int const rotary_dim) {
+    int64_t const* position_ids, int64_t const num_tokens,
+    int const rotary_dim) {
 #if (!defined(__CUDA_ARCH__) || __CUDA_ARCH__ < 800) && !defined(USE_ROCM)
   if constexpr ((std::is_same_v<scalar_t_in, c10::BFloat16>) ||
                 std::is_same_v<scalar_t_cache, c10::BFloat16>) {
@@ -360,9 +366,10 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
     int const head_chunks_per_token =
         (total_qk_heads + HEADS_PER_WARP - 1) / HEADS_PER_WARP;
 
-    int const warp_global = blockIdx.x * warpsPerBlock + warpId;
-    int const tokenIdx = warp_global / head_chunks_per_token;
-    int const headChunk = warp_global % head_chunks_per_token;
+    int64_t const warp_global =
+        static_cast<int64_t>(blockIdx.x) * warpsPerBlock + warpId;
+    int64_t const tokenIdx = warp_global / head_chunks_per_token;
+    int const headChunk = static_cast<int>(warp_global % head_chunks_per_token);
     int const first_head = headChunk * HEADS_PER_WARP;
     int const num_heads_this_warp =
         (first_head + HEADS_PER_WARP <= total_qk_heads)
@@ -391,14 +398,17 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
       int const localHeadIdx = first_head + k;
       bool const isQ = localHeadIdx < num_heads_q;
       int const headIdx = isQ ? localHeadIdx : localHeadIdx - num_heads_q;
-      int offWarp;
+      int64_t offWarp;
       if (isQ) {
-        offWarp = tokenIdx * num_heads * head_dim + headIdx * head_dim;
+        offWarp = tokenIdx * num_heads * head_dim +
+                  static_cast<int64_t>(headIdx) * head_dim;
       } else {
-        offWarp = tokenIdx * num_heads * head_dim + num_heads_q * head_dim +
-                  headIdx * head_dim;
+        offWarp = tokenIdx * num_heads * head_dim +
+                  static_cast<int64_t>(num_heads_q) * head_dim +
+                  static_cast<int64_t>(headIdx) * head_dim;
       }
-      int const offThread = offWarp + laneId * numElemsPerThread;
+      int64_t const offThread =
+          offWarp + static_cast<int64_t>(laneId) * numElemsPerThread;
       char* smem_dst =
           this_warp_head_smem + k * qkv_tile_bytes + laneId * elemSizeBytes;
       cp_async_shared_global_ca(smem_dst,
@@ -446,14 +456,17 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
       bool const isQ = localHeadIdx < num_heads_q;
       int const headIdx = isQ ? localHeadIdx : localHeadIdx - num_heads_q;
 
-      int offsetWarp;
+      int64_t offsetWarp;
       if (isQ) {
-        offsetWarp = tokenIdx * num_heads * head_dim + headIdx * head_dim;
+        offsetWarp = tokenIdx * num_heads * head_dim +
+                     static_cast<int64_t>(headIdx) * head_dim;
       } else {
-        offsetWarp = tokenIdx * num_heads * head_dim + num_heads_q * head_dim +
-                     headIdx * head_dim;
+        offsetWarp = tokenIdx * num_heads * head_dim +
+                     static_cast<int64_t>(num_heads_q) * head_dim +
+                     static_cast<int64_t>(headIdx) * head_dim;
       }
-      int const offsetThread = offsetWarp + laneId * numElemsPerThread;
+      int64_t const offsetThread =
+          offsetWarp + static_cast<int64_t>(laneId) * numElemsPerThread;
 
       // === Part 1: QK Norm (read from smem; group 0 already done). ===
       float sumOfSquares = 0.0f;
@@ -549,7 +562,7 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
   }
 
 template <typename scalar_t_in, typename scalar_t_cache>
-void launchFusedQKNormRope(void* qkv, int const num_tokens,
+void launchFusedQKNormRope(void* qkv, int64_t const num_tokens,
                            int const num_heads_q, int const num_heads_k,
                            int const num_heads_v, int const head_dim,
                            int const rotary_dim, float const eps,
@@ -559,9 +572,12 @@ void launchFusedQKNormRope(void* qkv, int const num_tokens,
   constexpr int blockSize = 256;
   int const warpsPerBlock = blockSize / 32;
   int const totalQKHeads = num_heads_q + num_heads_k;
-  int const totalWarps = num_tokens * totalQKHeads;
-  int const gridSize = common::divUp(totalWarps, warpsPerBlock);
-  dim3 gridDim(gridSize);
+  int64_t const totalWarps = num_tokens * totalQKHeads;
+  int64_t const gridSize =
+      common::divUp(totalWarps, static_cast<int64_t>(warpsPerBlock));
+  TORCH_CHECK(gridSize <= std::numeric_limits<int>::max(),
+              "Grid size exceeds CUDA dim3 x limit: ", gridSize);
+  dim3 gridDim(static_cast<unsigned int>(gridSize));
   dim3 blockDim(blockSize);
   switch (head_dim) {
     case 64:
@@ -598,7 +614,7 @@ void launchFusedQKNormRope(void* qkv, int const num_tokens,
 // When token_heads_per_warp == 1, delegates to the 1-head baseline above.
 template <typename scalar_t_in, typename scalar_t_cache>
 void launchFusedQKNormRopeNTokenHeads(
-    void* qkv, int const num_tokens, int const num_heads_q,
+    void* qkv, int64_t const num_tokens, int const num_heads_q,
     int const num_heads_k, int const num_heads_v, int const head_dim,
     int const rotary_dim, float const eps, void const* q_weight,
     void const* k_weight, void const* cos_sin_cache, bool const interleave,
@@ -641,9 +657,12 @@ void launchFusedQKNormRopeNTokenHeads(
   // Grid: one warp per (token, head_chunk); same token → reuse cos/sin in smem.
   int const head_chunks_per_token =
       (totalQKHeads + token_heads_per_warp - 1) / token_heads_per_warp;
-  int const total_warps = num_tokens * head_chunks_per_token;
-  int const gridSize = common::divUp(total_warps, warpsPerBlock);
-  dim3 gridDim(gridSize);
+  int64_t const total_warps = num_tokens * head_chunks_per_token;
+  int64_t const gridSize =
+      common::divUp(total_warps, static_cast<int64_t>(warpsPerBlock));
+  TORCH_CHECK(gridSize <= std::numeric_limits<int>::max(),
+              "Grid size exceeds CUDA dim3 x limit: ", gridSize);
+  dim3 gridDim(static_cast<unsigned int>(gridSize));
   dim3 blockDim(blockSize);
   // Cache element size: float=4, bfloat16=2 (host-safe; kernel uses same
   // layout).
@@ -802,7 +821,7 @@ void fused_qk_norm_rope(
           using cache_scalar_t = scalar_t;
           tensorrt_llm::kernels::launchFusedQKNormRopeNTokenHeads<
               qkv_scalar_t, cache_scalar_t>(
-              qkv.data_ptr(), static_cast<int>(num_tokens),
+              qkv.data_ptr(), num_tokens,
               static_cast<int>(num_heads_q), static_cast<int>(num_heads_k),
               static_cast<int>(num_heads_v), static_cast<int>(head_dim),
               static_cast<int>(cos_sin_cache.size(1)), static_cast<float>(eps),
