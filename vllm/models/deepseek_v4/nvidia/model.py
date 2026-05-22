@@ -849,17 +849,12 @@ class DeepseekV4Attention(nn.Module):
         self.nope_head_dim = self.head_dim - self.rope_head_dim
         self.n_groups = config.o_groups
         self.n_local_groups = self.n_groups // tp_size
-        if self.n_groups % tp_size != 0:
+        if self.n_local_groups <= 0 or self.n_groups % tp_size != 0:
             raise ValueError(
-                f"TP size {tp_size} does not evenly divide n_groups {self.n_groups}. "
-                f"Please use TP size that divides {self.n_groups} "
-                f"(valid TP: 1, 2, 4, 8)."
-            )
-        if self.n_local_groups <= 0:
-            raise ValueError(
-                f"DeepSeek V4 attention does not support TP size {tp_size} "
-                f"with n_groups={self.n_groups}. "
-                f"Please reduce TP size to at most {self.n_groups}."
+                f"TP size {tp_size} is not compatible with n_groups {self.n_groups}. "
+                f"n_local_groups = {self.n_local_groups}. "
+                f"Please use a TP size that evenly divides {self.n_groups} "
+                f"and results in n_local_groups >= 1."
             )
         self.window_size = config.sliding_window
         # NOTE(zyongye) Compress ratio can't be 0
