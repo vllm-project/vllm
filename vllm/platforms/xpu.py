@@ -29,6 +29,22 @@ else:
 logger = init_logger(__name__)
 
 
+# Intel integrated-GPU PCI device IDs (UMA — share system memory with the host).
+# Used by is_integrated_gpu() so MemorySnapshot falls back to psutil for the
+# true free memory instead of torch.xpu.mem_get_info() (which underreports on
+# iGPU). See vllm PR #40295.
+_INTEL_IGPU_PCI_IDS: frozenset[int] = frozenset({
+    # Lunar Lake     (Xe2-LPG,  intel_gpu_lnl_m) — Arc 130V / 140V
+    0x64A0,
+    # Arrow Lake-H   (Xe-LPG+,  intel_gpu_arl_h) — Arc Pro 130T / 140T
+    0x7D51, 0x7DD1,
+    # Panther Lake   (Xe3-LPG,  intel_gpu_ptl_h / intel_gpu_ptl_u) — future
+    0xB080, 0xB081, 0xB082,
+    0xB090, 0xB091, 0xB092,
+    0xB0A0, 0xB0A1, 0xB0A2,
+})
+
+
 class XPUPlatform(Platform):
     _enum = PlatformEnum.XPU
     device_name: str = "xpu"
@@ -314,6 +330,27 @@ class XPUPlatform(Platform):
     def is_data_center_gpu(cls) -> bool:
         device_name = cls.get_device_name().lower()
         return device_name.count("data center gpu") > 0
+
+    @classmethod
+    def is_integrated_gpu(cls, device_id: int = 0) -> bool:
+        """Return True if the XPU at ``device_id`` is an integrated GPU
+        sharing system memory (UMA) with the host, False for discrete cards.
+
+        Detects via the PCI device ID exposed by
+        ``torch.xpu.get_device_properties(device_id).device_id``, matched
+        against ``_INTEL_IGPU_PCI_IDS``. Mirrors the AMD APU detection
+        pattern in ``vllm/platforms/rocm.py``.
+
+        Returning True causes ``vllm/utils/mem_utils.py::MemorySnapshot``
+        to fall back from ``torch.xpu.mem_get_info()`` (which on iGPU
+        underreports the unified pool) to ``psutil.virtual_memory()``.
+        See vllm PR #40295.
+        """
+        try:
+            pci_id = torch.xpu.get_device_properties(device_id).device_id
+        except (AssertionError, RuntimeError):
+            return False
+        return pci_id in _INTEL_IGPU_PCI_IDS
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
