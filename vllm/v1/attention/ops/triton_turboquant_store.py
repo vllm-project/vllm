@@ -550,6 +550,15 @@ def triton_turboquant_store(
         value_mse = True
     if value_mse and value_midpoints is None:
         raise ValueError("value_midpoints must be provided when value_mse=True")
+    value_metadata_bytes = 2 if value_mse else 4
+    required_slot_size = key_packed_size + val_data_bytes + value_metadata_bytes
+    allocated_slot_size = kv_cache.stride(2)
+    if allocated_slot_size < required_slot_size:
+        value_layout = "MSE" if value_mse else "uniform"
+        raise ValueError(
+            f"KV cache slot ({allocated_slot_size}B) is too small for "
+            f"{value_layout} value path (requires {required_slot_size}B)"
+        )
 
     BLOCK_VAL = triton.next_power_of_2(val_data_bytes)
 

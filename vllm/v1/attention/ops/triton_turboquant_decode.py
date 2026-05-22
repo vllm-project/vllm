@@ -597,6 +597,15 @@ def triton_turboquant_decode_attention(
         key_packed_size,
         value_mse,
     )
+    value_metadata_bytes = 2 if value_mse else 4
+    required_slot_size = key_packed_size + cfg["val_data_bytes"] + value_metadata_bytes
+    allocated_slot_size = kv_cache.stride(2)
+    if allocated_slot_size < required_slot_size:
+        value_layout = "MSE" if value_mse else "uniform"
+        raise ValueError(
+            f"KV cache slot ({allocated_slot_size}B) is too small for "
+            f"{value_layout} value path (requires {required_slot_size}B)"
+        )
 
     # Compute q_rot = q @ Pi.T (rotated query for MSE key scoring)
     # FP8 path: pass query directly (float16); kernel casts inline.
