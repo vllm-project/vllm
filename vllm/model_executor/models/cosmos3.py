@@ -3,6 +3,8 @@
 
 import regex
 
+from vllm.config import VllmConfig
+from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.models.qwen3_vl import Qwen3VLForConditionalGeneration
 from vllm.model_executor.models.utils import WeightsMapper
 
@@ -41,3 +43,21 @@ class Cosmos3ForConditionalGeneration(Qwen3VLForConditionalGeneration):
     )
 
     allow_patterns_overrides = ["transformer/*.safetensors"]
+
+    """
+    Cosmos3 checkpoint separates transformer weights and vision_encoder weights
+    into separate directories, as it's in diffusers checkpoint format.
+    Using secondary_weights here to load all necessary weights for
+    the Reasoner-only part.
+    """
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        self.secondary_weights = [
+            DefaultModelLoader.Source(
+                model_or_path=vllm_config.model_config.model,
+                revision=vllm_config.model_config.revision,
+                prefix="",
+                allow_patterns_overrides=["vision_encoder/*.safetensors"],
+            ),
+        ]
