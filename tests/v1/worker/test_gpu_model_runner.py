@@ -357,6 +357,40 @@ def test_prepare_input_ids_replaces_async_spec_placeholders():
     )
 
 
+def test_prepare_input_ids_allows_new_req_with_real_spec_tokens():
+    runner = _make_async_spec_prepare_runner(
+        torch.tensor([[201, 202, 203, 204]], dtype=torch.int64)
+    )
+    runner.input_batch.prev_sampled_token_ids = torch.tensor(
+        [[101], [102]], dtype=torch.int32
+    )
+    runner.input_batch.req_ids = ["cached-req", "new-req"]
+    runner.prev_positions = SimpleNamespace(np=np.array([0, -1], dtype=np.int32))
+    runner.input_ids = _FakeCpuGpuBuffer(
+        torch.tensor([0, -1, -1, -1, -1, 301, 302], dtype=torch.int32)
+    )
+    scheduler_output = SimpleNamespace(
+        scheduled_spec_decode_tokens={
+            "cached-req": [-1, -1, -1, -1],
+            "new-req": [301, 302],
+        }
+    )
+
+    GPUModelRunner._prepare_input_ids(
+        runner,
+        scheduler_output,
+        num_reqs=2,
+        total_num_scheduled_tokens=7,
+        cu_num_tokens=np.array([5, 7], dtype=np.int32),
+    )
+
+    assert runner.input_ids.copy_count == 1
+    torch.testing.assert_close(
+        runner.input_ids.gpu[:7],
+        torch.tensor([101, 201, 202, 203, 204, 301, 302], dtype=torch.int32),
+    )
+
+
 def test_prepare_input_ids_rejects_async_spec_placeholders_without_sample_cache():
     runner = _make_async_spec_prepare_runner(
         torch.tensor([[201, 202, 203, 204]], dtype=torch.int64)

@@ -1737,14 +1737,15 @@ class GPUModelRunner(
         common_indices_match = True
         max_flattened_index = -1
         total_num_spec_tokens = 0
-        req_ids_with_spec_without_prev: list[str] = []
+        req_ids_with_placeholder_spec_without_prev: list[str] = []
 
         for cur_index in range(num_reqs):
             prev_index = prev_positions[cur_index]
             req_id = self.input_batch.req_ids[cur_index]
             if prev_index < 0:
-                if req_id in scheduled_spec_tokens:
-                    req_ids_with_spec_without_prev.append(req_id)
+                spec_token_ids = scheduled_spec_tokens.get(req_id, ())
+                if any(token_id < 0 for token_id in spec_token_ids):
+                    req_ids_with_placeholder_spec_without_prev.append(req_id)
                 continue
             prev_indices.append(prev_index)
             # We need to compute the flattened input_ids index of the
@@ -1770,11 +1771,11 @@ class GPUModelRunner(
             common_indices_match &= prev_index == flattened_index
             max_flattened_index = max(max_flattened_index, flattened_index)
 
-        if req_ids_with_spec_without_prev and has_async_spec_placeholders:
+        if req_ids_with_placeholder_spec_without_prev:
             raise RuntimeError(
                 "Async speculative decoding scheduled placeholder draft "
                 "tokens for requests that are not present in the previous "
-                f"worker batch: {req_ids_with_spec_without_prev}."
+                f"worker batch: {req_ids_with_placeholder_spec_without_prev}."
             )
 
         prev_draft_token_ids = self.input_batch.prev_draft_token_ids
