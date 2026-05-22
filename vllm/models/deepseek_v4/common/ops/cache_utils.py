@@ -39,6 +39,7 @@ def quantize_and_insert_k_kernel(
     block_stride: tl.constexpr,  # total bytes per block (padded)
     fp8_max: tl.constexpr,
     n_quant_blocks: tl.constexpr,  # 8 (7 real + 1 padding)
+    use_fnuz: tl.constexpr = False,
 ):
     """
     Quantize K tensor and insert into paged K cache.
@@ -49,6 +50,9 @@ def quantize_and_insert_k_kernel(
     - [64*576 + 64*8, block_stride): Padding
 
     One program per token.
+
+    ``use_fnuz=True`` selects FNUZ (``tl.float8e4b8``); default OCP
+    (``tl.float8e4nv``) matches every production caller.
     """
     pid = tl.program_id(0)
 
@@ -112,8 +116,11 @@ def quantize_and_insert_k_kernel(
             x_scaled = x / scale
             x_clamped = tl.clamp(x_scaled, -fp8_max, fp8_max)
 
-            # Convert to fp8, then bitcast to uint8 for storage
-            x_fp8 = x_clamped.to(tl.float8e4nv)
+            # Convert to fp8 (FNUZ on gfx942, OCP elsewhere), then bitcast to uint8.
+            if use_fnuz:
+                x_fp8 = x_clamped.to(tl.float8e4b8)
+            else:
+                x_fp8 = x_clamped.to(tl.float8e4nv)
             x_uint8 = x_fp8.to(tl.uint8, bitcast=True)
 
             # Store as uint8 (1 byte each)
@@ -145,6 +152,7 @@ def quantize_and_insert_k_cache(
     slot_mapping: torch.Tensor,  # [num_tokens] int64
     block_size: int = 64,
     is_ue8m0: bool = True,
+    use_fnuz: bool = False,
 ):
     """
     Quantize K tensor and insert into paged K cache.
@@ -155,6 +163,9 @@ def quantize_and_insert_k_cache(
     - Next 64 * 8 = 512 bytes: Scales
       - Each token: 8 bytes (uint8 scales, 7 real + 1 padding)
     - Padded to multiple of 576
+
+    ``use_fnuz=True`` switches to FNUZ E4M3 (FP8_MAX=224); default OCP
+    (FP8_MAX=448) matches every production caller.
     """
     assert k.dim() == 2 and k.shape[1] == 512, (
         f"K must be [num_tokens, 512], got {k.shape}"
@@ -171,7 +182,7 @@ def quantize_and_insert_k_cache(
     TOKEN_BF16_DIM = 64
     TOKEN_SCALE_DIM = 8
     QUANT_BLOCK_SIZE = 64
-    FP8_MAX = 448.0
+    FP8_MAX = 224.0 if use_fnuz else 448.0  # FNUZ value matches fp8_utils.py
     TOKEN_DATA_SIZE = TOKEN_FP8_DIM + TOKEN_BF16_DIM * 2
 
     grid = (num_tokens,)
@@ -191,6 +202,7 @@ def quantize_and_insert_k_cache(
         block_stride=block_stride,
         fp8_max=FP8_MAX,
         n_quant_blocks=8,
+        use_fnuz=use_fnuz,
     )
 
 
@@ -274,7 +286,7 @@ def _dequantize_and_gather_k_kernel(
                 # Load quantized fp8 values (stored as uint8)
                 x_uint8 = tl.load(token_fp8_ptr + offsets, mask=mask, other=0)
 
-                # Bitcast uint8 back to fp8 (FNUZ on gfx942, OCP otherwise)
+                # Bitcast uint8 back to fp8 (FNUZ on gfx942, OCP elsewhere).
                 if use_fnuz:
                     x_fp8 = x_uint8.to(tl.float8e4b8, bitcast=True)
                 else:
@@ -373,23 +385,10 @@ def dequantize_and_gather_k_cache(
 ) -> None:
     """Dequantize and gather a paged DSv4 K cache.
 
-    ``use_fnuz`` selects which Triton FP8 dtype is used to bitcast the stored
-    bytes back to floats. It MUST match the encoder that wrote into this
-    particular cache:
-
-    * ``compressed_k_cache``: Triton encoders in ``cache_utils.py`` /
-      ``fused_compress_quant_cache.py`` always use ``tl.float8e4nv`` (OCP,
-      bias 7, FP8_MAX=448) regardless of platform, so the reader must use
-      ``use_fnuz=False`` everywhere.
-    * ``swa_k_cache``: written by the C++ kernel
-      ``fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert``. After PR #42893
-      that kernel encodes FNUZ E4M3 on gfx942 (MI300X, FP8_MAX=240) and OCP
-      on gfx950, so the reader must use
-      ``use_fnuz=current_platform.is_fp8_fnuz()``.
-
-    Mismatching the two -- e.g. reading FNUZ bytes as OCP -- silently
-    rescales every K vector by ~448/240 ≈ 1.87 and produces gibberish in
-    sparse attention.
+    ``use_fnuz`` MUST match the encoder of the specific cache being read:
+    ``False`` for ``compressed_k_cache`` (Triton encoder is OCP everywhere),
+    ``current_platform.is_fp8_fnuz()`` for ``swa_k_cache`` (C++ encoder
+    writes FNUZ on gfx942 and OCP on gfx950).
     """
     if has_cutedsl():
         # lazily import, otherwise some tests fail due to CUDA driver init failure.

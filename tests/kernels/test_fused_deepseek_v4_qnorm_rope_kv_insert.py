@@ -23,13 +23,16 @@ from vllm.models.deepseek_v4.common.ops import (
     dequantize_and_gather_k_cache,
     quantize_and_insert_k_cache,
 )
+from vllm.platforms import current_platform
 
 # ── Constants matching the kernel ────────────────────────────────────────────
 HEAD_DIM = 512
 ROPE_DIM = 64
 NOPE_DIM = HEAD_DIM - ROPE_DIM  # 448
 QUANT_BLOCK = 64
-FP8_MAX = 448.0
+# Match the C++ SWA-K encoder: FNUZ on gfx942 (FP8_MAX=224), OCP elsewhere (448).
+USE_FNUZ = current_platform.is_fp8_fnuz()
+FP8_MAX = 224.0 if USE_FNUZ else 448.0
 HEAD_BYTES = NOPE_DIM + ROPE_DIM * 2 + 8  # 448 + 128 + 8 = 584
 
 
@@ -198,7 +201,7 @@ def test_kv_path_matches_reference(num_tokens: int, block_size: int):
         num_blocks, block_size * HEAD_BYTES, dtype=torch.uint8, device=device
     )
     quantize_and_insert_k_cache(
-        kv_ref, k_cache_ref, slot_mapping, block_size=block_size
+        kv_ref, k_cache_ref, slot_mapping, block_size=block_size, use_fnuz=USE_FNUZ
     )
 
     # ── Fused path (dummy q, single head) ──────────────────────────────────
@@ -229,7 +232,14 @@ def test_kv_path_matches_reference(num_tokens: int, block_size: int):
         # gather_lens arg is None (use seq_lens)
         k_cache_3d = k_cache_2d.view(num_blocks, block_size, HEAD_BYTES)
         dequantize_and_gather_k_cache(
-            out, k_cache_3d, seq_lens, None, block_table, block_size, offset=0
+            out,
+            k_cache_3d,
+            seq_lens,
+            None,
+            block_table,
+            block_size,
+            offset=0,
+            use_fnuz=USE_FNUZ,
         )
         return out[0, :num_tokens]
 
@@ -292,7 +302,7 @@ def test_kv_path_with_dp_padding(num_tokens: int, pad: int, block_size: int):
         num_blocks, block_size * HEAD_BYTES, dtype=torch.uint8, device=device
     )
     quantize_and_insert_k_cache(
-        kv_ref, k_cache_ref, slot_mapping, block_size=block_size
+        kv_ref, k_cache_ref, slot_mapping, block_size=block_size, use_fnuz=USE_FNUZ
     )
 
     # Fused: pass full-sized q/kv/positions, shorter slot_mapping.
@@ -341,7 +351,7 @@ def test_combined_q_and_kv(num_tokens: int, n_heads: int, block_size: int):
         num_blocks, block_size * HEAD_BYTES, dtype=torch.uint8, device=device
     )
     quantize_and_insert_k_cache(
-        kv_ref, k_cache_ref, slot_mapping, block_size=block_size
+        kv_ref, k_cache_ref, slot_mapping, block_size=block_size, use_fnuz=USE_FNUZ
     )
 
     # Fused single call.

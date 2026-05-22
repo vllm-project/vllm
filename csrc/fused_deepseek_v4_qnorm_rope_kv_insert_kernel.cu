@@ -89,10 +89,10 @@ constexpr int kQuantBlock = 64;
 constexpr int kNumQuantBlocks = kNopeDim / kQuantBlock;   // 7
 constexpr int kScaleBytesPerToken = kNumQuantBlocks + 1;  // 8 (7 real + 1 pad)
 constexpr int kTokenDataBytes = kNopeDim + kRopeDim * 2;  // 448 + 128 = 576
-// Match the encoding chosen in rocm_cvt_float_to_fp8_e4m3: FNUZ on gfx942
-// (max 240), OCP on gfx950 (max 448).
+// FNUZ on gfx942 / OCP on gfx950. FNUZ uses 224.0 (not the dtype's raw
+// 240.0) to match the rest of vLLM's FNUZ pipeline; see fp8_utils.py:412-417.
 #if defined(USE_ROCM) && (!defined(HIP_FP8_TYPE_OCP) || !defined(__gfx950__))
-constexpr float kFp8Max = 240.0f;
+constexpr float kFp8Max = 224.0f;
 #else
 constexpr float kFp8Max = 448.0f;
 #endif
