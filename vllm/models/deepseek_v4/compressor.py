@@ -296,7 +296,11 @@ class DeepseekCompressor(nn.Module):
         state_cache = self.state_cache.kv_cache
         # kv_state stored in first half, score_state stored in second half
         state_width = state_cache.shape[-1] // 2
-        pdl_kwargs = {} if current_platform.is_rocm() else {"launch_pdl": False}
+        pdl_kwargs = (
+            {}
+            if current_platform.is_rocm() or current_platform.is_xpu()
+            else {"launch_pdl": False}
+        )
 
         # Store the KV and score (with fused APE addition) in the state.
         # NOTE: PDL is disabled — both this kernel and _fused_kernel below
