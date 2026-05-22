@@ -213,6 +213,32 @@ not exercised; entries are intentionally blank. The suite gates the
 | --- | --- | --- | --- | --- | --- |
 | | | | T.3.1.1 | | |
 
+### ASR
+
+| Input | Basic | Long Context | Multilingual | Multi Turn | Image | Audio |
+| --- | --- | --- | --- | --- | --- | --- |
+| | | T.7.1.2 | | | | T.7.1.1 |
+
+| Cohere Feature | Speculative Decoding | Guided Generation | Thinking Budget | Melody |
+| --- | --- | --- | --- | --- |
+| | | | | |
+
+| Model Architecture | C3 Arch | C4 Arch | C5 Arch | Reward |
+| --- | --- | --- | --- | --- |
+| | | | | |
+
+| Quantization | BF16 | FP8 | MXFP8 | W4A16 | FP32 Logits |
+| --- | --- | --- | --- | --- | --- |
+| | | | | | |
+
+| Hardware | A100 | H100 | B200 | GB200 | MI300x |
+| --- | --- | --- | --- | --- | --- |
+| | | T.7.1.1, T.7.1.2 | | | |
+
+| vLLM Feature | Chunked Prefill | Hybrid Memory Allocator | Asynchronous Scheduling | Torch Compile | CUDA Graphs |
+| --- | --- | --- | --- | --- | --- |
+| | | | | | |
+
 ## Compatibility Sources
 
 Where to check compatibility for each category when backfilling

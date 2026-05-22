@@ -19,6 +19,7 @@ set -euo pipefail
 #
 # Environment Variables:
 #   ENGINES_DIR     - Directory for model checkpoints (default: /home/runner/_work/engines)
+#   DATA_DIR        - Directory for datasets (default: /home/runner/_work/data)
 #   HF_CACHE_DIR    - Directory for HuggingFace cache (default: /home/runner/_work/hf_cache)
 #   MODELS          - Comma-separated list of models to download (can also be passed as argument)
 #
@@ -26,6 +27,7 @@ set -euo pipefail
 
 # Configuration: Allow overriding checkpoint directories via environment variables
 ENGINES_DIR="${ENGINES_DIR:-/home/runner/_work/engines}"
+DATA_DIR="${DATA_DIR:-/home/runner/_work/data}"
 HF_CACHE_DIR="${HF_CACHE_DIR:-/home/runner/_work/hf_cache}"
 GITHUB_WORKSPACE="${GITHUB_WORKSPACE:-$(pwd)}"
 
@@ -34,7 +36,9 @@ setup_directories () {
     echo $GITHUB_WORKSPACE
     mkdir -p "$HF_CACHE_DIR"
     mkdir -p "$ENGINES_DIR"
+    mkdir -p "$DATA_DIR"
     echo "Using ENGINES_DIR: $ENGINES_DIR"
+    echo "Using DATA_DIR: $DATA_DIR"
     echo "Using HF_CACHE_DIR: $HF_CACHE_DIR"
 
     # Configure gcloud storage retry settings to handle transient network errors
@@ -44,8 +48,9 @@ setup_directories () {
     gcloud config set storage/exponential_sleep_multiplier 2
 }
 
-# Model checkpoints live under a common GCS prefix + model name.
+# Model checkpoints and datasets live under common GCS prefixes.
 MODEL_PATH_PREFIX="${MODEL_PATH_PREFIX:-gs://cohere-model-efficiency-ci/engines/}"
+DATA_PATH_PREFIX="${DATA_PATH_PREFIX:-gs://cohere-model-efficiency-ci/data/}"
 
 # To publish a local mhl_v2 engine tree to CI (requires GCP auth):
 #   gcloud storage rsync -r /path/to/mhl_v2 "${MODEL_PATH_PREFIX%/}/mhl_v2"
@@ -57,6 +62,15 @@ get_checkpoint_url () {
         echo "${MODEL_PATH_PREFIX}/${MODEL_NAME}"
     else
         echo "${MODEL_PATH_PREFIX}${MODEL_NAME}"
+    fi
+}
+
+get_data_url () {
+    local DATASET_NAME="$1"
+    if [[ "$DATA_PATH_PREFIX" != */ ]]; then
+        echo "${DATA_PATH_PREFIX}/${DATASET_NAME}"
+    else
+        echo "${DATA_PATH_PREFIX}${DATASET_NAME}"
     fi
 }
 
@@ -130,6 +144,22 @@ download_model_always () {
 
     echo "==> Downloading ${MODEL_NAME} model checkpoint from ${CHECKPOINT_URL}"
     replace_dir_from_gcs_cp "$CHECKPOINT_URL" "$DEST"
+}
+
+download_data_if_missing () {
+    local DATASET_NAME="$1"
+    local DATA_URL
+    local DEST
+
+    DATA_URL=$(get_data_url "$DATASET_NAME")
+    DEST="${DATA_DIR}/${DATASET_NAME}"
+
+    if [[ ! -d "$DEST" ]]; then
+        echo "==> Downloading dataset ${DATASET_NAME} from ${DATA_URL}"
+        replace_dir_from_gcs_cp "$DATA_URL" "$DEST"
+    else
+        echo "Dataset ${DATASET_NAME} already exists, skipping download."
+    fi
 }
 
 download_and_untar () {
@@ -258,6 +288,8 @@ download_vision () {
 download_asr () {
     echo "==> Downloading ASR model checkpoint"
     download_model_if_missing "cohere-transcribe-03-2026"
+    echo "==> Downloading ASR long-audio dataset"
+    download_data_if_missing "longform-audio-transcription"
 }
 
 download_model_arch_c5_3a30t_assets () {

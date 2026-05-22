@@ -7,6 +7,7 @@
 
 # Configuration: Allow overriding directories via environment variables
 export ENGINES_DIR="${ENGINES_DIR:-/root/engines}"
+export DATA_DIR="${DATA_DIR:-/root/data}"
 export VLLM_WORKSPACE="${VLLM_WORKSPACE:-/vllm-workspace}"
 export BEE_DIR="${BEE_DIR:-/app/cohere/apiary/bee}"
 export OUTPUT_DIR="${OUTPUT_DIR:-/root/output}"
@@ -14,6 +15,7 @@ export UNIT_SUMMARY_FILE_NAME="${UNIT_SUMMARY_FILE_NAME:-unit_results_summary.js
 # automatically hardware_profiles
 export VLLM_ENABLE_COHERE_AUTO_CONFIG=1
 echo "Using ENGINES_DIR: $ENGINES_DIR"
+echo "Using DATA_DIR: $DATA_DIR"
 echo "Using VLLM_WORKSPACE: $VLLM_WORKSPACE"
 echo "Using BEE_DIR: $BEE_DIR"
 echo "Using OUTPUT_DIR: $OUTPUT_DIR"
@@ -640,8 +642,8 @@ run_asr() {
     local errors=0
     export VLLM_WORKER_MULTIPROC_METHOD=spawn
 
-    time pytest -sv tests/cohere/test_asr.py::test_cohere_transcribe_wer_correctness || errors=1
-
+    time pytest -sv tests/cohere/test_asr_wer_tiny.py::test_cohere_transcribe_wer_correctness || errors=1
+    time pytest -sv tests/cohere/test_asr_long_audio_with_output_streaming.py::test_asr_long_audio_with_output_streaming || errors=1
     pytest -sv tests/entrypoints/openai/speech_to_text/test_transcription_inter_chunk_spacing.py || errors=1
     pytest -sv tests/entrypoints/openai/speech_to_text/test_speech_to_text_cancellation.py || errors=1
 

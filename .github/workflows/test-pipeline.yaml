@@ -149,6 +149,7 @@ jobs:
           -v ${{ runner.temp }}:/root/output \
           -v ${{ github.workspace }}:/vllm-workspace \
           -v /home/runner/_work/engines:/root/engines \
+          -v /home/runner/_work/data:/root/data \
           -v /home/runner/_work/hf_cache:/root/.cache/huggingface \
           --shm-size=256g \
           --ulimit memlock=-1 \
@@ -184,6 +185,7 @@ jobs:
           -v ${{ runner.temp }}:/root/output \
           -v ${{ github.workspace }}:/vllm-workspace \
           -v /home/runner/_work/engines:/root/engines \
+          -v /home/runner/_work/data:/root/data \
           -v /home/runner/_work/hf_cache:/root/.cache/huggingface \
           --shm-size=256g \
           --ulimit memlock=-1 \

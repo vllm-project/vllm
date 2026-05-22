@@ -78,6 +78,15 @@ This matrix is part of a three-layer documentation structure:
 - 6.1.2 `test_post_init_disabled_by_default`
 - 6.1.3 `test_post_init_no_op_for_non_cohere`
 
+### 7. ASR
+
+#### 7.1 [Cohere ASR](./features/asr.md)
+
+- 7.1.1 `test_cohere_transcribe_wer_correctness`
+- 7.1.2 `test_asr_long_audio_with_output_streaming`
+- 7.1.3 `test_create_transcription_non_streaming_joins_chunks_by_language`
+- 7.1.4 `test_non_streaming_cancel_aborts_engine_requests`
+
 ## Benchmarks
 
 ### 1. Model Architecture
