@@ -402,7 +402,8 @@ class EncoderCudaGraphManager:
                 batch_max_frames = max(
                     actual_frames_per_item[i] for i in batch_orig_indices
                 )
-                if batch_max_frames > self.max_frames_per_batch // self.max_batch_size:
+                frames_per_item = self.max_frames_per_batch // self.max_batch_size
+                if batch_max_frames > frames_per_item:
                     # Check if actual frames per item exceeds capture capacity.
                     # If so, fallback to eager to avoid shape mismatch.
                     token_budget = None
@@ -413,7 +414,7 @@ class EncoderCudaGraphManager:
                         "and 'encoder_cudagraph_max_frames_per_batch' "
                         "in 'compilation-config'",
                         batch_max_frames,
-                        self.max_frames_per_batch // self.max_batch_size,
+                        frames_per_item,
                     )
 
             if token_budget is None:
