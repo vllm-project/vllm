@@ -11,11 +11,16 @@ from plotting_tools.classify import classify_event
 from plotting_tools.nsys_jsonl import load_nsys_jsonl
 
 
-def load_trace(path: Path, *, strict: bool = False) -> list[dict[str, Any]]:
+def load_trace(
+    path: Path,
+    *,
+    strict: bool = False,
+    report: Any | None = None,
+) -> list[dict[str, Any]]:
     """Load Chrome JSON, or Nsight JSONL (.jsonl) from GUI export."""
     suffix = path.suffix.lower()
     if suffix == ".jsonl":
-        return load_nsys_jsonl(path, strict=strict)
+        return load_nsys_jsonl(path, strict=strict, report=report)
     raw = load_chrome_trace(path)
     return parse_duration_events(raw, strict=strict)
 
@@ -178,6 +183,67 @@ def infer_local_rank(
     if node in order:
         return order.index(node)
     return default
+
+
+def infer_device_id(events: list[dict[str, Any]], *, default: int = 0) -> int:
+    """CUDA device index from CUPTI rows (TP local rank on node)."""
+    devs: set[int] = set()
+    for e in events:
+        dev = (e.get("args") or {}).get("device_id")
+        if dev is not None:
+            devs.add(int(dev))
+    return min(devs) if devs else default
+
+
+def infer_global_rank(
+    trace_path: Path,
+    job_meta: dict[str, Any],
+    events: list[dict[str, Any]],
+) -> int:
+    """Global rank = PP_rank * TP + local device id."""
+    tp = max(1, int(job_meta.get("tensor_parallel", 1)))
+    pp_rank = infer_local_rank(trace_path, job_meta)
+    tp_rank = infer_device_id(events)
+    return pp_rank * tp + tp_rank
+
+
+def pp_sendrecv_duration_us(events: list[dict[str, Any]]) -> int:
+    return sum(
+        e["dur"]
+        for e in events
+        if e.get("kind") == "comm"
+        and "sendrecv" in (e.get("name") or "").lower()
+    )
+
+
+def pp_comm_reference_per_rank_us(
+    stage_totals: dict[int, int],
+    *,
+    tp: int,
+) -> float:
+    if not stage_totals:
+        return 0.0
+    return max(stage_totals.values()) / max(tp, 1)
+
+
+def adjust_duty_with_pp_balance(
+    duty: dict[str, float],
+    events: list[dict[str, Any]],
+    *,
+    pp_reference_us_per_rank: float,
+) -> dict[str, float]:
+    if not events or pp_reference_us_per_rank <= 0:
+        return duty
+    t0 = min(e["ts"] for e in events)
+    t1 = max(e["end"] for e in events)
+    span = max(t1 - t0, 1)
+    totals = {k: int(v * span) for k, v in duty.items()}
+    local_pp = pp_sendrecv_duration_us(events)
+    supplement = max(0.0, pp_reference_us_per_rank - local_pp)
+    if supplement <= 0:
+        return duty
+    totals["collective_comm"] = totals.get("collective_comm", 0) + int(supplement)
+    return {k: v / span for k, v in totals.items()}
 
 
 def merge_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:

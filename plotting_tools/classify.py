@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from typing import Literal
+from typing import Any, Literal
 
 Kind = Literal["compute", "comm", "control"]
 Subcategory = Literal[
@@ -169,12 +169,38 @@ NORM_PATTERNS = (
 
 # NCCL / PyTorch comm op labels for breakdown bar charts (order = first match wins).
 _COMM_OP_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("all_to_all", ("alltoall", "all_to_all", "all2all", "all-to-all")),
-    ("reduce_scatter", ("reducescatter", "reduce_scatter", "reducescatterprefix")),
-    ("all_gather", ("allgather", "all_gather", "allgatherprefix", "allgather_base")),
-    ("all_reduce", ("allreduce", "all_reduce", "allreduceprefix")),
-    ("broadcast", ("broadcast",)),
-    ("all_scatter", ("scatter", "reducescatter")),  # after reduce_scatter
+    ("all_to_all", (
+        "alltoall",
+        "all_to_all",
+        "all2all",
+        "all-to-all",
+        "deepep::all_to_all",
+        "deepep_a2a",
+    )),
+    ("reduce_scatter", (
+        "reducescatter",
+        "reduce_scatter",
+        "reducescatterprefix",
+        "nccldevkernel_reducescatter",
+    )),
+    ("all_gather", (
+        "allgather",
+        "all_gather",
+        "allgatherprefix",
+        "allgather_base",
+        "nccldevkernel_allgather",
+    )),
+    ("all_reduce", (
+        "allreduce",
+        "all_reduce",
+        "allreduceprefix",
+        "two_shot_all_reduce",
+        "one_shot_all_reduce",
+        "multimem_all_reduce",
+        "nccldevkernel_allreduce",
+        "pncclallreduce",
+    )),
+    ("broadcast", ("broadcast", "nccldevkernel_broadcast")),
     ("point_to_point", (
         "sendrecv",
         "send/recv",
@@ -182,45 +208,92 @@ _COMM_OP_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
         "irecv",
         "send_tensor",
         "recv_tensor",
+        "nccldevkernel_sendrecv",
     )),
-    ("memcpy_htod", ("memcpy htod", "memcpyhtod", "htod")),
-    ("memcpy_dtoh", ("memcpy dtoh", "memcpydtoh", "dtoh")),
-    ("memcpy_dtod", ("memcpy dtod", "memcpydtod", "dtod")),
+    ("memcpy_htod", ("memcpy htod", "memcpyhtod")),
+    ("memcpy_dtoh", ("memcpy dtoh", "memcpydtoh")),
+    ("memcpy_dtod", ("memcpy dtod", "memcpydtod")),
     ("memcpy_async", ("cudamemcpyasync", "cuda_memcpy_async")),
-    ("nccl_other", ("nccl",)),
+    ("nccl_other", ("nccldevkernel", "pnccl", "ncclkernel")),
+)
+
+_COLLECTIVE_SIGNALS = (
+    "nccl",
+    "memcpy",
+    "cudamemcpy",
+    "c10d",
+    "collective",
+    "allgather",
+    "allreduce",
+    "all_reduce",
+    "reducescatter",
+    "reduce_scatter",
+    "alltoall",
+    "all_to_all",
+    "broadcast",
+    "sendrecv",
+    "two_shot_all_reduce",
+    "one_shot_all_reduce",
+)
+
+_KERNEL_COLLECTIVE_SIGNALS = (
+    "nccldevkernel",
+    "pnccl",
+    "two_shot_all_reduce",
+    "one_shot_all_reduce",
+    "multimem_all_reduce",
+    "allreduce",
+    "all_reduce",
+    "reducescatter",
+    "reduce_scatter",
+    "allgather",
+    "all_gather",
+    "alltoall",
+    "all_to_all",
+    "sendrecv",
+    "broadcast",
 )
 
 
-def classify_comm_operation(name: str, cat: str = "") -> str | None:
+def classify_comm_operation(
+    name: str,
+    cat: str = "",
+    *,
+    args: dict[str, Any] | None = None,
+) -> str | None:
     """
     Map a comm-related event name to a collective / transfer bucket.
 
     Returns None if the event does not look like communication.
+    Includes GPU collective kernels (e.g. custom all-reduce) when cat is kernel.
     """
-    s = f"{name} {cat}".lower()
-    if not any(
-        k in s
-        for k in (
-            "nccl",
-            "memcpy",
-            "c10d",
-            "collective",
-            "allgather",
-            "allreduce",
-            "reducescatter",
-            "alltoall",
-            "broadcast",
-            "sendrecv",
-        )
+    name_l = name.lower().strip()
+    cat_l = cat.lower().strip()
+    s = f"{name_l} {cat_l}"
+
+    if cat_l == "memcpy" or name_l in (
+        "memcpy",
+        "memcpy unknown",
+        "memcpy default",
+        "memcpy device",
     ):
+        kind = int((args or {}).get("copy_kind", 0))
+        return {1: "memcpy_htod", 2: "memcpy_dtoh", 3: "memcpy_dtod"}.get(
+            kind, "memcpy_async"
+        )
+
+    signals = (
+        _KERNEL_COLLECTIVE_SIGNALS
+        if cat_l == "kernel"
+        else _COLLECTIVE_SIGNALS
+    )
+    if not any(k in s for k in signals):
         return None
+
     for label, keys in _COMM_OP_RULES:
         if any(k in s for k in keys):
-            # all_scatter rule is too broad (matches reducescatter) — skip generic scatter
-            if label == "all_scatter" and "reduce" in s:
-                continue
             return label
-    return "other_comm"
+    return "unclassified_comm"
 
 
 _COMM_OP_DISPLAY = {
@@ -236,6 +309,7 @@ _COMM_OP_DISPLAY = {
     "memcpy_dtod": "Memcpy D→D",
     "memcpy_async": "Memcpy (async)",
     "nccl_other": "NCCL (other)",
+    "unclassified_comm": "Unclassified comm",
     "other_comm": "Other comm",
 }
 
@@ -247,6 +321,8 @@ def comm_operation_label(op: str) -> str:
 def classify_kind(name: str, cat: str) -> Kind:
     s = f"{name} {cat}".lower()
 
+    if cat.lower() == "memcpy":
+        return "comm"
     if any(k in s for k in COMM_PATTERNS):
         return "comm"
     if cat.lower() == "kernel":
@@ -265,6 +341,10 @@ def classify_subcategory(name: str, cat: str, kind: Kind) -> Subcategory:
         return "collective_comm"
     if kind == "control":
         return "control"
+    if kind == "compute":
+        op = classify_comm_operation(name, "kernel")
+        if op is not None and not str(op).startswith("memcpy"):
+            return "collective_comm"
 
     if any(k in s for k in ATTENTION_PATTERNS):
         return "attention_comp"

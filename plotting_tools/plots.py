@@ -36,6 +36,13 @@ TRAFFIC_CMAP = LinearSegmentedColormap.from_list(
     ["#ffffff", "#41ab5d", "#08306b"],
 )
 
+HEATMAP_BG = "#FAF9F6"
+HEATMAP_NODE_HIGHLIGHT = "#FFF9E0"
+TRAFFIC_HEATMAP_CMAP = LinearSegmentedColormap.from_list(
+    "traffic_navy_cream",
+    ["#ffffcc", "#a1dab4", "#41b6c4", "#225ea8", "#08306b"],
+)
+
 DECOMPOSED_LAYERS = (
     ("attention_comp", "Attention Comp", "#4c78a8"),
     ("gate_comp", "Gate Comp", "#f58518"),
@@ -431,9 +438,11 @@ def plot_traffic_volume_pct(
     *,
     title: str,
     parallel_label: str,
+    duty: dict[str, float] | None = None,
 ) -> None:
     """Bar chart of duty-cycle % per decomposed category (may exceed 100% if events overlap)."""
-    duty = duty_by_sub(events)
+    if duty is None:
+        duty = duty_by_sub(events)
     labels: list[str] = []
     vals: list[float] = []
     colors: list[str] = []
@@ -562,34 +571,95 @@ def _comm_volume(event: dict[str, Any]) -> float:
     return float(event["dur"])
 
 
-def _pp_neighbor_ranks(local_rank: int, n_ranks: int) -> list[int]:
-    out: list[int] = []
-    if local_rank > 0:
-        out.append(local_rank - 1)
-    if local_rank < n_ranks - 1:
-        out.append(local_rank + 1)
-    return out
+def _pp_stage_ranks(pp_rank: int, tp: int) -> list[int]:
+    return list(range(pp_rank * tp, (pp_rank + 1) * tp))
 
 
-def _infer_pp_peer(local_rank: int, n_ranks: int, name: str) -> int | None:
-    """Pipeline-parallel fallback when NCCL name has no peer rank."""
+def _tp_peer_ranks(local_rank: int, tp: int) -> list[int]:
+    base = (local_rank // tp) * tp
+    return [base + j for j in range(tp) if base + j != local_rank]
+
+
+def _infer_pp_peer_ranks(
+    local_rank: int,
+    *,
+    tp: int,
+    pp: int,
+    name: str,
+) -> list[int]:
     peer = _peer_from_nccl_name(name)
-    if peer is not None and 0 <= peer < n_ranks:
-        return peer
+    if peer is not None and peer != local_rank:
+        return [peer]
+
     lower = name.lower()
-    if n_ranks == 2:
-        return 1 - local_rank
-    neighbors = _pp_neighbor_ranks(local_rank, n_ranks)
-    if not neighbors:
-        return None
-    if "sendrecv" in lower or "send" in lower or "recv" in lower:
-        if "send" in lower and "recv" not in lower and local_rank < n_ranks - 1:
-            return local_rank + 1
-        if "recv" in lower and "send" not in lower and local_rank > 0:
-            return local_rank - 1
-    if len(neighbors) == 1:
-        return neighbors[0]
-    return neighbors[0]
+    if not any(k in lower for k in ("sendrecv", "send", "recv")):
+        return []
+
+    pp_rank = local_rank // tp
+    targets: list[int] = []
+    if "send" in lower and "recv" not in lower:
+        if pp_rank + 1 < pp:
+            targets = _pp_stage_ranks(pp_rank + 1, tp)
+    elif "recv" in lower and "send" not in lower:
+        if pp_rank > 0:
+            targets = _pp_stage_ranks(pp_rank - 1, tp)
+    else:
+        if pp_rank > 0:
+            targets.extend(_pp_stage_ranks(pp_rank - 1, tp))
+        if pp_rank + 1 < pp:
+            targets.extend(_pp_stage_ranks(pp_rank + 1, tp))
+    return [t for t in targets if t != local_rank]
+
+
+def _infer_traffic_peers(
+    local_rank: int,
+    n_ranks: int,
+    name: str,
+    cat: str,
+    *,
+    tp: int = 1,
+    pp: int = 1,
+) -> list[int]:
+    explicit = _peer_from_nccl_name(name)
+    if explicit is not None and 0 <= explicit < n_ranks and explicit != local_rank:
+        return [explicit]
+
+    op = classify_comm_operation(name, cat)
+    if op is None and cat.lower() == "kernel":
+        op = classify_comm_operation(name, "kernel")
+
+    if op in ("point_to_point",) or (
+        op is None
+        and any(k in name.lower() for k in ("sendrecv", "send", "recv"))
+    ):
+        if pp > 1:
+            return _infer_pp_peer_ranks(local_rank, tp=tp, pp=pp, name=name)
+        if n_ranks == 2:
+            other = 1 - local_rank
+            return [other] if other != local_rank else []
+
+    if op in (
+        "all_reduce",
+        "all_gather",
+        "reduce_scatter",
+        "broadcast",
+        "all_to_all",
+        "nccl_other",
+    ):
+        if tp > 1:
+            return _tp_peer_ranks(local_rank, tp)
+
+    return []
+
+
+def _is_traffic_comm_event(e: dict[str, Any]) -> bool:
+    kind = e.get("kind")
+    if kind == "comm":
+        return True
+    if kind == "compute":
+        op = classify_comm_operation(e.get("name", ""), "kernel")
+        return op is not None and not str(op).startswith("memcpy")
+    return False
 
 
 def build_traffic_matrix(
@@ -597,28 +667,68 @@ def build_traffic_matrix(
     n_ranks: int,
     *,
     local_rank: int = 0,
-    pp_mode: bool = True,
+    tp: int = 1,
+    pp: int = 1,
 ) -> np.ndarray:
     """Rank-to-rank comm volume (bytes, else µs) from this trace's perspective."""
     mat = np.zeros((n_ranks, n_ranks), dtype=np.float64)
     for e in events:
-        if e["kind"] != "comm":
+        if not _is_traffic_comm_event(e):
             continue
         vol = _comm_volume(e)
-        name = e.get("name", "")
-        peer = _peer_from_nccl_name(name)
-        if peer is None and pp_mode:
-            peer = _infer_pp_peer(local_rank, n_ranks, name)
-        if peer is None or peer < 0 or peer >= n_ranks:
+        peers = _infer_traffic_peers(
+            local_rank,
+            n_ranks,
+            e.get("name", ""),
+            e.get("cat", ""),
+            tp=tp,
+            pp=pp,
+        )
+        if not peers:
             continue
-        if peer == local_rank:
-            continue
-        mat[local_rank, peer] += vol
+        share = vol / len(peers)
+        for peer in peers:
+            if 0 <= peer < n_ranks and peer != local_rank:
+                mat[local_rank, peer] += share
     return mat
+
+
+def symmetrize_traffic_matrix(
+    mat: np.ndarray,
+    *,
+    tp: int,
+    pp: int,
+) -> np.ndarray:
+    """Balance one-sided profiler durations across TP pairs and PP stages."""
+    out = mat.copy()
+    for stage in range(pp):
+        base = stage * tp
+        for a in range(tp):
+            for b in range(a + 1, tp):
+                i, j = base + a, base + b
+                if i >= out.shape[0] or j >= out.shape[1]:
+                    continue
+                v = max(out[i, j], out[j, i])
+                out[i, j] = out[j, i] = v
+    for stage_a in range(pp):
+        for stage_b in range(pp):
+            if stage_a == stage_b:
+                continue
+            for i in range(stage_a * tp, stage_a * tp + tp):
+                for j in range(stage_b * tp, stage_b * tp + tp):
+                    if i >= out.shape[0] or j >= out.shape[1]:
+                        continue
+                    v = max(out[i, j], out[j, i])
+                    out[i, j] = out[j, i] = v
+    return out
 
 
 def merge_rank_traffic_matrices(
     matrices: list[np.ndarray],
+    *,
+    tp: int = 1,
+    pp: int = 1,
+    symmetrize: bool = True,
 ) -> np.ndarray:
     """Sum per-rank trace matrices into one job-level rank x rank view."""
     if not matrices:
@@ -627,7 +737,26 @@ def merge_rank_traffic_matrices(
     out = np.zeros((n, n), dtype=np.float64)
     for m in matrices:
         out[: m.shape[0], : m.shape[1]] += m
+    if symmetrize and tp >= 1 and pp >= 1:
+        out = symmetrize_traffic_matrix(out, tp=tp, pp=pp)
     return out
+
+
+def _rank_node_group(rank: int, *, tp: int, pp: int) -> int:
+    _ = pp
+    return rank // max(tp, 1)
+
+
+def _heatmap_tick_labels(
+    n: int,
+    *,
+    rank_node_names: dict[int, str] | None,
+) -> list[str]:
+    labels: list[str] = []
+    for r in range(n):
+        node = (rank_node_names or {}).get(r, "")
+        labels.append(f"{r}\n{node}" if node else str(r))
+    return labels
 
 
 def build_gpu_traffic_matrix(
@@ -684,29 +813,83 @@ def plot_traffic_heatmap(
     ylabel: str = "Source rank",
     colorbar_label: str = "Volume (bytes or µs proxy)",
     annotate: bool = True,
+    tp: int = 1,
+    pp: int = 1,
+    rank_node_names: dict[int, str] | None = None,
 ) -> None:
     fig, ax = plt.subplots(figsize=(max(6, matrix.shape[1] * 0.9), max(5, matrix.shape[0] * 0.8)))
+    fig.patch.set_facecolor(HEATMAP_BG)
+    ax.set_facecolor(HEATMAP_BG)
+
+    n0, n1 = matrix.shape
     vmax = float(matrix.max()) if matrix.size else 1.0
     if vmax <= 0:
         vmax = 1.0
-    im = ax.imshow(matrix, cmap=TRAFFIC_CMAP, vmin=0, vmax=vmax, aspect="auto")
+
+    for i in range(n0):
+        for j in range(n1):
+            if _rank_node_group(i, tp=tp, pp=pp) == _rank_node_group(j, tp=tp, pp=pp):
+                ax.add_patch(
+                    plt.Rectangle(
+                        (j - 0.5, i - 0.5),
+                        1,
+                        1,
+                        facecolor=HEATMAP_NODE_HIGHLIGHT,
+                        edgecolor="#e8e0c8",
+                        linewidth=0.6,
+                        zorder=0,
+                    )
+                )
+
+    masked = np.ma.masked_where(matrix <= 0, matrix)
+    im = ax.imshow(
+        masked,
+        cmap=TRAFFIC_HEATMAP_CMAP,
+        vmin=0,
+        vmax=vmax,
+        aspect="auto",
+        interpolation="nearest",
+        zorder=1,
+    )
     ax.set_title(title)
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
-    n0, n1 = matrix.shape
     ax.set_xticks(range(n1))
     ax.set_yticks(range(n0))
-    ax.set_xticklabels([str(i) for i in range(n1)])
-    ax.set_yticklabels([str(i) for i in range(n0)])
+    ax.set_xticklabels(_heatmap_tick_labels(n1, rank_node_names=rank_node_names))
+    ax.set_yticklabels(_heatmap_tick_labels(n0, rank_node_names=rank_node_names))
+    for lbl in ax.get_xticklabels() + ax.get_yticklabels():
+        lbl.set_fontsize(8)
+
     if annotate:
         for i in range(n0):
             for j in range(n1):
                 val = matrix[i, j]
                 if val > 0:
                     txt = f"{val:.2e}" if val >= 1e4 else f"{val:.1f}"
-                    color = "white" if val > 0.6 * vmax else "black"
-                    ax.text(j, i, txt, ha="center", va="center", fontsize=8, color=color)
-    plt.colorbar(im, ax=ax, label=colorbar_label)
+                    color = "white" if val > 0.55 * vmax else "#1a1a1a"
+                    ax.text(
+                        j, i, txt, ha="center", va="center", fontsize=8, color=color, zorder=2
+                    )
+
+    cbar = fig.colorbar(im, ax=ax, label=colorbar_label, fraction=0.046, pad=0.04)
+    cbar.outline.set_edgecolor("#cccccc")
+    cbar.ax.set_facecolor(HEATMAP_BG)
+
+    ax.legend(
+        handles=[
+            Patch(
+                facecolor=HEATMAP_NODE_HIGHLIGHT,
+                edgecolor="#e8e0c8",
+                label="Same node (TP group)",
+            ),
+        ],
+        loc="upper left",
+        bbox_to_anchor=(1.22, 1.0),
+        fontsize=8,
+        framealpha=0.95,
+    )
+
     plt.tight_layout()
     save_figure(fig, out_path)
 
@@ -742,25 +925,60 @@ def plot_expert_traffic_volume(
     return total_b
 
 
+def _classify_event_for_comm_breakdown(
+    e: dict[str, Any],
+) -> str | None:
+    kind = e.get("kind")
+    if kind == "control":
+        return None
+
+    name = e.get("name", "")
+    cat = e.get("cat", "")
+    args = e.get("args") or {}
+
+    if kind == "comm":
+        return classify_comm_operation(name, cat, args=args)
+
+    if kind == "compute":
+        op = classify_comm_operation(name, "kernel", args=args)
+        if op is None or op.startswith("memcpy"):
+            return None
+        return op
+
+    return None
+
+
+def _short_comm_label(name: str, cat: str, width: int = 96) -> str:
+    label = f"{cat}|{name}".strip("|")
+    if len(label) <= width:
+        return label
+    return label[: width - 1] + "…"
+
+
 def comm_operation_breakdown(
     events: list[dict[str, Any]],
-) -> dict[str, dict[str, float | int]]:
-    """Count and total duration (µs) per comm operation type."""
+) -> tuple[dict[str, dict[str, float | int]], Counter[str]]:
+    """
+    Count duration/bytes per collective op type.
+
+    Includes CUPTI comm rows and collective GPU kernels (e.g. custom all-reduce).
+    """
     stats: dict[str, dict[str, float | int]] = defaultdict(
         lambda: {"count": 0, "dur_us": 0, "bytes": 0}
     )
+    unclassified: Counter[str] = Counter()
     for e in events:
-        if e.get("kind") != "comm":
-            continue
-        op = classify_comm_operation(e.get("name", ""), e.get("cat", ""))
+        op = _classify_event_for_comm_breakdown(e)
         if op is None:
-            op = "other_comm"
+            continue
+        if op == "unclassified_comm":
+            unclassified[_short_comm_label(e.get("name", ""), e.get("cat", ""))] += 1
         stats[op]["count"] += 1
         stats[op]["dur_us"] += e["dur"]
         b = _extract_comm_bytes(e)
         if b:
             stats[op]["bytes"] += b
-    return dict(stats)
+    return dict(stats), unclassified
 
 
 def plot_collective_ops_breakdown(
@@ -768,11 +986,11 @@ def plot_collective_ops_breakdown(
     out_path: Path,
     *,
     title: str,
-) -> dict[str, dict[str, float | int]]:
+) -> tuple[dict[str, dict[str, float | int]], Counter[str]]:
     """Bar chart: comm op type vs event count and vs total time (ms)."""
-    stats = comm_operation_breakdown(events)
+    stats, unclassified = comm_operation_breakdown(events)
     plot_collective_ops_breakdown_stats(stats, out_path, title=title)
-    return stats
+    return stats, unclassified
 
 
 def collect_nccl_ops(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1104,6 +1322,30 @@ def plot_classic_timeline(
     ax.set_title(title)
     ax.legend(loc="upper right")
     ax.grid(True, axis="x", linestyle="--", alpha=0.35)
+    plt.tight_layout()
+    save_figure(fig, out_path)
+
+
+def plot_classification_histogram(
+    counts: dict[str, int],
+    out_path: Path,
+    *,
+    title: str,
+    xlabel: str = "Count",
+) -> None:
+    """Horizontal bar chart of label → count (unclassified / skipped runtime)."""
+    if not counts:
+        return
+    items = sorted(counts.items(), key=lambda x: x[1], reverse=True)[:30]
+    labels = [k[:70] + ("…" if len(k) > 70 else "") for k, _ in items]
+    vals = [v for _, v in items]
+    fig, ax = plt.subplots(figsize=(12, max(4, 0.28 * len(items))))
+    ax.barh(range(len(items)), vals, color="#e45756")
+    ax.set_yticks(range(len(items)))
+    ax.set_yticklabels(labels, fontsize=7)
+    ax.invert_yaxis()
+    ax.set_xlabel(xlabel)
+    ax.set_title(title)
     plt.tight_layout()
     save_figure(fig, out_path)
 

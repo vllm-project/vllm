@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,12 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from plotting_tools.classify_report import (  # noqa: E402
+    ClassificationReport,
+    format_plotting_log,
+    merge_reports,
+    write_plotting_log,
+)
 from plotting_tools.plots import (  # noqa: E402
     PLOT_EXT,
     analyze_idle_gaps,
@@ -27,6 +34,7 @@ from plotting_tools.plots import (  # noqa: E402
     merge_rank_traffic_matrices,
     nocomm_windows,
     plot_average_duty_pct,
+    plot_classification_histogram,
     plot_classic_timeline,
     plot_collective_ops_breakdown,
     plot_collective_ops_breakdown_stats,
@@ -52,8 +60,14 @@ from plotting_tools.trace_io import (  # noqa: E402
     duty_by_sub,
     global_align_t0,
     sync_capture_t0,
+    adjust_duty_with_pp_balance,
+    infer_device_id,
+    infer_global_rank,
     infer_local_rank,
     infer_node_name,
+    pp_comm_reference_per_rank_us,
+    pp_rank_order,
+    pp_sendrecv_duration_us,
     load_chrome_trace,
     load_trace,
     parse_duration_events,
@@ -94,16 +108,55 @@ def _find_worker_traces(job_dir: Path) -> list[Path]:
 
 
 def _trace_output_prefix(trace_path: Path) -> str:
-    """Use node hostname (htc-g059) when present, else trace stem."""
-    return infer_node_name(trace_path) or trace_path.stem.replace(".", "_")
+    """Node + worker pid so TP multi-GPU traces do not overwrite outputs."""
+    import re
+
+    node = infer_node_name(trace_path) or trace_path.stem.replace(".", "_")
+    m = re.search(r"worker_process_(\d+)", trace_path.name)
+    if m:
+        return f"{node}_w{m.group(1)}"
+    return node
 
 
-def _load_trace_events(trace_path: Path, *, strict: bool) -> list[dict[str, Any]]:
+def _build_rank_node_names(
+    job_meta: dict[str, Any],
+    n_ranks: int,
+    tp: int,
+    loaded: list[tuple[Path, str, list[dict[str, Any]], ClassificationReport]],
+) -> dict[int, str]:
+    names: dict[int, str] = {}
+    for path, _, events, _ in loaded:
+        gr = infer_global_rank(path, job_meta, events)
+        names[gr] = infer_node_name(path) or path.parent.name
+    order = pp_rank_order(job_meta)
+    for r in range(n_ranks):
+        if r not in names and order:
+            stage = r // max(tp, 1)
+            if stage < len(order):
+                names[r] = order[stage]
+    return names
+
+
+def _load_trace_events(
+    trace_path: Path,
+    *,
+    strict: bool,
+    report: ClassificationReport,
+) -> list[dict[str, Any]]:
     if trace_path.suffix.lower() == ".jsonl":
-        return load_trace(trace_path, strict=strict)
+        return load_trace(trace_path, strict=strict, report=report)
     raw = load_chrome_trace(trace_path)
+    report.jsonl_lines = len(raw)
     nvtx = parse_nvtx_ranges(raw)
     events = parse_duration_events(raw, strict=strict)
+    for e in events:
+        report.record_parsed_event(
+            e["name"],
+            e["cat"],
+            e["kind"],
+            e["sub"],
+            args=e.get("args"),
+        )
     if nvtx:
         tag_phase(events, nvtx)
     return events
@@ -133,9 +186,18 @@ def analyze_trace(
     trim_capture_skew: bool = True,
     pp_comm_split: bool = False,
     global_t0_us: int | None = None,
+    pp_reference_us_per_rank: float = 0.0,
+    rank_node_names: dict[int, str] | None = None,
+    classification_report: ClassificationReport | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     if events is None:
-        events = _load_trace_events(trace_path, strict=strict)
+        events = _load_trace_events(
+            trace_path,
+            strict=strict,
+            report=classification_report or ClassificationReport(
+                trace_path=str(trace_path)
+            ),
+        )
 
     trace_out = out_dir / prefix
     trace_out.mkdir(parents=True, exist_ok=True)
@@ -144,17 +206,28 @@ def analyze_trace(
     tp = job_meta.get("tensor_parallel", 1)
     ep = job_meta.get("expert_parallel", 1)
     parallel_label = f"TP={tp} PP={pp} EP={ep}"
-    local_rank = infer_local_rank(trace_path, job_meta)
+    pp_rank = infer_local_rank(trace_path, job_meta)
+    global_rank = infer_global_rank(trace_path, job_meta, events)
+    device_id = infer_device_id(events)
     node = infer_node_name(trace_path) or prefix
     local_t0_us = trace_t0_us(events)
     axis = _time_axis_label(
         align_global=align_global, trim_capture_skew=trim_capture_skew
     )
     decomp_title = (
-        f"{node} (PP rank {local_rank}): decomposed compute / comm ({axis})"
+        f"{node} (global rank {global_rank}, PP {pp_rank}, GPU {device_id}): "
+        f"decomposed compute / comm ({axis})"
     )
     if pp_comm_split:
         decomp_title += " [PP vs local comm]"
+
+    duty = duty_by_sub(events)
+    if pp > 1 and pp_reference_us_per_rank > 0:
+        duty = adjust_duty_with_pp_balance(
+            duty,
+            events,
+            pp_reference_us_per_rank=pp_reference_us_per_rank,
+        )
 
     plot_decomposed_timeline(
         events,
@@ -169,6 +242,7 @@ def analyze_trace(
         trace_out / f"traffic_volume_pct{PLOT_EXT}",
         title=f"{node}: category time share",
         parallel_label=parallel_label,
+        duty=duty,
     )
     plot_classic_timeline(
         events,
@@ -187,20 +261,27 @@ def analyze_trace(
     mat = build_traffic_matrix(
         events,
         n_ranks_use,
-        local_rank=local_rank,
-        pp_mode=pp > 1,
+        local_rank=global_rank,
+        tp=tp,
+        pp=pp,
     )
     plot_traffic_heatmap(
         mat,
         trace_out / f"rank_traffic_heatmap{PLOT_EXT}",
-        title=f"{node}: rank-to-rank comm (PP rank {local_rank}, {parallel_label})",
+        title=f"{node}: rank-to-rank comm (rank {global_rank}, {parallel_label})",
         xlabel="Destination rank",
         ylabel="Source rank",
+        tp=tp,
+        pp=pp,
+        rank_node_names=rank_node_names,
     )
     plot_traffic_heatmap(
         mat,
         trace_out / f"all2all_traffic_heatmap{PLOT_EXT}",
         title=f"{node}: comm traffic matrix (rank x rank)",
+        tp=tp,
+        pp=pp,
+        rank_node_names=rank_node_names,
     )
     gpu_mat = build_gpu_traffic_matrix(events, n_gpus=tp if tp > 1 else None)
     plot_traffic_heatmap(
@@ -209,6 +290,9 @@ def analyze_trace(
         title=f"{node}: GPU-to-GPU comm on node (TP={tp})",
         xlabel="Destination GPU",
         ylabel="Source GPU",
+        tp=tp,
+        pp=1,
+        rank_node_names={i: node for i in range(gpu_mat.shape[0])},
     )
 
     msg_stats = plot_message_stats(
@@ -217,12 +301,22 @@ def analyze_trace(
         prefix=node,
     )
 
-    comm_breakdown = plot_collective_ops_breakdown(
+    comm_breakdown, comm_unclassified = plot_collective_ops_breakdown(
         events,
         trace_out / f"collective_ops_breakdown{PLOT_EXT}",
         title=f"{node}: communication ops (count & GPU time)",
     )
-    write_summary_json(trace_out / "collective_ops_breakdown.json", comm_breakdown)
+    if classification_report is not None:
+        classification_report.record_comm_breakdown(
+            comm_breakdown, comm_unclassified
+        )
+    write_summary_json(
+        trace_out / "collective_ops_breakdown.json",
+        {
+            "ops": comm_breakdown,
+            "unclassified_comm": dict(comm_unclassified.most_common(50)),
+        },
+    )
 
     nccl_ops = collect_nccl_ops(events)
     write_collective_ops_table(nccl_ops, trace_out / "collective_ops.json")
@@ -276,16 +370,19 @@ def analyze_trace(
     summary = {
         "trace": str(trace_path),
         "node": node,
-        "pp_rank": local_rank,
+        "pp_rank": pp_rank,
+        "global_rank": global_rank,
+        "device_id": device_id,
         "align_global": align_global,
         "trim_capture_skew": trim_capture_skew,
         "pp_comm_split": pp_comm_split,
         "timing": timing,
         "event_count": len(events),
-        "duty_by_subcategory": duty_by_sub(events),
+        "duty_by_subcategory": duty,
         "expert_traffic_gb_heuristic": expert_gb,
         "message_stats": msg_stats,
         "comm_ops_breakdown": comm_breakdown,
+        "comm_unclassified": dict(comm_unclassified.most_common(30)),
         "nccl_op_count": len(nccl_ops),
         "idle_context": idle_ctx,
         "job_metadata": job_meta,
@@ -361,14 +458,27 @@ def build_summary_plots(
         title=f"{job_label}: expert routing heuristic by node",
     )
 
-    breakdowns = [d["comm_ops_breakdown"] for d in node_data.values() if d.get("comm_ops_breakdown")]
+    breakdowns = [
+        d["comm_ops_breakdown"]
+        for d in node_data.values()
+        if d.get("comm_ops_breakdown")
+    ]
     merged_comm = merge_comm_operation_breakdowns(breakdowns)
+    merged_uncl: Counter[str] = Counter()
+    for d in node_data.values():
+        merged_uncl.update(d.get("comm_unclassified") or {})
     plot_collective_ops_breakdown_stats(
         merged_comm,
         summary_dir / f"collective_ops_breakdown{PLOT_EXT}",
         title=f"{job_label}: communication ops (all nodes combined)",
     )
-    write_summary_json(summary_dir / "collective_ops_breakdown.json", merged_comm)
+    write_summary_json(
+        summary_dir / "collective_ops_breakdown.json",
+        {
+            "ops": merged_comm,
+            "unclassified_comm": dict(merged_uncl.most_common(50)),
+        },
+    )
 
     matrices: list[np.ndarray] = []
     ranks_seen: list[int] = []
@@ -376,11 +486,17 @@ def build_summary_plots(
         mat = np.array(data.get("rank_traffic_matrix") or [], dtype=np.float64)
         if mat.size:
             matrices.append(mat)
-            ranks_seen.append(data.get("pp_rank", 0))
+            ranks_seen.append(data.get("global_rank", data.get("pp_rank", 0)))
 
     rank_summary: dict[str, Any] = {}
     if matrices:
-        merged = merge_rank_traffic_matrices(matrices)
+        merged = merge_rank_traffic_matrices(matrices, tp=tp, pp=pp)
+        rank_node_names: dict[int, str] = {}
+        for _node, data in node_data.items():
+            gr = data.get("global_rank")
+            if gr is not None:
+                rank_node_names[int(gr)] = str(data.get("node") or _node).split("_")[0]
+
         plot_traffic_heatmap(
             merged,
             summary_dir / f"rank_traffic_heatmap{PLOT_EXT}",
@@ -388,6 +504,9 @@ def build_summary_plots(
             xlabel="Destination PP/TP rank",
             ylabel="Source PP/TP rank",
             colorbar_label="Bytes or µs proxy (summed across nodes)",
+            tp=tp,
+            pp=pp,
+            rank_node_names=rank_node_names,
         )
         rank_summary = {
             "n_ranks": n_ranks_use,
@@ -577,7 +696,10 @@ def main() -> None:
         )
         sys.exit(1)
 
-    loaded: list[tuple[Path, str, list[dict[str, Any]]]] = []
+    loaded: list[
+        tuple[Path, str, list[dict[str, Any]], ClassificationReport]
+    ] = []
+    classification_reports: list[ClassificationReport] = []
     for tp in traces:
         if tp.stat().st_size == 0:
             print(f"Skipping empty trace: {tp}")
@@ -585,21 +707,26 @@ def main() -> None:
         path = tp.resolve()
         prefix = _trace_output_prefix(path)
         print(f"Loading {path}")
-        loaded.append((path, prefix, _load_trace_events(path, strict=args.strict_classify)))
+        rep = ClassificationReport(trace_path=str(path))
+        events = _load_trace_events(
+            path, strict=args.strict_classify, report=rep
+        )
+        classification_reports.append(rep)
+        loaded.append((path, prefix, events, rep))
 
     global_t0_us: int | None = None
     plot_t0_us: int | None = None
     align_global = sync_timelines
     trim_capture_skew = sync_timelines and len(loaded) > 1
     if sync_timelines and loaded:
-        all_ev = [ev for _, _, ev in loaded]
+        all_ev = [ev for _, _, ev, _ in loaded]
         global_t0_us = global_align_t0(all_ev)
         plot_t0_us = global_t0_us
         if trim_capture_skew:
             plot_t0_us = sync_capture_t0(all_ev) or plot_t0_us
         if global_t0_us is not None:
             print(f"Synced timelines: global t0_us (earliest capture)={global_t0_us}")
-            for _, prefix, ev in loaded:
+            for _, prefix, ev, _ in loaded:
                 off = clock_offset_ms(ev, time_origin_us=global_t0_us)
                 if off is not None:
                     print(f"  {prefix} capture starts +{off:.1f} ms vs global t0")
@@ -612,14 +739,35 @@ def main() -> None:
     per_node_summaries: dict[str, dict[str, Any]] = {}
     all_summaries: dict[str, Any] = {}
 
-    for path, prefix, events in loaded:
+    tp = int(job_meta.get("tensor_parallel", 1))
+    pp = int(job_meta.get("pipeline_parallel", 1))
+    n_ranks_default = max(args.n_ranks, pp * tp)
+
+    pp_reference_us_per_rank = 0.0
+    if pp > 1 and loaded:
+        stage_pp: dict[int, int] = {}
+        for path, _, events, _ in loaded:
+            pr = infer_local_rank(path, job_meta)
+            stage_pp[pr] = stage_pp.get(pr, 0) + pp_sendrecv_duration_us(events)
+        pp_reference_us_per_rank = pp_comm_reference_per_rank_us(stage_pp, tp=tp)
+
+    rank_node_names = _build_rank_node_names(
+        job_meta, n_ranks_default, tp, loaded
+    )
+
+    tp_meta = int(job_meta.get("tensor_parallel", 1))
+    pp_meta = int(job_meta.get("pipeline_parallel", 1))
+    ep_meta = int(job_meta.get("expert_parallel", 1))
+    parallel_label = f"TP={tp_meta} PP={pp_meta} EP={ep_meta}"
+
+    for path, prefix, events, rep in loaded:
         print(f"Analyzing {path} -> {out_dir / prefix}")
         summary, events = analyze_trace(
             path,
             out_dir,
             prefix=prefix,
             job_meta=job_meta,
-            n_ranks=args.n_ranks,
+            n_ranks=n_ranks_default,
             num_experts=args.num_experts,
             strict=args.strict_classify,
             max_plot_ms=args.max_plot_ms,
@@ -629,6 +777,9 @@ def main() -> None:
             trim_capture_skew=trim_capture_skew,
             pp_comm_split=args.pp_comm_split,
             global_t0_us=global_t0_us,
+            pp_reference_us_per_rank=pp_reference_us_per_rank,
+            rank_node_names=rank_node_names,
+            classification_report=rep,
         )
         summary["events"] = events  # kept in memory for summary plots only
         per_node_summaries[prefix] = summary
@@ -640,7 +791,7 @@ def main() -> None:
             per_node_summaries,
             summary_dir,
             job_meta=job_meta,
-            n_ranks=args.n_ranks,
+            n_ranks=n_ranks_default,
             job_label=job_dir.name,
             time_origin_us=plot_t0_us,
             align_global=align_global,
@@ -652,6 +803,69 @@ def main() -> None:
         all_summaries["summary_plots"] = summary_meta
 
     write_summary_json(out_dir / "job_summary.json", all_summaries)
+
+    merged_amb: dict[str, int] = {}
+    merged_skip: dict[str, int] = {}
+    for rep in classification_reports:
+        for k, v in rep.ambiguous_control.items():
+            merged_amb[k] = merged_amb.get(k, 0) + v
+        for k, v in rep.skipped_runtime_names.items():
+            merged_skip[k] = merged_skip.get(k, 0) + v
+    plot_classification_histogram(
+        merged_amb,
+        out_dir / f"unclassified_ambiguous_control{PLOT_EXT}",
+        title=f"{job_dir.name}: ambiguous control (unclassified runtime labels)",
+    )
+    plot_classification_histogram(
+        merged_skip,
+        out_dir / f"skipped_runtime_histogram{PLOT_EXT}",
+        title=f"{job_dir.name}: skipped runtime API (not loaded into plots)",
+    )
+
+    merged_comm_for_log: dict[str, dict[str, float | int]] | None = None
+    if len(per_node_summaries) >= 1:
+        merged_comm_for_log = (
+            all_summaries.get("summary_plots", {}).get("merged_comm_ops")
+        )
+    if merged_comm_for_log is None and per_node_summaries:
+        merged_comm_for_log = merge_comm_operation_breakdowns(
+            [d["comm_ops_breakdown"] for d in per_node_summaries.values()]
+        )
+
+    job_merged_report = merge_reports(classification_reports)
+    job_inventory = job_merged_report.inventory_dict()
+
+    log_text = format_plotting_log(
+        str(job_dir),
+        job_meta,
+        classification_reports,
+        parallel_label=parallel_label,
+        merged_comm=merged_comm_for_log,
+        job_inventory=job_inventory,
+    )
+    write_plotting_log(
+        out_dir,
+        log_text,
+        classification_reports,
+        job_meta,
+        merged_comm=merged_comm_for_log,
+        job_inventory=job_inventory,
+    )
+    inv_path = out_dir / "classification_inventory.json"
+    write_summary_json(
+        inv_path,
+        {
+            "job_inventory": job_inventory,
+            "per_trace": {
+                Path(r.trace_path).name: r.inventory_dict()
+                for r in classification_reports
+            },
+        },
+    )
+    print(
+        f"Wrote plotting_log.txt, plotting_log.json, and {inv_path.name} under {out_dir}"
+    )
+
     print(f"Wrote per-node plots under {out_dir}")
     if len(per_node_summaries) > 1:
         print(f"Wrote cross-node summary under {summary_dir}")
