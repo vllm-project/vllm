@@ -10,8 +10,8 @@ from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    get_tp_group,
 )
-from vllm.distributed.parallel_state import get_tp_group
 from vllm.model_executor.custom_op import CustomOp
 from vllm.utils.torch_utils import direct_register_custom_op
 

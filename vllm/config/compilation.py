@@ -134,6 +134,11 @@ class PassConfig:
     """Enable async TP."""
     fuse_allreduce_rms: bool = None  # type: ignore[assignment]
     """Enable flashinfer allreduce fusion."""
+    fuse_minimax_qk_norm: bool = None  # type: ignore[assignment]
+    """Deprecated. The MiniMax QK norm fusion is now applied automatically at
+    runtime (see `MiniMaxText01RMSNormTP.forward_qkv`). This flag is kept for
+    backward compatibility and has no effect; it will be removed in a future
+    release."""
     enable_qk_norm_rope_fusion: bool = None  # type: ignore[assignment]
     """Enable fused Q/K RMSNorm + RoPE pass."""
     fuse_rope_kvcache_cat_mla: bool = None  # type: ignore[assignment]
@@ -292,6 +297,13 @@ class PassConfig:
                 "current platform is not CUDA or ROCm. The fusion will be disabled."
             )
             self.fuse_rope_kvcache_cat_mla = False
+        if self.fuse_minimax_qk_norm is not None:
+            logger.warning_once(
+                "`fuse_minimax_qk_norm` is deprecated and has no effect; "
+                "the MiniMax QK norm fusion is now applied automatically at "
+                "runtime when its conditions are met. This flag will be "
+                "removed in a future release."
+            )
 
     def log_enabled_passes(self) -> None:
         """
