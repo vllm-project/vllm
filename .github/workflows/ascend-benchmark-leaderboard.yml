@@ -128,7 +128,7 @@ jobs:
       TARGET_REPO_URL: git@github.com:${{ github.repository }}.git
       TARGET_REPO_SHA: ${{ github.sha }}
       BENCHMARK_REPO_URL: git@github.com:vLLM-HUST/vllm-hust-benchmark.git
-      BENCHMARK_REPO_REF: ${{ (github.event_name == 'pull_request' && github.head_ref == 'ws/fix-actions-26145186169-26145186140') && 'ci/fix-same-spec-readiness-a296612' || '' }}
+      BENCHMARK_REPO_REF: ${{ vars.VLLM_HUST_BENCHMARK_REPO_REF || '' }}
       WEBSITE_REPO_URL: git@github.com:vLLM-HUST/vllm-hust-website.git
       VLLM_ASCEND_HUST_REPO_URL: git@github.com:vLLM-HUST/vllm-ascend-hust.git
       HUST_ASCEND_MANAGER_REPO_URL: git@github.com:vLLM-HUST/ascend-runtime-manager.git
