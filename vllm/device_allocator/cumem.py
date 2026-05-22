@@ -160,6 +160,12 @@ class CuMemAllocator:
         data = self.pointer_to_data.pop(ptr)
         if data.cpu_backup_tensor is not None:
             data.cpu_backup_tensor = None
+        # Drain pending kernels before the C extension's cuMemUnmap.
+        # The pluggable allocator path doesn't defer reclaim like the
+        # regular caching allocator, so without this, in-flight work
+        # (e.g. quant helpers' transient tensors during weight loading)
+        # races the unmap and surfaces as CUDA_ERROR_ILLEGAL_ADDRESS.
+        torch.cuda.synchronize(data.handle[0])
         logger.debug(
             "Freed %s bytes for %s with address %s from cumem allocator",
             data.handle[1],
