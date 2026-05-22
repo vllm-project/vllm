@@ -130,13 +130,15 @@ class Sampler:
         pos: torch.Tensor,
         input_ids: torch.Tensor,
         expanded_local_pos: torch.Tensor,
+        shard_vocab_start: int | None = None,
     ) -> torch.Tensor:
+        vocab_start = shard_vocab_start or 0
         # Copy logits to a new FP32 tensor.
         logits = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
 
         # Apply logit bias (e.g., allowed_token_ids, min_tokens) in place.
         self.logit_bias_state.apply_logit_bias(
-            logits, expanded_idx_mapping, idx_mapping_np, pos
+            logits, expanded_idx_mapping, idx_mapping_np, pos, vocab_start
         )
 
         # Apply penalties in place.
@@ -146,6 +148,7 @@ class Sampler:
             idx_mapping_np,
             input_ids,
             expanded_local_pos,
+            vocab_start,
         )
 
         # Apply bad words masking in place.
@@ -155,6 +158,7 @@ class Sampler:
             idx_mapping_np,
             input_ids,
             expanded_local_pos,
+            vocab_start,
         )
 
         # Apply temperature in place.
@@ -187,6 +191,7 @@ class Sampler:
             pos,
             input_ids,
             expanded_local_pos,
+            shard_vocab_start=shard_vocab_start,
         )
 
         # Sample the next token.
@@ -203,12 +208,12 @@ class Sampler:
         return sampled, processed_logits
 
     def can_sharded_sample(self, idx_mapping_np: np.ndarray) -> bool:
+        """Check whether all active requests use only sampling params that
+        are compatible with sharded logits. Params that require global vocab
+        knowledge (top-k, top-p, min-p) are not compatible."""
         ss = self.sampling_states
         return (
-            not np.any(self.logit_bias_state.use_logit_bias[idx_mapping_np])
-            and not np.any(self.penalties_state.use_penalty[idx_mapping_np])
-            and np.all(self.bad_words_state.num_bad_words.np[idx_mapping_np] == 0)
-            and np.all(ss.min_p.np[idx_mapping_np] == 0.0)
+            np.all(ss.min_p.np[idx_mapping_np] == 0.0)
             and np.all(ss.top_k.np[idx_mapping_np] == ss.vocab_size)
             and np.all(ss.top_p.np[idx_mapping_np] == 1.0)
             and ss.max_num_logprobs(idx_mapping_np) == NO_LOGPROBS

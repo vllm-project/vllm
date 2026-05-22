@@ -100,22 +100,16 @@ def _compute_block_stats_kernel(
         other=float("-inf"),
     ).to(tl.float32)
 
-    # Extract this block's contribution to the target logit at the
-    # draft-sampled token. Only the block containing the draft token
-    # contributes a non-zero value; the rejection kernel sums across
-    # blocks to recover the scalar.
+    # If present in this block, get the target logit for the draft
+    # sampled token.
     draft_token = tl.load(draft_sampled_ptr + logit_idx + 1)
     local_draft_token = draft_token - vocab_start
     offset_in_block = local_draft_token - block_idx * BLOCK_SIZE
-    in_this_block = (offset_in_block >= 0) & (offset_in_block < BLOCK_SIZE)
-    target_logit_at_draft = tl.where(
-        in_this_block,
-        tl.load(
-            target_logits_ptr + logit_idx * target_logits_stride + local_draft_token,
-            mask=in_this_block,
-            other=0.0,
-        ),
-        0.0,
+    in_block_mask = (offset_in_block >= 0) & (offset_in_block < BLOCK_SIZE)
+    target_logit_at_draft = tl.load(
+        target_logits_ptr + logit_idx * target_logits_stride + local_draft_token,
+        mask=in_block_mask,
+        other=0.0,
     ).to(tl.float32)
     tl.store(
         target_logits_at_draft_sampled_ptr
@@ -132,11 +126,6 @@ def _compute_block_stats_kernel(
 
     if temp != 0.0:
         target_sumexp = _compute_block_sumexp(target_logits, target_max)
-        target_sumexp = tl.where(
-            target_max > float("-inf"),
-            tl.sum(tl.exp(target_logits - target_max)),
-            0.0,
-        )
         tl.store(
             target_local_sumexp_ptr
             + logit_idx * target_local_sumexp_stride
@@ -559,6 +548,7 @@ def rejection_sample(
         num_speculative_steps,
         BLOCK_SIZE=VOCAB_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
+        num_warps=8,
     )
 
     # TP all-gather block logits stats across ranks if the target logits
@@ -617,7 +607,7 @@ def rejection_sample(
     )
 
     # Resample the rejected/bonus tokens.
-    RESAMPLE_BLOCK_SIZE = 1024
+    RESAMPLE_BLOCK_SIZE = 2048
     resample_num_blocks = triton.cdiv(vocab_size, RESAMPLE_BLOCK_SIZE)
     padded_resample_num_blocks = triton.next_power_of_2(resample_num_blocks)
     resampled_local_argmax = target_logits.new_empty(
@@ -652,6 +642,7 @@ def rejection_sample(
         BLOCK_SIZE=RESAMPLE_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
         USE_FP64=use_fp64,
+        num_warps=8,
     )
 
     # TP all-gather resampled max/argmax across ranks if the

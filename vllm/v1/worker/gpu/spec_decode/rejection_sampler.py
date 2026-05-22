@@ -112,6 +112,7 @@ class RejectionSampler:
             pos,
             draft_sampled,
             input_batch.expanded_local_pos,
+            shard_vocab_start=shard_vocab_start,
         )
         sampled, num_sampled = rejection_sample(
             processed_logits,

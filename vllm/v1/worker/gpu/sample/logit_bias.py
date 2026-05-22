@@ -124,6 +124,7 @@ class LogitBiasState:
         expanded_idx_mapping: torch.Tensor,
         idx_mapping_np: np.ndarray,
         pos: torch.Tensor,
+        vocab_start: int = 0,
     ) -> None:
         if not np.any(self.use_logit_bias[idx_mapping_np]):
             # No request uses logit bias. Skip the kernel launch.
@@ -141,6 +142,7 @@ class LogitBiasState:
             self.min_lens.gpu,
             self.num_stop_token_ids.gpu,
             self.stop_token_ids.gpu,
+            vocab_start,
         )
 
 
@@ -149,6 +151,7 @@ def _bias_kernel(
     logits_ptr,
     logits_stride,
     vocab_size,
+    vocab_start,
     expanded_idx_mapping_ptr,
     # Allowed token IDs.
     num_allowed_token_ids_ptr,
@@ -180,13 +183,18 @@ def _bias_kernel(
         block = tl.arange(0, BLOCK_SIZE)
         mask = block < num_allowed_token_ids
 
-        # Save logits for allowed token IDs.
+        # Save logits for allowed token IDs in this shard.
         allowed_token_ids = tl.load(
             allowed_token_ids_ptr + req_state_idx * allowed_token_ids_stride + block,
             mask=mask,
         )
+        local_ids = allowed_token_ids - vocab_start
+        in_shard = (local_ids >= 0) & (local_ids < vocab_size)
+
         logits = tl.load(
-            logits_ptr + token_idx * logits_stride + allowed_token_ids, mask=mask
+            logits_ptr + token_idx * logits_stride + local_ids,
+            mask=mask & in_shard,
+            other=0.0,
         )
 
         # Set logits to -inf for all tokens.
@@ -200,9 +208,9 @@ def _bias_kernel(
 
         # Restore logits for allowed token IDs.
         tl.store(
-            logits_ptr + token_idx * logits_stride + allowed_token_ids,
+            logits_ptr + token_idx * logits_stride + local_ids,
             logits,
-            mask=mask,
+            mask=mask & in_shard,
         )
 
     # Logit bias.
@@ -213,10 +221,19 @@ def _bias_kernel(
             bias_token_ids_ptr + req_state_idx * bias_token_ids_stride + block,
             mask=mask,
         )
+        local_ids = token_ids - vocab_start
+        in_shard = (local_ids >= 0) & (local_ids < vocab_size)
         bias = tl.load(bias_ptr + req_state_idx * bias_stride + block, mask=mask)
-        logits = tl.load(logits_ptr + token_idx * logits_stride + token_ids, mask=mask)
+        logits = tl.load(
+            logits_ptr + token_idx * logits_stride + local_ids,
+            mask=mask & in_shard,
+        )
         logits += bias
-        tl.store(logits_ptr + token_idx * logits_stride + token_ids, logits, mask=mask)
+        tl.store(
+            logits_ptr + token_idx * logits_stride + local_ids,
+            logits,
+            mask=mask & in_shard,
+        )
 
     # Apply min tokens.
     num_stop_token_ids = tl.load(num_stop_token_ids_ptr + req_state_idx)
@@ -228,10 +245,12 @@ def _bias_kernel(
             stop_token_ids_ptr + req_state_idx * stop_token_ids_stride + block,
             mask=mask,
         )
+        local_ids = stop_token_ids - vocab_start
+        in_shard = (local_ids >= 0) & (local_ids < vocab_size)
         tl.store(
-            logits_ptr + token_idx * logits_stride + stop_token_ids,
+            logits_ptr + token_idx * logits_stride + local_ids,
             -float("inf"),
-            mask=mask,
+            mask=mask & in_shard,
         )
 
 
@@ -247,6 +266,7 @@ def apply_logit_bias(
     min_lens: torch.Tensor,
     num_stop_token_ids: torch.Tensor,
     stop_token_ids: torch.Tensor,
+    vocab_start: int = 0,
 ) -> None:
     num_tokens, vocab_size = logits.shape
     BLOCK_SIZE = triton.next_power_of_2(
@@ -261,6 +281,7 @@ def apply_logit_bias(
         logits,
         logits.stride(0),
         vocab_size,
+        vocab_start,
         expanded_idx_mapping,
         num_allowed_token_ids,
         allowed_token_ids,

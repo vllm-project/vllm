@@ -76,6 +76,7 @@ class BadWordsState:
         idx_mapping_np: np.ndarray,
         input_ids: torch.Tensor,
         expanded_local_pos: torch.Tensor,
+        vocab_start: int = 0,
     ) -> None:
         max_num_bad_words = int(self.num_bad_words.np[idx_mapping_np].max())
         if max_num_bad_words == 0:
@@ -94,6 +95,7 @@ class BadWordsState:
             input_ids,
             expanded_local_pos,
             max_num_bad_words,
+            vocab_start,
         )
 
 
@@ -113,6 +115,8 @@ def _bad_words_kernel(
     total_len_ptr,
     input_ids_ptr,
     expanded_local_pos_ptr,
+    vocab_start,
+    vocab_size,
 ):
     token_idx = tl.program_id(0)
     bw_idx = tl.program_id(1)
@@ -159,7 +163,12 @@ def _bad_words_kernel(
         match = match & (expected == actual)
 
     if match:
-        tl.store(logits_ptr + token_idx * logits_stride + last_token, -float("inf"))
+        local_token = last_token - vocab_start
+        if (local_token >= 0) & (local_token < vocab_size):
+            tl.store(
+                logits_ptr + token_idx * logits_stride + local_token,
+                -float("inf"),
+            )
 
 
 def apply_bad_words(
@@ -174,8 +183,9 @@ def apply_bad_words(
     input_ids: torch.Tensor,
     expanded_local_pos: torch.Tensor,
     max_num_bad_words: int,
+    vocab_start: int = 0,
 ) -> None:
-    num_tokens = logits.shape[0]
+    num_tokens, vocab_size = logits.shape
     _bad_words_kernel[(num_tokens, max_num_bad_words)](
         logits,
         logits.stride(0),
@@ -191,4 +201,6 @@ def apply_bad_words(
         total_len,
         input_ids,
         expanded_local_pos,
+        vocab_start,
+        vocab_size,
     )
