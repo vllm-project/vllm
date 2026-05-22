@@ -1159,10 +1159,20 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w13_bias,
             w2_bias,
         )
+    elif mxfp4_backend == Mxfp4MoeBackend.XPU:
+        # No additional transformation needed for XPU backend
+        return (
+            w13_weight,
+            w2_weight,
+            w13_weight_scale,
+            w2_weight_scale,
+            w13_bias,
+            w2_bias,
+        )
     else:
         raise ValueError(
             f"Unsupported mxfp4_backend for Mxfp4MoEMethod: {mxfp4_backend}. "
-            f"Expected TRTLLM or Triton backend."
+            f"Expected TRTLLM, Triton, AITER, or XPU backend."
         )
 
 
