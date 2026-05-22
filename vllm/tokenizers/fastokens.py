@@ -1,47 +1,39 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""``fastokens`` tokenizer mode.
+"""``fastokens`` backend patch.
 
-Loads a Hugging Face fast tokenizer whose internal Rust tokenizer is replaced
-by the fastokens shim. fastokens also rebinds
-``tokenizers.decoders.DecodeStream`` so the streaming detokenizer accepts the
-shim. Both patches are installed for the lifetime of the process —
-``patch_transformers()`` is idempotent.
+When ``VLLM_USE_FASTOKENS=1`` is set, ``fastokens.patch_transformers()`` swaps
+the inner Rust tokenizer of every HF fast tokenizer loaded afterwards with the
+fastokens shim and rebinds ``tokenizers.decoders.DecodeStream`` so the
+streaming detokenizer accepts the shim. The patch is process-global and
+idempotent, so it applies to any tokenizer mode that ends up loading an HF
+fast tokenizer (`hf`, `deepseek_v32`, `deepseek_v4`, `qwen_vl`, …).
 """
 
-from pathlib import Path
+from importlib.metadata import PackageNotFoundError, version
 
-from .hf import CachedHfTokenizer, HfTokenizer
-from .protocol import TokenizerLike
+from packaging.version import Version
+
+_MIN_FASTOKENS_VERSION = "0.2.0"
 
 
-def _apply_fastokens_patch() -> None:
+def apply_fastokens_patch() -> None:
     try:
         import fastokens
     except ImportError as e:
         raise ImportError(
-            "The 'fastokens' package is required for tokenizer_mode='fastokens'."
+            f"The 'fastokens' package (>= {_MIN_FASTOKENS_VERSION}) is required "
+            "when VLLM_USE_FASTOKENS=1."
         ) from e
-    fastokens.patch_transformers()
 
-
-class FastokensTokenizer(TokenizerLike):
-    @classmethod
-    def from_pretrained(
-        cls,
-        path_or_repo_id: str | Path,
-        *args,
-        trust_remote_code: bool = False,
-        revision: str | None = None,
-        download_dir: str | None = None,
-        **kwargs,
-    ) -> HfTokenizer:
-        _apply_fastokens_patch()
-        return CachedHfTokenizer.from_pretrained(
-            path_or_repo_id,
-            *args,
-            trust_remote_code=trust_remote_code,
-            revision=revision,
-            download_dir=download_dir,
-            **kwargs,
+    try:
+        installed = version("fastokens")
+    except PackageNotFoundError:
+        installed = None
+    if installed is None or Version(installed) < Version(_MIN_FASTOKENS_VERSION):
+        raise ImportError(
+            f"fastokens >= {_MIN_FASTOKENS_VERSION} is required when "
+            f"VLLM_USE_FASTOKENS=1 (found {installed or 'unknown'})."
         )
+
+    fastokens.patch_transformers()
