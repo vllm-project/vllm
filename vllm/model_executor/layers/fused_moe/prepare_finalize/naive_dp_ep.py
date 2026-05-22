@@ -129,7 +129,7 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
         # Skip gathering scales if we have static quantization
         # (the scale is a scalar, replicated on all ranks) or
         # if quantization is deferred.
-        skip_gather_scales = scales is None or scales.ndim == 0
+        skip_gather_scales = scales is None or scales.numel() == 1
 
         # When LoRA is active, dispatch the per-token LoRA id along with
         # hidden_states so every rank receives the correct mapping for the
