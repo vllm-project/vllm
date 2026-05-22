@@ -695,6 +695,9 @@ mirror_benchmark_snapshots_to_git_branch() {
     return 0
   fi
 
+  BENCHMARK_SNAPSHOT_SYNC_PR_REQUIRED=0
+  BENCHMARK_SNAPSHOT_SYNC_PR_BRANCH=
+
   if [[ -z "${BENCHMARK_REPO_URL:-}" ]]; then
     echo "BENCHMARK_REPO_URL must be set when mirroring GitHub snapshot files" >&2
     return 2
@@ -733,7 +736,71 @@ mirror_benchmark_snapshots_to_git_branch() {
     -m "Source commit: ${GITHUB_SHA:-local}"
   git -C "$mirror_root" push --force-with-lease origin "HEAD:refs/heads/$sync_branch"
 
+  BENCHMARK_SNAPSHOT_SYNC_PR_REQUIRED=1
+  BENCHMARK_SNAPSHOT_SYNC_PR_BRANCH=$sync_branch
+
   echo "Pushed benchmark snapshot sync branch: $sync_branch"
+}
+
+open_benchmark_snapshot_sync_pr() {
+  local sync_branch=${BENCHMARK_SNAPSHOT_SYNC_PR_BRANCH:-${BENCHMARK_SNAPSHOT_SYNC_BRANCH:-bot/leaderboard-snapshot-sync}}
+  local repo_slug=${BENCHMARK_REPO_SLUG:-vLLM-HUST/vllm-hust-benchmark}
+  local snapshot_marker=
+  local title="chore(data): sync leaderboard snapshots"
+  local body
+  local pr_number=
+
+  if [[ "$PUBLISH_TO_HF" != "1" || "${BENCHMARK_SNAPSHOT_SYNC_PR_REQUIRED:-0}" != "1" ]]; then
+    return 0
+  fi
+
+  if ! command -v gh >/dev/null 2>&1; then
+    echo "gh CLI is required to create the benchmark snapshot PR" >&2
+    return 2
+  fi
+
+  if [[ -n "${BENCHMARK_REPO_GH_TOKEN:-}" ]]; then
+    export GH_TOKEN="$BENCHMARK_REPO_GH_TOKEN"
+  fi
+
+  if [[ -z "${GH_TOKEN:-}" ]] && ! gh auth status -h github.com >/dev/null 2>&1; then
+    echo "No GitHub CLI auth is available to create the benchmark snapshot PR" >&2
+    echo "Provide BENCHMARK_REPO_GH_TOKEN or pre-authenticate gh on the trusted runner." >&2
+    return 2
+  fi
+
+  if [[ -f "$AGGREGATE_OUTPUT_DIR/last_updated.json" ]]; then
+    snapshot_marker=$(python3 -c "import json, pathlib, sys; payload=json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')); print(payload.get('last_updated', ''))" "$AGGREGATE_OUTPUT_DIR/last_updated.json")
+  fi
+
+  if [[ -n "$snapshot_marker" ]]; then
+    title="$title ($snapshot_marker)"
+  fi
+
+  body=$(printf '%s\n' \
+    'This PR mirrors refreshed leaderboard snapshot files into `leaderboard-data/snapshots` for the website GitHub-first data path.' \
+    '' \
+    "- source branch: ${sync_branch}" \
+    "- source run: ${RUN_ID}" \
+    "- source repo: ${GITHUB_REPOSITORY:-vLLM-HUST/vllm-hust}" \
+    "- source commit: ${GITHUB_SHA:-local}" \
+    "- snapshot marker: ${snapshot_marker:-unknown}")
+
+  pr_number=$(gh pr list \
+    -R "$repo_slug" \
+    --base main \
+    --head "$sync_branch" \
+    --state open \
+    --json number \
+    --jq '.[0].number // empty')
+
+  if [[ -n "$pr_number" ]]; then
+    gh pr edit -R "$repo_slug" "$pr_number" --title "$title" --body "$body"
+  else
+    gh pr create -R "$repo_slug" --base main --head "$sync_branch" --title "$title" --body "$body"
+  fi
+
+  echo "Created or updated benchmark snapshot PR for branch: $sync_branch"
 }
 
 run_same_spec_current_benchmark() {
@@ -1125,6 +1192,7 @@ if [[ "$PUBLISH_TO_HF" == "1" ]]; then
     --execute
 
   mirror_benchmark_snapshots_to_git_branch
+  open_benchmark_snapshot_sync_pr
 else
   "$PYTHON_BIN" -m vllm_hust_benchmark.cli publish-website \
     --source-dir "$SUBMISSIONS_ROOT" \
