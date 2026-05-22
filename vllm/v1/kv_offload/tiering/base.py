@@ -14,7 +14,7 @@ import numpy as np
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.v1.kv_offload.base import OffloadingSpec
 
 # Type alias for job IDs used in async transfer tracking
 JobId = int
@@ -53,9 +53,22 @@ class SecondaryTierManager(ABC):
     async jobs; get_finished() polls for completion.
     """
 
-    def __init__(self, vllm_config: "VllmConfig", primary_kv_view: memoryview) -> None:
-        self._vllm_config = vllm_config
+    def __init__(
+        self,
+        offloading_spec: "OffloadingSpec",
+        primary_kv_view: memoryview,
+        tier_type: str,
+    ) -> None:
+        """
+        Args:
+            offloading_spec: Offloading configuration.
+            primary_kv_view: Memoryview of the primary tier's CPU KV cache.
+            tier_type: Tier type identifier, set by SecondaryTierFactory
+                from the registered tier type.
+        """
+        self._offloading_spec = offloading_spec
         self._primary_kv_view: memoryview = primary_kv_view
+        self.tier_type = tier_type
 
     @abstractmethod
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
@@ -153,16 +166,3 @@ class SecondaryTierManager(ABC):
     def shutdown(self) -> None:
         """Release resources held by this tier (threads, connections, etc.)."""
         return
-
-    @staticmethod
-    @abstractmethod
-    def get_tier_type() -> str:
-        """
-        Get the type identifier of this tier (e.g., "example", "storage").
-
-        Must match the "type" field in the tier config dict.
-
-        Returns:
-            Tier type string.
-        """
-        pass

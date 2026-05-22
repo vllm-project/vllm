@@ -145,6 +145,7 @@ if TYPE_CHECKING:
     VLLM_DP_SIZE: int = 1
     VLLM_USE_STANDALONE_COMPILE: bool = True
     VLLM_ENABLE_PREGRAD_PASSES: bool = True
+    VLLM_USE_BREAKABLE_CUDAGRAPH: bool = False
     VLLM_DP_MASTER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
@@ -181,6 +182,7 @@ if TYPE_CHECKING:
     VLLM_FLASHINFER_MOE_BACKEND: Literal["throughput", "latency", "masked_gemm"] = (
         "latency"
     )
+    VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
     VLLM_XGRAMMAR_CACHE_MB: int = 0
@@ -190,6 +192,10 @@ if TYPE_CHECKING:
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5600
     VLLM_MOONCAKE_BOOTSTRAP_PORT: int = 8998
+    VLLM_MOONCAKE_STORE_TIER_LOG: bool = False
+    VLLM_MOONCAKE_DISK_STAGING_USABLE_RATIO: float = 0.9
+    MOONCAKE_PREFERRED_SEGMENT: str | None = None
+    MOONCAKE_REQUESTER_LOCAL_HOSTNAME: str | None = None
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
@@ -248,7 +254,7 @@ if TYPE_CHECKING:
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
-    VLLM_USE_V2_MODEL_RUNNER: bool = False
+    VLLM_USE_V2_MODEL_RUNNER: bool | None = None
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
@@ -636,6 +642,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # https://github.com/pytorch/pytorch/issues/174502
     "VLLM_ENABLE_PREGRAD_PASSES": lambda: (
         os.environ.get("VLLM_ENABLE_PREGRAD_PASSES", "1") == "1"
+    ),
+    # Experimental: breakable cudagraph does not rely on torch.compile
+    "VLLM_USE_BREAKABLE_CUDAGRAPH": lambda: (
+        os.environ.get("VLLM_USE_BREAKABLE_CUDAGRAPH", "0") == "1"
     ),
     # Debug pattern matching inside custom passes.
     # Should be set to the fx.Node name (e.g. 'getitem_34' or 'scaled_mm_3').
@@ -1384,6 +1394,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MOONCAKE_BOOTSTRAP_PORT": lambda: int(
         os.getenv("VLLM_MOONCAKE_BOOTSTRAP_PORT", "8998")
     ),
+    # Log per-batch memory/disk tier breakdown on external GETs.
+    "VLLM_MOONCAKE_STORE_TIER_LOG": lambda: (
+        os.getenv("VLLM_MOONCAKE_STORE_TIER_LOG", "False").lower() in ("true", "1")
+    ),
+    # Fraction of the owner's DirectIO staging buffer to fill per GET batch.
+    "VLLM_MOONCAKE_DISK_STAGING_USABLE_RATIO": lambda: float(
+        os.getenv("VLLM_MOONCAKE_DISK_STAGING_USABLE_RATIO", "0.9")
+    ),
+    # Pin this rank to a specific owner segment ("host:port").
+    "MOONCAKE_PREFERRED_SEGMENT": lambda: os.getenv("MOONCAKE_PREFERRED_SEGMENT"),
+    # Override the hostname the rank registers as a Mooncake requester.
+    "MOONCAKE_REQUESTER_LOCAL_HOSTNAME": lambda: os.getenv(
+        "MOONCAKE_REQUESTER_LOCAL_HOSTNAME"
+    ),
     # Flashinfer MoE backend for vLLM's fused Mixture-of-Experts support.
     # Both require compute capability 10.0 or above.
     # Available options:
@@ -1395,6 +1419,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "VLLM_FLASHINFER_MOE_BACKEND",
         "latency",
         ["throughput", "latency", "masked_gemm"],
+    ),
+    # Override the directory for the FlashInfer autotune config cache.
+    "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR": lambda: os.getenv(
+        "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", None
     ),
     # Flashinfer fused allreduce backend.
     "VLLM_FLASHINFER_ALLREDUCE_BACKEND": env_with_choices(
@@ -1710,9 +1738,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_COMPILE_CACHE_SAVE_FORMAT": env_with_choices(
         "VLLM_COMPILE_CACHE_SAVE_FORMAT", "binary", ["binary", "unpacked"]
     ),
-    # Flag to enable v2 model runner.
-    "VLLM_USE_V2_MODEL_RUNNER": lambda: bool(
-        int(os.getenv("VLLM_USE_V2_MODEL_RUNNER", "0"))
+    # Flag to control the v2 model runner. If unset, use config defaults.
+    "VLLM_USE_V2_MODEL_RUNNER": lambda: maybe_convert_bool(
+        os.getenv("VLLM_USE_V2_MODEL_RUNNER", None)
     ),
     # Log model inspection after loading.
     # If enabled, logs a transformers-style hierarchical view of the model
@@ -1910,6 +1938,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_LOG_STATS_INTERVAL",
         "VLLM_DEBUG_LOG_API_SERVER_RESPONSE",
         "VLLM_TUNED_CONFIG_FOLDER",
+        "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR",
         "VLLM_ENGINE_ITERATION_TIMEOUT_S",
         "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
         "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",

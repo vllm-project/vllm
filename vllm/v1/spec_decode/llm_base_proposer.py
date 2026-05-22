@@ -116,7 +116,7 @@ class SpecDecodeBaseProposer:
 
         self.max_batch_size = vllm_config.scheduler_config.max_num_seqs
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-        self.token_arange_np = np.arange(self.max_num_tokens)
+        self.token_arange_np = np.arange(self.max_num_tokens, dtype=np.int32)
 
         # Can be specialized by methods like DFlash to reduce the limit
         self.max_query_tokens = self.max_num_tokens
@@ -1218,6 +1218,7 @@ class SpecDecodeBaseProposer:
                 "Exaone4_5_ForConditionalGeneration",
                 "GlmOcrForConditionalGeneration",
                 "HunYuanVLForConditionalGeneration",
+                "InternS2PreviewForConditionalGeneration",
                 "MiMoV2OmniForCausalLM",
                 "Qwen2_5_VLForConditionalGeneration",
                 "Qwen3_5ForConditionalGeneration",
