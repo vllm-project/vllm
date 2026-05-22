@@ -533,8 +533,7 @@ def validate_api_server_args(args):
 
 @instrument(span_name="API server setup")
 def setup_server(args):
-    """Validate API server args, set up signal handler, create socket
-    ready to serve."""
+    """Validate API server args and create the server socket."""
 
     log_version_and_model(logger, VLLM_VERSION, args.model)
     log_non_default_args(args)
@@ -559,12 +558,6 @@ def setup_server(args):
     # workaround to avoid footguns where uvicorn drops requests with too
     # many concurrent requests active
     set_ulimit()
-
-    def signal_handler(*_) -> None:
-        # Interrupt server on sigterm while initializing
-        raise KeyboardInterrupt("terminated")
-
-    signal.signal(signal.SIGTERM, signal_handler)
 
     if args.uds:
         listen_address = f"unix:{args.uds}"
@@ -672,8 +665,14 @@ async def build_and_serve_renderer(
 async def run_server(args, **uvicorn_kwargs) -> None:
     """Run a single-worker API server."""
 
-    # Add process-specific prefix to stdout and stderr.
-    decorate_logs("APIServer")
+    decorate_logs("APIServer", skip_if_decorated=True)
+
+    # Interrupt initialization if SIGTERM arrives before uvicorn installs its
+    # own signal handlers. Once uvicorn is running it replaces this.
+    def _interrupt_init(*_) -> None:
+        raise KeyboardInterrupt("terminated")
+
+    signal.signal(signal.SIGTERM, _interrupt_init)
 
     listen_address, sock = setup_server(args)
     await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)
