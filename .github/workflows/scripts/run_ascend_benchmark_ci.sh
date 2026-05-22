@@ -23,6 +23,7 @@ BENCH_CONSTRAINTS_FILE=${BENCH_CONSTRAINTS_FILE:-}
 SAME_SPEC_BENCHMARK_ENABLED=${SAME_SPEC_BENCHMARK_ENABLED:-1}
 SAME_SPEC_SPEC_FILE=${SAME_SPEC_SPEC_FILE:-$VLLM_HUST_BENCHMARK_REPO/docs/official-baselines/official-ascend-jan-2026-v0110-random-online-qwen25-14b-910b3.json}
 SAME_SPEC_CONSTRAINTS_FILE=${SAME_SPEC_CONSTRAINTS_FILE:-$VLLM_HUST_BENCHMARK_REPO/docs/official-baselines/official-ascend-constraints.stub.json}
+SAME_SPEC_READY_TIMEOUT_SECONDS=${SAME_SPEC_READY_TIMEOUT_SECONDS:-600}
 ALLOW_RANDOM_HF_PUBLISH=${ALLOW_RANDOM_HF_PUBLISH:-0}
 
 MODEL_NAME=${MODEL_NAME:-Qwen/Qwen2.5-0.5B-Instruct}
@@ -150,6 +151,7 @@ SUDO_PRESERVE_ENV_VARS=(
   PORT
   PYTHON_BIN
   PYTHONPATH
+  READY_TIMEOUT_SECONDS
   RESULT_DIR
   RESULT_ROOT
   RUN_ID
@@ -292,6 +294,38 @@ run_ascend_root_helper() {
   else
     PYTHON_BIN="$helper_python_bin" sudo -E -n "$ASCEND_BENCHMARK_ROOT_HELPER" "$@"
   fi
+}
+
+run_with_same_spec_stderr_filter() {
+  local summary_interval=${SAME_SPEC_WAIT_LOG_SUMMARY_INTERVAL:-30}
+
+  if (( summary_interval <= 0 )); then
+    summary_interval=30
+  fi
+
+  "$@" 2> >(
+    suppressed=0
+    while IFS= read -r line; do
+      if [[ "$line" == curl:\ \(7\)\ Failed\ to\ connect\ to\ *"Couldn't connect to server" ]]; then
+        suppressed=$((suppressed + 1))
+        if (( suppressed == 1 || suppressed % summary_interval == 0 )); then
+          echo "[same-spec-current] current same-spec server is still starting (${suppressed} connection-refused readiness probes suppressed)" >&2
+        fi
+        continue
+      fi
+
+      if (( suppressed > 0 )); then
+        echo "[same-spec-current] suppressed ${suppressed} connection-refused readiness probes while waiting for current same-spec startup" >&2
+        suppressed=0
+      fi
+
+      printf '%s\n' "$line" >&2
+    done
+
+    if (( suppressed > 0 )); then
+      echo "[same-spec-current] suppressed ${suppressed} connection-refused readiness probes while waiting for current same-spec startup" >&2
+    fi
+  )
 }
 
 wait_for_ascend_runtime_ready() {
@@ -612,6 +646,7 @@ run_same_spec_current_benchmark() {
   local same_spec_runner=$VLLM_HUST_BENCHMARK_REPO/scripts/run-current-ascend-same-spec.sh
   local same_spec_raw_result=$RESULT_ROOT/raw_benchmark_result.json
   local same_spec_submission_dir=$RESULT_ROOT/submission
+  local same_spec_ready_timeout_seconds=${SAME_SPEC_READY_TIMEOUT_SECONDS:-600}
   local current_vllm_hust_commit
   local current_vllm_hust_ref
   local current_plugin_commit
@@ -641,7 +676,8 @@ run_same_spec_current_benchmark() {
   rm -rf "$same_spec_submission_dir" "$SUBMISSION_DIR"
 
   if [[ "$ASCEND_BENCHMARK_USE_SUDO" == "1" ]]; then
-    VLLM_HUST_WORKSPACE_ROOT="$WORKSPACE_ROOT" \
+    READY_TIMEOUT_SECONDS="$same_spec_ready_timeout_seconds" \
+      VLLM_HUST_WORKSPACE_ROOT="$WORKSPACE_ROOT" \
       CURRENT_RUNTIME_CWD=/tmp \
       CURRENT_RUNTIME_PYTHON="$PYTHON_BIN" \
       CURRENT_VLLM_HUST_REPO="$VLLM_HUST_REPO" \
@@ -663,9 +699,10 @@ run_same_spec_current_benchmark() {
       CURRENT_SERVER_PORT="$PORT" \
       CURRENT_CLIENT_PORT="$PORT" \
       CONSTRAINTS_FILE="$SAME_SPEC_CONSTRAINTS_FILE" \
-      run_ascend_root_helper same-spec "$same_spec_runner" "$SAME_SPEC_SPEC_FILE"
+      run_with_same_spec_stderr_filter run_ascend_root_helper same-spec "$same_spec_runner" "$SAME_SPEC_SPEC_FILE"
   else
-    env \
+    run_with_same_spec_stderr_filter env \
+      READY_TIMEOUT_SECONDS="$same_spec_ready_timeout_seconds" \
       VLLM_HUST_WORKSPACE_ROOT="$WORKSPACE_ROOT" \
       CURRENT_RUNTIME_CWD=/tmp \
       CURRENT_RUNTIME_PYTHON="$PYTHON_BIN" \
