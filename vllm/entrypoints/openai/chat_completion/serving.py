@@ -89,7 +89,7 @@ class OpenAIServingChat(OpenAIServing):
         models: OpenAIServingModels,
         response_role: str,
         *,
-        openai_serving_render: "OpenAIServingRender",
+        openai_serving_render: "OpenAIServingRender | None" = None,
         request_logger: RequestLogger | None,
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
@@ -223,6 +223,11 @@ class OpenAIServingChat(OpenAIServing):
         if self.engine_client.errored:
             raise self.engine_client.dead_error
 
+        if self.openai_serving_render is None:
+            raise RuntimeError(
+                "openai_serving_render was not provided to OpenAIServingChat; "
+                "pass it at construction time to use render_chat"
+            )
         return await self.openai_serving_render.render_chat(request)
 
     async def create_chat_completion(

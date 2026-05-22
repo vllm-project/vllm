@@ -57,7 +57,7 @@ class OpenAIServingCompletion(OpenAIServing):
         engine_client: EngineClient,
         models: OpenAIServingModels,
         *,
-        openai_serving_render: "OpenAIServingRender",
+        openai_serving_render: "OpenAIServingRender | None" = None,
         request_logger: RequestLogger | None,
         return_tokens_as_token_ids: bool = False,
         enable_prompt_tokens_details: bool = False,
@@ -105,6 +105,11 @@ class OpenAIServingCompletion(OpenAIServing):
         if self.engine_client.errored:
             raise self.engine_client.dead_error
 
+        if self.openai_serving_render is None:
+            raise RuntimeError(
+                "openai_serving_render was not provided to OpenAIServingCompletion; "
+                "pass it at construction time to use render_completion"
+            )
         return await self.openai_serving_render.render_completion(request)
 
     async def create_completion(

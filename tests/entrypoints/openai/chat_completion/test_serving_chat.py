@@ -626,6 +626,35 @@ def test_async_serving_chat_init():
     assert serving_completion.chat_template == CHAT_TEMPLATE
 
 
+def test_serving_chat_optional_render():
+    # openai_serving_render should be optional, downstream users constructing
+    # OpenAIServingChat directly (e.g. KubeRay, Ray Serve) must not get a
+    # TypeError just because they don't pass this argument.
+    engine = MockEngine()
+    models = OpenAIServingModels(engine, BASE_MODEL_PATHS)
+
+    # Instantiation without openai_serving_render must not raise
+    chat = OpenAIServingChat(
+        engine,
+        models,
+        response_role="assistant",
+        chat_template=CHAT_TEMPLATE,
+        chat_template_content_format="auto",
+        request_logger=None,
+    )
+    assert chat.openai_serving_render is None
+
+    # Calling render_chat_request with no render object must raise RuntimeError,
+    # not AttributeError
+    async def _call_render():
+        engine.errored = False
+        chat._check_model = AsyncMock(return_value=None)
+        await chat.render_chat_request(MagicMock())
+
+    with pytest.raises(RuntimeError, match="openai_serving_render was not provided"):
+        asyncio.run(_call_render())
+
+
 @pytest.mark.asyncio
 async def test_serving_chat_returns_correct_model_name():
     mock_engine = MagicMock(spec=AsyncLLM)

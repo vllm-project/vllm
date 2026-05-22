@@ -289,6 +289,41 @@ async def test_completion_error_stream():
     assert chunks[-1] == "data: [DONE]\n\n"
 
 
+def test_serving_completion_optional_render():
+    # openai_serving_render should be optional, downstream users constructing
+    # OpenAIServingCompletion directly must not get a TypeError.
+    import asyncio
+
+    engine = MagicMock(spec=AsyncLLM)
+    engine.errored = False
+    engine.model_config = MockModelConfig()
+    engine.input_processor = MagicMock()
+    engine.renderer = MagicMock()
+    models = OpenAIServingModels(
+        engine_client=engine,
+        base_model_paths=BASE_MODEL_PATHS,
+    )
+
+    # Instantiation without openai_serving_render must not raise
+    completion = OpenAIServingCompletion(
+        engine,
+        models,
+        request_logger=None,
+    )
+    assert completion.openai_serving_render is None
+
+    # Calling render_completion_request must raise RuntimeError, not AttributeError
+    async def _call_render():
+        completion._check_model = AsyncMock(return_value=None)
+        from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+
+        req = CompletionRequest(model=MODEL_NAME, prompt="hi")
+        await completion.render_completion_request(req)
+
+    with pytest.raises(RuntimeError, match="openai_serving_render was not provided"):
+        asyncio.run(_call_render())
+
+
 def test_json_schema_response_format_missing_schema():
     """When response_format type is 'json_schema' but the json_schema field
     is not provided, request construction should raise a validation error
