@@ -78,6 +78,43 @@ async def test_single_completion(client: openai.AsyncOpenAI, model_name: str) ->
     "model_name",
     [MODEL_NAME],
 )
+async def test_completion_truncation_side_controls_prompt_truncation(
+    client: openai.AsyncOpenAI, model_name: str
+) -> None:
+    prompt_token_ids = list(range(8))
+
+    right_completion = await client.completions.create(
+        model=model_name,
+        prompt=prompt_token_ids,
+        max_tokens=1,
+        temperature=0.0,
+        extra_body={
+            "return_token_ids": True,
+            "truncate_prompt_tokens": 4,
+            "truncation_side": "right",
+        },
+    )
+    assert right_completion.choices[0].prompt_token_ids == prompt_token_ids[:4]
+
+    left_completion = await client.completions.create(
+        model=model_name,
+        prompt=prompt_token_ids,
+        max_tokens=1,
+        temperature=0.0,
+        extra_body={
+            "return_token_ids": True,
+            "truncate_prompt_tokens": 4,
+            "truncation_side": "left",
+        },
+    )
+    assert left_completion.choices[0].prompt_token_ids == prompt_token_ids[-4:]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME],
+)
 async def test_no_logprobs(client: openai.AsyncOpenAI, model_name: str):
     # test using token IDs
     completion = await client.completions.create(
