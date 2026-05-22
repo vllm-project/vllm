@@ -89,7 +89,7 @@ class INCConfig(QuantizationConfig):
         self.data_type = data_type
         self.backend = backend
         self.pack_factor = Fraction(32, weight_bits)
-        self.resolver = INCConfigParser(self)
+        self.config_parser = INCConfigParser(self)
 
     def __repr__(self) -> str:
         return (
@@ -131,7 +131,7 @@ class INCConfig(QuantizationConfig):
         )
 
     def get_layer_config(self, layer, layer_name: str):
-        return self.resolver.get_layer_config(layer, layer_name)
+        return self.config_parser.get_layer_config(layer, layer_name)
 
     def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
         if self.block_name_to_quantize is not None:
@@ -156,7 +156,7 @@ class INCConfig(QuantizationConfig):
                         return UnquantizedFusedMoEMethod(layer.moe_config)
                     return UnquantizedLinearMethod()
 
-        layer_config = self.resolver.resolve(layer, prefix)
+        layer_config = self.config_parser.resolve(layer, prefix)
         if not layer_config.quantized:
             if isinstance(layer, (LinearBase, ParallelLMHead)):
                 return UnquantizedLinearMethod()

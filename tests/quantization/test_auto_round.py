@@ -108,7 +108,7 @@ def test_inc_config_parser_exact_match() -> None:
         }
     )
 
-    layer_config = config.resolver.resolve(DummyLayer(), "layers.0.self_attn.q_proj")
+    layer_config = config.config_parser.resolve(DummyLayer(), "layers.0.self_attn.q_proj")
 
     assert layer_config.bits == 8
     assert layer_config.group_size == 64
@@ -142,7 +142,7 @@ def test_inc_config_parser_regex_match() -> None:
         }
     )
 
-    layer_config = config.resolver.resolve(DummyLayer(), "layers.3.self_attn.q_proj")
+    layer_config = config.config_parser.resolve(DummyLayer(), "layers.3.self_attn.q_proj")
 
     assert layer_config.bits == 8
     assert layer_config.group_size == 64
@@ -160,7 +160,7 @@ def test_inc_config_parser_invalid_regex_ignored() -> None:
         }
     )
 
-    layer_config = config.resolver.resolve(DummyLayer(), "layers.0.self_attn.q_proj")
+    layer_config = config.config_parser.resolve(DummyLayer(), "layers.0.self_attn.q_proj")
 
     assert layer_config.bits == 4
     assert layer_config.group_size == 128
@@ -170,7 +170,7 @@ def test_inc_config_parser_invalid_regex_ignored() -> None:
 def test_inc_config_parser_block_name_to_quantize_marks_unquantized() -> None:
     config = make_config(block_name_to_quantize=["layers.1"])
 
-    layer_config = config.resolver.resolve(DummyLayer(), "layers.0.self_attn.q_proj")
+    layer_config = config.config_parser.resolve(DummyLayer(), "layers.0.self_attn.q_proj")
 
     assert layer_config.bits == 16
     assert layer_config.group_size == -1
@@ -182,7 +182,7 @@ def test_inc_config_parser_parallel_lm_head_defaults_to_unquantized() -> None:
     layer = object.__new__(ParallelLMHead)
     config = make_config()
 
-    layer_config = config.resolver.resolve(layer, "lm_head")
+    layer_config = config.config_parser.resolve(layer, "lm_head")
 
     assert layer_config.quantized is False
     assert layer_config.bits == 16
@@ -205,7 +205,7 @@ def test_inc_config_parser_fused_moe_requires_consistent_configs() -> None:
     )
 
     with pytest.raises(ValueError, match="requires consistent quant config"):
-        config.resolver.resolve(DummyFusedMoE(), "layers.0.block_sparse_moe")
+        config.config_parser.resolve(DummyFusedMoE(), "layers.0.block_sparse_moe")
 
 
 def test_inc_config_parser_fused_module_requires_consistent_configs() -> None:
@@ -231,7 +231,7 @@ def test_inc_config_parser_fused_module_requires_consistent_configs() -> None:
     config.packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
     with pytest.raises(ValueError, match="requires consistent quant config"):
-        config.resolver.resolve(DummyLayer(), "layers.0.self_attn.qkv_proj")
+        config.config_parser.resolve(DummyLayer(), "layers.0.self_attn.qkv_proj")
 
 
 def test_inc_layer_config_mx_fp_helpers() -> None:
