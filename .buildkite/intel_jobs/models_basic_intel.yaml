@@ -44,5 +44,6 @@ steps:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
+      pip install matplotlib &&
       pytest -v -s models/test_initialization.py -k "not test_can_initialize_small_subset" --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB'
-  parallelism: 4
+  parallelism: 10
