@@ -26,11 +26,7 @@ def _nearest_rank_percentile(values: list[float], percentile: float) -> float:
         return 0.0
     sorted_values = sorted(values)
     rank = max(
-        0,
-        min(
-            len(sorted_values) - 1,
-            int(percentile * len(sorted_values) - 1e-12),
-        ),
+        0, min(len(sorted_values) - 1, int(percentile * len(sorted_values) - 1e-12))
     )
     return sorted_values[rank]
 
