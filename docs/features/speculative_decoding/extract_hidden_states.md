@@ -50,7 +50,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
         print(f"hidden_states: {obj['hidden_states'].shape}")
 ```
 
-A complete example is available at [`examples/offline_inference/extract_hidden_states.py`](../../../examples/offline_inference/extract_hidden_states.py).
+A complete example is available at [`examples/features/speculative_decoding/extract_hidden_states_offline.py`](../../../examples/features/speculative_decoding/extract_hidden_states_offline.py).
 
 ## Online Example
 
