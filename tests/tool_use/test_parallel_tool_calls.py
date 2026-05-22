@@ -17,6 +17,15 @@ from .utils import (
 )
 
 
+def apply_parallel_tool_system_prompt(
+    messages,
+    server_config: ServerConfig,
+):
+    if server_config["model"] == "ibm-granite/granite-3.0-8b-instruct":
+        return ensure_system_prompt(messages, server_config)
+    return messages
+
+
 # test: getting the model to generate parallel tool calls (streaming/not)
 # when requested. NOTE that not all models may support this, so some exclusions
 # may be added in the future. e.g. llama 3.1 models are not designed to support
@@ -34,7 +43,9 @@ async def test_parallel_tool_calls(
 
     models = await client.models.list()
     model_name: str = models.data[0].id
-    messages = ensure_system_prompt(MESSAGES_ASKING_FOR_PARALLEL_TOOLS, server_config)
+    messages = apply_parallel_tool_system_prompt(
+        MESSAGES_ASKING_FOR_PARALLEL_TOOLS, server_config
+    )
     chat_completion = await client.chat.completions.create(
         messages=messages,
         temperature=0,
@@ -164,7 +175,9 @@ async def test_parallel_tool_calls_with_results(
 
     models = await client.models.list()
     model_name: str = models.data[0].id
-    messages = ensure_system_prompt(MESSAGES_WITH_PARALLEL_TOOL_RESPONSE, server_config)
+    messages = apply_parallel_tool_system_prompt(
+        MESSAGES_WITH_PARALLEL_TOOL_RESPONSE, server_config
+    )
     chat_completion = await client.chat.completions.create(
         messages=messages,
         temperature=0,
@@ -232,7 +245,9 @@ async def test_parallel_tool_calls_false(
 
     models = await client.models.list()
     model_name: str = models.data[0].id
-    messages = ensure_system_prompt(MESSAGES_ASKING_FOR_PARALLEL_TOOLS, server_config)
+    messages = apply_parallel_tool_system_prompt(
+        MESSAGES_ASKING_FOR_PARALLEL_TOOLS, server_config
+    )
     chat_completion = await client.chat.completions.create(
         messages=messages,
         temperature=0,
