@@ -1241,3 +1241,108 @@ def test_partial_gpu_prefix_plus_cpu_load() -> None:
         assert bid in ext_block_ids, (
             f"Load GPU block {bid} should be an ext_comp block, not a comp or new block"
         )
+
+
+# ---------------------------------------------------------------------------
+# Test 11: TOCTOU between Phase A and Phase B (regression for #39702)
+# ---------------------------------------------------------------------------
+def test_toctou_cpu_hit_evicted_between_phases_no_crash() -> None:
+    """Regression for vllm-project/vllm#39702.
+
+    When ``get_num_new_matched_tokens`` (Phase A) reports a CPU cache hit
+    of ``N`` tokens but ``update_state_after_alloc`` (Phase B) runs after
+    other requests have caused LRU eviction of those exact blocks, the
+    second ``find_longest_cache_hit`` call returns 0 while
+    ``num_external_tokens`` is still ``N``, triggering
+    ``AssertionError: Expected N hit tokens, got 0``.
+
+    Setup: ``num_cpu_blocks=5`` (4 usable; null_block takes 1).
+        1. Store req_a's 2 blocks to CPU. CPU: [a0, a1, _, _].
+        2. Phase A on req_b (same prompt as req_a) reports a 2-block hit.
+           Without the fix this does NOT pin a0/a1 — they remain at LRU front.
+        3. Store req_c (2) + req_d (2) — 4 more blocks into 4 slots. With
+           a0/a1 unpinned and at LRU front, they get evicted. CPU: [c0, c1,
+           d0, d1].
+        4. Phase B on req_b: re-searches the CPU coordinator, finds 0
+           cached hashes, asserts.
+
+    After the fix, Phase A pins the hit blocks so step 3 evicts req_c's
+    blocks instead, and Phase B reads the cached ``(cpu_hit_blocks,
+    hit_length)`` tuple without re-searching.
+    """
+    # 5 total = 4 usable (null_block takes 1)
+    fix = make_scheduler(num_cpu_blocks=5, num_gpu_blocks=16, lazy=False)
+    sched = fix.scheduler
+
+    # --- Step 1: Store req_a's 2 blocks to CPU cache ---
+    req_a = make_request(num_blocks=2)
+    kv_a = _alloc_and_register(fix, req_a, 2)
+    sched.update_state_after_alloc(req_a, kv_a, num_external_tokens=0)
+    sched_out_a = make_scheduler_output(
+        {req_a.request_id: 2 * BLOCK_SIZE},
+        new_reqs={req_a.request_id: kv_a.get_block_ids()},
+    )
+    meta_a = sched.build_connector_meta(sched_out_a)
+    assert meta_a.store_event >= 0
+    simulate_store_completion(sched, meta_a.store_event)
+
+    # --- Step 2: Phase A — req_b (same prompt as req_a) reports a CPU hit ---
+    req_b = Request(
+        request_id="req-b-toctou",
+        prompt_token_ids=req_a.prompt_token_ids,
+        sampling_params=req_a.sampling_params,
+        pooling_params=None,
+        mm_features=None,
+        block_hasher=req_a._block_hasher,
+    )
+    hit_tokens, is_async = sched.get_num_new_matched_tokens(
+        req_b, num_computed_tokens=0
+    )
+    assert hit_tokens == 2 * BLOCK_SIZE, (
+        f"Phase A should report 2 blocks of CPU hit, got {hit_tokens}"
+    )
+    assert is_async is True
+
+    # --- Step 3: TOCTOU window — fill CPU cache so LRU evicts req_a's blocks
+    # (in production this corresponds to other concurrent requests landing
+    # between Phase A and Phase B for req_b). 4 usable slots, req_a occupies 2;
+    # req_c (2) + req_d (2) require evicting 2 LRU blocks. ---
+    req_c = make_request(num_blocks=2)
+    req_d = make_request(num_blocks=2)
+    kv_c = _alloc_and_register(fix, req_c, 2)
+    kv_d = _alloc_and_register(fix, req_d, 2)
+    sched.update_state_after_alloc(req_c, kv_c, num_external_tokens=0)
+    sched.update_state_after_alloc(req_d, kv_d, num_external_tokens=0)
+    sched_out_pressure = make_scheduler_output(
+        {
+            req_c.request_id: 2 * BLOCK_SIZE,
+            req_d.request_id: 2 * BLOCK_SIZE,
+        },
+        new_reqs={
+            req_c.request_id: kv_c.get_block_ids(),
+            req_d.request_id: kv_d.get_block_ids(),
+        },
+    )
+    meta_pressure = sched.build_connector_meta(sched_out_pressure)
+    assert meta_pressure.store_event >= 0
+    simulate_store_completion(sched, meta_pressure.store_event)
+
+    # --- Step 4: Phase B — must not crash ---
+    # Before fix: AssertionError: Expected 32 hit tokens, got 0
+    # After fix: Phase A pinned the hits → Step 3 evicted req_c instead,
+    # Phase B consumes the cached (cpu_hit_blocks, hit_length) tuple.
+    gpu_blocks_b = fix.gpu_block_pool.get_new_blocks(2)
+    kv_blocks_b = KVCacheBlocks(blocks=(gpu_blocks_b,))
+    sched.update_state_after_alloc(req_b, kv_blocks_b, num_external_tokens=hit_tokens)
+
+    # --- Step 5: with the fix, the load is queued correctly ---
+    sched_out_b = make_scheduler_output(
+        {req_b.request_id: 1},
+        new_reqs={req_b.request_id: kv_blocks_b.get_block_ids()},
+    )
+    meta_b = sched.build_connector_meta(sched_out_b)
+    assert meta_b.load_event >= 0, (
+        "Phase B should queue a load event using the pinned CPU hit blocks"
+    )
+    assert len(meta_b.load_gpu_blocks) == 2
+    assert len(meta_b.load_cpu_blocks) == 2
