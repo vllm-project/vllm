@@ -4,6 +4,8 @@ use std::time::Duration;
 use thiserror::Error;
 use thiserror_ext::Macro;
 
+use crate::protocol::utility::UtilityCallId;
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Public error type for the Rust engine-core client.
@@ -70,17 +72,17 @@ pub enum Error {
     #[error("utility call `{method}` failed (call_id={call_id}): {message}")]
     UtilityCallFailed {
         method: String,
-        call_id: i64,
+        call_id: UtilityCallId,
         message: String,
     },
     #[error("utility call `{method}` returned an invalid result (call_id={call_id}): {message}")]
     UtilityResultDecode {
         method: String,
-        call_id: i64,
+        call_id: UtilityCallId,
         message: String,
     },
     #[error("utility call `{method}` closed unexpectedly (call_id={call_id})")]
-    UtilityCallClosed { method: String, call_id: i64 },
+    UtilityCallClosed { method: String, call_id: u64 },
 
     /// A special variant to allow cloning the same error.
     #[error(transparent)]
