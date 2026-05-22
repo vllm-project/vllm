@@ -202,7 +202,7 @@ class AudioFlamingo3ProcessingInfo(BaseProcessingInfo):
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        return {"audio": None}
+        return {"audio": 1}
 
 
 class AudioFlamingo3DummyInputsBuilder(
@@ -372,62 +372,6 @@ class AudioFlamingo3MultiModalDataParser(MultiModalDataParser):
 class AudioFlamingo3MultiModalProcessor(
     BaseMultiModalProcessor[AudioFlamingo3ProcessingInfo]
 ):
-    def _normalize_feature_attention_mask(
-        self,
-        feature_attention_mask: torch.Tensor,
-        input_features: torch.Tensor,
-        feature_extractor: Any,
-    ) -> torch.Tensor:
-        feature_len = input_features.shape[-1]
-        if feature_attention_mask.shape[-1] == feature_len:
-            return feature_attention_mask
-
-        input_lengths = feature_attention_mask.sum(-1).to(torch.long)
-        hop_length = getattr(feature_extractor, "hop_length", None)
-        if hop_length is None:
-            raise ValueError(
-                "Cannot convert sample-level audio attention mask without "
-                "`feature_extractor.hop_length`."
-            )
-
-        feature_lengths = torch.div(
-            input_lengths + hop_length - 1,
-            hop_length,
-            rounding_mode="floor",
-        ).clamp(max=feature_len)
-        feature_positions = torch.arange(
-            feature_len,
-            device=feature_attention_mask.device,
-        )
-        return (feature_positions[None, :] < feature_lengths[:, None]).to(
-            feature_attention_mask.dtype
-        )
-
-    def _expand_audio_tokens(
-        self,
-        prompt: str,
-        processor: Any,
-        feature_attention_mask: torch.Tensor,
-        chunk_counts: list[int],
-    ) -> str:
-        audio_token = getattr(processor, "audio_token", "<sound>")
-        expanded_prompt = prompt
-
-        start_idx = 0
-        for chunk_count in chunk_counts:
-            sample_mask = feature_attention_mask[start_idx : start_idx + chunk_count]
-            start_idx += chunk_count
-
-            sample_input_length = sample_mask.sum().reshape(1)
-            audio_token_length = _get_audio_post_pool_output_lengths(
-                sample_input_length.to(torch.long)
-            )[0]
-            expanded_prompt = expanded_prompt.replace(
-                audio_token, audio_token * int(audio_token_length.item()), 1
-            )
-
-        return expanded_prompt
-
     def _call_hf_processor(
         self,
         prompt: str,
