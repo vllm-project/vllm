@@ -5,7 +5,9 @@
 Decode path: Triton stage1 (split-KV tiled attention scoring + value
 accumulation) + stage2 (log-sum-exp reduction across splits).
 
-Supports FP8 (E4M3) keys, 3-bit and 4-bit uniform quantized values.
+Supports FP8 (E4M3) keys and 3-bit/4-bit values. Current presets store
+values with the rotated Lloyd-Max path. FP8-key mode keeps keys in
+original space and applies inverse rotation once after value accumulation.
 """
 
 import math
@@ -50,7 +52,8 @@ def _tq_decode_stage1(
     Block_table_ptr,  # [B, max_num_blocks] int32
     Seq_lens_ptr,  # [B] int32
     # TQ parameters
-    Centroids_ptr,  # [n_centroids] float32
+    Centroids_ptr,  # [n_key_centroids] float32
+    ValueCentroids_ptr,  # [n_value_centroids] float32
     # Output (intermediate for stage2)
     Mid_o_ptr,  # [B, Hq, NUM_KV_SPLITS, D+1] float32
     # Strides
@@ -81,6 +84,7 @@ def _tq_decode_stage1(
     BLOCK_D: tl.constexpr,  # next_power_of_2(HEAD_DIM)
     BLOCK_KV: tl.constexpr,  # tokens per tile (16)
     KEY_FP8: tl.constexpr,  # 1 if K is stored as FP8
+    VALUE_MSE: tl.constexpr,  # 1 if V is stored as rotated MSE values
     NORM_CORRECTION: tl.constexpr = 0,  # 1 = re-normalize centroids
     FP8_E4B15: tl.constexpr = 0,  # 1 = use e4b15 (Ampere/Ada), 0 = e4nv (Hopper+)
 ):
@@ -118,7 +122,12 @@ def _tq_decode_stage1(
         mse_mask = (1 << MSE_BITS) - 1
 
     # Precompute value bit/byte index vectors (loop-invariant)
-    if VQB == 3:
+    if VALUE_MSE:
+        val_mse_bit_off = d_offs * VQB
+        val_mse_byte_idx = val_mse_bit_off // 8
+        val_mse_bit_shift = val_mse_bit_off % 8
+        val_mse_mask = (1 << VQB) - 1
+    elif VQB == 3:
         val_bit_off = d_offs * 3
         val_byte_idx = val_bit_off // 8
         val_bit_shift = val_bit_off % 8
@@ -235,7 +244,36 @@ def _tq_decode_stage1(
         # ============================================================
         val_bases = slot_bases + KPS
 
-        if VQB == 3:
+        if VALUE_MSE:
+            val_addrs0 = val_bases[:, None] + val_mse_byte_idx[None, :]
+            val_raw0 = tl.load(
+                KV_cache_ptr + val_addrs0,
+                mask=kv_mask[:, None] & d_mask[None, :],
+                other=0,
+            ).to(tl.int32)
+            val_raw1 = tl.load(
+                KV_cache_ptr + val_addrs0 + 1,
+                mask=kv_mask[:, None] & d_mask[None, :],
+                other=0,
+            ).to(tl.int32)
+            val_raw16 = val_raw0 | (val_raw1 << 8)
+            v_idx = (val_raw16 >> val_mse_bit_shift[None, :]) & val_mse_mask
+            v_centroids = tl.load(
+                ValueCentroids_ptr + v_idx,
+                mask=kv_mask[:, None] & d_mask[None, :],
+                other=0.0,
+            )
+
+            norm_bases = val_bases + VAL_DATA_BYTES
+            n_lo = tl.load(KV_cache_ptr + norm_bases, mask=kv_mask, other=0).to(
+                tl.uint16
+            )
+            n_hi = tl.load(KV_cache_ptr + norm_bases + 1, mask=kv_mask, other=0).to(
+                tl.uint16
+            )
+            v_norms = (n_lo | (n_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
+            values = v_centroids * v_norms[:, None]
+        elif VQB == 3:
             val_addrs0 = val_bases[:, None] + val_byte_idx[None, :]
             val_raw0 = tl.load(
                 KV_cache_ptr + val_addrs0,
@@ -323,6 +361,7 @@ def _tq_full_dequant_kv(
     KV_cache_ptr,
     Block_table_ptr,
     Centroids_ptr,
+    ValueCentroids_ptr,
     K_out_ptr,  # [B, Hk, max_seq, D] float16
     V_out_ptr,  # [B, Hk, max_seq, D] float16
     stride_ko_b,
@@ -344,11 +383,17 @@ def _tq_full_dequant_kv(
     VAL_DATA_BYTES: tl.constexpr,
     MSE_BITS: tl.constexpr,
     KEY_FP8: tl.constexpr,
+    VALUE_MSE: tl.constexpr,
     BLOCK_D: tl.constexpr,
     NORM_CORRECTION: tl.constexpr = 0,
     FP8_E4B15: tl.constexpr = 0,  # 1 = use e4b15 (Ampere/Ada), 0 = e4nv (Hopper+)
 ):
-    """Full dequant: reconstruct K (MSE centroids * norm or FP8) and V to fp16."""
+    """Full dequant: reconstruct K and V to fp16.
+
+    When VALUE_MSE is true, V is reconstructed in the rotated domain. The
+    caller must apply the inverse Hadamard after this kernel if original-space
+    values are needed.
+    """
     pos = tl.program_id(0)
     bh = tl.program_id(1)
     bid = bh // NUM_KV_HEADS
@@ -410,7 +455,28 @@ def _tq_full_dequant_kv(
 
     # === V dequant ===
     val_base = slot_base + KPS
-    if VQB == 4:
+    if VALUE_MSE:
+        val_bit_off = d_offs * VQB
+        val_byte_idx = val_bit_off // 8
+        val_bit_shift = val_bit_off % 8
+        val_umask = (1 << VQB) - 1
+
+        val_raw0 = tl.load(
+            KV_cache_ptr + val_base + val_byte_idx, mask=d_mask, other=0
+        ).to(tl.int32)
+        val_raw1 = tl.load(
+            KV_cache_ptr + val_base + val_byte_idx + 1, mask=d_mask, other=0
+        ).to(tl.int32)
+        raw16_val = val_raw0 | (val_raw1 << 8)
+        v_idx = (raw16_val >> val_bit_shift) & val_umask
+        v_centroids = tl.load(ValueCentroids_ptr + v_idx, mask=d_mask, other=0.0)
+
+        norm_base = val_base + VAL_DATA_BYTES
+        n_lo = tl.load(KV_cache_ptr + norm_base).to(tl.uint16)
+        n_hi = tl.load(KV_cache_ptr + norm_base + 1).to(tl.uint16)
+        v_norm = (n_lo | (n_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
+        v_vals = v_centroids * v_norm
+    elif VQB == 4:
         vb_idx = d_offs // 2
         vb_shift = (d_offs % 2) * 4
         val_raw = tl.load(KV_cache_ptr + val_base + vb_idx, mask=d_mask, other=0).to(
@@ -452,7 +518,7 @@ def _tq_full_dequant_kv(
         v_vals = tl.zeros([BLOCK_D], dtype=tl.float32)
 
     vo_base = bid * stride_vo_b + hid * stride_vo_h + pos * stride_vo_s
-    tl.store(V_out_ptr + vo_base + d_offs, v_vals.to(tl.float16), mask=d_mask)
+    tl.store(V_out_ptr + vo_base + d_offs, v_vals, mask=d_mask)
 
 
 # ---------------------------------------------------------------------------
@@ -466,9 +532,9 @@ def _tq_full_dequant_kv(
 _layout_cache: dict = {}
 
 
-def _get_layout(D, mse_bits, value_quant_bits, key_packed_size):
+def _get_layout(D, mse_bits, value_quant_bits, key_packed_size, value_mse=False):
     """Get cached layout constants."""
-    key = (D, mse_bits, value_quant_bits, key_packed_size)
+    key = (D, mse_bits, value_quant_bits, key_packed_size, value_mse)
     cfg = _layout_cache.get(key)
     if cfg is None:
         val_data_bytes = math.ceil(D * value_quant_bits / 8)
@@ -489,12 +555,14 @@ def triton_turboquant_decode_attention(
     block_table: torch.Tensor,  # [B, max_num_blocks] int32
     seq_lens: torch.Tensor,  # [B] int32
     Pi: torch.Tensor,  # [D, D] float32
-    centroids: torch.Tensor,  # [n_centroids] float32
+    centroids: torch.Tensor,  # [n_key_centroids] float32
     scale: float,
     mse_bits: int,
     key_packed_size: int,
     value_quant_bits: int,
     key_fp8: bool = False,
+    value_centroids: torch.Tensor | None = None,
+    value_mse: bool | None = None,
     norm_correction: bool = False,
     PiT: torch.Tensor | None = None,  # [D, D] pre-computed Pi.T contiguous
     # Pre-allocated buffers (optional, avoids per-call allocation)
@@ -514,7 +582,18 @@ def triton_turboquant_decode_attention(
     kv_group_size = Hq // Hk
     device = query.device
 
-    cfg = _get_layout(D, mse_bits, value_quant_bits, key_packed_size)
+    if value_mse is None:
+        value_mse = True
+    if value_centroids is None:
+        value_centroids = centroids
+
+    cfg = _get_layout(
+        D,
+        mse_bits,
+        value_quant_bits,
+        key_packed_size,
+        value_mse,
+    )
 
     # Compute q_rot = q @ Pi.T (rotated query for MSE key scoring)
     # FP8 path: pass query directly (float16); kernel casts inline.
@@ -557,6 +636,7 @@ def triton_turboquant_decode_attention(
         block_table,
         seq_lens,
         centroids,
+        value_centroids,
         mid_o,
         q_rot.stride(0),
         q_rot.stride(1),
@@ -581,23 +661,28 @@ def triton_turboquant_decode_attention(
         BLOCK_D=cfg["BLOCK_D"],
         BLOCK_KV=BLOCK_KV,
         KEY_FP8=1 if key_fp8 else 0,
+        VALUE_MSE=1 if value_mse else 0,
         NORM_CORRECTION=1 if norm_correction else 0,
         FP8_E4B15=fp8_e4b15,
         num_warps=1,
         num_stages=1,
     )
 
-    # Stage 2: Reduce across KV splits
-    # Output in query dtype — eliminates float16_copy kernel after stage2
+    # Stage 2: Reduce across KV splits.
+    #
+    # Value-MSE accumulates values in the rotated domain and applies inverse
+    # rotation after stage2. Keep the stage2 result in fp32 until that rotation
+    # is complete; storing to bf16/fp16 first would amplify rounding error.
     out_dtype = query.dtype
+    stage2_dtype = torch.float32 if value_mse else out_dtype
     if (
         output_buf is not None
         and output_buf.shape[0] >= B
-        and output_buf.dtype == out_dtype
+        and output_buf.dtype == stage2_dtype
     ):
         output = output_buf[:B, :Hq, :D]
     else:
-        output = torch.empty(B, Hq, D, dtype=out_dtype, device=device)
+        output = torch.empty(B, Hq, D, dtype=stage2_dtype, device=device)
         if buf_holder is not None:
             buf_holder._tq_output_buf = output
     if lse_buf is not None and lse_buf.shape[0] >= B:
@@ -622,9 +707,12 @@ def triton_turboquant_decode_attention(
         NUM_KV_SPLITS=NUM_KV_SPLITS,
         BLOCK_DV=cfg["BLOCK_D"],
         Lv=D,
-        OUTPUT_FP16=1 if out_dtype == torch.float16 else 0,
+        OUTPUT_FP16=1 if stage2_dtype == torch.float16 else 0,
         num_warps=4,
         num_stages=2,
     )
+
+    if value_mse:
+        output = (output.float().reshape(-1, D) @ Pi).reshape(B, Hq, D).to(out_dtype)
 
     return output  # already in query dtype

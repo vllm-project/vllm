@@ -351,13 +351,21 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             # fp16 copy for rotation in continuation prefill path
             layer._tq_Pi_half = H.to(torch.float16)
 
-            # Centroids for Lloyd-Max quantization.
-            layer._tq_centroids = get_centroids(D, self.tq_config.centroid_bits).to(
-                device=device, dtype=torch.float32
-            )
+            # Centroids for Lloyd-Max quantization. Key/value tables are
+            # separate because key and value bit widths can differ.
+            layer._tq_centroids = get_centroids(
+                D,
+                self.tq_config.key_centroid_bits,
+            ).to(device=device, dtype=torch.float32)
+            layer._tq_value_centroids = get_centroids(
+                D,
+                self.tq_config.value_centroid_bits,
+            ).to(device=device, dtype=torch.float32)
 
             c_sorted, _ = layer._tq_centroids.sort()
             layer._tq_midpoints = (c_sorted[:-1] + c_sorted[1:]) / 2
+            v_sorted, _ = layer._tq_value_centroids.sort()
+            layer._tq_value_midpoints = (v_sorted[:-1] + v_sorted[1:]) / 2
             layer._tq_cached = True
 
     def do_kv_cache_update(
@@ -554,6 +562,8 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             key_packed_size=self.tq_config.key_packed_size,
             value_quant_bits=self.tq_config.effective_value_quant_bits,
             key_fp8=self.tq_config.key_fp8,
+            value_midpoints=layer._tq_value_midpoints,
+            value_mse=self.tq_config.value_mse_supported,
         )
 
     # ------------------------------------------------------------------ #
@@ -687,6 +697,8 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                         key_packed_size=self.tq_config.key_packed_size,
                         value_quant_bits=(self.tq_config.effective_value_quant_bits),
                         key_fp8=self.tq_config.key_fp8,
+                        value_centroids=layer._tq_value_centroids,
+                        value_mse=self.tq_config.value_mse_supported,
                         norm_correction=self.tq_config.norm_correction,
                         PiT=PiT,
                     )
@@ -744,9 +756,12 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         # Use WorkspaceManager for dequant buffers.
         # Shared across all layers — saves 60× memory at long context.
         # Required for CUDA Graph capture (per-layer growth incompatible with CG).
+        v_dequant_dtype = (
+            torch.float32 if self.tq_config.value_mse_supported else torch.float16
+        )
         k_buf, v_buf = current_workspace_manager().get_simultaneous(
             (buf_shape, torch.float16),
-            (buf_shape, torch.float16),
+            (buf_shape, v_dequant_dtype),
         )
         # Skip .zero_() — kernel writes all positions up to cached_len,
         # and we only read [:cached_len] afterwards.
@@ -758,6 +773,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             kv_cache,
             block_table,
             centroids,
+            layer._tq_value_centroids,
             k_cached,
             v_cached,
             k_cached.stride(0),
@@ -779,6 +795,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             VAL_DATA_BYTES=val_data_bytes,
             MSE_BITS=self.tq_config.key_mse_bits,
             KEY_FP8=1 if self.tq_config.key_fp8 else 0,
+            VALUE_MSE=1 if self.tq_config.value_mse_supported else 0,
             BLOCK_D=BLOCK_D,
             NORM_CORRECTION=1 if self.tq_config.norm_correction else 0,
             FP8_E4B15=_use_fp8_e4b15(device.index or 0),
@@ -799,8 +816,16 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 0, 1
             )  # (cached_len, Hk, D)
 
-        # Skip .contiguous() — the copy into k_full/v_full handles layout
-        v_cached_trim = v_cached[0, :, :cached_len, :].transpose(0, 1)
+        # Value-MSE stores V in rotated space; inverse-rotate after full
+        # dequant before returning original-space values to prefill paths.
+        if self.tq_config.value_mse_supported:
+            Pi = layer._tq_Pi
+            v_flat = v_cached[0, :, :cached_len, :].reshape(-1, D)
+            v_flat = v_flat.float() @ Pi
+            v_cached_trim = v_flat.reshape(Hk, cached_len, D).transpose(0, 1)
+        else:
+            # Skip .contiguous() — the copy into v_full handles layout.
+            v_cached_trim = v_cached[0, :, :cached_len, :].transpose(0, 1)
 
         # Concatenate cached + current chunk K/V (match query dtype)
         # Pre-allocate full K/V buffer, copy into slices (no cat alloc)
@@ -863,8 +888,9 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         Pi: torch.Tensor,
         centroids: torch.Tensor,
         PiT: torch.Tensor | None = None,
-        layer: torch.nn.Module | None = None,
+        layer: Any = None,
     ) -> torch.Tensor:
+        assert layer is not None
         # Acquire shared decode scratch buffers from WorkspaceManager.
         # Layers execute sequentially so one set of buffers is sufficient.
         # Falls back to kernel-internal allocation if workspace unavailable.
@@ -874,11 +900,15 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         Hq = self.num_heads
         mid_o_buf = output_buf = lse_buf = None
         if is_workspace_manager_initialized():
-            # output_buf in query dtype — matches the in-kernel fp16 cast in stage2.
+            # Value-MSE inverse-rotates stage2 output; keep that intermediate
+            # in fp32 so the rotation does not amplify bf16/fp16 rounding.
+            stage2_dtype = (
+                torch.float32 if self.tq_config.value_mse_supported else query.dtype
+            )
             mid_o_buf, output_buf, lse_buf = (
                 current_workspace_manager().get_simultaneous(
                     ((B, Hq, S, D + 1), torch.float32),
-                    ((B, Hq, D), query.dtype),
+                    ((B, Hq, D), stage2_dtype),
                     ((B, Hq), torch.float32),
                 )
             )
@@ -895,6 +925,8 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             key_packed_size=self.tq_config.key_packed_size,
             value_quant_bits=self.tq_config.effective_value_quant_bits,
             key_fp8=self.tq_config.key_fp8,
+            value_centroids=layer._tq_value_centroids,
+            value_mse=self.tq_config.value_mse_supported,
             norm_correction=self.tq_config.norm_correction,
             PiT=PiT,
             mid_o_buf=mid_o_buf,

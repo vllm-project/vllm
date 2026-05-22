@@ -16,7 +16,9 @@ logger = logging.getLogger(__name__)
 
 # Named TQ presets: each maps to frozen config parameters.
 # key_quant_bits: 8 = FP8 keys, 3-4 = MSE (Lloyd-Max) quantized keys.
-# value_quant_bits: 3-4 = uniform quantized values.
+# value_quant_bits: 3-4 = value quantization bits. Current presets use
+# rotated MSE (Lloyd-Max) values; the legacy uniform value layout remains
+# available for explicit fallback paths.
 TQ_PRESETS: dict[str, dict] = {
     "turboquant_k8v4": {
         "key_quant_bits": 8,
@@ -46,7 +48,9 @@ class TurboQuantConfig:
     """Configuration for TurboQuant KV-cache quantization.
 
     Applies Hadamard rotation followed by per-coordinate Lloyd-Max scalar
-    quantization for keys, and uniform quantization for values.
+    quantization for keys. Values use the same rotated Lloyd-Max path in
+    current presets; the FP8-key preset stores keys in original space and
+    values in rotated MSE space.
 
     Historical note: the core algorithmic pattern implemented for key
     quantization (Hadamard rotation followed by deterministic scalar
@@ -78,8 +82,9 @@ class TurboQuantConfig:
         head_dim: Attention head dimension (e.g. 64, 96, 128).
         key_quant_bits: Bits for key quantization. 8 = FP8 keys (no
             rotation/MSE). 3-4 = Lloyd-Max MSE quantized keys.
-        value_quant_bits: Bits per value dimension for uniform quantization.
-            3 = 8 levels, 4 = 16 levels (default).
+        value_quant_bits: Bits per value dimension. Current presets use
+            Lloyd-Max MSE value quantization. 3 = 8 levels, 4 = 16 levels
+            (default).
         norm_correction: Re-normalize centroid vectors to unit norm before
             inverse rotation during dequant. Fixes quantization-induced norm
             distortion, improving PPL by ~0.8% at 4-bit.
@@ -87,7 +92,7 @@ class TurboQuantConfig:
 
     head_dim: int = 128
     key_quant_bits: int = 3  # 3-4 = MSE keys, 8 = FP8 keys
-    value_quant_bits: int = 4  # 3-4 = uniform quantized values
+    value_quant_bits: int = 4  # 3-4 = value quantization bits
     seed: int = 42  # kept for backward compatibility; no longer used internally
     norm_correction: bool = False
 
@@ -121,8 +126,31 @@ class TurboQuantConfig:
         return self.mse_bits
 
     @property
+    def key_centroid_bits(self) -> int:
+        """Centroid bits for key MSE tables.
+
+        FP8-key mode does not quantize keys through centroids, but the
+        existing runtime expects a non-empty centroid table to be available
+        for shared launcher plumbing. Keep the historical non-zero fallback.
+        """
+        return self.mse_bits
+
+    @property
+    def value_centroid_bits(self) -> int:
+        """Centroid bits for the staged value-MSE path."""
+        return self.value_quant_bits
+
+    @property
     def n_centroids(self) -> int:
         return 2**self.mse_bits
+
+    @property
+    def n_key_centroids(self) -> int:
+        return 2**self.key_centroid_bits
+
+    @property
+    def n_value_centroids(self) -> int:
+        return 2**self.value_centroid_bits
 
     @property
     def key_packed_size(self) -> int:
@@ -150,10 +178,46 @@ class TurboQuantConfig:
     def value_packed_size(self) -> int:
         """Packed bytes for a single VALUE vector.
 
-        Uniform quantization: ceil(head_dim * bits / 8) + 4 bytes (scale + zero fp16).
+        Current presets store rotated MSE values:
+          ceil(head_dim * bits / 8) + 2 bytes (vec_norm fp16).
+
+        Legacy uniform value layout, used only by explicit fallback paths:
+          ceil(head_dim * bits / 8) + 4 bytes (scale + zero fp16).
         """
+        if self.value_mse_supported:
+            return self.value_mse_packed_size
+        return self.value_uniform_packed_size
+
+    @property
+    def value_uniform_packed_size(self) -> int:
+        """Packed bytes for the legacy uniform VALUE layout."""
         data_bytes = math.ceil(self.head_dim * self.value_quant_bits / 8)
         return data_bytes + 4  # +2 scale(fp16) +2 zero(fp16)
+
+    @property
+    def value_mse_supported(self) -> bool:
+        """Whether this preset stores values with rotated MSE quantization."""
+        return True
+
+    @property
+    def value_mse_packed_size(self) -> int:
+        """Packed bytes for rotated VALUE MSE layout.
+
+        MSE values use packed centroid indices plus one fp16 vector norm.
+        """
+        data_bytes = math.ceil(self.head_dim * self.value_quant_bits / 8)
+        return data_bytes + 2  # +2 vec_norm(fp16)
+
+    @property
+    def value_mse_slot_size(self) -> int:
+        """Slot size for rotated VALUE MSE layout."""
+        return self.key_packed_size + self.value_mse_packed_size
+
+    @property
+    def value_mse_slot_size_aligned(self) -> int:
+        """Even-aligned slot size for rotated VALUE MSE layout."""
+        s = self.value_mse_slot_size
+        return s + (s % 2)
 
     @property
     def slot_size(self) -> int:
