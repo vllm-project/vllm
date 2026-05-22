@@ -84,6 +84,7 @@ from vllm.multimodal.processing import PromptReplacement, PromptUpdate
 from vllm.sequence import IntermediateTensors
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
 
@@ -695,6 +696,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         # Use pre-computed cos_sin_cache from RotaryEmbedding
         cos, sin = self.rotary_pos_emb.get_cos_sin(max_size)
 
+        pos_ids = pos_ids.to(cos.device, non_blocking=True)
         cos_combined = cos[pos_ids].flatten(1)
         sin_combined = sin[pos_ids].flatten(1)
 
@@ -753,9 +755,10 @@ class Qwen2_5_VisionTransformer(nn.Module):
         window_index_thw, cu_seqlens_window_thw = self.get_window_index_thw(t, h, w)
         cos_thw, sin_thw = self.rotary_pos_emb_thw(t, h, w)
 
-        cos_thw = cos_thw[window_index_thw, :, :]
+        window_index_thw_dev = window_index_thw.to(cos_thw.device, non_blocking=True)
+        cos_thw = cos_thw[window_index_thw_dev, :, :]
         cos_thw = cos_thw.flatten(start_dim=0, end_dim=1)
-        sin_thw = sin_thw[window_index_thw, :, :]
+        sin_thw = sin_thw[window_index_thw_dev, :, :]
         sin_thw = sin_thw.flatten(start_dim=0, end_dim=1)
 
         cu_seqlens_thw = torch.repeat_interleave(
@@ -1093,7 +1096,7 @@ class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             **super()._get_mm_fields_config(hf_inputs, hf_processor_mm_kwargs),
-            second_per_grid_ts=MultiModalFieldConfig.batched("video"),
+            second_per_grid_ts=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
         )
 
     def _call_hf_processor(
@@ -1418,7 +1421,9 @@ class Qwen2_5_VLForConditionalGeneration(
         grid_thw_list = grid_thw.tolist()
         image_embeds_out = []
         for emb, size in zip(image_embeds_split, grid_thw_list):
-            positions = compute_mrope_for_media(size, merge_size).to(emb.device)
+            positions = compute_mrope_for_media(size, merge_size).to(
+                emb.device, non_blocking=True
+            )
             emb = torch.cat([emb, positions], dim=1)
             image_embeds_out.append(emb)
         image_embeds_split = image_embeds_out
@@ -1500,7 +1505,7 @@ class Qwen2_5_VLForConditionalGeneration(
                 merge_size,
                 tokens_per_second=tokens_per_second,
                 video_second_per_grid=video_second_per_grid_t.item(),
-            ).to(emb.device)
+            ).to(emb.device, non_blocking=True)
 
             emb = emb[retention_mask]
             positions = positions[retention_mask]
@@ -1545,8 +1550,8 @@ class Qwen2_5_VLForConditionalGeneration(
             else mrope_positions.device
         )
 
-        # Tensors
-        input_ids_t = torch.as_tensor(input_ids, device=device, dtype=torch.long)
+        # Tensors.
+        input_ids_t = async_tensor_h2d(input_ids, dtype=torch.long, device=device)
 
         mm_embeddings_out = [mm[:, :-4] for mm in multimodal_embeddings]
         mm_embeddings_pos = [

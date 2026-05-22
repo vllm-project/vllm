@@ -20,10 +20,16 @@ The score models is designed to compute similarity scores between two input prom
     - `LLM.score`
 - Online APIs:
     - [Score API](scoring.md#score-api) (`/score`)
-    - [Rerank API](scoring.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
+    - [Cohere Rerank API](scoring.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
 
 !!! note
     Only when a classification model outputs num_labels equal to 1 can it be used as a scoring model and have its scoring API enabled.
+
+### Score Types
+
+The three supported scoring functions are as illustrated in the figure below.
+
+![Score Types](../../assets/models/pooling_models/score_types.svg)
 
 ## Supported Models
 
@@ -97,7 +103,7 @@ The score models is designed to compute similarity scores between two input prom
 \* Feature support is the same as that of the original model.
 
 !!! note
-    Similar to Qwen3-Reranker, you need to use the following `--hf_overrides` to load the official original `Qwen3-VL-Reranker`.
+    Similar to Qwen3-Reranker, you need to use the following `--hf_overrides` to load the official original `Qwen3-VL-Reranker`. `Qwen3-VL` officially uses `qwen_vl_utils` for image preprocessing, while vLLM uses `transformers`' `video_processing_qwen3_vl`, which leads to slightly different results compared to the official Hugging Face repository examples.
 
     ```bash
     vllm serve Qwen/Qwen3-VL-Reranker-2B --hf_overrides '{"architectures": ["Qwen3VLForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}'
@@ -357,7 +363,7 @@ Full example:
 - [examples/pooling/score/vision_score_api_online.py](../../../examples/pooling/score/vision_score_api_online.py)
 - [examples/pooling/score/vision_rerank_api_online.py](../../../examples/pooling/score/vision_rerank_api_online.py)
 
-### Rerank API
+### Cohere Rerank API
 
 `/rerank`, `/v1/rerank`, and `/v2/rerank` APIs are compatible with both [Jina AI's rerank API interface](https://jina.ai/reranker/) and
 [Cohere's rerank API interface](https://docs.cohere.com/v2/reference/rerank) to ensure compatibility with
@@ -440,7 +446,7 @@ AS cross-encoder models are a subset of classification models that accept two pr
 
 Score templates are supported for **cross-encoder** models only. If you are using an **embedding** model for scoring, vLLM does not apply a score template.
 
-Some scoring models require a specific prompt format to work correctly. You can specify a custom score template using the `--chat-template` parameter (see [Chat Template](../../serving/openai_compatible_server.md#chat-template)).
+Some scoring models require a specific prompt format to work correctly. You can specify a custom score template using the `--chat-template` parameter (see [Chat Template](../../serving/online_serving/README.md#chat-template)).
 
 Like chat templates, the score template receives a `messages` list. For scoring, each message has a `role` attribute—either `"query"` or `"document"`. For the usual kind of point-wise cross-encoder, you can expect exactly two messages: one query and one document. To access the query and document content, use Jinja's `selectattr` filter:
 
