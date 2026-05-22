@@ -1,12 +1,13 @@
 mod cli;
 mod logging;
 
-use std::env;
 use std::process::ExitStatus;
+use std::{env, process::ExitCode};
 
 use anyhow::{Context, Result, anyhow, bail};
+use thiserror_ext::AsReport as _;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use vllm_managed_engine::ManagedEngineHandle;
 
 use crate::cli::{Cli, Command};
@@ -75,7 +76,7 @@ fn shutdown_signal() -> CancellationToken {
     token
 }
 
-fn main() -> Result<()> {
+fn main() -> ExitCode {
     logging::init_tracing();
     let cli = Cli::parse();
 
@@ -85,10 +86,18 @@ fn main() -> Result<()> {
         runtime.worker_threads(worker_threads);
     }
 
-    runtime
+    let result = runtime
         .build()
-        .context("failed to build Tokio runtime")?
-        .block_on(async_main(cli))
+        .context("failed to build Tokio runtime")
+        .and_then(|rt| rt.block_on(async_main(cli)));
+
+    match result {
+        Ok(_) => ExitCode::SUCCESS,
+        Err(err) => {
+            error!("Rust Frontend failed with error: {:#?}", err.as_report());
+            ExitCode::FAILURE
+        }
+    }
 }
 
 async fn async_main(cli: Cli) -> Result<()> {
