@@ -335,6 +335,7 @@ class FusedMoE(PluggableLayer):
             activation=self.activation,
             device=vllm_config.device_config.device,
             routing_method=self.routing_method_type,
+            swiglu_limit=swiglu_limit,
             # TODO: in_dtype == out_dtype?
             disable_inplace=disable_inplace() or shared_experts is not None,
         )
