@@ -500,8 +500,6 @@ def test_mxfp4_cpu_fused_moe_bias_swiglu(M, N, K, E, topk, seed):
 # INT4 W4A16 group-quantized MoE
 # ===========================================================================
 
-INT4_W4A16_ATOL = 1e-1
-INT4_W4A16_RTOL = 1e-1
 
 INT4_MOE_CONFIGS = [
     # (N, K, E, topk, group_size)
@@ -664,8 +662,8 @@ def test_int4_w4a16_cpu_fused_moe(M, N, K, E, topk, group_size, seed):
     torch.testing.assert_close(
         ref_out.bfloat16(),
         out,
-        atol=INT4_W4A16_ATOL,
-        rtol=INT4_W4A16_RTOL,
+        atol=1e-2,
+        rtol=1e-2,
     )
 
 

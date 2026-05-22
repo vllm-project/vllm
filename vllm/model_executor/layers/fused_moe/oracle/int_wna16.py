@@ -215,17 +215,6 @@ def make_wna16_moe_kernel(
                 w2_g_idx_sort_indices=w2_g_idx_sort_indices,
                 is_k_full=is_k_full,
             )
-    elif (
-        prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts
-    ):
-        max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
-        assert max_num_tokens is not None
-        experts = experts_cls(
-            max_num_tokens=max_num_tokens,
-            num_dispatchers=prepare_finalize.num_dispatchers(),
-            moe_config=moe_config,
-            quant_config=moe_quant_config,
-        )
     else:
         experts = experts_cls(
             moe_config=moe_config,
@@ -656,38 +645,26 @@ def convert_to_wna16_moe_kernel_format(
         )
     elif backend == WNA16MoEBackend.CPU:
         # CPU backend: repack INT4 weights to blocked format via
-        # prepare_int4_moe_layer_for_cpu (mirrors how Marlin repacks
-        # weights in _process_weights_marlin).
+        # prepare_int4_moe_layer_for_cpu.
         from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
             prepare_int4_moe_layer_for_cpu,
         )
 
         # Determine zero points for repacking.
-        # For asymmetric GPTQ: reinterpret checkpoint qzeros as int32.
-        # For symmetric: pass None so prepare_int4_moe_layer_for_cpu
-        # synthesizes the correct zero points.
         w13_zeros: torch.Tensor | None = None
         w2_zeros: torch.Tensor | None = None
-        # Check symmetry: GPTQ uses "is_sym", compressed_tensors uses
-        # "symmetric".  Default to symmetric (True) if neither is present.
-        is_sym = getattr(
-            quant_config, "is_sym", getattr(quant_config, "symmetric", True)
-        )
-        if not is_sym:
-            raw_w13_zp = getattr(layer, "w13_qzeros", None)
-            raw_w2_zp = getattr(layer, "w2_qzeros", None)
-            if raw_w13_zp is not None:
-                w13_zeros = (
-                    raw_w13_zp.data.view(torch.int32)
-                    if raw_w13_zp.dtype != torch.int32
-                    else raw_w13_zp.data
-                )
-            if raw_w2_zp is not None:
-                w2_zeros = (
-                    raw_w2_zp.data.view(torch.int32)
-                    if raw_w2_zp.dtype != torch.int32
-                    else raw_w2_zp.data
-                )
+        if w13_qzeros is not None:
+            w13_zeros = (
+                w13_qzeros.data.view(torch.int32)
+                if w13_qzeros.dtype != torch.int32
+                else w13_qzeros.data
+            )
+        if w2_qzeros is not None:
+            w2_zeros = (
+                w2_qzeros.data.view(torch.int32)
+                if w2_qzeros.dtype != torch.int32
+                else w2_qzeros.data
+            )
 
         group_size = w13.size(1) * 8 // w13_scale.size(1)
         (

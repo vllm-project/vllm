@@ -339,16 +339,11 @@ def _symmetric_zp_packed(quant_algo: CPUQuantAlgo) -> int:
     (unpack_4bit_to_32bit_signed) adds +1 to stored zeros, so we
     store 7 per nibble: 0x77777777 → +1 → 8.
 
-    Note: compressed-tensors symmetric is the only case that needs
-    synthetic zeros.  GPTQ/AWQ checkpoints carry their own qzeros
-    and bypass this function entirely.
+    Both GPTQ symmetric and compressed-tensors symmetric use this
+    synthesis path on CPU, since neither caller passes qzeros to
+    convert_to_wna16_moe_kernel_format.
     """
-    if quant_algo != CPUQuantAlgo.GPTQ:
-        raise ValueError(
-            f"Synthetic zero points only supported for GPTQ path, "
-            f"got {quant_algo}. AWQ/other formats should provide "
-            f"checkpoint zeros directly."
-        )
+    assert quant_algo == CPUQuantAlgo.GPTQ
     return 0x77777777  # each nibble=7, +1 in GPTQ unpack → 8
 
 
@@ -373,9 +368,9 @@ def prepare_int4_moe_layer_for_cpu(
         w2_scale: [E, num_groups, K] float16/bf16
         group_size: quantization group size
         quant_algo: CPUQuantAlgo.GPTQ or CPUQuantAlgo.AWQ
-        w13_zeros: optional [E, num_groups, N//8] int32 from checkpoint.
+        w13_zeros: optional [E, num_groups, N//8] int32 packed zeros.
                    If None, synthetic zeros are created for symmetric quant.
-        w2_zeros: optional [E, num_groups, N//8] int32 from checkpoint.
+        w2_zeros: optional [E, num_groups, N//8] int32 packed zeros.
                   If None, synthetic zeros are created for symmetric quant.
 
     Returns:
@@ -385,7 +380,6 @@ def prepare_int4_moe_layer_for_cpu(
     E = w13_packed.size(0)
 
     if w13_zeros is None:
-        # Symmetric quantization: synthesize zero points.
         num_groups_w13 = w13_scale.size(1)
         N_w13 = w13_scale.size(2)  # 2*I
         _zp = _symmetric_zp_packed(quant_algo)
@@ -430,10 +424,6 @@ class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
             moe_config,
             quant_config,
         )
-        # Initialize from quant_config.  For GPTQ, these are already blocked
-        # (convert_to_wna16_moe_kernel_format did the repacking).
-        # For compressed_tensors, these are raw and will be overridden by
-        # process_weights_after_loading.
         self._w1_blocked_scale = quant_config.w1_scale
         self._w2_blocked_scale = quant_config.w2_scale
         self._w1_blocked_zero = quant_config.w1_zp
