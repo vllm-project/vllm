@@ -19,6 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     SupportsHMA,
 )
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
@@ -340,21 +341,17 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         ready_event.record()
         copy_stream.wait_event(ready_event)
 
-        slot_mapping = attn_metadata.slot_mapping
+        slot_mapping = get_forward_context().slot_mapping[layer_name]  # type: ignore
         offset = 0
         for request in connector_metadata.requests:
             num_tokens = request.token_ids.shape[0]
             with torch.cuda.stream(copy_stream):
-                req_slot_mapping = slot_mapping[offset : offset + num_tokens]
+                req_slot_mapping_gpu = slot_mapping[offset : offset + num_tokens]
+                assert req_slot_mapping_gpu.device == kv_layer.device
                 offset += num_tokens
 
-                # Move the CPU slot_mapping to GPU on the copy stream to avoid
-                # implicit H2D that would sync the default stream.
-                slot_mapping_gpu = req_slot_mapping.to(
-                    device=kv_layer.device, non_blocking=True
-                )
                 hidden_states_gpu = extract_from_kv_cache(
-                    kv_layer, slot_mapping_gpu, num_tokens
+                    kv_layer, req_slot_mapping_gpu, num_tokens
                 )
                 # Async DtoH copy into pinned host memory.
                 pinned_hs = torch.empty_like(
