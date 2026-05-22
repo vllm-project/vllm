@@ -179,6 +179,13 @@ class Scheduler(SchedulerInterface):
         # KV Connector: requests in process of async KV loading or recving
         self.finished_recving_kv_req_ids: set[str] = set()
         self.failed_recving_kv_req_ids: set[str] = set()
+        # KV Connector: requests whose blocks are held pending the connector
+        # finishing an outbound KV transfer (e.g. PD-disagg prefiller waiting
+        # for the decode peer to acknowledge the pull). These keep
+        # `has_requests()` true so that the engine continues to poll
+        # `connector.get_finished()` until the transfer completes (or times
+        # out) and the blocks can be freed.
+        self.delayed_free_req_ids: set[str] = set()
 
         # Encoder-related.
         # Calculate encoder cache size if applicable
@@ -1854,12 +1861,18 @@ class Scheduler(SchedulerInterface):
         delay_free_blocks |= connector_delay_free_blocks
         if not delay_free_blocks:
             self._free_blocks(request)
+        else:
+            # The connector is holding the blocks for an async transfer.
+            # Track the request id so the engine stays awake polling
+            # `connector.get_finished()` until the transfer completes.
+            self.delayed_free_req_ids.add(request_id)
 
         return kv_xfer_params
 
     def _free_blocks(self, request: Request):
         assert request.is_finished()
         self.kv_cache_manager.free(request)
+        self.delayed_free_req_ids.discard(request.request_id)
         del self.requests[request.request_id]
 
     @property
@@ -1883,6 +1896,25 @@ class Scheduler(SchedulerInterface):
 
     def has_finished_requests(self) -> bool:
         return len(self.finished_req_ids) > 0
+
+    def has_delayed_free_requests(self) -> bool:
+        """Returns True if any request still holds blocks pending the KV
+        connector finishing an async outbound transfer."""
+        return len(self.delayed_free_req_ids) > 0
+
+    def has_requests(self) -> bool:
+        """Override `SchedulerInterface.has_requests` to also stay alive while
+        any request is waiting for the KV connector to complete an async
+        outbound transfer. Without this, the engine can sleep on the input
+        queue right after a prefill (PD-disagg prefiller), never polling
+        `connector.get_finished()` to receive the decode-side acknowledgement,
+        and the held blocks become unreclaimable until the connector's own
+        timeout fires."""
+        return (
+            self.has_unfinished_requests()
+            or self.has_finished_requests()
+            or self.has_delayed_free_requests()
+        )
 
     def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False
