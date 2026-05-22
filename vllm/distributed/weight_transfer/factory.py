@@ -120,3 +120,9 @@ WeightTransferEngineFactory.register_engine(
     "vllm.distributed.weight_transfer.ipc_engine",
     "IPCWeightTransferEngine",
 )
+
+WeightTransferEngineFactory.register_engine(
+    "rdt",
+    "vllm.distributed.weight_transfer.rdt_engine",
+    "RDTWeightTransferEngine",
+)
