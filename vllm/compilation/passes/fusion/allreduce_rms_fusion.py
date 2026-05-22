@@ -416,6 +416,135 @@ class AllReduceFusedAddRMSNormPattern(BasePattern):
         )
 
 
+class AllReduceGemmaRMSNormPattern(BasePattern):
+    """Gemma-style variant of AllReduceRMSNormPattern.
+
+    Matches `tensor_model_parallel_all_reduce -> ir.ops.rms_norm(weight + 1)`
+    (no residual) produced by GemmaRMSNorm.forward_native, and replaces it
+    with the flashinfer fused op. The +1 weight shift is applied in the
+    replacement before being passed to flashinfer as `rms_gamma`.
+    """
+
+    def __init__(
+        self,
+        epsilon: float,
+        dtype: torch.dtype,
+        device: str | None,
+        allreduce_params: FlashInferFusedAllReduceParams,
+    ) -> None:
+        super().__init__(dtype, device)
+        self.epsilon = epsilon
+        self.allreduce_params = allreduce_params
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        return [self.empty(5, 16), self.empty(16)]
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            input: torch.Tensor, weight: torch.Tensor
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            allreduce_output = tensor_model_parallel_all_reduce(input)
+            rms = vllm.ir.ops.rms_norm(allreduce_output, weight + 1.0, self.epsilon)
+            return rms, allreduce_output
+
+        def replacement(
+            input: torch.Tensor, weight: torch.Tensor
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            residual = torch.zeros_like(input)
+            rms_result = torch.empty_like(input)
+            assert flashinfer_comm is not None, "FlashInfer must be enabled"
+            allreduce = auto_functionalized(
+                flashinfer_trtllm_fused_allreduce_norm,
+                allreduce_in=input,
+                residual=residual,
+                norm_out=rms_result,
+                quant_out=None,
+                scale_out=None,
+                rms_gamma=weight + 1.0,
+                rms_eps=self.epsilon,
+                pattern_code=flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNorm,
+                **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
+            )
+            return allreduce[3], allreduce[1]
+
+        pm.register_replacement(
+            pattern,
+            replacement,
+            self.get_inputs(),
+            pm.fwd_only,
+            pm_pass,
+            extra_check=_rms_input_weight_dtype_match,
+        )
+
+
+class AllReduceFusedAddGemmaRMSNormPattern(BasePattern):
+    """Gemma-style variant of AllReduceFusedAddRMSNormPattern.
+
+    Matches `tensor_model_parallel_all_reduce -> ir.ops.fused_add_rms_norm(
+    x, residual, weight + 1, eps)` and emits the flashinfer fused op with
+    `rms_gamma = weight + 1` applied in the replacement.
+    """
+
+    def __init__(
+        self,
+        epsilon: float,
+        dtype: torch.dtype,
+        device: str | None,
+        allreduce_params: FlashInferFusedAllReduceParams,
+    ) -> None:
+        super().__init__(dtype, device)
+        self.epsilon = epsilon
+        self.allreduce_params = allreduce_params
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        input = self.empty(5, 16)
+        residual = self.empty(5, 16)
+        weight = self.empty(16)
+        return [residual, input.to(self.dtype), weight]
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            residual: torch.Tensor, input: torch.Tensor, weight: torch.Tensor
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            allreduce_output = tensor_model_parallel_all_reduce(input)
+            rms, residual = vllm.ir.ops.fused_add_rms_norm(
+                allreduce_output, residual, weight + 1.0, self.epsilon
+            )
+            return rms, residual
+
+        def replacement(
+            residual: torch.Tensor, input: torch.Tensor, weight: torch.Tensor
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            assert flashinfer_comm is not None, "FlashInfer must be enabled"
+            allreduce = auto_functionalized(
+                flashinfer_trtllm_fused_allreduce_norm,
+                allreduce_in=input,
+                residual=residual,
+                norm_out=None,
+                quant_out=None,
+                scale_out=None,
+                rms_gamma=weight + 1.0,
+                rms_eps=self.epsilon,
+                pattern_code=flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNorm,
+                **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
+            )
+            return allreduce[1], allreduce[2]
+
+        pm.register_replacement(
+            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+        )
+
+        first_return_only = lambda fn: lambda a, b, c: fn(a, b, c)[0]
+
+        pm.register_replacement(
+            first_return_only(pattern),  # type: ignore[no-untyped-call]
+            first_return_only(replacement),  # type: ignore[no-untyped-call]
+            self.get_inputs(),
+            pm.fwd_only,
+            pm_pass,
+        )
+
+
 class AllReduceFusedRMSNormStaticQuantFP8Pattern(BasePattern):
     """
     This pattern replaces the allreduce + rms norm (without residual)
@@ -876,6 +1005,18 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
                 self.allreduce_params,
             ).register(self.patterns)
             AllReduceFusedAddRMSNormPattern(
+                epsilon,
+                self.model_dtype,
+                self.device,
+                self.allreduce_params,
+            ).register(self.patterns)
+            AllReduceGemmaRMSNormPattern(
+                epsilon,
+                self.model_dtype,
+                self.device,
+                self.allreduce_params,
+            ).register(self.patterns)
+            AllReduceFusedAddGemmaRMSNormPattern(
                 epsilon,
                 self.model_dtype,
                 self.device,
