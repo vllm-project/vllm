@@ -301,6 +301,97 @@ def test_sample_tokens_skips_pp_group_lookup_without_async_scheduling(
     assert GPUModelRunner.sample_tokens(runner, None) is None
 
 
+class _FakeCpuGpuBuffer:
+    def __init__(self, cpu: torch.Tensor):
+        self.cpu = cpu
+        self.gpu = torch.full_like(cpu, -99)
+        self.copy_count = 0
+
+    def copy_to_gpu(self, num_tokens: int) -> None:
+        self.copy_count += 1
+        self.gpu[:num_tokens].copy_(self.cpu[:num_tokens])
+
+
+def _make_async_spec_prepare_runner(
+    prev_draft_token_ids: torch.Tensor | None,
+) -> GPUModelRunner:
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.input_batch = SimpleNamespace(
+        prev_sampled_token_ids=torch.tensor([[101]], dtype=torch.int32),
+        prev_draft_token_ids=prev_draft_token_ids,
+        req_ids=["req-1"],
+    )
+    runner.prev_positions = SimpleNamespace(np=np.array([0], dtype=np.int32))
+    runner.input_ids = _FakeCpuGpuBuffer(
+        torch.tensor([0, -1, -1, -1, -1], dtype=torch.int32)
+    )
+    runner.enable_prompt_embeds = False
+    runner.use_async_spec_decode = True
+    runner.pin_memory = False
+    runner.device = torch.device("cpu")
+    runner.num_spec_tokens = 4
+    runner._draft_token_ids = None
+    return runner
+
+
+def test_prepare_input_ids_replaces_async_spec_placeholders():
+    runner = _make_async_spec_prepare_runner(
+        torch.tensor([[201, 202, 203, 204]], dtype=torch.int64)
+    )
+    scheduler_output = SimpleNamespace(
+        scheduled_spec_decode_tokens={"req-1": [-1, -1, -1, -1]}
+    )
+
+    GPUModelRunner._prepare_input_ids(
+        runner,
+        scheduler_output,
+        num_reqs=1,
+        total_num_scheduled_tokens=5,
+        cu_num_tokens=np.array([5], dtype=np.int32),
+    )
+
+    assert runner.input_ids.copy_count == 0
+    torch.testing.assert_close(
+        runner.input_ids.gpu[:5],
+        torch.tensor([101, 201, 202, 203, 204], dtype=torch.int32),
+    )
+
+
+def test_prepare_input_ids_rejects_async_spec_placeholders_without_sample_cache():
+    runner = _make_async_spec_prepare_runner(
+        torch.tensor([[201, 202, 203, 204]], dtype=torch.int64)
+    )
+    runner.input_batch.prev_sampled_token_ids = None
+    scheduler_output = SimpleNamespace(
+        scheduled_spec_decode_tokens={"req-1": [-1, -1, -1, -1]}
+    )
+
+    with pytest.raises(RuntimeError, match="no cached sampled token IDs"):
+        GPUModelRunner._prepare_input_ids(
+            runner,
+            scheduler_output,
+            num_reqs=1,
+            total_num_scheduled_tokens=5,
+            cu_num_tokens=np.array([5], dtype=np.int32),
+        )
+
+
+def test_prepare_input_ids_rejects_async_spec_placeholders_without_draft_cache():
+    runner = _make_async_spec_prepare_runner(None)
+    scheduler_output = SimpleNamespace(
+        scheduled_spec_decode_tokens={"req-1": [-1, -1, -1, -1]}
+    )
+
+    with pytest.raises(RuntimeError, match="no cached draft token IDs"):
+        GPUModelRunner._prepare_input_ids(
+            runner,
+            scheduler_output,
+            num_reqs=1,
+            total_num_scheduled_tokens=5,
+            cu_num_tokens=np.array([5], dtype=np.int32),
+        )
+
+
 def test_select_common_block_size_no_valid_option():
     backend_a = _make_mock_backend_for_kernel_block_size([64])
     backend_b = _make_mock_backend_for_kernel_block_size([MultipleOf(16)])
