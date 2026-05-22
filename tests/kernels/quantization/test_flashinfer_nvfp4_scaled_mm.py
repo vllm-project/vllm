@@ -13,6 +13,7 @@ from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_scaled_fp4_mm,
+    has_flashinfer_b12x_gemm,
 )
 from vllm.utils.torch_utils import set_random_seed
 
@@ -74,7 +75,7 @@ def get_ref_results(
 @pytest.mark.parametrize("shape", SHAPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
-@pytest.mark.parametrize("backend", ["cutlass", "cudnn", "trtllm"])
+@pytest.mark.parametrize("backend", ["cutlass", "cudnn", "trtllm", "b12x"])
 @pytest.mark.parametrize("autotune", [False, True])
 @torch.inference_mode()
 def test_flashinfer_nvfp4_gemm(
@@ -87,6 +88,10 @@ def test_flashinfer_nvfp4_gemm(
 ) -> None:
     if "trtllm" in backend and dtype == torch.float16:
         pytest.skip("Only torch.bfloat16 is supported for TRTLLM FP4 GEMM operations")
+    if backend == "b12x" and not current_platform.has_device_capability(120):
+        pytest.skip("b12x FP4 GEMM requires SM120+ (CC 12.0+)")
+    if backend == "b12x" and not has_flashinfer_b12x_gemm():
+        pytest.skip("b12x FP4 GEMM backend not available in installed FlashInfer")
 
     set_random_seed(seed)
     m, n, packed_k = shape
@@ -105,8 +110,7 @@ def test_flashinfer_nvfp4_gemm(
 
     # ops.scaled_fp4_quant returns swizzled scales, while weights
     # from checkpoints are in linear scales.
-    # So instead of needing to swizzle for cutlass as in modelopt.py,
-    # we need to unswizzle for trtllm here.
+    # cutlass and b12x use swizzled scales directly; trtllm needs them unswizzled.
     a_fp4, a_scale_interleaved = ops.scaled_fp4_quant(
         a_dtype, a_global_scale, is_sf_swizzled_layout=True, backend=backend
     )
