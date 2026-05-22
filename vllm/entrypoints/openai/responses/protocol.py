@@ -276,6 +276,13 @@ class ResponsesRequest(OpenAIBaseModel):
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
     )
+    chat_template_kwargs: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Additional keyword args to pass to the chat template renderer. "
+            "Will be accessible by the template."
+        ),
+    )
     # --8<-- [end:responses-extra-params]
 
     def build_chat_params(
@@ -296,7 +303,7 @@ class ResponsesRequest(OpenAIBaseModel):
             chat_template=default_template,
             chat_template_content_format=default_template_content_format,
             chat_template_kwargs=merge_kwargs(  # To remove unset values
-                {},
+                self.chat_template_kwargs,
                 dict(
                     add_generation_prompt=not continue_final,
                     continue_final_message=continue_final,

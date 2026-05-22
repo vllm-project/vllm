@@ -44,6 +44,10 @@ from .matcher_utils import MatcherQuantFP8
 
 FP8_DTYPE = current_platform.fp8_dtype()
 
+
+# The empirical value for small batch
+PDL_ADVANCE_LAUNCH_TOKENS = 16
+
 logger = init_logger(__name__)
 
 flashinfer_comm: ModuleType | None = None
@@ -204,6 +208,7 @@ if flashinfer_comm is not None:
             layout_code=layout_code,
             use_oneshot=use_oneshot,
             fp32_acc=fp32_acc,
+            trigger_completion_at_end=num_tokens > PDL_ADVANCE_LAUNCH_TOKENS,
         )
 
     def call_trtllm_fused_allreduce_norm_fake(
@@ -939,7 +944,7 @@ class AiterAllreduceFusedRMSNormPattern(BasePattern, VllmPatternReplacement):
         def _replacement(
             input: torch.Tensor, weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
-            residual = torch.empty_like(input)
+            residual = torch.zeros_like(input)
             allreduce = self.FUSED_AR_RMSNORM_OP(
                 input_=input,
                 residual=residual,

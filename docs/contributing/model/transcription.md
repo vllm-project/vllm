@@ -278,7 +278,7 @@ Once your model implements `SupportsTranscription`, you can test the endpoints (
       http://localhost:8000/v1/audio/translations
     ```
 
-Or check out more examples in [examples/online_serving](../../../examples/online_serving).
+Or check out more examples in [examples/speech_to_text](../../../examples/speech_to_text).
 
 !!! note
     - If your model handles chunking internally (e.g., via its processor or encoder), set `min_energy_split_window_size=None` in the returned `SpeechToTextConfig` to disable server-side chunking.

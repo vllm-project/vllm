@@ -89,7 +89,7 @@ class SequencePooler(Pooler):
         return pooled_data
 
 
-def pooler_for_embed(pooler_config: PoolerConfig):
+def pooler_for_embed(pooler_config: PoolerConfig) -> SequencePooler:
     pooling = get_seq_pooling_method(pooler_config.get_seq_pooling_type())
 
     vllm_config = get_current_vllm_config()
@@ -109,7 +109,7 @@ def pooler_for_classify(
     pooling: SequencePoolingMethod | SequencePoolingFn | None = None,
     classifier: ClassifierFn | None = None,
     act_fn: PoolerActivation | None = None,
-):
+) -> SequencePooler:
     if pooling is None:
         pooling = get_seq_pooling_method(pooler_config.get_seq_pooling_type())
 

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from dataclasses import dataclass
 
 import safetensors
 import torch
@@ -21,6 +22,41 @@ from vllm.utils.platform_utils import is_pin_memory_available
 logger = init_logger(__name__)
 
 
+@dataclass(frozen=True)
+class MoEEPLoadSpec:
+    """Per-expert-parallel slicing metadata for one FusedMoE LoRA module.
+
+    Threaded into the LoRA loader so per-expert weights from EP ranks
+    other than this one can be skipped before they ever hit CPU memory.
+    """
+
+    ep_rank: int
+    local_num_experts: int
+    global_num_experts: int
+
+
+_EXPERTS_SEPARATOR = ".experts."
+
+
+def _is_remote_expert_key(raw_name: str, spec: "MoEEPLoadSpec") -> bool:
+    """
+    Decide whether a checkpoint key belongs to a non-local expert.
+    """
+    pos = raw_name.find(_EXPERTS_SEPARATOR)
+    if pos < 0:
+        return False
+    idx_start = pos + len(_EXPERTS_SEPARATOR)
+    idx_end = raw_name.find(".", idx_start)
+    if idx_end < 0:
+        return False
+    idx_str = raw_name[idx_start:idx_end]
+    if not idx_str.isdigit():
+        return False
+    expert_idx = int(idx_str)
+    local_start = spec.ep_rank * spec.local_num_experts
+    return not (local_start <= expert_idx < local_start + spec.local_num_experts)
+
+
 class LoRAModel:
     """A LoRA fine-tuned model."""
 
@@ -29,12 +65,17 @@ class LoRAModel:
         lora_model_id: int,
         rank: int,
         loras: dict[str, LoRALayerWeights],
+        is_3d_lora_weight: bool = False,
     ) -> None:
         """
         Args:
             lora_model_id: The integer id for the lora model.
             rank: lora rank.
             loras: module name -> weights for lora-replaced layers.
+            is_3d_lora_weight: Whether the on-disk MoE adapter is in the 3D
+                fused (gate_up_proj / down_proj) layout. Propagated from the
+                originating LoRARequest. Only consulted by the LoRA model
+                manager when enable_mixed_moe_lora_format is on.
 
         """
         self.id = lora_model_id
@@ -44,6 +85,7 @@ class LoRAModel:
         )
         self.rank = rank
         self.loras: dict[str, LoRALayerWeights] = loras
+        self.is_3d_lora_weight = is_3d_lora_weight
 
     def clone(self, lora_model_id: int) -> "LoRAModel":
         """Return a copy of the object with different ids.
@@ -53,6 +95,7 @@ class LoRAModel:
             lora_model_id,
             rank=self.rank,
             loras=self.loras.copy(),
+            is_3d_lora_weight=self.is_3d_lora_weight,
         )
 
     def get_lora(self, module_name: str) -> LoRALayerWeights | None:
@@ -134,6 +177,7 @@ class LoRAModel:
         weights_mapper: WeightsMapper | None = None,
         tensorizer_config_dict: dict | None = None,
         skip_prefixes: list[str] | None = None,
+        moe_ep_spec: MoEEPLoadSpec | None = None,
     ) -> "LoRAModel":
         """Create a LoRAModel from a local checkpoint.
 
@@ -149,6 +193,11 @@ class LoRAModel:
             skip_prefixes: List of module name prefixes to skip during loading.
                 Models can define this to skip modules not used in inference
                 (e.g., MTP layers). Format: ["mtp."]
+            moe_ep_spec: When 2D FusedMoE LoRA modules are present with
+                expert parallelism enabled, the (ep_rank, local, global)
+                slicing metadata shared across all MoE layers. Non-local
+                expert weights are skipped at read time instead of being
+                loaded and discarded later.
 
         Returns:
             Loaded LoRA Model.
@@ -203,6 +252,7 @@ class LoRAModel:
             tensors = TensorDeserializer(
                 lora_tensor_path,
                 dtype=tensorizer_config.dtype,
+                device=device,
                 **tensorizer_args.deserialization_kwargs,
             )
             check_unexpected_modules(tensors)
@@ -219,6 +269,10 @@ class LoRAModel:
                 # Load tensors if there are only expected modules.
                 check_unexpected_modules(f)
                 for module in f.keys():  # noqa
+                    if moe_ep_spec is not None and _is_remote_expert_key(
+                        module, moe_ep_spec
+                    ):
+                        continue
                     tensors[module] = f.get_tensor(module)
         elif os.path.isfile(lora_bin_file_path) or os.path.isfile(lora_pt_file_path):
             lora_file_path = (
@@ -228,6 +282,15 @@ class LoRAModel:
             )
             tensors = torch.load(lora_file_path, map_location=device, weights_only=True)
             check_unexpected_modules(tensors)
+            if moe_ep_spec is not None:
+                # `.bin`/`.pt` adapters can't be lazy-loaded, but pruning
+                # the dict here still frees the non-local expert tensors
+                # before the dtype cast / pin_memory work that follows.
+                tensors = {
+                    k: v
+                    for k, v in tensors.items()
+                    if not _is_remote_expert_key(k, moe_ep_spec)
+                }
         else:
             raise ValueError(f"{lora_dir} doesn't contain tensors")
 
