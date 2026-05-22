@@ -20,11 +20,17 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from vllm.models.deepseek_v4.common.ops import (
+    dequantize_and_gather_k_cache,
     fused_indexer_q_rope_quant,
     fused_inv_rope_fp8_quant,
     fused_q_kv_rmsnorm,
 )
-from vllm.utils.deep_gemm import fp8_einsum
+from vllm.models.deepseek_v4.nvidia.flashmla import (
+    _sparse_mla_prefill_workspace_bounds,
+)
+from vllm.models.deepseek_v4.nvidia.ops.fp8_einsum import (
+    deepseek_v4_fp8_einsum_config,
+)
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import rocm_inv_rope_einsum
 
@@ -60,6 +66,7 @@ from vllm.utils.multi_stream_utils import (
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
     FlashMLASparseBackend,
+    FlashMLASparseMetadata,
 )
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV4IndexerBackend,
@@ -67,6 +74,7 @@ from vllm.v1.attention.backends.mla.indexer import (
 )
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
+from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
     from vllm.models.deepseek_v4.nvidia.flashmla import (
@@ -74,6 +82,26 @@ if TYPE_CHECKING:
     )
 
 logger = init_logger(__name__)
+
+
+def _allocate_deepseek_v4_wo_a_output(
+    num_tokens: int,
+    num_groups: int,
+    output_rank: int,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> torch.Tensor:
+    shape = (num_tokens, num_groups, output_rank)
+    if torch.compiler.is_compiling():
+        # Workspace growth can call torch.accelerator.empty_cache(), which
+        # Dynamo intentionally refuses to trace. During compilation this is a
+        # normal graph allocation, matching the o_padded allocation above.
+        return torch.empty(shape, dtype=dtype, device=device)
+
+    (output,) = current_workspace_manager().get_simultaneous(
+        (shape, dtype),
+    )
+    return output
 
 
 def _select_v4_sparse_impl() -> "type[DeepseekV4SparseMLAAttentionImpl]":
@@ -204,12 +232,13 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         self.wo_b = mla_modules.wo_b
 
         # Pick fp8_einsum recipe based on GPU arch:
-        # SM90: FP32 block scales stay [g, r/128, d/128] → sfb_gran_mn=128
-        # SM100: INT32 packed scales become [g, r, ...] → sfb_gran_mn=1
+        # SM90/SM120: FP32 block scales stay [g, r/128, d/128].
+        # SM100: INT32 packed scales become [g, r, ...].
         cap = current_platform.get_device_capability()
         assert cap is not None, "DeepseekV4 attention requires a CUDA device"
-        self._einsum_recipe = (1, 128, 128) if cap.major <= 9 else (1, 1, 128)
-        self._tma_aligned_scales = cap.major >= 10
+        self._einsum_recipe, self._tma_aligned_scales = deepseek_v4_fp8_einsum_config(
+            cap.major
+        )
 
         self.rotary_emb = mla_modules.rotary_emb
         self.indexer_rotary_emb = mla_modules.indexer_rotary_emb
@@ -234,6 +263,8 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         # [1] doubles as post-GEMM event1. Reuse is safe: GEMM fully joins
         # before post-GEMM starts.
         self.ln_events = [torch.cuda.Event() for _ in range(4)]
+        self.kv_done_event = torch.cuda.Event()
+        self.gather_done_event = torch.cuda.Event()
 
         assert cache_config is not None, "DeepseekV4 attention requires cache_config"
         self.swa_cache_layer = DeepseekV4SWACache(
@@ -338,10 +369,12 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         wo_a_fp8 = self.wo_a.weight
         wo_a_scale = self.wo_a.weight_scale_inv
 
-        z = torch.empty(
-            (num_tokens, self.n_local_groups, self.o_lora_rank),
-            device=o.device,
-            dtype=torch.bfloat16,
+        z = _allocate_deepseek_v4_wo_a_output(
+            num_tokens,
+            self.n_local_groups,
+            self.o_lora_rank,
+            torch.bfloat16,
+            hidden_states.device,
         )
         torch.ops.vllm.deepseek_v4_fp8_einsum(
             o_fp8,
@@ -441,7 +474,133 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         # on the default stream so q stays on its consumer stream (mla_attn
         # downstream reads q on default). Indexer/compressor go on aux for
         # overlap with default's GEMM + cache write.
-        if self.indexer is not None:
+        #
+        # C128A prefill: launch the KV gather on aux_stream[1] so it overlaps
+        # with the indexer forward (on aux_stream[0]). The pre-gathered
+        # workspace is passed to mla_attn so _forward_prefill skips its own
+        # gather phase.
+        kv_workspace_for_prefill: torch.Tensor | None = None
+        prefill_chunk_size = self.mla_attn.impl_cls.PREFILL_CHUNK_SIZE
+        gather_overlap = (
+            isinstance(attn_metadata, dict)
+            and self.compress_ratio >= 128
+            and self.indexer is not None
+            and self.compressor is not None
+            and self.aux_stream_list is not None
+            and len(self.aux_stream_list) >= 2
+        )
+        if gather_overlap:
+            _swa_m = cast(
+                "DeepseekSparseSWAMetadata | None",
+                attn_metadata.get(self.swa_cache_layer.prefix),
+            )
+            gather_overlap = (
+                _swa_m is not None
+                and _swa_m.num_prefills > 0
+                and _swa_m.num_prefills <= prefill_chunk_size
+            )
+        if gather_overlap:
+            _swa_m = cast(
+                "DeepseekSparseSWAMetadata",
+                attn_metadata[self.swa_cache_layer.prefix],
+            )
+            _flashmla_m = cast(
+                FlashMLASparseMetadata | None,
+                attn_metadata.get(self.mla_attn.prefix),
+            )
+            assert _flashmla_m is not None, (
+                "C128A prefill requires FlashMLASparseMetadata"
+            )
+
+            _seq_lens_cpu = _swa_m.prefill_seq_lens_cpu
+            _gather_lens_cpu = _swa_m.prefill_gather_lens_cpu
+            assert _seq_lens_cpu is not None and _gather_lens_cpu is not None
+            _n_bound, _m_bound = _sparse_mla_prefill_workspace_bounds(
+                seq_lens_cpu=_seq_lens_cpu,
+                gather_lens_cpu=_gather_lens_cpu,
+                compress_ratio=self.compress_ratio,
+                swa_only=False,
+            )
+
+            # Workspace aliasing: this allocation places kv_workspace at
+            # offset 0 of the same per-ubatch workspace buffer that
+            # _forward_prefill will later allocate kv from. The dummy-run
+            # reservation already grows the buffer to fit the full spec list,
+            # so a kv-only request here cannot trigger a resize that would
+            # orphan kv_workspace mid-forward.
+            (kv_workspace_for_prefill,) = current_workspace_manager().get_simultaneous(
+                (
+                    (prefill_chunk_size, _m_bound, self.mla_attn.head_dim),
+                    torch.bfloat16,
+                ),
+            )
+
+            _aux0 = self.aux_stream_list[0]
+            _aux1 = self.aux_stream_list[1]
+            _indexer = self.indexer
+            assert self.compressor is not None
+            _compressor = self.compressor
+
+            def _wq_b_kv_insert_and_compress() -> torch.Tensor:
+                q = self.wq_b(qr).view(-1, self.n_local_heads, self.head_dim)
+                self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
+                _compressor(kv_score, positions, self.rotary_emb)
+                return q
+
+            self.ln_events[0].record()
+            q = _wq_b_kv_insert_and_compress()
+            self.kv_done_event.record()
+
+            with torch.cuda.stream(_aux0):
+                self.ln_events[0].wait()
+                _indexer(
+                    hidden_states,
+                    qr,
+                    indexer_kv_score,
+                    indexer_weights,
+                    positions,
+                    self.indexer_rotary_emb,
+                )
+                self.ln_events[1].record()
+
+            _num_p = _swa_m.num_prefills
+            _num_d = _swa_m.num_decodes
+            _comp_k_cache = self.mla_attn.kv_cache
+            _swa_k_cache = self.swa_cache_layer.kv_cache
+            _seq_lens_dev = _swa_m.prefill_seq_lens
+            _gather_lens_dev = _swa_m.prefill_gather_lens
+            assert _seq_lens_dev is not None and _gather_lens_dev is not None
+            _block_table = _flashmla_m.block_table[_num_d:]
+            _comp_block_size = _flashmla_m.block_size // self.compress_ratio
+            _swa_block_table = _swa_m.block_table[_num_d:]
+            _swa_block_size = _swa_m.block_size
+
+            with torch.cuda.stream(_aux1):
+                self.kv_done_event.wait()
+                if _comp_k_cache is not None and _comp_k_cache.numel() > 0:
+                    dequantize_and_gather_k_cache(
+                        kv_workspace_for_prefill[:_num_p],
+                        _comp_k_cache,
+                        seq_lens=_seq_lens_dev[:_num_p] // self.compress_ratio,
+                        gather_lens=None,
+                        block_table=_block_table[:_num_p],
+                        block_size=_comp_block_size,
+                        offset=0,
+                    )
+                dequantize_and_gather_k_cache(
+                    kv_workspace_for_prefill[:_num_p],
+                    _swa_k_cache,
+                    seq_lens=_seq_lens_dev[:_num_p],
+                    gather_lens=_gather_lens_dev[:_num_p],
+                    block_table=_swa_block_table[:_num_p],
+                    block_size=_swa_block_size,
+                    offset=_n_bound,
+                )
+                self.gather_done_event.record()
+
+            self.ln_events[1].wait()
+            self.gather_done_event.wait()
+        elif self.indexer is not None:
             aux_streams = self.aux_stream_list
             indexer = self.indexer
             # Local ref so the closure keeps a non-None type for mypy.
@@ -506,7 +665,13 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
 
         # MLA attention writes into the pre-allocated `out` buffer
         # ([num_tokens, padded_heads, head_dim]).
-        self.mla_attn(q, kv, positions, output=out)
+        self.mla_attn(
+            q,
+            kv,
+            positions,
+            output=out,
+            kv_workspace=kv_workspace_for_prefill,
+        )
 
     def _fused_qnorm_rope_kv_insert(
         self,
@@ -571,38 +736,6 @@ direct_register_custom_op(
     op_func=deepseek_v4_attention,
     mutates_args=["out"],
     fake_impl=deepseek_v4_attention_fake,
-)
-
-
-def deepseek_v4_fp8_einsum(
-    a: torch.Tensor,
-    a_scale: torch.Tensor,
-    b: torch.Tensor,
-    b_scale: torch.Tensor,
-    out: torch.Tensor,
-    equation: str,
-    recipe: list[int],
-) -> None:
-    fp8_einsum(equation, (a, a_scale), (b, b_scale), out, recipe=tuple(recipe))
-
-
-def deepseek_v4_fp8_einsum_fake(
-    a: torch.Tensor,
-    a_scale: torch.Tensor,
-    b: torch.Tensor,
-    b_scale: torch.Tensor,
-    out: torch.Tensor,
-    equation: str,
-    recipe: list[int],
-) -> None:
-    return None
-
-
-direct_register_custom_op(
-    op_name="deepseek_v4_fp8_einsum",
-    op_func=deepseek_v4_fp8_einsum,
-    mutates_args=["out"],
-    fake_impl=deepseek_v4_fp8_einsum_fake,
 )
 
 
@@ -740,8 +873,16 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         kv: torch.Tensor,
         positions: torch.Tensor,
         output: torch.Tensor,
+        kv_workspace: torch.Tensor | None = None,
     ) -> None:
-        self.impl_cls.forward_mqa(self, q, kv, positions, output)
+        self.impl_cls.forward_mqa(
+            self,
+            q,
+            kv,
+            positions,
+            output,
+            kv_workspace=kv_workspace,
+        )
 
 
 class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
